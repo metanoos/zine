@@ -1,0 +1,778 @@
+@import url("https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800&family=Newsreader:ital,wght@0,400;0,500;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap");
+
+:root {
+  --surface: #ececeb;
+  --surface-raised: #f7f7f6;
+  --surface-sunken: #dedede;
+  --ink: #17171a;
+  --ink-dim: #6b6a66;
+  --accent: #b1790a;
+  --accent-soft: #b1790a1f;
+  --rule: #17171a24;
+  --rule-strong: #17171a3d;
+
+  --font-display: "Big Shoulders Display", sans-serif;
+  --font-body: "Newsreader", Georgia, serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  /* voice ink palette — light mode (kept clear of gold, which is reserved for chrome) */
+  --v0-fg: #157a63;
+  --v0-bg: #157a631f;
+  --v1-fg: #6a3fa0;
+  --v1-bg: #6a3fa01f;
+  --v2-fg: #a63465;
+  --v2-bg: #a634651f;
+  --v3-fg: #2d6a2f;
+  --v3-bg: #2d6a2f1f;
+  --v4-fg: #2a5f9e;
+  --v4-bg: #2a5f9e1f;
+  --v5-fg: #46519e;
+  --v5-bg: #46519e1f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #080808;
+    --surface-raised: #101010;
+    --surface-sunken: #030303;
+    --ink: #ecebe6;
+    --ink-dim: #8f8d87;
+    --accent: #f2b134;
+    --accent-soft: #f2b1341f;
+    --rule: #ecebe61f;
+    --rule-strong: #ecebe63a;
+
+    --v0-fg: #4fd6b8;
+    --v0-bg: #4fd6b81f;
+    --v1-fg: #b48af0;
+    --v1-bg: #b48af022;
+    --v2-fg: #f28fb0;
+    --v2-bg: #f28fb022;
+    --v3-fg: #82cf85;
+    --v3-bg: #82cf8520;
+    --v4-fg: #7ab8f0;
+    --v4-bg: #7ab8f022;
+    --v5-fg: #9aa5f5;
+    --v5-bg: #9aa5f522;
+  }
+}
+
+/* Manual theme overrides. !important beats the prefers-color-scheme media
+   query above so the user's explicit choice wins regardless of OS setting.
+   Absence of data-theme falls through to the media query (auto). */
+html[data-theme="dark"] {
+  --surface: #080808 !important;
+  --surface-raised: #101010 !important;
+  --surface-sunken: #030303 !important;
+  --ink: #ecebe6 !important;
+  --ink-dim: #8f8d87 !important;
+  --accent: #f2b134 !important;
+  --accent-soft: #f2b1341f !important;
+  --rule: #ecebe61f !important;
+  --rule-strong: #ecebe63a !important;
+
+  --v0-fg: #4fd6b8 !important;
+  --v0-bg: #4fd6b81f !important;
+  --v1-fg: #b48af0 !important;
+  --v1-bg: #b48af022 !important;
+  --v2-fg: #f28fb0 !important;
+  --v2-bg: #f28fb022 !important;
+  --v3-fg: #82cf85 !important;
+  --v3-bg: #82cf8520 !important;
+  --v4-fg: #7ab8f0 !important;
+  --v4-bg: #7ab8f022 !important;
+  --v5-fg: #9aa5f5 !important;
+  --v5-bg: #9aa5f522 !important;
+}
+
+html[data-theme="light"] {
+  --surface: #ececeb !important;
+  --surface-raised: #f7f7f6 !important;
+  --surface-sunken: #dedede !important;
+  --ink: #17171a !important;
+  --ink-dim: #6b6a66 !important;
+  --accent: #b1790a !important;
+  --accent-soft: #b1790a1f !important;
+  --rule: #17171a24 !important;
+  --rule-strong: #17171a3d !important;
+
+  --v0-fg: #157a63 !important;
+  --v0-bg: #157a631f !important;
+  --v1-fg: #6a3fa0 !important;
+  --v1-bg: #6a3fa01f !important;
+  --v2-fg: #a63465 !important;
+  --v2-bg: #a634651f !important;
+  --v3-fg: #2d6a2f !important;
+  --v3-bg: #2d6a2f1f !important;
+  --v4-fg: #2a5f9e !important;
+  --v4-bg: #2a5f9e1f !important;
+  --v5-fg: #46519e !important;
+  --v5-bg: #46519e1f !important;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+.app-shell {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* (Masthead removed — the nav rail now carries the brand; the run-agent
+   button lives in the editor workspace toolbar.) */
+
+/* Legend */
+
+.legend {
+  display: flex;
+  gap: 0.85rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.swatch-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+/* Run agent button */
+
+.run-agent-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.03em;
+  color: var(--surface-sunken);
+  background: var(--accent);
+  border: none;
+  border-radius: 4px;
+  padding: 0.4rem 0.7rem 0.4rem 0.85rem;
+  cursor: pointer;
+}
+
+.run-agent-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.run-agent-btn:active:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+.run-agent-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.run-agent-btn .kbd {
+  font-size: 0.68rem;
+  opacity: 0.7;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
+}
+
+/* Body: sidebar + workspace */
+
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* Nav rail (far-left icon column) */
+
+.nav-rail {
+  flex: 0 0 52px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--rule-strong);
+  background: var(--surface-sunken);
+  overflow: hidden;
+  transition: flex-basis 0.16s ease;
+}
+
+.nav-rail.expanded {
+  flex-basis: 168px;
+}
+
+/* Brand block at the rail head: the eye-speech glyph doubles as the
+   About button, with the wordmark beside it (expanded) or below (collapsed). */
+.rail-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.6rem 0 0.5rem;
+}
+
+.nav-rail.expanded .rail-brand {
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 0.6rem;
+  padding: 0.6rem 0.85rem;
+}
+
+.rail-brand-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.rail-brand-icon:hover {
+  background: var(--accent-soft);
+}
+
+.rail-brand-emoji {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.rail-brand-wordmark {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 0.8rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.rail-divider {
+  height: 1px;
+  margin: 0 8px;
+  background: var(--rule);
+}
+
+.nav-rail-top {
+  flex: 1; /* pushes the bottom group + footer to the rail's foot */
+}
+
+.nav-rail-bottom {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--rule);
+}
+
+.rail-item {
+  width: 100%;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.nav-rail.expanded .rail-item {
+  justify-content: flex-start;
+  padding: 0 0.95rem;
+}
+
+.rail-item:hover {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.rail-item.active {
+  color: var(--accent);
+  /* left accent bar marks the active view */
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.rail-item svg {
+  display: block;
+  flex: 0 0 20px;
+}
+
+.rail-item-label {
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* Footer: divider + theme toggle + collapse toggle, pinned to the bottom. */
+.rail-footer {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* View placeholder (non-editor views until they're built out) */
+
+.view-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 2rem;
+  color: var(--ink-dim);
+}
+
+.view-placeholder-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 2rem;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+
+.view-placeholder-blurb {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  text-align: center;
+}
+
+.view-placeholder-soon {
+  margin: 0.5rem 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  opacity: 0.7;
+}
+
+/* Sidebar / file tree */
+
+.sidebar {
+  flex: 0 0 220px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--rule-strong);
+  background: var(--surface);
+  overflow-y: auto;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.65rem 0.6rem 0.5rem 0.9rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.sidebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: var(--ink-dim);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+
+.icon-btn:active:not(:disabled) {
+  background: var(--rule-strong);
+}
+
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.create-row {
+  gap: 0.4rem;
+}
+
+.create-row-icon {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  color: var(--ink-dim);
+}
+
+.create-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--ink);
+  background: var(--surface-raised);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 0.1rem 0.35rem;
+  outline: none;
+}
+
+.create-input::placeholder {
+  color: var(--ink-dim);
+  opacity: 0.7;
+}
+
+.tree {
+  padding-bottom: 1rem;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.22rem 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tree-row:hover {
+  background: var(--surface-sunken);
+}
+
+.tree-chevron {
+  width: 1.2em;
+  flex: none;
+  color: var(--ink-dim);
+  font-size: 1.1em;
+}
+
+.tree-file-dot {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--rule-strong);
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-file-open {
+  background: var(--accent-soft);
+}
+
+.tree-file-open .tree-file-dot {
+  background: var(--accent);
+}
+
+.tree-open-marker {
+  margin-left: auto;
+  padding-left: 0.5rem;
+  font-size: 0.65rem;
+  color: var(--ink-dim);
+  letter-spacing: 0.08em;
+}
+
+/* Drag & drop */
+
+.tree-row[draggable="true"] {
+  -webkit-user-drag: element;
+}
+
+.tree-row.tree-dragging {
+  opacity: 0.4;
+}
+
+.tree-row.tree-drop-target {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.tree-row.tree-drop-denied {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tree.tree-drop-target {
+  background: var(--accent-soft);
+}
+
+/* Workspace split */
+
+.workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Thin toolbar replacing the old Masthead controls. Holds the run-agent
+   action for the editor view (cmd+enter still works). */
+.workspace-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 1rem;
+  padding: 0.45rem 0.9rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface);
+}
+
+.workspace-panels {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.panel {
+  flex: 1 1 50%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.panel + .panel {
+  border-left: 1px solid var(--rule-strong);
+}
+
+.tab-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.4rem 0.9rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface-sunken);
+  box-shadow: inset 0 2px 0 transparent;
+}
+
+.panel-active .tab-bar {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.tab-path {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-status {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+
+/* CodeMirror editor — sits inside .panel and fills it. Layout (flex, height,
+   font, padding) is set via EditorView.theme in App.tsx; this layer adds the
+   pieces CM doesn't own: surface background fallback, selection color, and
+   voice marks (now applied to CM's spans via Decoration.mark). */
+
+.editor-host {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  background: var(--surface-raised);
+}
+
+.editor-host .cm-editor {
+  flex: 1;
+  min-width: 0;
+}
+
+.editor-host .cm-scroller {
+  white-space: pre-wrap;
+}
+
+.editor-host .cm-selectionBackground,
+.editor-host .cm-content ::selection {
+  background: var(--accent-soft);
+}
+
+/* voice marks — same classes the old contentEditable spans used; now applied
+   to the text spans CM emits inside Decoration.mark ranges. */
+
+.voice-span {
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  border-radius: 2px;
+  padding: 0.05em 0.1em;
+}
+
+.voice-0 { color: var(--v0-fg); background: var(--v0-bg); }
+.voice-1 { color: var(--v1-fg); background: var(--v1-bg); }
+.voice-2 { color: var(--v2-fg); background: var(--v2-bg); }
+.voice-3 { color: var(--v3-fg); background: var(--v3-bg); }
+.voice-4 { color: var(--v4-fg); background: var(--v4-bg); }
+.voice-5 { color: var(--v5-fg); background: var(--v5-bg); }
+
+/* Pinned region — live-text preserve marker (see protocol, Pins vs hardening).
+ * Orthogonal to voice: rendered as its own layer, visually distinct. A left
+ * rule reads as "this block is settled / fenced off," independent of which
+ * voice wrote it. box-decoration-break clones the rule across wrapped lines. */
+
+.pinned-span {
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  border-left: 2px solid var(--ink);
+  padding-left: 0.35em;
+  margin-left: -0.35em;
+  background: var(--rule);
+}
+
+/* Panel flash on agent-written content */
+
+@keyframes panel-flash {
+  0% { background: var(--accent-soft); }
+  100% { background: transparent; }
+}
+
+.panel-flash .editor-host {
+  animation: panel-flash 1.4s ease-out;
+}
+
+/* Toast */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.5rem;
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 0.55rem 1rem;
+  border-radius: 5px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (max-width: 800px) {
+  .body {
+    flex-direction: column;
+  }
+  .sidebar {
+    flex: 0 0 auto;
+    max-height: 30vh;
+    border-right: none;
+    border-bottom: 1px solid var(--rule-strong);
+  }
+  .workspace-panels {
+    flex-direction: column;
+  }
+  .panel + .panel {
+    border-left: none;
+    border-top: 1px solid var(--rule-strong);
+  }
+  /* Rail becomes a horizontal icon bar when the body stacks vertically.
+     Expanded labels are hidden — no room on a narrow stacked layout. */
+  .nav-rail,
+  .nav-rail.expanded {
+    flex: 0 0 auto;
+    flex-basis: auto;
+    flex-direction: row;
+    width: 100%;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--rule-strong);
+  }
+  .rail-brand {
+    flex-direction: row;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+  }
+  .rail-brand-wordmark,
+  .rail-item-label {
+    display: none;
+  }
+  .nav-rail.expanded .rail-item {
+    justify-content: center;
+    padding: 0;
+  }
+  .rail-divider {
+    width: 1px;
+    height: auto;
+    margin: 0.5rem 0;
+  }
+  .nav-rail-top,
+  .nav-rail-bottom,
+  .rail-footer {
+    flex-direction: row;
+    flex: 0 0 auto;
+  }
+  .nav-rail-bottom {
+    border-top: none;
+    border-left: 1px solid var(--rule);
+  }
+  .rail-footer .rail-divider {
+    border-left: 1px solid var(--rule);
+    margin: 0;
+    width: 1px;
+    height: auto;
+    align-self: stretch;
+  }
+  .rail-item {
+    width: 52px;
+    flex: 0 0 auto;
+  }
+  .rail-item.active {
+    /* bottom accent bar in horizontal orientation */
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+}

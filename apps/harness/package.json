@@ -1,0 +1,31 @@
+{
+  "name": "@zine/harness",
+  "version": "0.1.0",
+  "description": "Open, BYOK LLM harness for folder/file editing with Nostr-based provenance tracing",
+  "main": "dist/cli.js",
+  "bin": {
+    "tracer": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "test": "tsx --test src/*.test.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "commander": "^15.0.0",
+    "diff-match-patch": "^1.0.5",
+    "nostr-tools": "^2.23.9"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/diff-match-patch": "^1.0.36",
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2"
+  }
+}
