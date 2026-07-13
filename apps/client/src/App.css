@@ -483,19 +483,13 @@ body {
   background: var(--surface-sunken);
 }
 
-.tree-chevron {
-  width: 1.2em;
+.tree-icon {
   flex: none;
   color: var(--ink-dim);
-  font-size: 1.1em;
 }
 
-.tree-file-dot {
-  width: 5px;
-  height: 5px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--rule-strong);
+.tree-icon-open {
+  color: var(--accent);
 }
 
 .tree-name {
@@ -505,10 +499,6 @@ body {
 
 .tree-file-open {
   background: var(--accent-soft);
-}
-
-.tree-file-open .tree-file-dot {
-  background: var(--accent);
 }
 
 .tree-open-marker {
@@ -610,6 +600,31 @@ body {
   font-family: var(--font-mono);
   font-size: 0.7rem;
   color: var(--ink-dim);
+  white-space: nowrap;
+}
+
+/* Hashtag strip — sits at the head of each panel, below the tab bar and above
+   the editor surface. Derived live from inline #tags in the document body. */
+
+.panel-tags {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.32rem 0.9rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface-raised);
+}
+
+.panel-tag {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.01em;
+  color: var(--ink-dim);
+  background: var(--surface-sunken);
+  border-radius: 3px;
+  padding: 0.08rem 0.4rem;
   white-space: nowrap;
 }
 
@@ -775,4 +790,111 @@ body {
     /* bottom accent bar in horizontal orientation */
     box-shadow: inset 0 -2px 0 var(--accent);
   }
+}
+
+/* Context menu (right-click on a tree row) and delete-confirm dialog.
+   Both reuse the raised surface + mono idiom; fixed-positioned so they
+   float above the sidebar without participating in the tree layout. */
+
+.ctx-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 7rem;
+  padding: 0.2rem;
+  background: var(--surface-raised);
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  font-family: var(--font-mono);
+}
+
+.ctx-menu-item {
+  display: block;
+  width: 100%;
+  padding: 0.3rem 0.5rem;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ctx-menu-item:hover {
+  background: var(--surface-sunken);
+}
+
+.ctx-menu-item.danger:hover {
+  color: var(--accent);
+}
+
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.confirm-dialog {
+  max-width: 320px;
+  padding: 1.1rem 1.2rem;
+  background: var(--surface-raised);
+  border: 1px solid var(--rule-strong);
+  border-radius: 6px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.25);
+}
+
+.confirm-message {
+  margin: 0 0 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.confirm-cancel,
+.confirm-delete {
+  padding: 0.35rem 0.8rem;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.confirm-cancel {
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  color: var(--ink-dim);
+}
+
+.confirm-cancel:hover {
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+
+.confirm-delete {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: var(--surface-raised);
+}
+
+.confirm-delete:hover {
+  filter: brightness(1.08);
+}
+
+/* Empty panel — shown when the open file was deleted. Keeps the panel slot
+   reserved instead of crashing on a missing file reference. */
+.panel-empty {
+  flex: 1;
 }

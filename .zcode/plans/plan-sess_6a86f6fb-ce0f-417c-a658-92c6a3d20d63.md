@@ -1,39 +1,52 @@
-## Reconcile pins ↔ hardening: orthogonal, one-directional backing
+## Wire editor → relay: browser-side signing + Tauri-spawned sidecar
 
-### The decision (architecture call, recorded in spec)
-**Hardening and pinning stay orthogonal.** Hardening = snapshot preservation (immutable citable node; live text intentionally stays editable — `trace-provenance.md:153`). Pinning = live-text preservation (canonical text wins over the agent; local/unsigned today). The two answer different questions and must not be bundled.
+### Architecture (decided last turn)
+- **Signing in the browser** with a locally-generated keypair (`nostr-tools/pure`, stored in `localStorage`). Two-worlds cost (CLI voices vs browser voice) accepted; NIP-46 unification is later.
+- **Tauri spawns `relay/zine-relay` as a sidecar** (confirmed direction per HANDOFF + `main.go:3-10`). Browser connects over `ws://127.0.0.1:4869`.
+- `nostr-tools/relay` uses native browser `WebSocket` (`abstract-relay.js:138` falls back to global `WebSocket`) — no polyfill.
+- `nostr-tools/pure` is browser-safe (no Node `crypto`/`fs`).
 
-**One-directional optional backing:** a pin *may* be backed by a hardened node (so a lost `conflict` is recoverable — the old text exists as a citable node), but a hardened node is *not* inherently pinned (citing a frozen version ≠ forbidding edits to the live copy). Three honest modes fall out: harden-only (recoverable+citable, editable), pin-only (live-protected, unrecoverable if lost — today's behavior), harden+pin (both). This is the dependency direction `pins.ts:18-20` deferred; picking it unblocks the client surface.
+### The one real obstacle: relay origin policy
+Khatru's `ApplySaneDefaults` (`relay/main.go:39`) rejects cross-origin browser WS — the Tauri webview's origin (`tauri://localhost` or `http://localhost:1420` in dev) isn't `127.0.0.1:4869`. **Chosen:** add a permissive origin policy for localhost in `relay/main.go`. Localhost-only relay, never internet-reachable by design — accepting localhost browser origins doesn't widen attack surface. Rejected: a custom Tauri protocol handler proxying WS — more moving parts, no benefit for a localhost sidecar.
 
-### Why this direction (not pin⇒harden or harden⇒pin bundling)
-- Harden⇒pin would force every citation to also be a no-edit zone — breaks the normal "harden to quote elsewhere, keep improving the original" case the spec already relies on.
-- Pin⇒harden-for-free is appealing but changes today's pin semantics (currently unsignable/local) — keep it optional so pin-only behavior is unchanged.
-- Backing a pin with a node is strictly additive: a lost conflict becomes recoverable instead of destructive. No existing test breaks.
+### Steps
 
-### Spec change — `protocol/trace-provenance.md`
-1. **Composability §**: add a short "Pins vs hardening" subsection stating the orthogonality + one-directional backing rule. Cite `trace-provenance.md:153` for "hardening tolerates live-text loss." Note the third mode (harden+pin) and that backing is optional. Cross-ref to `pins.ts`'s deferred-`sign` note as the path to making a backed pin durable/signed.
-2. **Client UX §**: record that bracket markup is hidden in rendering (already implied at `:198`), and that a pin's canonical text is the *inner* content, not the raw `[[ ]]` — so `restorePins`'s text-identity match works unchanged over bracketed regions.
-3. **Open questions §**: add "module of trace-nodes" — a *collection* of hardened nodes as an addressable unit (cite collectively / pin as a group) — flagged as an extension *of* hardening, not a sibling. This is the germ from the conversation; it stays open, not implemented.
-4. No new action types, no new tags, no new event kinds. This is a clarification + a relationship rule, not a wire-format change.
+**1. Relay: accept localhost browser origins (`relay/main.go`)**
+Add an origin-acceptance policy alongside `ApplySaneDefaults` allowing `127.0.0.1`, `localhost`, and the Tauri scheme. Verify with a browser-side WS handshake against the running binary before touching the client. Keep `--host 127.0.0.1` bind.
 
-### Client change — `apps/client/src/App.tsx` (the CM6 editor just built)
-Surface the reconcile in the one place it's visible: let an author mark a region as **pinned**, rendered distinctly from **hardened**. Concretely:
-- Add a `pinned: boolean` to the in-memory `Run` model (client-side only, mirroring how `Run[]` voice attribution is already client-side — same boundary reasoning as the last change).
-- A CM6 `Decoration.mark` for pinned ranges (distinct visual — e.g. a left border / different background than voice colors), derived from a `StateField` the same way `voiceField` is.
-- A keybinding / command to toggle pin on the current selection (e.g. Cmd-Shift-P). Toggling flips `pinned` on the affected runs.
-- **No hardening implementation in the client yet** (the harness has none either — `[[ ]]` is spec-only). The reconcile is expressed as: pin decoration is independent of voice decoration, and the spec records that a future hardened region *may* also carry a pin. The client shows the two as orthogonal layers now, so adding hardening later doesn't rework this.
+**2. Client: browser identity + relay client (`apps/client/src/identity.ts`, new)**
+- `loadOrCreateVoice()`: reads `localStorage` for secret-key hex; if absent, `generateSecretKey()` (`nostr-tools/pure`), stores it. Returns `{ secretKey, publicKey }`. Mirrors `voice.ts`'s `createLocal` posture — fresh local generation only, never a paste.
+- `connectRelay()`: wraps `Relay.connect(ws://127.0.0.1:4869)`, retrying briefly while the sidecar boots.
 
-### Out of scope (explicit)
-- No `[[ ]]` hardening implementation (still spec-only across the whole repo).
-- No `sign` path (the deferred durable-promotion — separate, larger).
-- No harness changes (`pin-restore.ts` works unchanged — its text-identity match handles bracketed inner text already).
-- No protocol wire-format change (no new tags/kinds/actions).
+**3. Client: provenance bridge (`apps/client/src/provenance.ts`, new)**
+Thin adapter owning relay+signer singletons:
+- `publishEdit({prevEventId, relativePath, folderId, deltas, snapshot, contentHash})` — builds the kind-4290 template (mirrors `store.ts:publishTraceNode` exactly: same tags `file/folder/F/D/action/e...prev`, same content JSON), signs via `finalizeEvent` from `nostr-tools/pure`, publishes.
+- `fetchChain(folderId, relativePath)` / `fetchLatest(relativePath)` — query helpers mirroring `store.ts:fetchChain`.
+Folder/file identity is synthetic for now (client isn't attached to real disk) — a hardcoded `folderId`/path per open file, same as `INITIAL_FILES` is already synthetic.
 
-### Verification
-- Spec: re-read after edit for internal consistency (the `:153` claim, the Client UX `:198` claim, the deferred-`sign` note in `pins.ts`).
-- Client: `npm run build` (tsc strict + vite); manual `npm run dev` — toggle pin on a selection, confirm decoration renders and is independent of voice color; type across a pinned region, confirm caret stable (the CM6 rewrite's guarantee holds).
+**4. Client: Tauri sidecar spawn (`apps/client/src-tauri/src/lib.rs`, `tauri.conf.json`)**
+- A `spawn_relay` Tauri command: locates `relay/zine-relay` (dev: relative to workspace; fallback `TRACER_RELAY_BIN` env), spawns via Tauri 2's `Command` API (detached, stdio piped), waits until `127.0.0.1:4869` accepts TCP.
+- Invoke `spawn_relay` on mount before `connectRelay`; guard against double-spawn.
+- `tauri.conf.json`: whitelist the shell permission for the relay binary.
+
+**5. Client: hook editor deltas → bridge (`apps/client/src/App.tsx`)**
+Today `FileEditor` lifts new `Run[]` to `onEdit` on every transaction but publishes nothing. Add: on a debounce (1.5s idle, or explicit Cmd+S), call `provenance.publishEdit(...)` with accumulated deltas since last seal. Track `lastSealedEventId` per file. This is where the "in-app editor gives each delta its own timestamp" case (spec `:124-134`) finally gets exercised for real.
+
+### Verification (project standard: run real things)
+- **Relay origin:** start `relay/zine-relay`, browser console `new WebSocket('ws://127.0.0.1:4869')` connects without close. Then a signed kind-4290 round-trip from the browser, read back via `sqlite3 ~/.tracer/relay.sqlite3`.
+- **Client:** `npm run build` clean. `tauri dev` → confirm sidecar spawns, type in editor, Cmd+S, verify signed event lands in relay (sqlite row). Reload → chain reconstructs, prior content reappears.
+- **No regression:** voice colors, pin toggle (`Cmd-Alt-P`), `runAgent` flow still work.
+
+### Out of scope
+- Identity unification (browser ↔ CLI voices separate — accepted cost).
+- Real disk attach (sidebar stays synthetic `INITIAL_FILES`).
+- Publish-to-external-relay (local sidecar only).
+- Hardening / `[[ ]]` (spec-only).
+- Pin persistence across reload.
 
 ### Files touched
-- `protocol/trace-provenance.md` (3 edits: Composability subsection, Client UX note, Open questions item)
-- `apps/client/src/App.tsx` (pin StateField + Decoration + toggle command; `pinned` on Run)
-- `apps/client/src/App.css` (pinned decoration style)
+- `relay/main.go` (origin policy)
+- `apps/client/package.json` (add `nostr-tools`)
+- `apps/client/src/identity.ts`, `provenance.ts` (new)
+- `apps/client/src-tauri/src/lib.rs`, `tauri.conf.json` (sidecar spawn + shell perm)
+- `apps/client/src/App.tsx` (wire debounce+publish on edit)

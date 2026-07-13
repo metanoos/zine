@@ -8,18 +8,20 @@ import {
   type DecorationSet,
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { diffToDeltas, publishEdit, fetchLatestEventId } from "./provenance.js";
 import {
   BarChart3,
   Cpu,
   FileText,
   Folder,
+  FolderOpen,
   Globe,
   KeyRound,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
-  Pencil,
   Radio,
+  ScrollText,
   Sun,
   type LucideIcon,
 } from "lucide-react";
@@ -73,17 +75,67 @@ function resolvedMode(theme: Theme): "light" | "dark" {
 }
 
 const INITIAL_FILES: Record<string, FileState> = {
-  "README.md": { runs: [{ voice: "alice", text: "" }], nodeId: "1a2b3c4" },
-  "essays/on-provenance.md": { runs: [{ voice: "alice", text: "" }], nodeId: "f6a221c" },
-  "essays/on-self-hosting.md": { runs: [{ voice: "alice", text: "" }], nodeId: "b02e7a1" },
+  "README.md": {
+    runs: [{ voice: "alice", text: "# zine\n\nA field-notes editor for provenance-aware writing. #provenance #writing\n" }],
+    nodeId: "1a2b3c4",
+  },
+  "essays/on-provenance.md": {
+    runs: [
+      {
+        voice: "alice",
+        text:
+          "# On provenance\n\nProvenance is the chain of custody a text carries with it. #provenance #authorship #nostr\n\nEach paragraph knows who wrote it, and when, and on whose word it was revised.\n",
+      },
+    ],
+    nodeId: "f6a221c",
+  },
+  "essays/on-self-hosting.md": {
+    runs: [
+      {
+        voice: "alice",
+        text:
+          "# On self-hosting\n\nSelf-hosting is the practice of running your own. #self-hosting #infrastructure #sovereignty #ssh #tilde #unix #decentralization #p2p\n\nThe reward is control; the cost is attention.\n",
+      },
+    ],
+    nodeId: "b02e7a1",
+  },
   "essays/drafts/untitled.md": { runs: [{ voice: "alice", text: "" }], nodeId: "0000000" },
-  "assets/notes.md": { runs: [{ voice: "alice", text: "" }], nodeId: "9f8e7d6" },
+  "assets/notes.md": {
+    runs: [{ voice: "alice", text: "# notes\n\nScratch space. #scratch\n" }],
+    nodeId: "9f8e7d6",
+  },
 };
+
+// Synthetic folder identity for the client. The sidebar isn't attached to
+// real disk yet (INITIAL_FILES is in-memory), so this is a constant rather
+// than a real attached-folder UUID. When disk-attach lands this becomes the
+// registry's folder id; for now it just needs to be stable so the prev-chain
+// is consistent across publishes.
+const FOLDER_ID = "00000000-0000-0000-0000-000000000000";
 
 // --- run/text helpers -------------------------------------------------
 
 function flatten(runs: Run[]): string {
   return runs.map((r) => r.text).join("");
+}
+
+// Pull up to 7 unique hashtags out of the document body. A hashtag is a `#`
+// at start-of-text or after whitespace followed by a word (letters/digits/_/-).
+// Hex colors, `C#`, and mid-word `#` are skipped by the leading-boundary check.
+// Dedupe is case-insensitive; the first-seen casing is what we display.
+function extractHashtags(runs: Run[]): string[] {
+  const text = flatten(runs);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of text.matchAll(/(?:^|\s)#([\p{L}\p{N}_][\p{L}\p{N}_-]*)/gu)) {
+    const tag = m[1];
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(tag);
+    if (out.length >= 7) break;
+  }
+  return out;
 }
 
 function runsToChars(runs: Run[]): { ch: string; voice: string }[] {
@@ -167,6 +219,14 @@ function parentPath(path: string): string {
   return i === -1 ? ROOT : path.slice(0, i);
 }
 
+// Does `parent` contain any file or folder beneath it? Used by both move and
+// delete to decide whether a path is a folder with descendants to sweep.
+function hasChild(files: Set<string>, folders: Set<string>, parent: string): boolean {
+  for (const f of files) if (f.startsWith(parent + "/")) return true;
+  for (const f of folders) if (f.startsWith(parent + "/")) return true;
+  return false;
+}
+
 // Is `descendant` the same as or nested inside `ancestor`?
 function isDescendantOrSelf(ancestor: string, descendant: string): boolean {
   if (ancestor === descendant) return true;
@@ -213,6 +273,7 @@ function TreeItem({
   onDragLeaveTarget,
   onDropOn,
   canDropOn,
+  onContextMenuRow,
 }: {
   node: TreeNode;
   depth: number;
@@ -227,6 +288,7 @@ function TreeItem({
   onDragLeaveTarget: (path: string) => void;
   onDropOn: (path: string) => void;
   canDropOn: (path: string) => boolean;
+  onContextMenuRow: (e: React.MouseEvent, path: string) => void;
 }) {
   const indent = { paddingLeft: depth * 14 + 10 };
   const isDragging = draggingPath === node.path;
@@ -273,9 +335,14 @@ function TreeItem({
             e.stopPropagation();
             onDropOn(node.path);
           }}
+          onContextMenu={(e) => onContextMenuRow(e, node.path)}
           onClick={() => onToggleFolder(node.path)}
         >
-          <span className="tree-chevron">{isOpen ? "▾" : "▸"}</span>
+          {isOpen ? (
+            <FolderOpen size={13} className="tree-icon" aria-hidden="true" />
+          ) : (
+            <Folder size={13} className="tree-icon" aria-hidden="true" />
+          )}
           <span className="tree-name">{node.name}</span>
         </div>
         {isOpen &&
@@ -295,6 +362,7 @@ function TreeItem({
               onDragLeaveTarget={onDragLeaveTarget}
               onDropOn={onDropOn}
               canDropOn={canDropOn}
+              onContextMenuRow={onContextMenuRow}
             />
           ))}
       </div>
@@ -315,9 +383,10 @@ function TreeItem({
         e.dataTransfer.setData("text/zine-path", node.path);
         onDragStart(node.path);
       }}
+      onContextMenu={(e) => onContextMenuRow(e, node.path)}
       onClick={() => onOpenFile(node.path)}
     >
-      <span className="tree-file-dot" aria-hidden="true" />
+      <FileText size={13} className={"tree-icon" + (openIn.length ? " tree-icon-open" : "")} aria-hidden="true" />
       <span className="tree-name">{node.name}</span>
       {openIn.length > 0 && <span className="tree-open-marker">{openIn.join("")}</span>}
     </div>
@@ -337,6 +406,7 @@ function Sidebar({
   filePaths,
   folderPaths,
   onMove,
+  onDelete,
 }: {
   tree: TreeNode[];
   collapsed: Set<string>;
@@ -350,6 +420,7 @@ function Sidebar({
   filePaths: Set<string>;
   folderPaths: Set<string>;
   onMove: (src: string, destFolder: string) => void;
+  onDelete: (path: string) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -360,6 +431,54 @@ function Sidebar({
   // target (a folder path, or "" for root).
   const [draggingPath, setDraggingPath] = useState<string | null>(null);
   const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
+
+  // context menu + delete-confirm state. ctxMenu is positioned at the cursor;
+  // confirmDelete holds the path pending a Delete click.
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{
+    path: string;
+    name: string;
+    isFolder: boolean;
+    childCount: number;
+  } | null>(null);
+
+  // dismiss the context menu on any pointer-down outside the menu itself, or
+  // on Escape. A single listener covers both the menu and the open-input row.
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!ctxMenu) return;
+    function onPointerDown(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setCtxMenu(null);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setCtxMenu(null);
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [ctxMenu]);
+
+  function openContextMenu(e: React.MouseEvent, path: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    setCtxMenu({ x: e.clientX, y: e.clientY, path });
+  }
+
+  function requestDelete(path: string) {
+    setCtxMenu(null);
+    const isFolder = folderPaths.has(path) || hasChild(filePaths, folderPaths, path);
+    let childCount = 0;
+    if (isFolder) {
+      for (const p of filePaths) if (p.startsWith(path + "/")) childCount++;
+      for (const p of folderPaths) if (p.startsWith(path + "/")) childCount++;
+    }
+    setConfirmDelete({ path, name: basename(path), isFolder, childCount });
+  }
 
   function canDropOn(destFolder: string): boolean {
     if (!draggingPath) return false;
@@ -464,9 +583,57 @@ function Sidebar({
               clearDrag();
             }}
             canDropOn={canDropOn}
+            onContextMenuRow={openContextMenu}
           />
         ))}
       </div>
+      {ctxMenu && (
+        <div
+          ref={menuRef}
+          className="ctx-menu"
+          style={{ left: ctxMenu.x, top: ctxMenu.y }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <button
+            type="button"
+            className="ctx-menu-item"
+            onClick={() => requestDelete(ctxMenu.path)}
+          >
+            Delete
+          </button>
+        </div>
+      )}
+      {confirmDelete && (
+        <div
+          className="confirm-overlay"
+          onClick={() => setConfirmDelete(null)}
+        >
+          <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
+            <p className="confirm-message">
+              {confirmDelete.isFolder
+                ? confirmDelete.childCount > 0
+                  ? `Delete folder "${confirmDelete.name}" and ${confirmDelete.childCount} item${confirmDelete.childCount === 1 ? "" : "s"} inside it? This cannot be undone.`
+                  : `Delete empty folder "${confirmDelete.name}"? This cannot be undone.`
+                : `Delete "${confirmDelete.name}"? This cannot be undone.`}
+            </p>
+            <div className="confirm-actions">
+              <button type="button" className="confirm-cancel" onClick={() => setConfirmDelete(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="confirm-delete"
+                onClick={() => {
+                  onDelete(confirmDelete.path);
+                  setConfirmDelete(null);
+                }}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </nav>
   );
 }
@@ -492,11 +659,8 @@ function CreateRow({
   }
   return (
     <div className="tree-row create-row">
-      <span className="tree-chevron" aria-hidden="true">
-        {kind === "folder" ? "▸" : ""}
-      </span>
       <span className="create-row-icon" aria-hidden="true">
-        {kind === "folder" ? <Folder size={14} /> : <FileText size={14} />}
+        {kind === "folder" ? <Folder size={13} /> : <FileText size={13} />}
       </span>
       <input
         ref={inputRef}
@@ -793,12 +957,13 @@ function Panel({
   flash,
 }: {
   path: string;
-  file: FileState;
+  file?: FileState;
   active: boolean;
   onFocusPanel: () => void;
   onEdit: (runs: Run[]) => void;
   flash: boolean;
 }) {
+  const tags = file ? extractHashtags(file.runs) : [];
   return (
     <section
       className={"panel" + (flash ? " panel-flash" : "") + (active ? " panel-active" : "")}
@@ -807,7 +972,20 @@ function Panel({
       <div className="tab-bar">
         <span className="tab-path">{path}</span>
       </div>
-      <FileEditor file={file} onEdit={onEdit} />
+      {tags.length > 0 && (
+        <div className="panel-tags" aria-label="Hashtags">
+          {tags.map((tag) => (
+            <span key={tag} className="panel-tag">
+              #{tag}
+            </span>
+          ))}
+        </div>
+      )}
+      {file ? (
+        <FileEditor file={file} onEdit={onEdit} />
+      ) : (
+        <div className="panel-empty" />
+      )}
     </section>
   );
 }
@@ -821,7 +999,7 @@ function Panel({
 type RailItem = { view: View; Icon: LucideIcon; label: string };
 
 const RAIL_TOP: RailItem[] = [
-  { view: "editor", Icon: Pencil, label: "Editor" },
+  { view: "editor", Icon: ScrollText, label: "Press" },
   { view: "stats", Icon: BarChart3, label: "Stats" },
   { view: "globe", Icon: Globe, label: "Globe" },
 ];
@@ -921,7 +1099,11 @@ function NavRail({
           title={mode === "dark" ? "Light mode" : "Dark mode"}
           onClick={onToggleTheme}
         >
-          {mode === "dark" ? <SunIcon /> : <MoonIcon />}
+          {mode === "dark" ? (
+            <Sun size={20} strokeWidth={1.75} />
+          ) : (
+            <Moon size={20} strokeWidth={1.75} />
+          )}
         </button>
         <button
           type="button"
@@ -931,7 +1113,11 @@ function NavRail({
           title={expanded ? "Collapse" : "Expand"}
           onClick={onToggleExpanded}
         >
-          <PanelToggleIcon expanded={expanded} />
+          {expanded ? (
+            <PanelLeftClose size={20} strokeWidth={1.75} />
+          ) : (
+            <PanelLeftOpen size={20} strokeWidth={1.75} />
+          )}
         </button>
       </div>
     </nav>
@@ -960,12 +1146,125 @@ function ViewPlaceholder({ view }: { view: Exclude<View, "editor"> }) {
   );
 }
 
+// --- provenance hook: editor → relay -----------------------------------
+//
+// On mount, asks Tauri to spawn the relay sidecar (no-op outside Tauri, e.g.
+// plain `npm run dev` in a browser — publish silently skips if no relay).
+// Then debounces edits: 1.5s after the last change to a file, or immediately
+// on Cmd+S, it diffs against the last sealed snapshot and publishes a
+// kind-4290 node. Tracks lastSealedEventId per path so the prev-chain grows.
+
+interface SealedState {
+  snapshot: string;
+  eventId: string | null;
+}
+type SealedMap = Record<string, SealedState>;
+
+async function sha256Hex(text: string): Promise<string> {
+  const data = new TextEncoder().encode(text);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function useProvenance(files: Record<string, FileState>) {
+  const sealedRef = useRef<SealedMap>({});
+  const pendingTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  // Reconstruct (load) completed? Avoids republishing the seed content as an
+  // edit on first mount when the chain already has it.
+  const hydrated = useRef(false);
+
+  // Spawn + hydrate once.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      // Outside Tauri (plain browser dev), invoke is undefined — skip sidecar.
+      const w = window as unknown as { __TAURI__?: { core?: { invoke?: (c: string) => Promise<unknown> } } };
+      try {
+        await w.__TAURI__?.core?.invoke?.("spawn_relay");
+      } catch (e) {
+        console.warn("[provenance] spawn_relay failed (relay may already be up):", e);
+      }
+
+      // Hydrate each seeded file's last-sealed pointer from the relay, if the
+      // chain already has events for it. Seed content stays as-is; what we need
+      // is the prevEventId so the next publish chains correctly after a reload.
+      try {
+        const next: SealedMap = {};
+        for (const [path, file] of Object.entries(files)) {
+          const latest = await fetchLatestEventId(FOLDER_ID, path).catch(() => null);
+          next[path] = { snapshot: flatten(file.runs), eventId: latest };
+        }
+        if (!cancelled) {
+          sealedRef.current = next;
+          hydrated.current = true;
+        }
+      } catch (e) {
+        console.warn("[provenance] hydration failed:", e);
+        if (!cancelled) hydrated.current = true;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Debounced publish on file changes.
+  useEffect(() => {
+    if (!hydrated.current) return;
+    for (const path of Object.keys(files)) {
+      const current = flatten(files[path].runs);
+      const sealed = sealedRef.current[path];
+      if (!sealed) {
+        sealedRef.current[path] = { snapshot: current, eventId: null };
+        continue;
+      }
+      if (current === sealed.snapshot) continue;
+      scheduleSeal(path, 1500);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files]);
+
+  function scheduleSeal(path: string, ms: number) {
+    clearTimeout(pendingTimers.current[path]);
+    pendingTimers.current[path] = setTimeout(() => {
+      void sealNow(path);
+    }, ms);
+  }
+
+  async function sealNow(path: string) {
+    const file = files[path];
+    if (!file) return;
+    const snapshot = flatten(file.runs);
+    const sealed = sealedRef.current[path];
+    if (sealed && snapshot === sealed.snapshot) return;
+    try {
+      const deltas = diffToDeltas(sealed?.snapshot ?? "", snapshot);
+      if (deltas.length === 0) return;
+      const event = await publishEdit({
+        prevEventId: sealed?.eventId ?? null,
+        relativePath: path,
+        folderId: FOLDER_ID,
+        deltas,
+        snapshot,
+        contentHash: await sha256Hex(snapshot),
+      });
+      sealedRef.current[path] = { snapshot, eventId: event.id };
+    } catch (e) {
+      console.warn(`[provenance] publish failed for ${path}:`, e);
+    }
+  }
+
+  return { sealNow };
+}
+
 function App() {
   const [files, setFiles] = useState<Record<string, FileState>>(INITIAL_FILES);
   const [panels, setPanels] = useState<[string, string]>([
     "essays/on-provenance.md",
     "essays/on-self-hosting.md",
   ]);
+  const { sealNow } = useProvenance(files);
   const [activePanel, setActivePanel] = useState<0 | 1>(0);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [running, setRunning] = useState(false);
@@ -1129,10 +1428,38 @@ function App() {
     });
   }
 
-  function hasChild(files: Set<string>, folders: Set<string>, parent: string): boolean {
-    for (const f of files) if (f.startsWith(parent + "/")) return true;
-    for (const f of folders) if (f.startsWith(parent + "/")) return true;
-    return false;
+  // Remove `path` (a file or folder) from local state. For a folder, every
+  // descendant file and empty-folder is dropped too. Any open panel pointing at
+  // the deleted file or inside the deleted folder is cleared to "" so Panel
+  // shows its empty state instead of crashing on a dangling file reference.
+  // Mirrors moveNode's shape — same four pieces of state need to stay coherent.
+  function deleteNode(path: string) {
+    const fileSet = new Set(Object.keys(files));
+    const folderSet = new Set(emptyFolders);
+    const isFolderDelete = folderSet.has(path) || hasChild(fileSet, folderSet, path);
+    const under = (p: string) => p === path || (isFolderDelete && p.startsWith(path + "/"));
+
+    setFiles((prev) => {
+      const next: Record<string, FileState> = {};
+      for (const [p, state] of Object.entries(prev)) {
+        if (!under(p)) next[p] = state;
+      }
+      return next;
+    });
+
+    setEmptyFolders((prev) => {
+      const next = new Set<string>();
+      for (const p of prev) if (!under(p)) next.add(p);
+      return next;
+    });
+
+    setPanels((prev) => prev.map((p) => (under(p) ? "" : p)) as [string, string]);
+
+    setCollapsed((prev) => {
+      const next = new Set<string>();
+      for (const p of prev) if (!under(p)) next.add(p);
+      return next;
+    });
   }
 
   useEffect(() => {
@@ -1140,6 +1467,12 @@ function App() {
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
         e.preventDefault();
         runAgent();
+      }
+      // Cmd/Ctrl+S: seal now (publish pending edits for the active panel).
+      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+        e.preventDefault();
+        const path = panels[activePanel];
+        if (path) void sealNow(path);
       }
     }
     window.addEventListener("keydown", onKeyDown);
@@ -1183,6 +1516,7 @@ function App() {
               filePaths={filePaths}
               folderPaths={folderPaths}
               onMove={moveNode}
+              onDelete={deleteNode}
             />
             <main className="workspace">
               <div className="workspace-toolbar">
