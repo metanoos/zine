@@ -11,11 +11,14 @@ import { Registry } from './registry.js';
 import { ProvenanceStore } from './store.js';
 import { VoiceRegistry } from './voice.js';
 import { watchFolder } from './watch.js';
-import { PinRegistry } from './pins.js';
 
 async function createStore(voiceName?: string): Promise<{ store: ProvenanceStore; close: () => void }> {
-  const relay = await connectLocalRelay();
+  // Load the signer before connecting so its signEvent can be wired as the
+  // NIP-42 AUTH handler — friend-mode relays challenge every connection
+  // (transport.md §5). In open mode (no friends.json) the relay never
+  // challenges, so the handler is dead code that costs nothing.
   const signer = await new VoiceRegistry().loadOrDefault(voiceName);
+  const relay = await connectLocalRelay({ authSigner: signer });
   const registry = new Registry();
   const store = new ProvenanceStore(relay, signer, registry);
   return { store, close: () => relay.close() };
@@ -69,13 +72,9 @@ program
     // The file's containing directory becomes its traced folder if not attached yet.
     const folder = await store.attachFolder(path.dirname(absPath));
 
-    const pinRegistry = new PinRegistry();
     const relativePath = path.relative(folder.path, absPath);
-    const pins = pinRegistry.listPins(folder.path, relativePath);
-
     console.log(`Asking ${provider.name} to edit ${relativePath}...`);
-    if (pins.length > 0) console.log(`  (${pins.length} pin(s) active — will be restored if the model altered them)`);
-    const { node, pinResults } = await runLlmEdit({ store, folder, absPath, instruction, provider, pins });
+    const { node, bracketResults } = await runLlmEdit({ store, folder, absPath, instruction, provider });
 
     if (!node) {
       console.log('No change (model returned identical content).');
@@ -84,19 +83,19 @@ program
       if (node.summary) console.log(`  ${node.summary}`);
     }
 
-    // Surface every pin outcome so sediment is legible. Conflicts are the one
-    // case the harness couldn't silently fix — they need the user's eye, so
-    // they also flip the exit code to non-zero.
-    const conflicts = pinResults.filter((r) => r.outcome === 'conflict');
-    if (pinResults.length > 0) {
-      for (const r of pinResults) {
-        const preview = r.pin.text.length > 50 ? `${r.pin.text.slice(0, 50)}…` : r.pin.text;
+    // Surface every bracket outcome so sediment is legible. Conflicts are the
+    // one case the harness couldn't silently fix — they need the user's eye,
+    // so they also flip the exit code to non-zero.
+    const conflicts = bracketResults.filter((r) => r.outcome === 'conflict');
+    if (bracketResults.length > 0) {
+      for (const r of bracketResults) {
+        const preview = r.text.length > 50 ? `${r.text.slice(0, 50)}…` : r.text;
         const where = r.detail ? ` — ${r.detail}` : '';
-        console.log(`  pin ${r.outcome}: ${JSON.stringify(preview)}${where}`);
+        console.log(`  bracket ${r.outcome}: ${JSON.stringify(preview)}${where}`);
       }
     }
     if (conflicts.length > 0) {
-      console.error(`${conflicts.length} pin conflict(s) — the model restructured a pinned span too heavily to safely restore. Review and re-pin if needed.`);
+      console.error(`${conflicts.length} bracket conflict(s) — the model restructured a bracketed span too heavily to safely restore. Review and re-author the bracket if needed.`);
       process.exitCode = 1;
     }
 
@@ -138,6 +137,21 @@ program
     watchFolder(store, folder);
   });
 
+program
+  .command('revoke <folderId>')
+  .description('Revoke a published zine: publish a NIP-09 kind-5 deletion request for every owned node in the folder trace. Relays advertising NIP-9 delete the referenced events and refuse re-publication. The chain itself is untouched (history retained); only relay retention changes (spec §10).')
+  .requiredOption('-r, --reason <text>', 'human-readable reason carried in the kind-5 content')
+  .option(...voiceOption)
+  .action(async (folderId: string, cmdOpts) => {
+    const { store, close } = await createStore(cmdOpts.voice);
+    const event = await store.revokeZine(folderId, cmdOpts.reason);
+    console.log(`Published kind-5 deletion request ${event.id}`);
+    const eTags = event.tags.filter((t) => t[0] === 'e');
+    const aTags = event.tags.filter((t) => t[0] === 'a');
+    console.log(`  ${eTags.length} node(s) targeted (e tags), ${aTags.length} replaceable address(es) (a tags)`);
+    close();
+  });
+
 const voice = program.command('voice').description('Manage signing voices (identities)');
 
 voice
@@ -171,117 +185,7 @@ voice
     for (const v of voices) console.log(`${v.name}  [${v.kind}]  ${v.publicKey}`);
   });
 
-const pin = program.command('pin').description('Manage pinned (settled) spans — preserved across LLM rewrites');
-
-pin
-  .command('add <file>')
-  .description('Pin a span of a file so the LLM rewrite path preserves it. Pin identity is the text itself.')
-  .option('-t, --text <span>', 'pin this literal text')
-  .option('-l, --lines <range>', 'pin lines from the file, e.g. "3-7" or "5"')
-  .option('-n, --note <note>', 'short note for this pin')
-  .action((fileArg: string, cmdOpts) => {
-    const absPath = path.resolve(fileArg);
-    if (!fs.existsSync(absPath)) {
-      console.error(`No such file: ${absPath}`);
-      process.exitCode = 1;
-      return;
-    }
-    const text = resolvePinText(absPath, cmdOpts.text, cmdOpts.lines);
-    if (text === null) return; // resolvePinText already printed the error
-
-    const registry = new PinRegistry();
-    const folderPath = path.dirname(absPath);
-    const relativePath = path.relative(folderPath, absPath);
-    const span = registry.addPin(folderPath, relativePath, text, cmdOpts.note);
-    console.log(`Pinned ${span.id} in ${relativePath}`);
-    console.log(`  text: ${JSON.stringify(text.length > 60 ? `${text.slice(0, 60)}…` : text)}`);
-  });
-
-pin
-  .command('list <file>')
-  .description('List pinned spans for a file')
-  .action((fileArg: string) => {
-    const absPath = path.resolve(fileArg);
-    const registry = new PinRegistry();
-    const folderPath = path.dirname(absPath);
-    const relativePath = path.relative(folderPath, absPath);
-    const spans = registry.listPins(folderPath, relativePath);
-    if (spans.length === 0) {
-      console.log(`No pins for ${relativePath}.`);
-      return;
-    }
-    console.log(`${spans.length} pin(s) for ${relativePath}:`);
-    for (const s of spans) {
-      const preview = s.text.length > 60 ? `${s.text.slice(0, 60)}…` : s.text;
-      const note = s.note ? `  (${s.note})` : '';
-      console.log(`  ${s.id}  ${JSON.stringify(preview)}${note}`);
-    }
-  });
-
-pin
-  .command('remove <file> <pinId>')
-  .description('Remove a pinned span by id')
-  .action((fileArg: string, pinId: string) => {
-    const absPath = path.resolve(fileArg);
-    const registry = new PinRegistry();
-    const folderPath = path.dirname(absPath);
-    const relativePath = path.relative(folderPath, absPath);
-    const removed = registry.removePin(folderPath, relativePath, pinId);
-    if (removed) console.log(`Removed pin ${pinId}.`);
-    else {
-      console.error(`No pin ${pinId} for ${relativePath}.`);
-      process.exitCode = 1;
-    }
-  });
-
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : err);
   process.exitCode = 1;
 });
-
-/** Resolves the text to pin from either a literal `--text` arg or a
- * `--lines` range (1-indexed, inclusive) read from the current file.
- * Returns null on a usage error after printing it. */
-function resolvePinText(
-  absPath: string,
-  text: string | undefined,
-  lines: string | undefined,
-): string | null {
-  if (text && lines) {
-    console.error('Pass either --text or --lines, not both.');
-    process.exitCode = 1;
-    return null;
-  }
-  if (!text && !lines) {
-    console.error('Pass --text <span> or --lines <range> to specify what to pin.');
-    process.exitCode = 1;
-    return null;
-  }
-  if (text) return text;
-
-  // --lines: 1-indexed, inclusive on both ends. "5" pins just line 5.
-  const match = /^(\d+)(?:-(\d+))?$/.exec(lines!);
-  if (!match) {
-    console.error(`Invalid --lines range "${lines}" — use "3-7" or "5".`);
-    process.exitCode = 1;
-    return null;
-  }
-  const start = parseInt(match[1], 10);
-  const end = match[2] ? parseInt(match[2], 10) : start;
-  if (end < start) {
-    console.error(`--lines range end (${end}) before start (${start}).`);
-    process.exitCode = 1;
-    return null;
-  }
-  const fileContent = fs.readFileSync(absPath, 'utf8');
-  const fileLines = fileContent.split('\n');
-  if (start > fileLines.length) {
-    console.error(`--lines start ${start} is past end of file (${fileLines.length} line(s)).`);
-    process.exitCode = 1;
-    return null;
-  }
-  const clampedEnd = Math.min(end, fileLines.length);
-  // Preserve original line content exactly, including any trailing newline
-  // structure — the pin's canonical text is what must survive rewrites.
-  return fileLines.slice(start - 1, clampedEnd).join('\n');
-}

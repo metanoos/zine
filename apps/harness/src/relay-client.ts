@@ -4,10 +4,19 @@ import * as path from 'node:path';
 
 import { Relay } from 'nostr-tools/relay';
 import type { Event, Filter } from 'nostr-tools';
+import type { Signer } from 'nostr-tools/signer';
 
 export interface RelayClientOptions {
   url?: string;
   relayBinaryPath?: string;
+  /**
+   * Optional NIP-42 AUTH signer. When the relay is in friend mode (friends.json
+   * active, see relay/friends.go + protocol/transport.md §5), it challenges
+   * every connection. This signer signs the kind-22242 AUTH event with the
+   * owner's (or a friend's) key so the relay accepts the connection. In open
+   * mode (no friends.json) the relay never challenges and this is unused.
+   */
+  authSigner?: Signer;
 }
 
 const DEFAULT_URL = 'ws://127.0.0.1:4869';
@@ -22,7 +31,7 @@ export async function connectLocalRelay(opts: RelayClientOptions = {}): Promise<
   const url = opts.url ?? process.env.TRACER_RELAY_URL ?? DEFAULT_URL;
 
   try {
-    return await Relay.connect(url);
+    return await connectOnce(url, opts.authSigner);
   } catch {
     // not reachable yet — fall through to spawning it
   }
@@ -32,7 +41,7 @@ export async function connectLocalRelay(opts: RelayClientOptions = {}): Promise<
   for (let attempt = 0; attempt < 30; attempt++) {
     await delay(150);
     try {
-      return await Relay.connect(url);
+      return await connectOnce(url, opts.authSigner);
     } catch {
       // keep retrying while it boots
     }
@@ -42,6 +51,22 @@ export async function connectLocalRelay(opts: RelayClientOptions = {}): Promise<
       `Build it (cd relay && go build -o zine-relay .) and set TRACER_RELAY_BIN to the binary path, ` +
       `or start it manually.`,
   );
+}
+
+/**
+ * Construct a Relay, optionally wire the NIP-42 AUTH handler, then connect.
+ * The instance-first order (set onauth before connect) avoids the race where
+ * the relay's AUTH challenge arrives before the handler is wired — see
+ * nostr-tools' own pool (nostr.bundle.js:3620-3634) for the same pattern.
+ * The Signer interface's signEvent has exactly the shape onauth needs.
+ */
+async function connectOnce(url: string, authSigner?: Signer): Promise<Relay> {
+  const relay = new Relay(url);
+  if (authSigner) {
+    relay.onauth = (evt) => authSigner.signEvent(evt);
+  }
+  await relay.connect();
+  return relay;
 }
 
 function spawnLocalRelay(opts: RelayClientOptions): void {
