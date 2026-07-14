@@ -377,7 +377,7 @@ function spliceRuns(runs: Run[], start: number, end: number, insertText: string,
 // The four topbar LLM operations. With a non-empty editor selection, each
 // acts on just the selected text (continuing/condensing/reinventing/replying
 // to that range in place); with no selection, each acts on the whole document.
-export type OpKind = "extend" | "settle" | "stir" | "reply" | "save" | "zine";
+export type OpKind = "extend" | "settle" | "stir" | "reply" | "step" | "send";
 
 /** Split flat doc text into preserved bracket spans (`[[ … ]]`, kept verbatim)
  *  and the loose prose between them. The substrate for Settle (condense loose)
@@ -3631,17 +3631,17 @@ const VOICE_OPS: { op: OpKind; label: string; title: string; cls: string }[] = [
   { op: "stir", label: "Stir", title: "Reinvent loose prose, run (( commands )), preserve [[ anchors ]]", cls: "op-stir" },
 ];
 
-// Deliver ops (Save / zine) live in the same voice menu but are not LLM ops —
+// Deliver ops (Step / Send) live in the same voice menu but are not LLM ops —
 // they seal the trace, signed as the clicked voice. Split out so the menu
-// doesn't provider-gate them (you can save with no model configured). Save is
-// the deliberate checkpoint (spec §Save/seal triggers: "Client-facing 'save',
-// framed to read as deliberate, not autosave") under a chosen voice's key.
-// zine is reserved for the real publish+sign path (see open work below); for
-// now both route through the same seal, but the buttons are distinct so the
-// vocabulary stays honest.
-const VOICE_DELIVER: { op: "save" | "zine"; label: string; title: string; cls: string }[] = [
-  { op: "zine", label: "Send", title: "Sign and broadcast this trace under this voice's key", cls: "op-send" },
-  { op: "save", label: "Save", title: "Seal this trace as a deliberate checkpoint, signed as this voice", cls: "op-save" },
+// doesn't provider-gate them (you can step with no model configured). Step is
+// the deliberate local checkpoint (protocol §8: a rhythm-layer unit, sealed to
+// the local relay only) under a chosen voice's key. Send pushes an already-
+// sealed node to external relays — the "let this leave my machine" gesture.
+// Affirm (a later, separate act marking a sent node as the author's published
+// position) is not yet in this menu; it requires a prior Send.
+const VOICE_DELIVER: { op: "step" | "send"; label: string; title: string; cls: string }[] = [
+  { op: "send", label: "Send", title: "Push this trace to external relays under this voice's key", cls: "op-send" },
+  { op: "step", label: "Step", title: "Seal this trace as a local checkpoint, signed as this voice", cls: "op-save" },
 ];
 
 
@@ -6486,7 +6486,7 @@ function App() {
     else if (op === "settle") void settleLLM(idx);
     else if (op === "stir") void stirLLM(idx);
     else if (op === "reply") void replyLLM(idx);
-    else if (op === "save" || op === "zine") void deliverAsVoice(idx);
+    else if (op === "step" || op === "send") void deliverAsVoice(idx);
   }
 
   /** Resolve which panel an op should target given the current selection.

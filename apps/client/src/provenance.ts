@@ -3,7 +3,7 @@ import type { Event, EventTemplate } from "nostr-tools";
 import type { Filter } from "nostr-tools";
 import { Relay } from "nostr-tools/relay";
 
-import { loadOrCreateVoice } from "./identity.js";
+import { loadOrCreateVoice, resolveRelayUrl } from "./identity.js";
 import { writeRelays, readRelays } from "./relay-config.js";
 import type { Run } from "./workspace-core.js";
 import { flattenRuns } from "./workspace-core.js";
@@ -277,6 +277,12 @@ export interface PublishEditInput {
   deltas: EditorDelta[];
   snapshot: string;
   contentHash: string;
+  /** When true, seal to the home relay only — don't fan out to external write
+   *  relays. This is the Step gesture (protocol §8): a local checkpoint that
+   *  doesn't leave the machine. The user later Sends (pushToExternalRelays)
+   *  if they want the node reachable by others. Default false (backward-compat:
+   *  existing callers fan out as before). */
+  localOnly?: boolean;
   /** Per-character attribution for `snapshot`, serialized into the node's
    *  `authors` field (protocol §FileTraceNode Content). Concatenating the runs'
    *  text in order MUST reproduce `snapshot` exactly; readers validate this and
@@ -815,7 +821,71 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   };
 
   const signed = finalizeEvent(template, signer);
-  await publishToMany(relays, signed);
+  // Step (localOnly): publish to the home relay only — the node is sealed and
+  // safe, but hasn't left the machine. Send (the default, for backward-compat)
+  // fans out to all write-enabled relays. The distinction is the sovereignty
+  // filter: not every Step is Sent (protocol §8).
+  if (input.localOnly) {
+    const homeUrl = resolveRelayUrl();
+    const homeRelay = await getRelayRetrying(homeUrl);
+    if (homeRelay) {
+      await publishWithAuth(homeRelay, signed);
+    }
+  } else {
+    await publishToMany(relays, signed);
+  }
+  return signed;
+}
+
+/** Send: push an already-sealed node to all write-enabled external relays.
+ *  This is the deliberate "let this leave my machine" gesture (protocol §8) —
+ *  the node was sealed locally (by a Step), and now the author chooses to make
+ *  it reachable by others. Idempotent: re-sending a node that's already on a
+ *  relay is a no-op (the relay dedupes by event id). */
+export async function sendSealed(event: Event): Promise<void> {
+  const relays = await getWriteRelays();
+  await publishToMany(relays, event);
+}
+
+/** Affirm: mark a sent node as the author's published position. Seals a new
+ *  node with `action: "affirm"` citing the sent node via a `q` tag. Per §8,
+ *  affirm requires prior Send — affirming a node that was never sent would
+ *  claim a public position for something no one can fetch. The caller is
+ *  responsible for ensuring the cited node has been sent. */
+export async function affirmNode(
+  citedNodeId: string,
+  citedOwnerPubkey: string,
+  input: {
+    prevEventId: string | null;
+    relativePath: string;
+    folderId: string;
+    snapshot: string;
+    contentHash: string;
+    signer?: Uint8Array;
+  },
+): Promise<Event> {
+  const signer = input.signer ?? loadOrCreateVoice().secretKey;
+  const template = {
+    kind: 4290,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [
+      ["z", "file"],
+      ["f", input.folderId],
+      ["action", "affirm"],
+      // Cite the sent node being affirmed (NIP-18 quote shape, §3.1).
+      ["q", citedNodeId, "", citedOwnerPubkey],
+      ...(input.prevEventId
+        ? [["e", input.prevEventId, "", "prev"] as string[]]
+        : []),
+    ],
+    content: JSON.stringify({
+      snapshot: input.snapshot,
+      deltas: [],
+      contentHash: input.contentHash,
+    }),
+  };
+  const signed = finalizeEvent(template, signer);
+  await publishToMany(await getWriteRelays(), signed);
   return signed;
 }
 
