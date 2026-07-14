@@ -67,15 +67,38 @@ export function onionAddressFromSeed(seed: Uint8Array): string {
   return base32Encode(payload) + ".onion";
 }
 
-/** Convenience: derive the onion address + base64 seed from the current signing
- *  voice's secret. The seed (base64) is what gets passed to Tor's control port
- *  via `ADD_ONION ED25519-V3:<base64>`. */
+/** Build the 64-byte expanded private key Tor's control port expects.
+ *
+ * Tor's `ADD_ONION ED25519-V3:<base64>` requires a 64-byte blob that is NOT
+ * `seed || pubkey` (a common mistake — that produces a different onion address).
+ * It is the ed25519 expanded secret key: SHA-512(seed) split into two 32-byte
+ * halves, with the first half clamped (the scalar), the second half unmodified
+ * (the prefix/PRF nonce). This is the same format libsodium's
+ * crypto_sign_seed_keypair produces internally.
+ *
+ * @noble/curves exposes this via getExtendedPublicKey(seed), which returns
+ * { head (clamped scalar), prefix (nonce), pointBytes (pubkey) }. The expanded
+ * key is head || prefix — verified against a live Tor daemon (Tor 0.4.9.11)
+ * which generated the exact onion address our onionAddressFromSeed computes. */
+export function expandedKeyFromSeed(seed: Uint8Array): Uint8Array {
+  const ext = ed25519.utils.getExtendedPublicKey(seed);
+  const expanded = new Uint8Array(64);
+  expanded.set(ext.head, 0);    // 32-byte clamped scalar
+  expanded.set(ext.prefix, 32); // 32-byte prefix (nonce)
+  return expanded;
+}
+
+/** Convenience: derive the onion address + base64 expanded key from the
+ *  current signing voice's secret. The expanded key (base64) is what gets
+ *  passed to Tor's control port via `ADD_ONION ED25519-V3:<base64>`. */
 export function deriveOnionAddress(): { address: string; seedBase64: string } {
   const voice = loadOrCreateVoice();
   const seed = deriveOnionSeed(voice.secretKey);
+  const expanded = expandedKeyFromSeed(seed);
   return {
     address: onionAddressFromSeed(seed),
-    seedBase64: bytesToBase64(seed),
+    // Tor expects the 64-byte expanded key (seed || pubkey), not just the seed.
+    seedBase64: bytesToBase64(expanded),
   };
 }
 

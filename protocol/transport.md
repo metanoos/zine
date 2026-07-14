@@ -139,17 +139,24 @@ the suffix `.onion` is appended, yielding a 56-character address + `.onion` =
 
 ### 3.4 The key never touches disk
 
-Tor's control-port `ADD_ONION` command accepts the key inline:
+Tor's control-port `ADD_ONION` command accepts the key inline, but expects the
+**64-byte expanded private key** (not the 32-byte seed):
 
 ```
-ADD_ONION ED25519-V3:<base64-of-32-byte-seed> Port=80,127.0.0.1:4869
+ADD_ONION ED25519-V3:<base64-of-64-byte-expanded-key> Port=80,127.0.0.1:4869
 ```
 
-The flow: the press derives the seed (pure crypto, §3.1) → passes it to the Tor
-sidecar via the control port → Tor creates the onion service in memory → on next
-launch, re-derived and re-registered. There is no `~/.tracer/onion-key` file. The
-Nostr secret in the keychain is the single source; the onion is a projection of
-it, not a sibling credential.
+The expanded key is `SHA-512(seed)` split into two 32-byte halves: the first
+half clamped (the ed25519 scalar — bits 0-2 cleared, bit 254 set, bit 255
+cleared), the second half unmodified (the prefix/PRF nonce). This is the same
+format libsodium's `crypto_sign_seed_keypair` produces internally. Passing only
+the 32-byte seed fails with "Failed to decode ED25519-V3 key."
+
+The flow: the press derives the seed (§3.1) → expands it to the 64-byte form →
+passes it to the Tor sidecar via the control port → Tor creates the onion
+service in memory → on next launch, re-derived and re-registered. There is no
+`~/.tracer/onion-key` file. The Nostr secret in the keychain is the single
+source; the onion is a projection of it, not a sibling credential.
 
 This is the property that makes identity portable across networks: the same
 secret, on a new machine, reproduces the same identity *and* the same reachability.
