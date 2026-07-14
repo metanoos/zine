@@ -4834,7 +4834,7 @@ function useProvenance(
     }
   }
 
-  async function sealNow(path: string, signer?: Uint8Array) {
+  async function sealNow(path: string, signer?: Uint8Array, localOnly?: boolean) {
     if (!folder) return;
     // Belt-and-suspenders: never seal while replay is parked on a historical
     // step. That step's file is frozen with reconstructed content via a
@@ -4897,6 +4897,7 @@ function useProvenance(
         signer,
         runs,
         taggedTraces.length > 0 ? taggedTraces : undefined,
+        localOnly,
       );
       lastSealedRef.current.set(path, { content, tags: [...tags], taggedTraces: [...taggedTraces] });
       // Reflect the freshly-sealed node id back into state so the next diff
@@ -4930,6 +4931,7 @@ function useProvenance(
       signer?: Uint8Array,
       runs?: Run[],
       taggedTraces?: string[],
+      localOnly?: boolean,
     ) => Promise<string>
   >(async () => "");
   // Seed the last-sealed map for files loaded from disk/relay. Called from
@@ -5392,7 +5394,7 @@ function App() {
   // Thread the backend's write fn into the hook so sealNow routes through the
   // right storage (disk on desktop, localStorage on webapp) instead of the
   // hardwired Tauri disk path.
-  writeRef.current = (path, content, tags, signer, runs, taggedTraces) => {
+  writeRef.current = (path, content, tags, signer, runs, taggedTraces, localOnly) => {
     // Gate writes to foreign folders — the user must fork first. The banner's
     // Fork button is the path out of read-only. Logging rather than throwing so
     // a stray keystroke-driven seal doesn't surface as an error toast.
@@ -5400,7 +5402,7 @@ function App() {
       console.warn("write blocked: viewing a foreign folder — fork it to edit");
       return Promise.resolve("");
     }
-    return backendRef.current.writeFile(path, content, tags, signer, runs, undefined, taggedTraces);
+    return backendRef.current.writeFile(path, content, tags, signer, runs, undefined, taggedTraces, localOnly);
   };
   const [activePanel, setActivePanel] = useState<number>(0);
   // Branch detection: rescan incoming forks / sibling heads for the active file.
@@ -8669,7 +8671,7 @@ function App() {
           userTagsByPath[p] = st.tags;
         }
       }
-      void backendRef.current.movePath(src, destFolder, userTagsByPath).catch((e) =>
+      void backendRef.current.movePath(src, destFolder, isFolderMove, userTagsByPath).catch((e) =>
         console.warn(`[workspace] movePath failed for ${src}:`, e),
       );
     }
@@ -8894,7 +8896,7 @@ function App() {
         userTagsByPath[p] = st.tags;
       }
     }
-    void backendRef.current.renamePath(path, cleanName, userTagsByPath).catch((e) =>
+    void backendRef.current.renamePath(path, cleanName, isFolderRename, userTagsByPath).catch((e) =>
       console.warn(`[workspace] renamePath failed for ${path}:`, e),
     );
     return null;

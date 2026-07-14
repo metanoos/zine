@@ -1,19 +1,28 @@
-@import url("https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800&family=Newsreader:ital,wght@0,400;0,500;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;500&family=Big+Shoulders+Display:wght@600;800&family=Fraunces:opsz,wght@9..144,400;9..144,500&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&family=Lora:wght@400;500&family=Newsreader:ital,wght@0,400;0,500;1,400&family=Spectral:wght@400;500&display=swap");
+@import url("maplibre-gl/dist/maplibre-gl.css");
 
 :root {
-  --surface: #ececeb;
-  --surface-raised: #f7f7f6;
-  --surface-sunken: #dedede;
+  --surface: #e3e3e2;
+  --surface-raised: #e6e6e5;
+  --surface-sunken: #d4d4d4;
   --ink: #17171a;
   --ink-dim: #6b6a66;
-  --accent: #b1790a;
-  --accent-soft: #b1790a1f;
+  --accent: #d99a0a;
+  --accent-soft: #d99a0a1f;
+  --on-accent: #5c3d00;
+  --reject-fg: #b23a48;
+  --reject-bg: #b23a481f;
   --rule: #17171a24;
   --rule-strong: #17171a3d;
 
   --font-display: "Big Shoulders Display", sans-serif;
   --font-body: "Newsreader", Georgia, serif;
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  /* Lightness token for the generative keychain voice identity (see
+     keys-store.ts identityColors). Keychain keys store a hue/sat and derive
+     fg/bg from this so one identity reads on both themes. Dark ink on light. */
+  --voice-ink-l: 28%;
 
   /* voice ink palette — light mode (kept clear of gold, which is reserved for chrome) */
   --v0-fg: #157a63;
@@ -28,6 +37,15 @@
   --v4-bg: #2a5f9e1f;
   --v5-fg: #46519e;
   --v5-bg: #46519e1f;
+
+  /* Times stacked-area bands — a muted qualitative palette kept clear of the
+     gold accent (reserved for chrome). Six steps + --rule-strong for "other". */
+  --times-stack-1: #2a5f9e;
+  --times-stack-2: #157a63;
+  --times-stack-3: #6a3fa0;
+  --times-stack-4: #a63465;
+  --times-stack-5: #2d6a2f;
+  --times-stack-6: #46519e;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -37,10 +55,15 @@
     --surface-sunken: #030303;
     --ink: #ecebe6;
     --ink-dim: #8f8d87;
-    --accent: #f2b134;
-    --accent-soft: #f2b1341f;
+    --accent: #f5a919;
+    --accent-soft: #f5a9191f;
+    --on-accent: #2b1c00;
+    --reject-fg: #e06577;
+    --reject-bg: #e0657722;
     --rule: #ecebe61f;
     --rule-strong: #ecebe63a;
+
+    --voice-ink-l: 64%;
 
     --v0-fg: #4fd6b8;
     --v0-bg: #4fd6b81f;
@@ -54,6 +77,13 @@
     --v4-bg: #7ab8f022;
     --v5-fg: #9aa5f5;
     --v5-bg: #9aa5f522;
+
+    --times-stack-1: #7ab8f0;
+    --times-stack-2: #4fd6b8;
+    --times-stack-3: #b48af0;
+    --times-stack-4: #f28fb0;
+    --times-stack-5: #82cf85;
+    --times-stack-6: #9aa5f5;
   }
 }
 
@@ -66,10 +96,15 @@ html[data-theme="dark"] {
   --surface-sunken: #030303 !important;
   --ink: #ecebe6 !important;
   --ink-dim: #8f8d87 !important;
-  --accent: #f2b134 !important;
-  --accent-soft: #f2b1341f !important;
+  --accent: #f5a919 !important;
+  --accent-soft: #f5a9191f !important;
+  --on-accent: #2b1c00 !important;
+  --reject-fg: #e06577 !important;
+  --reject-bg: #e0657722 !important;
   --rule: #ecebe61f !important;
   --rule-strong: #ecebe63a !important;
+
+  --voice-ink-l: 64% !important;
 
   --v0-fg: #4fd6b8 !important;
   --v0-bg: #4fd6b81f !important;
@@ -83,18 +118,30 @@ html[data-theme="dark"] {
   --v4-bg: #7ab8f022 !important;
   --v5-fg: #9aa5f5 !important;
   --v5-bg: #9aa5f522 !important;
+
+  --times-stack-1: #7ab8f0 !important;
+  --times-stack-2: #4fd6b8 !important;
+  --times-stack-3: #b48af0 !important;
+  --times-stack-4: #f28fb0 !important;
+  --times-stack-5: #82cf85 !important;
+  --times-stack-6: #9aa5f5 !important;
 }
 
 html[data-theme="light"] {
-  --surface: #ececeb !important;
-  --surface-raised: #f7f7f6 !important;
-  --surface-sunken: #dedede !important;
+  --surface: #e3e3e2 !important;
+  --surface-raised: #e6e6e5 !important;
+  --surface-sunken: #d4d4d4 !important;
   --ink: #17171a !important;
   --ink-dim: #6b6a66 !important;
-  --accent: #b1790a !important;
-  --accent-soft: #b1790a1f !important;
+  --accent: #d99a0a !important;
+  --accent-soft: #d99a0a1f !important;
+  --on-accent: #3d2800 !important;
+  --reject-fg: #b23a48 !important;
+  --reject-bg: #b23a481f !important;
   --rule: #17171a24 !important;
   --rule-strong: #17171a3d !important;
+
+  --voice-ink-l: 28% !important;
 
   --v0-fg: #157a63 !important;
   --v0-bg: #157a631f !important;
@@ -108,10 +155,54 @@ html[data-theme="light"] {
   --v4-bg: #2a5f9e1f !important;
   --v5-fg: #46519e !important;
   --v5-bg: #46519e1f !important;
+
+  --times-stack-1: #2a5f9e !important;
+  --times-stack-2: #157a63 !important;
+  --times-stack-3: #6a3fa0 !important;
+  --times-stack-4: #a63465 !important;
+  --times-stack-5: #2d6a2f !important;
+  --times-stack-6: #46519e !important;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* Scrollbars — slim, themed to the surface/rule tokens so they read as chrome
+   instead of a platform default. Tauri is WebKit, so ::-webkit-scrollbar does
+   the heavy lifting; Firefox gets scrollbar-width/color. The 2px transparent
+   border + background-clip:pading-box trick gives a ~6px thumb floating in a
+   10px gutter — narrow at rest, still easy to grab. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--rule-strong);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-dim);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: var(--accent);
+  background-clip: padding-box;
 }
 
 html,
@@ -204,6 +295,10 @@ body {
   flex: 1;
   display: flex;
   min-height: 0;
+  /* Same containment idea as the tall reading views: without clipping here,
+     horizontal overflow bubbles to document scroll and carries the nav rail
+     (and anything else in normal flow) sideways. Children own their scroll. */
+  overflow: hidden;
 }
 
 /* Nav rail (far-left icon column) */
@@ -264,7 +359,7 @@ body {
 }
 
 .rail-brand-wordmark {
-  font-family: var(--font-display);
+  font-family: var(--font-mono);
   font-weight: 800;
   font-size: 0.8rem;
   letter-spacing: 0.18em;
@@ -279,6 +374,10 @@ body {
 }
 
 .nav-rail-top {
+  flex: 0 0 auto;
+}
+
+.nav-rail-lists {
   flex: 1; /* pushes the bottom group + footer to the rail's foot */
 }
 
@@ -319,6 +418,17 @@ body {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+/* A rail toggle that's currently OFF (e.g. voice-attribution coloring
+   disabled). Dimmed so the off state reads at a glance; hover still lifts it
+   so the user can find the control to turn it back on. */
+.rail-item-off {
+  color: var(--ink-dim);
+  opacity: 0.55;
+}
+.rail-item-off:hover {
+  opacity: 1;
+}
+
 .rail-item svg {
   display: block;
   flex: 0 0 20px;
@@ -343,8 +453,8 @@ body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
+  align-items: flex-start;
+  justify-content: flex-start;
   gap: 0.5rem;
   padding: 2rem;
   color: var(--ink-dim);
@@ -363,7 +473,7 @@ body {
   margin: 0;
   font-family: var(--font-body);
   font-size: 1.05rem;
-  text-align: center;
+  text-align: left;
 }
 
 .view-placeholder-soon {
@@ -375,16 +485,998 @@ body {
   opacity: 0.7;
 }
 
+/* Tall reading/list views. Same scroll-containment fix as .about-view below:
+   without overflow-y:auto + min-height:0, content taller than the 100vh shell
+   overflows into document-level scroll, which carries the nav rail (and the
+   rest of normal flow) out of view. */
+.keys-view,
+.models-view,
+.relays-view,
+.download-view,
+.web-home,
+.times-view,
+.listings-view {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Centered reading views (folder picker, activity, listings) pin to the top
+   and center their heading/blurb/list blocks. The inner lists (.web-home-list
+   etc.) are width:100% with a max-width, so they center within the view. */
+.web-home,
+.times-view,
+.listings-view {
+  align-items: center;
+  text-align: center;
+}
+
+/* Settings views — Keys, Relays, Models, Download. One consistent left-aligned
+   column: the blurb, list/grid, add control, and storage note all share the
+   same measure (--settings-col) and the same left edge, so the four pages read
+   as a family. The nav rail already marks the active page (gold icon + inset
+   accent bar on .rail-item.active), so these views carry no <h1> of their own
+   — the blurb leads directly. */
+.keys-view,
+.models-view,
+.relays-view,
+.download-view {
+  --settings-col: 35rem;
+  align-items: flex-start;
+  justify-content: flex-start;
+  text-align: left;
+  gap: 1rem;
+}
+
+.keys-view .view-placeholder-blurb,
+.models-view .view-placeholder-blurb,
+.relays-view .view-placeholder-blurb,
+.download-view .view-placeholder-blurb {
+  max-width: var(--settings-col);
+}
+
+/* Shared settings containers — the two idioms the press already uses, named so
+   the four settings pages can pull them in by class instead of re-deriving
+   border/radius/selection per page.
+
+   .settings-card  — bordered form container (Keys, Models cards, Download
+     platform cards). Groups editable fields, so it keeps a persistent 1px rule
+     and raised surface. Matches the press's own form container (.sampler-panel
+     / .sampler-field) and reads as a discrete box, not a list row.
+   .settings-row   — borderless list row (Relays). Matches .palette-item /
+     .tree-row: transparent at rest, picks up a surface fill on hover/focus,
+     and shows selection with the press accent ring (inset box-shadow) rather
+     than a border-color swap. The "home" distinction carries on the existing
+     .relay-tag chip, not a gold border.
+
+   Selection/active = the same accent ring everywhere: inset 0 0 0 1px
+   var(--accent) on var(--accent-soft). Radius is 4px across the family
+   (press's value), overridden only where a card needs more. */
+.settings-card {
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.6rem 0.7rem;
+  background: var(--surface-raised);
+}
+.settings-row {
+  border-radius: 4px;
+  padding: 0.5rem 0.55rem;
+}
+.settings-row:hover,
+.settings-row:focus-within {
+  background: var(--surface-raised);
+}
+
+/* About view — the pitch. Shared lede, then Write / Curate side by side.
+ * The .about-view reuses .view-placeholder as a top-aligned reading surface. */
+
+.about-view {
+  justify-content: flex-start;
+  /* The view itself is the full-width scroller so the scrollbar lands on the
+     page's right edge, not mid-page over a centered column. The reading
+     column (max-width + centering) lives on .about-view-inner below. */
+  text-align: left;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.about-view-inner {
+  max-width: 1100px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  /* Pad the reading column in from the viewport edges so it never kisses the
+     scrollbar on the right or the nav rail on the left. */
+  padding: 0 0.5rem;
+}
+
+.about-lede {
+  margin: 0;
+  max-width: 42rem;
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  line-height: 1.6;
+  color: var(--ink);
+}
+
+.about-lede code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  color: var(--accent);
+}
+
+.about-beats {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 42rem;
+}
+
+.about-beat {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--ink-dim);
+}
+
+.about-beat strong {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  color: var(--accent);
+}
+
+.about-closer {
+  margin: 0.4rem 0 0;
+  max-width: 42rem;
+  font-family: var(--font-body);
+  font-style: italic;
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--ink);
+  border-top: 1px solid var(--rule);
+  padding-top: 1rem;
+}
+
+/* Models view — provider cards laid out as a grid of editable rows. The shell
+ * reuses .view-placeholder; .models-list is the only models-specific layout. */
+
+.models-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  width: 100%;
+  max-width: var(--settings-col);
+}
+
+.models-card {
+  /* .settings-card supplies border/radius/padding/surface */
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.models-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.models-label-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  padding: 0.1rem 0;
+}
+
+.models-label-input:hover,
+.models-label-input:focus {
+  border-bottom-color: var(--rule);
+  outline: none;
+}
+
+.models-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.models-delete {
+  opacity: 0.6;
+}
+
+.models-empty {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  color: var(--ink-dim);
+  opacity: 0.7;
+  padding: 0.2rem 0;
+}
+
+.models-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.35rem 0.6rem;
+}
+
+.models-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.models-field input,
+.models-field select {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.25rem 0.35rem;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.models-field input:focus,
+.models-field select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.models-card-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.models-test {
+  padding: 0.25rem 0.7rem;
+  font-size: 0.68rem;
+}
+
+.models-add-wrap {
+  position: relative;
+  align-self: flex-start;
+}
+
+.models-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.models-add-menu {
+  position: absolute;
+  top: calc(100% + 0.3rem);
+  left: 0;
+  z-index: 50;
+  min-width: 13rem;
+  padding: 0.2rem;
+  background: var(--surface-raised);
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  font-family: var(--font-mono);
+}
+
+.models-add-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.models-add-item:hover {
+  background: var(--surface-sunken);
+}
+
+.models-add-item-meta {
+  font-size: 0.66rem;
+  color: var(--ink-dim);
+  opacity: 0.8;
+}
+
+.models-add-sep {
+  height: 1px;
+  margin: 0.2rem 0.3rem;
+  background: var(--rule);
+}
+
+.models-storage-note {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--ink-dim);
+  max-width: var(--settings-col);
+  line-height: 1.4;
+  margin: 0.5rem 0 0;
+  opacity: 0.8;
+}
+
+/* Keys view — Nostr keychain. Card layout differs from models cards: a left
+   preview swatch (the label rendered in the key's own font + colors) anchors
+   a right meta column (label input, delete/copy actions, pubkey). The swatch
+   IS the identity — what you see there is how that key's text renders in the
+   editor. Reuses the same tokens and .icon-btn patterns for the action
+   controls. Author/inject assignment lives in Press (AUTHOR + model / keys). */
+
+.keys-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  width: 100%;
+  max-width: var(--settings-col);
+}
+
+.key-card {
+  /* .settings-card supplies border/radius/padding/surface */
+  display: flex;
+  align-items: stretch;
+  gap: 0.7rem;
+}
+
+/* The preview swatch: label text in the key's font, fg on bg. Fixed min size
+   so the row alignment holds regardless of label length; the text truncates.
+   fg/bg/font-family are injected inline by KeysView from identityColors(). */
+.key-card-preview {
+  flex-shrink: 0;
+  width: 7.5rem;
+  min-height: 3.5rem;
+  border-radius: 4px;
+  padding: 0.4rem 0.55rem;
+  font-size: 1.05rem;
+  line-height: 1.2;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-card-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  justify-content: space-between;
+}
+
+.key-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.key-label-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  padding: 0.1rem 0;
+}
+
+.key-label-input:hover,
+.key-label-input:focus {
+  border-bottom-color: var(--rule);
+  outline: none;
+}
+
+.key-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.key-delete {
+  opacity: 0.6;
+}
+
+.key-delete:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+/* npub / nsec rows. Label + truncated monospace value + copy (and reveal for
+   nsec). The value truncates with an ellipsis; the full string is in the
+   title for hover/tooltip. Mirrors the models-field visual weight. */
+.key-value-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+}
+
+.key-value-label {
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.6rem;
+  opacity: 0.7;
+  width: 2.2rem;
+}
+
+.key-value-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  color: var(--ink-dim);
+}
+
+.key-value-row:hover .key-value-text {
+  color: var(--ink);
+}
+
+/* Per-voice style customization. Unfolded by the Palette toggle in each card's
+   actions, this reveals a font picker + hue/sat sliders. The card's preview
+   swatch already renders from the same identity, so it updates live as the
+   sliders move — what you see there is exactly how the voice renders in the
+   editor. Mirrors the .key-value-row / .icon-btn tokens. */
+
+.key-style-toggle {
+  opacity: 0.6;
+}
+
+.key-style-toggle:hover {
+  opacity: 1;
+}
+
+.key-style-toggle.is-open {
+  opacity: 1;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.key-card-style {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.4rem 0 0.1rem;
+  margin-top: 0.1rem;
+  border-top: 1px solid var(--rule);
+}
+
+.key-style-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.key-style-label {
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  opacity: 0.7;
+  width: 2.2rem;
+}
+
+.key-style-select {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.15rem 0.35rem;
+  cursor: pointer;
+}
+
+.key-style-select:hover {
+  border-color: var(--rule-strong);
+}
+
+.key-style-value {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--ink-dim);
+  width: 2.4rem;
+  text-align: right;
+}
+
+/* Range sliders. A slim track with an accent-colored thumb; the hue track
+   paints the full hue spectrum behind itself and marks the [25°,55°] gold band
+   (reserved for chrome — the band identityFromPubkey dodges) slightly darker so
+   the reserved region is discoverable. Saturation is a neutral grey ramp. */
+
+.key-style-slider {
+  flex: 1;
+  min-width: 0;
+  height: 1rem;
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--rule);
+  border-radius: 999px;
+  cursor: pointer;
+  outline: none;
+}
+
+.key-style-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 1px solid var(--surface-raised);
+  box-shadow: 0 0 0 1px var(--accent-soft);
+  cursor: pointer;
+}
+
+.key-style-slider::-moz-range-thumb {
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 1px solid var(--surface-raised);
+  cursor: pointer;
+}
+
+/* Hue track: full spectrum so the chosen degree is legible at a glance. The
+   gold band [25,55]/360 ≈ 7%–15% is darkened to flag the chrome-reserved hue —
+   a soft hint, not a hard ban (customization is the point; the live preview
+   remains the readability guardrail). */
+.hue-slider {
+  background: linear-gradient(
+    to right,
+    hsl(0 70% 55%),
+    hsl(24 70% 55%) 6.9%,
+    #b08a2e 6.9%,
+    #b08a2e 15.3%,
+    hsl(56 70% 55%) 15.3%,
+    hsl(90 70% 55%),
+    hsl(120 70% 55%),
+    hsl(150 70% 55%),
+    hsl(180 70% 55%),
+    hsl(210 70% 55%),
+    hsl(240 70% 55%),
+    hsl(270 70% 55%),
+    hsl(300 70% 55%),
+    hsl(330 70% 55%),
+    hsl(360 70% 55%)
+  );
+}
+
+.sat-slider {
+  background: linear-gradient(to right, var(--ink-dim), var(--accent));
+}
+
+.keys-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  align-self: flex-start;
+}
+
+.keys-storage-note {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--ink-dim);
+  max-width: var(--settings-col);
+  line-height: 1.4;
+  margin: 0.5rem 0 0;
+  opacity: 0.8;
+}
+
+/* Download view */
+
+.download-status {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 1rem;
+  color: var(--ink-dim);
+  max-width: var(--settings-col);
+}
+
+.download-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  max-width: var(--settings-col);
+  text-align: left;
+}
+
+.download-hint {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: var(--ink-dim);
+}
+
+.download-hint code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--surface-raised);
+  padding: 0.05em 0.35em;
+  border-radius: 3px;
+}
+
+.download-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.6rem;
+  width: 100%;
+  max-width: var(--settings-col);
+}
+
+.download-card {
+  /* .settings-card supplies border/radius/surface; download cards are sparser
+     than keys/models cards, so they keep their own padding. */
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1.1rem 1.2rem;
+}
+
+/* Recommended build = the press accent ring, not a border-color swap. */
+.download-card.recommended {
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background: var(--accent-soft);
+}
+
+.download-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--ink);
+}
+
+.download-card-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.download-card-badge {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+
+.download-card-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.download-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 0.4rem;
+  background: var(--surface-sunken);
+}
+
+.download-item-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--ink);
+  text-decoration: none;
+  font-family: var(--font-body);
+  font-weight: 500;
+  font-size: 0.95rem;
+}
+
+.download-item-link:hover {
+  text-decoration: underline;
+}
+
+.download-item-name {
+  word-break: break-all;
+}
+
+.download-item-meta {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Relays view — a flat list of press-style rows (.settings-row: borderless at
+   rest, surface fill on hover, accent ring for the home relay). The home
+   distinction carries on the .relay-tag chip, not a border-color swap. */
+
+.relay-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  max-width: var(--settings-col);
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.relay-row {
+  /* .settings-row: borderless list row, surface fill on hover */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+/* The home relay is marked by the accent ring (the press's selection language),
+   not a border-color swap. The .relay-tag "home" chip still names it. */
+.relay-row.builtin {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.relay-row-main {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.relay-url {
+  font-family: var(--font-mono);
+  font-size: 0.88rem;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relay-tag {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0.08rem 0.35rem;
+  border-radius: 3px;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.relay-row-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-shrink: 0;
+}
+
+.relay-role {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 0.25rem 0.4rem;
+  border-radius: 3px;
+  border: 1px solid var(--rule);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.relay-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+
+.relay-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.3rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+
+.relay-delete:hover:not(:disabled) {
+  color: var(--danger, #c33);
+  border-color: var(--danger, #c33);
+}
+
+.relay-delete:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.relay-add {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  max-width: var(--settings-col);
+  flex-wrap: wrap;
+}
+
+.relay-add-input {
+  flex: 1 1 14rem;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.relay-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 0.9rem;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+}
+
+.relay-add-btn:hover {
+  opacity: 0.9;
+}
+
+/* Empty state (no folder attached yet) */
+
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  justify-content: center;
+  margin-top: 1rem;
+}
+
+.empty-primary-btn,
+.empty-secondary-btn {
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  padding: 0.55rem 1.1rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  background: var(--surface-raised);
+  color: var(--ink);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.empty-primary-btn {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--surface);
+  font-weight: 600;
+}
+
+.empty-primary-btn:hover,
+.empty-secondary-btn:hover {
+  filter: brightness(1.08);
+}
+
+.empty-error {
+  margin-top: 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: #c00;
+  text-align: center;
+  max-width: 32rem;
+}
+
 /* Sidebar / file tree */
 
 .sidebar {
-  flex: 0 0 220px;
+  flex: 0 0 var(--sidebar-width, 220px);
   display: flex;
   flex-direction: column;
   min-width: 0;
-  border-right: 1px solid var(--rule-strong);
   background: var(--surface);
   overflow-y: auto;
+}
+
+/* Switch-folder button pinned to the top of the sidebar: detach the current
+   press and return to the folder/home picker. Styled to read as a quiet header
+   affordance, matching the mono/uppercase language of the section titles. */
+.sidebar-switch {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.6rem 0.9rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer;
+}
+.sidebar-switch:hover {
+  color: var(--accent);
+}
+
+/* Horizontal resize handle between the collection sidebar and the workspace.
+   The grab zone is 8px wide and pulled left by half so it straddles the old
+   border line (resting look identical to the previous 1px rule). ::before
+   draws the hairline; hover/active swap to the accent and thicken it. */
+.sidebar-resizer {
+  flex: 0 0 8px;
+  margin-left: -4px;
+  position: relative;
+  z-index: 5;
+  cursor: col-resize;
+  touch-action: none;
+}
+.sidebar-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: var(--rule-strong);
+  transition: background 0.12s ease, width 0.12s ease;
+}
+.sidebar-resizer:hover::before,
+.sidebar-resizer:active::before {
+  background: var(--accent);
+  width: 2px;
+}
+/* While dragging: suppress text selection + lock the column cursor app-wide. */
+body.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .sidebar-header {
@@ -398,12 +1490,6 @@ body {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--ink-dim);
-}
-
-.sidebar-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.15rem;
 }
 
 .icon-btn {
@@ -435,8 +1521,20 @@ body {
   cursor: default;
 }
 
+.icon-btn.active {
+  /* Subtle wash, not a high-contrast chip: --surface-sunken reads as a near-black
+     pit in dark mode (and a near-white glyph on top), which makes an always-on
+     toggle like the palette/sampler header buttons pop violently next to their
+     dim, transparent neighbors. --rule is a faint ~12% tint in both themes, so
+     the active state stays legible without the extreme contrast. */
+  background: var(--rule);
+  color: var(--ink);
+}
+
 .create-row {
   gap: 0.4rem;
+  flex-wrap: wrap;
+  align-items: flex-start;
 }
 
 .create-row-icon {
@@ -462,6 +1560,241 @@ body {
 .create-input::placeholder {
   color: var(--ink-dim);
   opacity: 0.7;
+}
+
+/* Validation error under the create-row input. The row wraps (see .create-row
+   above) so the message drops to its own line beneath the icon + input. */
+.create-error {
+  flex-basis: 100%;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  line-height: 1.3;
+  color: var(--danger, #c33);
+  white-space: normal;
+}
+
+/* --- sampler panel ----------------------------------------------------- */
+.sampler-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--rule-strong);
+  background: var(--surface);
+}
+
+.sampler-urls {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--ink);
+  background: var(--surface-raised);
+  border: 1px solid var(--rule-strong);
+  border-radius: 3px;
+  padding: 0.3rem 0.4rem;
+  outline: none;
+}
+
+.sampler-urls:focus {
+  border-color: var(--accent);
+}
+
+.sampler-urls::placeholder {
+  color: var(--ink-dim);
+  opacity: 0.7;
+}
+
+.sampler-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.6rem;
+}
+
+.sampler-field {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.sampler-field input {
+  width: 3.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--ink);
+  background: var(--surface-raised);
+  border: 1px solid var(--rule-strong);
+  border-radius: 3px;
+  padding: 0.1rem 0.35rem;
+  outline: none;
+}
+
+.sampler-field input:focus {
+  border-color: var(--accent);
+}
+
+/* Text inputs (kinds list, search) and the datetime pickers need more room
+ * than the default 3.5rem number slot. --grow fills remaining space on the row
+ * so the kinds field reads as the primary control; the datetime picker gets a
+ * fixed wider width so the native calendar widget isn't clipped. */
+.sampler-field--grow {
+  flex: 1 1 auto;
+  min-width: 8rem;
+}
+
+.sampler-field--grow input {
+  width: 100%;
+}
+
+.sampler-field input[type="datetime-local"] {
+  width: auto;
+  min-width: 12.5rem;
+}
+
+.sampler-run {
+  width: 100%;
+  font-size: 0.74rem;
+  padding: 0.3rem 0.5rem;
+}
+
+.sampler-status {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+}
+
+.sampler-status.error {
+  color: var(--danger, #c33);
+}
+
+/* Palette section — the curated set of hardened spans. Sits below the tree as
+ * a second sidebar section; mirrors the sampler panel's compactness. Each row
+ * is a citation you can copy to the clipboard (Copy = full `[[ text | nodeId ]]`)
+ * or remove from the curation (Trash = drop the reference, not the node). */
+
+.sidebar-header--palette {
+  border-top: 1px solid var(--rule);
+  margin-top: 0.25rem;
+  padding-top: 0.55rem;
+}
+
+.palette-panel {
+  padding: 0.2rem 0.5rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.palette-status {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+  padding: 0.3rem 0.2rem;
+}
+
+.palette-status.error {
+  color: var(--danger, #c33);
+}
+
+.palette-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.3rem 0.35rem;
+  border-radius: 4px;
+  cursor: default;
+}
+
+.palette-item:hover {
+  background: var(--surface-raised);
+}
+
+/* The selected trace, when it is a hardened span living in the palette: a gold
+   box matching the sidebar's tree-row-selected. The body is click-to-select. */
+.palette-item-selected {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.palette-item-body {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.palette-item-text {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 0.78rem;
+  line-height: 1.3;
+  color: var(--ink);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.palette-item-origin {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--ink-dim);
+  margin-top: 0.15rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The user-authored display label sits before the origin in the origin line.
+   Slightly brighter than the origin path so it reads as the entry's name. */
+.palette-item-label {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.palette-item-actions {
+  display: flex;
+  gap: 0.15rem;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.palette-item:hover .palette-item-actions {
+  opacity: 1;
+}
+
+.palette-action {
+  background: transparent;
+  border: none;
+  color: var(--ink-dim);
+  cursor: pointer;
+  padding: 0.2rem;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.palette-action:hover {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.palette-action--danger:hover {
+  color: var(--danger, #c33);
 }
 
 .tree {
@@ -497,16 +1830,22 @@ body {
   text-overflow: ellipsis;
 }
 
-.tree-file-open {
-  background: var(--accent-soft);
+/* New folder / New file on the mounted-folder row — pushed right so the
+   label still reads as the primary expand/collapse target. */
+.tree-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  margin-left: auto;
+  flex: none;
 }
 
-.tree-open-marker {
-  margin-left: auto;
-  padding-left: 0.5rem;
-  font-size: 0.65rem;
-  color: var(--ink-dim);
-  letter-spacing: 0.08em;
+/* The selected trace — a gold box on the one file/folder row that is the
+   active trace. Gold is reserved for selection; being open in a panel alone no
+   longer fills a row (the open-tab icon tint stays neutral ink-dim). */
+.tree-row-selected {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 /* Drag & drop */
@@ -540,81 +1879,889 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* Shrink in the .press-top row (default min-width:auto would let panel
+     content expand the whole press, including the collections sidebar). */
+  min-width: 0;
+  /* Contain spill; .workspace-panels owns horizontal scroll so the nav rail
+     and collections listing stay put. */
+  overflow: hidden;
+}
+
+/* Foreign-folder banner: shown when the attached folder is owned by someone
+   else (read-only browse). The Fork button seeds a shallow fork under the
+   user's key and re-attaches to the editable copy. */
+.foreign-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--amber-soft, #3a2f1a);
+  border-bottom: 1px solid var(--amber, #c08a2a);
+  font-size: 13px;
+}
+.foreign-banner-text {
+  color: var(--amber-bright, #e0a838);
+}
+.foreign-banner-fork {
+  flex-shrink: 0;
+  padding: 5px 14px;
+  background: var(--amber, #c08a2a);
+  color: #1a1a1a;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.foreign-banner-fork:hover {
+  background: var(--amber-bright, #e0a838);
+}
+
+/* Branch-detection banner: incoming forks / sibling heads on the active file.
+   Incorporate = unilateral no-conflict accept (protocol §3.8). */
+.merge-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--rule-strong);
+  font-size: 13px;
+}
+.merge-banner-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.merge-banner-text {
+  color: var(--ink);
+  min-width: 0;
+}
+.merge-banner-incorporate {
+  flex-shrink: 0;
+  padding: 5px 14px;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.merge-banner-incorporate:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.merge-banner-incorporate:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.merge-banner-blocked {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--ink-dim);
+  font-style: italic;
+  white-space: nowrap;
+}
+
+/* Three-way merge panel (conflict reconcile) */
+.merge-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 14px;
+  background: var(--surface-raised);
+  border-bottom: 1px solid var(--rule-strong);
+  max-height: min(48vh, 420px);
+  overflow: auto;
+}
+.merge-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.merge-panel-title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.merge-panel-sub {
+  font-size: 12px;
+  color: var(--ink-dim);
+  margin-top: 2px;
+  max-width: 52ch;
+}
+.merge-panel-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+  align-items: center;
+}
+.merge-panel-cancel,
+.merge-panel-preview {
+  padding: 5px 12px;
+  border: 1px solid var(--rule-strong);
+  background: transparent;
+  color: var(--ink);
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.merge-panel-cancel:hover,
+.merge-panel-preview:hover {
+  background: var(--surface-sunken);
+}
+.merge-panel-confirm {
+  padding: 5px 14px;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.merge-panel-confirm:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.merge-panel-confirm:disabled,
+.merge-panel-cancel:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.merge-clean-note {
+  font-size: 12px;
+  color: var(--ink-dim);
+  padding: 6px 8px;
+  background: var(--accent-soft);
+  border-radius: 4px;
+}
+.merge-conflicts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.merge-conflict {
+  border: 1px solid var(--rule-strong);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.merge-conflict-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--surface-sunken);
+  border-bottom: 1px solid var(--rule);
+  flex-wrap: wrap;
+}
+.merge-conflict-label {
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+.merge-conflict-choices {
+  display: flex;
+  gap: 4px;
+}
+.merge-choice {
+  padding: 3px 10px;
+  font-size: 12px;
+  border: 1px solid var(--rule-strong);
+  background: transparent;
+  color: var(--ink-dim);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.merge-choice:hover {
+  color: var(--ink);
+  background: var(--surface-raised);
+}
+.merge-choice.active {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.merge-conflict-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0;
+}
+@media (max-width: 720px) {
+  .merge-conflict-cols {
+    grid-template-columns: 1fr;
+  }
+}
+.merge-col {
+  padding: 8px 10px;
+  border-right: 1px solid var(--rule);
+  min-width: 0;
+}
+.merge-col:last-child {
+  border-right: none;
+}
+.merge-col-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+  margin-bottom: 4px;
+}
+.merge-col pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 140px;
+  overflow: auto;
+  line-height: 1.4;
+}
+.merge-col-ours {
+  background: color-mix(in srgb, var(--v0-fg) 6%, transparent);
+}
+.merge-col-theirs {
+  background: color-mix(in srgb, var(--v2-fg) 6%, transparent);
+}
+.merge-preview {
+  border: 1px solid var(--rule-strong);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--surface);
+}
+.merge-preview pre {
+  margin: 4px 0 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow: auto;
+  line-height: 1.4;
 }
 
 /* Thin toolbar replacing the old Masthead controls. Holds the run-agent
    action for the editor view (cmd+enter still works). */
-.workspace-toolbar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 1rem;
-  padding: 0.45rem 0.9rem;
-  border-bottom: 1px solid var(--rule);
-  background: var(--surface);
-}
-
 .workspace-panels {
   flex: 1;
   display: flex;
   min-height: 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Each column is a .panel-cell (the flex child whose flexGrow is set inline per
+   the resize weights) wrapping a .panel and its right-edge drop strip. The cell
+   — not .panel — owns the flex sizing so the edge strip can overlay the cell's
+   right edge without disturbing the panel's own column layout. basis:0 + grow
+   means columns share the row by weight. */
+.panel-cell {
+  flex-grow: 1;
+  flex-shrink: 1;
+  flex-basis: 0;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Lone panel fills the scrollport. Flexbox only distributes leftover space up
+   to Σ(flex-grow) when that sum is < 1 (CSS Flexbox §9.7) — so closing a
+   narrow column can leave the survivor with grow 0.3 and only 30% of the row.
+   Inline flexGrow can't be overridden from CSS; min-width:100% forces the
+   span. JS also resets the weight to 1 on collapse (commitWithCollapse). */
+.workspace-panels > .panel-cell:only-child {
+  min-width: 100%;
 }
 
 .panel {
-  flex: 1 1 50%;
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
 }
 
-.panel + .panel {
-  border-left: 1px solid var(--rule-strong);
+/* Horizontal resize handle between adjacent editor panels. Same idiom as the
+   sidebar resizer: an 8px grab zone whose ::before draws the hairline, pulled
+   left by half so it straddles the old border line (resting look unchanged). */
+.panel-resizer {
+  flex: 0 0 8px;
+  margin-left: -4px;
+  position: relative;
+  z-index: 5;
+  cursor: col-resize;
+  touch-action: none;
+}
+.panel-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: var(--rule-strong);
+  transition: background 0.12s ease, width 0.12s ease;
+}
+.panel-resizer:hover::before,
+.panel-resizer:active::before {
+  background: var(--accent);
+  width: 2px;
+}
+/* While dragging: suppress text selection + lock the column cursor. */
+body.panel-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* Right-edge drop zone for spawning a new panel. A strip pinned to each cell's
+   right edge, shown only while a tab drag is in progress (the .tab-dragging
+   class on .workspace-panels toggles it). Targeted state draws an accent bar so
+   the user sees where the new column will appear. Wide (16px) so it's an easy
+   hit while dragging — it overlays panel content, but only during a drag. */
+.panel-edge-drop {
+  display: none;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 16px;
+  z-index: 4;
+  cursor: copy;
+}
+.workspace-panels.tab-dragging .panel-edge-drop {
+  display: block;
+}
+.panel-edge-drop.active {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  box-shadow: inset -2px 0 0 var(--accent);
 }
 
 .tab-bar {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.4rem 0.9rem;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
   border-bottom: 1px solid var(--rule);
   background: var(--surface-sunken);
   box-shadow: inset 0 2px 0 transparent;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
 }
 
-.panel-active .tab-bar {
+/* The tab bar itself stays neutral; gold is reserved for the single active
+   trace (see .tab.trace-active), not for whichever tab happens to be
+   frontmost in a panel. */
+
+.tab-list {
+  display: flex;
+  align-items: stretch;
+  flex: 1;
+  min-width: 0;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 13rem;
+  padding: 0.4rem 0.35rem 0.4rem 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--ink-dim);
+  border-right: 1px solid var(--rule);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.tab:hover {
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+/* .active marks the frontmost tab of a panel — the one whose file is visible
+   there. Every panel has one, so this carries only the neutral "visible here"
+   treatment (raised surface, full ink). It does NOT carry gold: there is only
+   one active trace at a time, and a panel's front tab may not be it (e.g. a
+   background panel whose tab is merely frontmost, not the focused trace).
+   Gold is reserved for .tab.trace-active below. */
+.tab.active {
+  color: var(--ink);
+  background: var(--surface-raised);
+}
+
+/* The single active trace: the frontmost tab of the focused panel. This is
+   the one tab that earns the gold accent — a top border (not a full frame)
+   so it reads as a selection marker, matching the sidebar tree's gold ring
+   on the same trace. A non-focused panel's front tab stays .active only. */
+.tab.trace-active {
   box-shadow: inset 0 2px 0 var(--accent);
 }
 
-.tab-path {
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  color: var(--ink);
+.tab-label {
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
 }
 
+/* Status icon prefixing the tab title: folder glyph for a folder tab, file
+   glyph for a file tab. flex:none keeps the icon from collapsing. Color is
+   neutral by default and gold only on the active trace (.tab.trace-active),
+   not on every panel's front tab. */
 .tab-status {
+  flex: none;
+  color: var(--ink-dim);
+}
+.tab.trace-active .tab-status {
+  color: var(--accent);
+}
+
+.tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: var(--ink-dim);
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: background 0.1s ease, color 0.1s ease, opacity 0.1s ease;
+}
+
+.tab:hover .tab-close,
+.tab.active .tab-close {
+  opacity: 1;
+}
+
+.tab-close:hover {
+  background: var(--rule-strong);
+  color: var(--ink);
+}
+
+/* Tab drag & drop — the dragged tab fades; the insertion point is marked by a
+   left accent bar on the tab being dropped "before", and a soft highlight on
+   the list when the bare end-of-list is the drop target. Mirrors the file-tree
+   DnD treatment (tree-dragging / tree-drop-target) so both read as one family. */
+
+.tab[draggable="true"] {
+  -webkit-user-drag: element;
+}
+
+.tab.tab-dragging {
+  opacity: 0.4;
+}
+
+.tab.tab-drop-before {
+  /* left insertion marker; preserve the active-trace underline if both apply */
+  box-shadow: inset 2px 0 0 var(--accent), inset 0 2px 0 var(--accent);
+}
+
+.tab-list-drop-target {
+  background: var(--accent-soft);
+}
+
+/* New-panel drop zone at the tab bar's right edge. A grab strip pinned to the
+   tab bar's visible right end — sticky:right keeps it on screen even when the
+   tab list overflows and scrolls. Targeted state draws a right accent bar so
+   the user sees the new column will appear there. Matches the .panel-edge-drop
+   treatment on the cell border for a consistent read along the panel's height.
+   Rendered only while a tab is being dragged, so the wider 16px grab zone
+   costs nothing at rest. */
+.tab-bar-edge {
+  flex: 0 0 16px;
+  align-self: stretch;
+  position: sticky;
+  right: 0;
+  z-index: 2;
+}
+.tab-bar-edge.active {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  box-shadow: inset -2px 0 0 var(--accent);
+}
+
+/* Cited-trace chips — the named list of traces this one composes (every `q`
+   edge on its head: bracket quotes, the Reply source, tagged zines). A chip
+   is a pinned reference to another trace, labeled by that trace's own name (a
+   file's basename, or for a nameless hardened span its phrase), distinct from a
+   `#`-tag (a topical label). Clicking opens the cited trace's Seals modal. */
+.panel-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.01em;
+  color: var(--ink-dim);
+  background: var(--surface-sunken);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.08rem 0.45rem;
+  margin: 0.32rem 0 0.32rem 0.4rem;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.1s ease, border-color 0.1s ease;
+}
+.panel-chip:hover {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+.panel-chip-reply {
+  flex: 0 0 auto;
+}
+
+/* The citation-chip strip itself — a row of trace references, sibling to the
+   `#`-tag chips. A nameless trace (a hardened span) gets `--span`, tinted so a
+   phrase reads as quoted prose rather than a filename. */
+.panel-cites {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 0 0 auto;
+}
+.panel-cite {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.01em;
+  color: var(--ink-dim);
+  background: var(--surface-sunken);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.08rem 0.4rem;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.1s ease, border-color 0.1s ease;
+}
+.panel-cite:hover {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+.panel-cite-name {
+  max-width: 18ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A nameless trace's chip — its "name" is the span phrase itself, so render in
+   the prose font (italic) to read as quoted text, not a file path. */
+.panel-cite-span .panel-cite-name {
+  font-family: var(--font-serif, var(--font-mono));
+  font-style: italic;
+}
+
+/* Tagged traces — the tag section. Occupies the tag position in the panel row:
+   a "tag" names a trace (a sealed q-target), never a bare string, so these
+   closable chips are what fills it. Visually distinct from the greyer quote
+   chips (.panel-cite) via an accent tint, so the two sections read as separate
+   groups — tags you can remove, cites you can open. */
+.panel-tagged {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.32rem 0.9rem;
+}
+.panel-tag-trace {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.01em;
+  color: var(--ink-dim);
+  background: var(--surface-sunken);
+  border: 1px solid var(--accent-soft, var(--rule));
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.panel-tag-trace-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  max-width: 20ch;
+  overflow: hidden;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0.08rem 0 0.08rem 0.4rem;
+  cursor: pointer;
+  transition: color 0.1s ease;
+}
+.panel-tag-trace-name:hover {
+  color: var(--accent);
+}
+.panel-tag-trace-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A nameless tagged trace — its label is the span phrase, so italic prose. */
+.panel-tag-trace-span .panel-tag-trace-label {
+  font-family: var(--font-serif, var(--font-mono));
+  font-style: italic;
+}
+.panel-tag-trace-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+  padding: 0.16rem 0.4rem 0.16rem 0.1rem;
+  opacity: 0.55;
+}
+.panel-tag-trace-remove:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+
+/* Inbound tracker — the second tag-section line, the INVERSE of the outbound
+   chips above: who forks/tags/cites THIS trace (spec §3.8/§6/§3.3). Deliberately
+   more muted than the outbound chips (smaller, fainter) so "what I tag" vs "what
+   tags me" reads as two distinct bands at a glance. Hidden entirely when empty
+   (the component returns null), so the layout is unchanged for traces with no
+   inbound traffic. */
+.panel-inbound-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+  padding: 0.28rem 0.9rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface-raised);
+}
+/* Collapsed-state summary button: "↘ 2 forks · 1 tag". A bare toggle, no chip
+   chrome — reads as a status line, not an action. */
+.panel-inbound-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  border: none;
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.02em;
+  color: var(--ink-faint, var(--ink-dim));
+  cursor: pointer;
+  padding: 0;
+  white-space: nowrap;
+}
+.panel-inbound-summary:hover {
+  color: var(--ink-dim);
+}
+/* Each signal cluster (forked-by / tagged-by / cited-by). Icon + label, then
+   the chips. flex-wrap so a long list drops to a second line within the row. */
+.panel-inbound-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem;
+}
+.panel-inbound-icon {
+  color: var(--ink-faint, var(--ink-dim));
+  flex: 0 0 auto;
+}
+/* Color-code the three kinds at the icon so they're scannable: fork = accent
+   (lineage), tag = green-ish (curation), cite = neutral (composition). Falls
+   back to ink-dim when the accent vars are unset. */
+.panel-inbound-group[data-kind="fork"] .panel-inbound-icon {
+  color: var(--accent);
+}
+.panel-inbound-group[data-kind="tag"] .panel-inbound-icon {
+  color: var(--accent-soft, var(--accent));
+}
+.panel-inbound-group[data-kind="cite"] .panel-inbound-icon {
+  color: var(--ink-faint, var(--ink-dim));
+}
+.panel-inbound-group-label {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.03em;
+  text-transform: lowercase;
+  color: var(--ink-faint, var(--ink-dim));
+  margin-right: 0.1rem;
+}
+/* Read-only click-to-open chips. Muted vs the outbound .panel-cite (smaller
+   font, fainter ink, no border) to mark them as inbound/surfaced, not authored. */
+.panel-inbound-chip {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.01em;
+  color: var(--ink-faint, var(--ink-dim));
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 0.04rem 0.32rem;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.1s ease, border-color 0.1s ease, background 0.1s ease;
+}
+.panel-inbound-chip:hover {
+  color: var(--ink);
+  border-color: var(--rule);
+  background: var(--surface-sunken);
+}
+.panel-inbound-chip-name {
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The "+ trace" tag-trace picker — a small button that opens an autocomplete
+   over the current folder's files. Selecting one cites its head as a `q` edge
+   with no body bracket (the protocol's `tag-add`). The popover is positioned
+   under the button; reuses the tag-input styling for the field. */
+.panel-cite-picker {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.panel-cite-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px dashed var(--rule);
+  border-radius: 3px;
+  padding: 0.08rem 0.4rem;
+  cursor: pointer;
+  transition: color 0.1s ease, border-color 0.1s ease;
+}
+.panel-cite-add:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.panel-cite-picker-pop {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 20;
+  margin-top: 0.2rem;
+  background: var(--surface-raised);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.3rem;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  min-width: 11rem;
+}
+.panel-cite-picker-list {
+  list-style: none;
+  margin: 0.3rem 0 0;
+  padding: 0;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+.panel-cite-picker-item {
+  display: block;
+  width: 100%;
+  text-align: left;
   font-family: var(--font-mono);
   font-size: 0.7rem;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  padding: 0.2rem 0.35rem;
+  cursor: pointer;
+}
+.panel-cite-picker-item:hover {
+  background: var(--surface-sunken);
+  color: var(--accent);
+}
+
+/* Preview / Markdown surface toggle, pinned to the tags row's right edge. A
+   two-button segmented control; the active button takes the accent underline
+   the tabs use. Sits at the end of the .panel-tags-row, after the tag chips. */
+.tab-bar-mode {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  border-left: 1px solid var(--rule);
+}
+.tab-bar-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  padding: 0;
+  background: transparent;
+  border: none;
   color: var(--ink-dim);
-  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+.tab-bar-mode-btn:hover {
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+.tab-bar-mode-btn.active {
+  color: var(--ink);
+  background: var(--surface-sunken);
 }
 
 /* Hashtag strip — sits at the head of each panel, below the tab bar and above
-   the editor surface. Derived live from inline #tags in the document body. */
+   the editor surface. Derived live from inline #tags in the document body.
+   The row also carries the Preview/Markdown mode switcher pinned to its right
+   edge — the tags grow to fill, the switcher stays put. */
+
+.panel-tags-row {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface-raised);
+}
+
+/* Drag a file from the tree onto this strip → tag that trace. Same highlight
+   family as .tree-drop-target so tree drops and tag drops read as one. */
+.panel-tags-row.tag-drop-active {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
 
 .panel-tags {
   display: flex;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.3rem;
+  min-width: 0;
   padding: 0.32rem 0.9rem;
-  border-bottom: 1px solid var(--rule);
-  background: var(--surface-raised);
 }
 
 .panel-tag {
@@ -626,6 +2773,92 @@ body {
   border-radius: 3px;
   padding: 0.08rem 0.4rem;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.panel-tag-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+  padding: 0 0 0 0.1rem;
+  opacity: 0.55;
+}
+
+.panel-tag-remove:hover {
+  opacity: 1;
+}
+
+.panel-tag-input {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink);
+  background: transparent;
+  border: 1px dashed var(--rule);
+  border-radius: 3px;
+  padding: 0.06rem 0.35rem;
+  outline: none;
+  width: 6rem;
+}
+
+.panel-tag-input::placeholder {
+  color: var(--ink-dim);
+  opacity: 0.7;
+}
+
+.panel-tag-input.invalid,
+.create-input.invalid {
+  border-color: var(--danger, #c33);
+}
+
+/* Event metadata strip — provenance for a freshly sampled event. Mirrors the
+   tag bar's chip row; the kind badge is the one spot distinguishing a zine
+   trace (4290/4291/4292) from a foreign kind the sampler picked up. */
+.event-meta-bar {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.28rem 0.9rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface-raised);
+}
+
+.event-meta-chip {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.01em;
+  color: var(--ink-dim);
+  background: var(--surface-sunken);
+  border-radius: 3px;
+  padding: 0.08rem 0.4rem;
+  white-space: nowrap;
+}
+
+/* The kind badge is the meaningful one — give it weight. Compatible traces
+   read as a quiet neutral; foreign kinds read as amber (a notice, not an
+   error) so it's clear this isn't a zine/trace event. */
+.event-meta-chip.event-kind {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.event-meta-chip.event-kind.foreign {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.event-meta-chip.event-relay,
+.event-meta-chip.event-id {
+  opacity: 0.8;
 }
 
 /* CodeMirror editor — sits inside .panel and fills it. Layout (flex, height,
@@ -633,11 +2866,29 @@ body {
    pieces CM doesn't own: surface background fallback, selection color, and
    voice marks (now applied to CM's spans via Decoration.mark). */
 
-.editor-host {
+/* .panel-body positions the single CodeMirror surface that now serves both
+   Preview and Markdown modes — App's LLM ops, palette citations, and Cmd+S
+   seal hold its view ref and dispatch into it imperatively regardless of
+   which mode is showing. Switching modes only reconfigures its decorations
+   (modeFacet in brackets.ts) plus the CSS below (font face, gutter). */
+.panel-body {
+  position: relative;
   flex: 1;
+  min-height: 0;
+}
+
+.editor-host {
+  position: absolute;
+  inset: 0;
   display: flex;
   min-height: 0;
   background: var(--surface-raised);
+}
+
+/* Preview mode hides CodeMirror's line-number gutter so it reads as a clean
+   typeset document rather than a source view. Markdown mode keeps it. */
+.panel-mode-preview .cm-gutters {
+  display: none;
 }
 
 .editor-host .cm-editor {
@@ -649,10 +2900,226 @@ body {
   white-space: pre-wrap;
 }
 
+/* Markdown (raw) mode: monospaced "uniwidth" face. Voice colors live as
+   decorations on top, untouched. */
+.panel-mode-markdown .editor-host .cm-scroller {
+  font-family: var(--font-mono);
+}
+
 .editor-host .cm-selectionBackground,
 .editor-host .cm-content ::selection {
   background: var(--accent-soft);
 }
+
+/* --- provenance chips ---------------------------------------------------
+   Rendered by CitationWidget/DirectiveWidget (brackets.ts) — Preview-mode
+   CodeMirror decorations that collapse `[[ ]]`/`(( ))` marks into chips.
+   Raw markdown syntax otherwise stays literal text in Preview mode (same
+   fidelity as Markdown mode); these two marks are the exception, kept legible
+   as the press's own vocabulary rather than a plain markdown dump. */
+
+.md-cite {
+  display: inline;
+  font-style: normal;
+  font-family: var(--font-body);
+  color: var(--ink);
+  background: var(--accent-soft);
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+/* The selected hardened span gets a gold ring (a stronger outline than the
+   resting accent-soft fill) so the active trace is unmistakable among many
+   chips. Clicking a chip with a nodeId selects it (brackets.ts). */
+.md-cite-selected {
+  box-shadow: 0 0 0 1px var(--accent);
+  cursor: pointer;
+}
+/* `[[`/`]]` stay visible (not hidden) so a resolved chip still reads as the
+   literal document markup, just styled — mirrors bracketed-span's coloring
+   in Markdown mode. */
+.md-cite-bracket {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+/* The phrase inside a Preview-mode citation chip. When the chip has a resolved
+   voice, CitationWidget applies a voice class + inline style (color/background/
+   font-family) from voiceSpanStyle — the same resolver the in-doc voice layer
+   uses — so the phrase reads as the attributed voice's contribution. The
+   box-decoration-break/padding here mirror .voice-span so a voiced phrase's
+   background clones cleanly across line wraps; with no voice it's a no-op and
+   the phrase inherits .md-cite's neutral chrome. */
+.md-cite-phrase {
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  border-radius: 2px;
+  padding: 0.05em 0.1em;
+}
+.md-cite-sep {
+  margin: 0 0.35rem 0 0.5rem;
+  color: var(--ink-dim);
+}
+.md-cite-node {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--ink-dim);
+  overflow-wrap: anywhere;
+}
+.md-cite-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: -2px;
+  width: 1.1rem;
+  height: 1.1rem;
+  margin-left: 0.3rem;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: var(--ink-dim);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+.md-cite-copy:hover {
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+.md-cite-copy:active {
+  background: var(--rule-strong);
+}
+
+/* `(( command ))` — a transient Stir directive, never sealed. Reads as an
+   inline directive chip so it's visually distinct from a citation. */
+.md-directive {
+  display: inline;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  color: var(--ink-dim);
+  background: var(--surface-sunken);
+  border-radius: 3px;
+  padding: 0.05rem 0.35rem;
+}
+.md-directive::before {
+  content: "(( ";
+  color: var(--accent);
+}
+.md-directive::after {
+  content: " ))";
+  color: var(--accent);
+}
+
+/* --- markdown preview (standard symbols) --------------------------------
+   Emitted by markdown-preview.ts's decoration pass — runs only in Preview
+   mode (the plugin returns Decoration.none in Markdown). Hides the literal
+   `#`/`**`/`` ` ``/`-`/`>`/`~~` markup characters (Decoration.replace) and
+   styles the text beneath (Decoration.mark) so a doc reads as typeset prose
+   while the on-disk bytes stay raw markdown. Scoped under .panel-mode-preview
+   as defense-in-depth — the plugin is already inert in Markdown mode. */
+
+/* Headings — display face, weight 800, scale by level. The leading `# `s are
+   hidden by the plugin; the line gets a top margin so consecutive headings
+   breathe. Mirrors the rail/display typography (--font-display). */
+.panel-mode-preview .md-heading {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+.panel-mode-preview .md-heading-line { margin-top: 1.25rem; }
+.panel-mode-preview .md-heading-1-line .md-heading { font-size: 2rem; line-height: 1.15; }
+.panel-mode-preview .md-heading-2-line .md-heading { font-size: 1.65rem; line-height: 1.2; }
+.panel-mode-preview .md-heading-3-line .md-heading { font-size: 1.4rem; line-height: 1.25; }
+.panel-mode-preview .md-heading-4-line .md-heading { font-size: 1.2rem; line-height: 1.3; }
+.panel-mode-preview .md-heading-5-line .md-heading { font-size: 1.05rem; line-height: 1.35; }
+.panel-mode-preview .md-heading-6-line .md-heading {
+  font-size: 0.95rem;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* Emphasis — bold/italic/strike over the body face. Markers are hidden. */
+.panel-mode-preview .md-bold { font-weight: 700; }
+.panel-mode-preview .md-italic { font-style: italic; }
+.panel-mode-preview .md-strike { text-decoration: line-through; text-decoration-thickness: 1px; }
+
+/* Inline code — mono on a sunken chip. Backticks hidden. */
+.panel-mode-preview .md-code-inline {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--surface-sunken);
+  border-radius: 3px;
+  padding: 0.05em 0.3em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* Fenced code block — every interior line gets mono + sunken bg + a left
+   rule; the ``` delimiters are hidden. Reads as a distinct code region. */
+.panel-mode-preview .md-code-fence-line {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--surface-sunken);
+  border-left: 2px solid var(--rule-strong);
+  padding-left: 0.6rem;
+}
+/* Open/close fence lines draw the same left rule so the block reads as one
+   bounded region; their ``` text is replaced with empty (hidden). */
+.panel-mode-preview .md-code-fence-open,
+.panel-mode-preview .md-code-fence-close {
+  background: var(--surface-sunken);
+  border-left: 2px solid var(--rule-strong);
+  padding-left: 0.6rem;
+}
+
+/* Blockquote — left border + dimmed italic, mirroring the conventional quote
+   read. The leading `> ` is hidden. */
+.panel-mode-preview .md-blockquote-line {
+  border-left: 3px solid var(--rule-strong);
+  padding-left: 0.75rem;
+  color: var(--ink-dim);
+  font-style: italic;
+}
+
+/* Horizontal rule — the `---` text is replaced by a widget that draws a thin
+   centered line; the line class adds vertical breathing room. */
+.panel-mode-preview .md-hr-line { margin: 0.6rem 0; }
+.panel-mode-preview .md-hr {
+  display: block;
+  height: 1px;
+  margin: 0.35rem 0;
+  background: var(--rule-strong);
+}
+
+/* Lists — indent + marker. For unordered items the `- `/`* `/`+ ` marker is
+   hidden and ::before draws a `•`; ordered items keep their `1.` (content). */
+.panel-mode-preview .md-li-line { padding-left: 1rem; }
+.panel-mode-preview .md-ul-line,
+.panel-mode-preview .md-task-line { padding-left: 0.25rem; }
+.panel-mode-preview .md-ul-line::before {
+  content: "•";
+  display: inline-block;
+  width: 0.9rem;
+  margin-left: -0.9rem;
+  color: var(--ink-dim);
+  text-align: center;
+}
+.panel-mode-preview .md-ol-line {
+  /* The `1.` digit stays as literal text; just nudge it left so it reads as
+     a list marker rather than indented prose. */
+  padding-left: 0.5rem;
+}
+.panel-mode-preview .md-task {
+  display: inline-block;
+  width: 1rem;
+  margin-left: -0.1rem;
+  margin-right: 0.25rem;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+}
+.panel-mode-preview .md-task.checked { color: var(--accent); }
 
 /* voice marks — same classes the old contentEditable spans used; now applied
    to the text spans CM emits inside Decoration.mark ranges. */
@@ -671,18 +3138,57 @@ body {
 .voice-4 { color: var(--v4-fg); background: var(--v4-bg); }
 .voice-5 { color: var(--v5-fg); background: var(--v5-bg); }
 
-/* Pinned region — live-text preserve marker (see protocol, Pins vs hardening).
- * Orthogonal to voice: rendered as its own layer, visually distinct. A left
- * rule reads as "this block is settled / fenced off," independent of which
- * voice wrote it. box-decoration-break clones the rule across wrapped lines. */
-
-.pinned-span {
+/* Bracketed span — the hardening authoring surface + the protocol's single
+ * rewrite-protection marker (trace-provenance.md "Rewrite protection"). A
+ * second decoration layer, visually distinct from voice. The mark spans the
+ * whole `[[ … ]]` run including the bracket characters — the bracketing is
+ * literal and stays visible (a resolved bracket's `| nodeId`
+ * suffix is hidden; see brackets.ts). The bracket marks the run as a trace
+ * component; a single underline carries its state:
+ *   --pending (registered): a neutral gray underline — "captured, in the trace."
+ *   --resolved (hardened):  a gold underline       — "fixed, citable." */
+.bracketed-span {
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
-  border-left: 2px solid var(--ink);
-  padding-left: 0.35em;
-  margin-left: -0.35em;
-  background: var(--rule);
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 2px;
+}
+.bracketed-span--pending {
+  text-decoration-color: var(--ink-dim);
+}
+.bracketed-span--resolved {
+  text-decoration-color: var(--accent);
+}
+/* The selected hardened span in Markdown mode — a gold ring on top of the
+   resolved/pending underline so the active trace stands out. Matches the
+   Preview-mode .md-cite-selected ring. */
+.bracketed-span--selected {
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent);
+  border-radius: 2px;
+}
+/* Inline `| <8-char>` token that replaces a resolved bracket's `| nodeId`
+   suffix in Markdown mode (NodeAbbrevWidget in brackets.ts). Dim mono so it
+   reads as metadata, not prose; the full id is on the span's `title`. Mirrors
+   the Preview-mode `.md-cite-node` styling so a hardened span reads as one
+   token across both modes. */
+.bracketed-abbrev {
+  font-family: var(--font-mono);
+  font-size: 0.75em;
+  color: var(--ink-dim);
+  margin-left: 0.15em;
+}
+
+/* A temp-lived (( command )) directive — consumed by Stir, never sealed.
+   Dashed underline (vs brackets' solid) so it reads as transient, and a faint
+   dotted outline so it's distinct from both pinned and bracketed spans. */
+.command-span {
+  border-bottom: 1px dashed var(--accent);
+  outline: 1px dotted var(--accent-soft);
+  outline-offset: 1px;
+  background: var(--accent-soft);
+  border-radius: 1px;
 }
 
 /* Panel flash on agent-written content */
@@ -694,6 +3200,25 @@ body {
 
 .panel-flash .editor-host {
   animation: panel-flash 1.4s ease-out;
+}
+
+/* Rejected edit while replay is read-only — a red inset pulse so the refusal
+   reads as deliberate, not a dead input. Same host element + animation shape
+   as the gold agent-flash above. Rapid rejects re-arm the timer (the class
+   stays on) so it fades once, after the user stops typing. */
+@keyframes editor-host-reject {
+  0% {
+    background: var(--reject-bg);
+    box-shadow: inset 0 0 0 1px var(--reject-fg);
+  }
+  100% {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px transparent;
+  }
+}
+
+.editor-host.editor-host-reject {
+  animation: editor-host-reject 0.9s ease-out;
 }
 
 /* Toast */
@@ -715,81 +3240,6 @@ body {
 *:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
-}
-
-@media (max-width: 800px) {
-  .body {
-    flex-direction: column;
-  }
-  .sidebar {
-    flex: 0 0 auto;
-    max-height: 30vh;
-    border-right: none;
-    border-bottom: 1px solid var(--rule-strong);
-  }
-  .workspace-panels {
-    flex-direction: column;
-  }
-  .panel + .panel {
-    border-left: none;
-    border-top: 1px solid var(--rule-strong);
-  }
-  /* Rail becomes a horizontal icon bar when the body stacks vertically.
-     Expanded labels are hidden — no room on a narrow stacked layout. */
-  .nav-rail,
-  .nav-rail.expanded {
-    flex: 0 0 auto;
-    flex-basis: auto;
-    flex-direction: row;
-    width: 100%;
-    overflow-x: auto;
-    border-right: none;
-    border-bottom: 1px solid var(--rule-strong);
-  }
-  .rail-brand {
-    flex-direction: row;
-    justify-content: center;
-    gap: 0.5rem;
-    padding: 0.4rem 0.6rem;
-  }
-  .rail-brand-wordmark,
-  .rail-item-label {
-    display: none;
-  }
-  .nav-rail.expanded .rail-item {
-    justify-content: center;
-    padding: 0;
-  }
-  .rail-divider {
-    width: 1px;
-    height: auto;
-    margin: 0.5rem 0;
-  }
-  .nav-rail-top,
-  .nav-rail-bottom,
-  .rail-footer {
-    flex-direction: row;
-    flex: 0 0 auto;
-  }
-  .nav-rail-bottom {
-    border-top: none;
-    border-left: 1px solid var(--rule);
-  }
-  .rail-footer .rail-divider {
-    border-left: 1px solid var(--rule);
-    margin: 0;
-    width: 1px;
-    height: auto;
-    align-self: stretch;
-  }
-  .rail-item {
-    width: 52px;
-    flex: 0 0 auto;
-  }
-  .rail-item.active {
-    /* bottom accent bar in horizontal orientation */
-    box-shadow: inset 0 -2px 0 var(--accent);
-  }
 }
 
 /* Context menu (right-click on a tree row) and delete-confirm dialog.
@@ -828,6 +3278,24 @@ body {
 
 .ctx-menu-item.danger:hover {
   color: var(--accent);
+}
+
+/* A disabled menu action reads as inert: faded and non-interactive, so the
+   affordance matches the behavior (e.g. "Close Others" with one tab open). */
+.ctx-menu-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ctx-menu-item:disabled:hover {
+  background: transparent;
+}
+
+/* Divider between grouped context-menu actions (e.g. New File/New Folder
+   above Rename/Delete). Bare border so it scales with the menu's padding. */
+.ctx-menu-separator {
+  height: 0;
+  margin: 0.2rem 0;
+  border-top: 1px solid var(--rule);
 }
 
 .confirm-overlay {
@@ -883,6 +3351,173 @@ body {
   color: var(--ink);
 }
 
+/* Compose surface — the prompt-injection modal (palette → LLM → document).
+ * Reuses the confirm-overlay/dialog shape; wider to fit streaming output. */
+
+.compose-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.compose-dialog {
+  width: min(640px, 92vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  padding: 1rem 1.2rem 1.2rem;
+  background: var(--surface-raised);
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.compose-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.compose-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.compose-close {
+  background: transparent;
+  border: none;
+  font-size: 1.3rem;
+  line-height: 1;
+  color: var(--ink-dim);
+  cursor: pointer;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+}
+
+.compose-close:hover {
+  background: var(--rule);
+  color: var(--ink);
+}
+
+.compose-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.compose-label {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-dim);
+}
+
+.compose-hint {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+  opacity: 0.8;
+}
+
+.compose-staged {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.compose-staged-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.3rem 0.4rem;
+  background: var(--surface);
+  border-radius: 4px;
+}
+
+.compose-staged-text {
+  font-family: var(--font-body);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--ink);
+  flex: 1;
+  min-width: 0;
+}
+
+.compose-unstage {
+  background: transparent;
+  border: none;
+  color: var(--ink-dim);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 0.25rem;
+  flex-shrink: 0;
+}
+
+.compose-unstage:hover {
+  color: var(--ink);
+}
+
+.compose-instruction {
+  width: 100%;
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.4rem 0.5rem;
+  resize: vertical;
+}
+
+.compose-instruction:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.compose-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.compose-run,
+.compose-stop {
+  padding: 0.3rem 0.9rem;
+  font-size: 0.72rem;
+}
+
+.compose-response {
+  font-family: var(--font-body);
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--surface);
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+  white-space: pre-wrap;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
 .confirm-delete {
   background: var(--accent);
   border: 1px solid var(--accent);
@@ -893,8 +3528,1823 @@ body {
   filter: brightness(1.08);
 }
 
+/* --- create / sample modals ----------------------------------------------
+ * New folder / New file / Sample relays open centered modals (portalled to
+ * document.body) instead of shifting the collection listing. The shells reuse
+ * the confirm-overlay/dialog (create) and compose-overlay/dialog (sample)
+ * classes; only the inner field + hint + the SamplerPanel's seat need styling. */
+.create-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.create-modal-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 0.92rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.create-modal-hint {
+  margin: -0.3rem 0 0; /* tighten under the title */
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+}
+
+/* Name input — mirrors the inline .create-input look (accent border, mono) so
+   the field reads the same as the old inline row, just full-width. */
+.create-modal-field {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--ink);
+  background: var(--surface-raised);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 0.3rem 0.4rem;
+  outline: none;
+}
+
+.create-modal-field:focus {
+  box-shadow: 0 0 0 1px var(--accent-soft);
+}
+
+.create-modal-field::placeholder {
+  color: var(--ink-dim);
+  opacity: 0.7;
+}
+
+.create-modal-error {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  line-height: 1.3;
+  color: var(--danger, #c33);
+}
+
+/* The sample modal seats the existing SamplerPanel (its .sampler-* classes
+   are reused as-is). Just remove the panel's own border/sunken bg since the
+   compose-dialog shell already provides the framing. */
+.sample-modal .sampler-panel {
+  border-bottom: none;
+  background: transparent;
+  padding: 0;
+}
+
+/* Widens the compose-dialog shell for content that needs more than a single
+   narrow column — currently just the Seals modal's side-by-side list+diff. */
+.sample-modal-wide {
+  width: min(920px, 94vw);
+}
+
+/* --- seals modal (history + diff) --------------------------------------- */
+/* Two columns: a reverse-chronological seal list on the left, the selected
+   seal's content/diff on the right. Read-only — no restore action. */
+.seals-modal {
+  display: flex;
+  gap: 0.9rem;
+  min-height: 0;
+  height: min(70vh, 640px);
+}
+
+.seals-list {
+  flex: 0 0 15rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  border-right: 1px solid var(--rule);
+  padding-right: 0.7rem;
+}
+
+.seals-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.05rem;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 0.3rem 0.45rem;
+  cursor: pointer;
+}
+
+.seals-row:hover {
+  background: var(--surface-sunken);
+}
+
+.seals-row.active {
+  background: var(--surface-sunken);
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.seals-row.pinned .seals-row-action::after {
+  content: " · pinned";
+  color: var(--accent);
+}
+
+.seals-row-date {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.seals-row-action {
+  text-transform: lowercase;
+}
+
+.seals-row-id {
+  opacity: 0.7;
+}
+
+.seals-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.seals-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.seals-step-btn,
+.seals-diff-btn {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+  background: var(--surface-sunken);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+}
+
+.seals-step-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.seals-diff-btn.active {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+
+.seals-position {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+}
+
+.seals-diff-toggle {
+  display: flex;
+  gap: 0.3rem;
+  margin-left: auto;
+}
+
+.seals-content,
+.seals-diff {
+  flex: 1 1 auto;
+  overflow: auto;
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  background: var(--surface-sunken);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink);
+}
+
+.seals-diff-add {
+  background: color-mix(in srgb, #2da44e 22%, transparent);
+}
+
+.seals-diff-remove {
+  background: color-mix(in srgb, #cf222e 22%, transparent);
+  text-decoration: line-through;
+  opacity: 0.8;
+}
+
+.seals-diff-same {
+  color: var(--ink-dim);
+}
+
+/* Folder-wide replay transport — always-visible block pinned at the top of the
+   sidebar (under "Switch folder"). Two stacked rows: a centered stepper +
+   counter on top, and a transport row (play · pace · slider) below. The slider
+   fills the transport row's remaining width and scrubs the whole timeline.
+   `last` is sticky: a new seal while parked at the right end grows the slider's
+   max and ticks the counter up. */
+.sidebar-replay {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  width: 100%;
+  padding: 0.45rem 0.6rem 0.5rem;
+  background: var(--surface-sunken);
+  border-bottom: 1px solid var(--rule);
+}
+
+.sidebar-replay-row {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  width: 100%;
+}
+
+/* Top row: the stepper + counter, left-aligned to match the transport row
+   below it (play + pace sit at the left edge there too). */
+.sidebar-replay-stepper {
+  justify-content: flex-start;
+}
+
+/* Bottom row: play + pace stay fixed-width on the left, slider fills the rest. */
+.sidebar-replay-transport {
+  justify-content: flex-start;
+}
+
+/* Subtle accent edge while auto-playing, so the transport reads as "running". */
+.sidebar-replay.is-playing {
+  box-shadow: inset 0 2px 0 0 var(--accent, #4f8cff);
+}
+
+.sidebar-replay .seals-step-btn {
+  /* Slightly larger hit area than the modal's — this is a persistent control. */
+  padding: 0.28rem 0.55rem;
+  line-height: 1;
+}
+
+.sidebar-replay .seals-position {
+  /* Stable width so the stepper doesn't reflow as the index digit count grows. */
+  min-width: 3.4rem;
+  text-align: center;
+}
+
+/* The play/pause button rests in the default step-button look (no accent
+   border) and only lights up while actively playing, so it doesn't draw the
+   eye when idle. Transforms to ⏸ while playing. */
+.sidebar-replay-play {
+  flex: 0 0 auto;
+}
+.sidebar-replay.is-playing .sidebar-replay-play {
+  color: var(--accent, #4f8cff) !important;
+  border-color: var(--accent, #4f8cff) !important;
+}
+.sidebar-replay-play:disabled {
+  opacity: 0.4;
+}
+
+/* The skip-to-live (⏭) escape gets the same accent treatment as play, but only
+   while replay holds the editor read-only — it's the visible way out of a
+   frozen/paused-on-history view. Clicking it seeks to `last`, which lifts the
+   read-only gate. Brightens further on hover to reinforce "click to escape". */
+.sidebar-replay-skip {
+  color: var(--accent, #4f8cff) !important;
+  border-color: var(--accent, #4f8cff) !important;
+}
+.sidebar-replay-skip:hover {
+  background: var(--accent-soft, #4f8cff1f);
+}
+
+/* The speed chip: a compact, self-contained toggle. Bold-ish so it reads as a
+   value you can change, not a label. Hover hints it's clickable. Fixed width so
+   the row doesn't reflow as the digit count changes (1× vs 16×). */
+.sidebar-replay-speed {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.15rem 0.4rem;
+  cursor: pointer;
+  line-height: 1;
+  min-width: 2rem;
+  text-align: center;
+}
+.sidebar-replay-speed:hover {
+  border-color: var(--accent, #4f8cff);
+  color: var(--accent, #4f8cff);
+}
+
+/* The scrubber — a native range input that fills the row's remaining width.
+   Wrapped so savepoint ticks can layer behind its track. accent-color tints
+   the track + thumb in one line (UA-friendly); the fixed height keeps it
+   aligned with the compact buttons. The wrapper takes over the flex sizing
+   the slider used to own; the slider fills the wrapper and stacks above the
+   ticks (z-index: 1) so the thumb stays grabbable. */
+.sidebar-replay-slider-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.sidebar-replay-slider {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 1.4rem;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent, #4f8cff);
+}
+
+/* Savepoint tick marks: one per replay step, positioned along the track at
+   the same fraction the slider maps step i to (i / (count-1)). Dim so the
+   thumb reads as the live position; pointer-events:none so the range input
+   stays the only interactive layer. Rendered behind the track (z-index: 0);
+   native range tracks are translucent enough that a tick shows through. */
+.sidebar-replay-ticks {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+.sidebar-replay-tick {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 7px;
+  background: var(--ink-dim);
+  opacity: 0.5;
+  border-radius: 1px;
+}
+
 /* Empty panel — shown when the open file was deleted. Keeps the panel slot
    reserved instead of crashing on a missing file reference. */
 .panel-empty {
   flex: 1;
 }
+
+/* --- folder tab body --------------------------------------------------- */
+/* Shown in place of a FileEditor when the active tab is a folder (opened via
+   the folder row's info button). Three regions, top to bottom: a tags row
+   (the folder-tab header, symmetric with a file tab's tags row), a clickable
+   content list of immediate children with open-in-panel markers, and a
+   "Sample into this folder" control. No editor surface. */
+.folder-view {
+  flex: 1;
+  overflow: auto;
+  padding: 0.5rem 0.5rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  font-family: var(--font-mono);
+  color: var(--ink);
+  min-height: 0;
+}
+.folder-view-tags {
+  /* Reuses .panel-tags-row; flush against the panel header like a file tab. */
+  padding: 0.35rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+.folder-contents {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.folder-contents-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.22rem 0.75rem;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  border-left: 2px solid transparent;
+}
+.folder-contents-row:hover {
+  background: var(--surface-sunken);
+  border-left-color: var(--accent);
+}
+.folder-contents-icon {
+  flex: none;
+  color: var(--ink-dim);
+}
+.folder-contents-icon-open,
+.folder-contents-open .folder-contents-icon {
+  color: var(--accent);
+}
+.folder-contents-folder .folder-contents-icon {
+  color: var(--accent);
+}
+.folder-contents-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.folder-contents-empty {
+  padding: 0.5rem 0.75rem;
+  color: var(--ink-dim);
+  font-size: 0.8rem;
+  font-style: italic;
+}
+.folder-view-actions {
+  padding: 0 0.5rem;
+  margin-top: auto;
+}
+.folder-view-sample {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.folder-view-sample:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+/* Sampler modal scope banner — shown when sampling into a subfolder. */
+.sampler-scope {
+  margin: 0 0 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--accent-soft);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  border-radius: 4px;
+}
+.sampler-scope strong {
+  color: var(--accent);
+}
+
+/* --- voices bar (per-panel pen selector + Summon) ---------------------- */
+/* Sits at the bottom of each panel: one chip per keychain voice. The selected
+   chip is that panel's "pen" (the voice new text is attributed to, per-panel).
+   The active chip's ▾ menu runs an inline LLM continuation at the cursor. */
+
+/* Press content: the editor view's column. Wraps the sidebar+panels pair
+   (.press-top) and the voices+actions bar (.topbar) beneath it as a coequal
+   region. Sits in .body to the right of the nav rail, filling the remaining
+   width. */
+.press-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.press-top {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  /* Collections stay pinned; .workspace-panels is the horizontal scrollport. */
+  overflow: hidden;
+}
+
+/* Voices + actions bar: bottom region of the press. Two rows share one
+   column template — identity left, actions, then model + status right:
+     label  | key | a1 a2 a3 a4 | model | tokens | error | stop
+   Row 1: AUTHOR | pen | Save SEND · · |  —    |  —   |  —  |  —
+   Row 2: MODEL  | inj | Ext Set Sti Rep | model▾ | 1.2k | err | Stop?
+   Four equal action tracks; Save/SEND are normal single-track width.
+   Model options use the provider card label. */
+.topbar {
+  flex: 0 0 auto;
+  display: grid;
+  /* Identity, four equal action tracks, model + status, then trailing 1fr so
+     the row (and its divider) spans the full bar width. */
+  grid-template-columns:
+    max-content
+    minmax(5rem, 8rem)
+    repeat(4, minmax(4.5rem, 5.75rem))
+    minmax(5.5rem, 10rem)
+    max-content
+    minmax(0, 10rem)
+    max-content
+    minmax(0, 1fr);
+  column-gap: 0.3rem;
+  row-gap: 0;
+  align-items: center;
+  /* Horizontal padding lives on each row so the inter-row border can run
+     edge-to-edge across the full topbar. */
+  padding: 0.3rem 0;
+  border-top: 1px solid var(--rule);
+  background: var(--surface-sunken);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  min-height: 0;
+  container-type: inline-size;
+  container-name: topbar;
+}
+.topbar-group {
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
+  align-items: center;
+  column-gap: 0.3rem;
+  min-width: 0;
+  min-height: 0;
+  padding: 0.15rem 0.6rem;
+}
+/* Full-bleed hairline above the model/ops row (edge to edge of the bar). */
+.topbar-group + .topbar-group {
+  border-top: 1px solid var(--rule);
+  padding-top: 0.3rem;
+}
+/* Empty cells keep table columns aligned across rows. */
+.topbar-slot {
+  min-width: 0;
+}
+.topbar-label {
+  color: var(--ink-dim);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  line-height: 1;
+  justify-self: end;
+  text-align: right;
+}
+.topbar-select {
+  font: inherit;
+  color: inherit;
+  background: var(--surface-raised);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.1rem 0.25rem;
+  cursor: pointer;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+/* Model select: long provider labels clip when closed. */
+.topbar-model-select {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Base action button: fills its grid track (one of four equal columns). */
+.topbar-action {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.2rem 0.35rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  text-align: center;
+}
+.topbar-action:hover:not(:disabled) {
+  background: var(--surface-raised);
+}
+.topbar-action:disabled {
+  color: var(--ink-dim);
+  opacity: 0.5;
+  cursor: default;
+}
+.topbar-action.stop {
+  color: var(--accent);
+  border-color: var(--accent);
+  width: auto;
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
+}
+.topbar-action-error {
+  color: var(--danger, #c0392b);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.topbar-token-count {
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Very tight: shed token estimate and error. */
+@container topbar (max-width: 36rem) {
+  .topbar-token-count {
+    display: none;
+  }
+  .topbar-action-error {
+    display: none;
+  }
+}
+
+/* Webapp home (create / join / reopen a relay folder) */
+
+.web-home {
+  justify-content: flex-start;
+  gap: 1rem;
+}
+
+.web-home-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  max-width: 42rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.web-home-folder {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.1));
+  border-radius: 0.5rem;
+  background: var(--surface, inherit);
+}
+
+.web-home-open {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--ink);
+  text-align: left;
+  padding: 0;
+}
+
+.web-home-open:hover {
+  text-decoration: underline;
+}
+
+.web-home-folder-label {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.98rem;
+}
+
+.web-home-folder-id {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink-dim);
+  margin-left: auto;
+}
+
+.web-home-actions {
+  width: 100%;
+  max-width: 42rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+/* Globe view — full-bleed spherical MapLibre canvas. Unlike the other views
+ * (which are centred text), the globe needs to fill its container edge-to-edge
+ * so the sphere has room and the NavigationControl sits in the corner. */
+
+.globe-view {
+  flex: 1;
+  display: flex;
+  position: relative;
+  min-height: 0;
+  padding: 0;
+}
+
+.globe-canvas {
+  flex: 1;
+  min-height: 0;
+}
+
+/* MapLibre's controls default to light affordances; keep them legible on the
+ * dark canvas without overriding library internals. */
+
+.globe-canvas .maplibregl-ctrl-group {
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.globe-canvas .maplibregl-ctrl-attrib {
+  font-size: 0.7rem;
+  opacity: 0.85;
+}
+
+/* Zine pins — small accent dots centered on each pin's geohash cell. */
+.globe-pin {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 2px solid var(--surface-raised, #fff);
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  transition: transform 0.1s ease;
+}
+.globe-pin:hover { transform: scale(1.25); }
+
+/* The pin popup (MapLibre renders .maplibregl-popup-content). */
+.globe-pin-popup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-family: var(--font-mono);
+}
+.globe-pin-name {
+  font-size: 0.85rem;
+  color: var(--ink);
+  font-weight: 600;
+}
+.globe-pin-geo { font-size: 0.68rem; color: var(--ink-dim); }
+
+/* The legend overlay, top-left of the globe. */
+.globe-legend {
+  position: fixed;
+  top: 1rem;
+  left: 4.5rem; /* clear of the 52px rail */
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+}
+.globe-legend-main {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+.globe-legend-hint {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  color: var(--ink-dim);
+}
+
+/* PinPanel — the Spaces authoring modal (pin a zine to a geohash). */
+.pin-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+  padding: 1rem;
+}
+.pin-panel {
+  width: 100%;
+  max-width: 26rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 1.1rem 1.2rem;
+  border: 1px solid var(--rule);
+  border-radius: 0.75rem;
+  background: var(--surface-raised);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+.pin-header { display: flex; align-items: center; justify-content: space-between; }
+.pin-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--ink);
+}
+.pin-close {
+  background: transparent;
+  border: none;
+  color: var(--ink-dim);
+  cursor: pointer;
+  padding: 0.2rem;
+  border-radius: 4px;
+  transition: color 0.12s, background 0.12s;
+}
+.pin-close:hover { color: var(--ink); background: var(--surface-sunken); }
+.pin-folder {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+}
+.pin-folder code { color: var(--ink); }
+
+.pin-current, .pin-add {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--rule);
+}
+.pin-current-label {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-dim);
+}
+.pin-loading, .pin-empty { font-family: var(--font-mono); font-size: 0.78rem; color: var(--ink-dim); }
+.pin-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+.pin-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.pin-geo { font-family: var(--font-mono); font-size: 0.78rem; color: var(--accent); }
+.pin-cell {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+  flex: 1;
+}
+.pin-remove {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  color: var(--ink-dim);
+  cursor: pointer;
+  padding: 0.15rem;
+  border-radius: 3px;
+  transition: color 0.12s, background 0.12s;
+}
+.pin-remove:hover { color: var(--reject-fg); background: var(--reject-bg); }
+
+.pin-coords { display: flex; gap: 0.5rem; }
+.pin-coord { flex: 1; display: flex; flex-direction: column; gap: 0.15rem; }
+.pin-coord span {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-dim);
+}
+.pin-coord input {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.pin-coord input:focus { outline: none; border-color: var(--accent); }
+.pin-precisions { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.pin-precision { font-size: 0.68rem; }
+.pin-preview {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+}
+.pin-preview code { color: var(--accent); }
+.pin-add-btn { align-self: flex-start; margin-top: 0.2rem; }
+
+/* Times view — aggregate tag-usage overview for the attached folder. A reading
+ * surface top-aligned and centered, like .about-view: header + window pills,
+ * then a chart card, then a two-column tag list + items list. All themed via
+ * the shared CSS vars so light/dark/auto inherit for free. */
+
+.times-view {
+  justify-content: flex-start;
+  gap: 1.25rem;
+  max-width: 1080px;
+  margin: 0 auto;
+  text-align: left;
+}
+
+.times-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  width: 100%;
+  flex-wrap: wrap;
+}
+
+.times-folder {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--ink);
+}
+
+/* Segmented control for the time window. */
+.times-window-pills {
+  display: inline-flex;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface-raised);
+}
+
+.times-pill {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 0.35rem 0.7rem;
+  border: none;
+  border-right: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-dim);
+  cursor: pointer;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  transition: background 0.12s, color 0.12s;
+}
+.times-pill:last-child { border-right: none; }
+.times-pill:hover { color: var(--ink); }
+.times-pill.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.times-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.times-metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink-dim);
+}
+.times-metric select {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--ink);
+  background: var(--surface-raised);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.25rem 0.4rem;
+}
+
+.times-nucleus-note {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+}
+.times-nucleus-note code {
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+.times-clear {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  border: none;
+  background: none;
+  color: var(--ink-dim);
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+.times-clear:hover { color: var(--ink); }
+
+.times-refresh { display: inline-flex; align-items: center; gap: 0.35rem; }
+
+.times-count {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+  margin-left: auto;
+}
+
+/* Chart card. */
+.times-chart {
+  width: 100%;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  padding: 0.5rem 0.75rem;
+}
+.times-chart-svg { width: 100%; height: auto; display: block; }
+/* Each stacked band. Fill comes from the layer color via inline `fill`; the
+   class just sets opacity + the crisp hairline separator between bands. */
+.times-chart-layer {
+  fill-opacity: 0.82;
+  stroke-linejoin: round;
+}
+.times-chart-baseline { stroke: var(--rule-strong); stroke-width: 1; }
+.times-chart-grid { stroke: var(--rule); stroke-width: 1; stroke-dasharray: 2 3; }
+.times-chart-ymax,
+.times-chart-tick {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  fill: var(--ink-dim);
+}
+.times-chart-empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  fill: var(--ink-dim);
+  text-anchor: middle;
+}
+.times-chart-caption {
+  margin: 0 0 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-dim);
+}
+/* The band key under the chart reuses .legend/.legend-item/.swatch-dot but
+   wraps and trims so a long "other" tail doesn't blow the card height. */
+.times-chart-legend {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  flex-wrap: wrap;
+  max-height: 4.2em;
+  overflow: hidden;
+}
+
+/* Two-column tag list + name counts. */
+.times-grid {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) minmax(200px, 1fr);
+  gap: 1.25rem;
+  width: 100%;
+  align-items: start;
+}
+@media (max-width: 720px) {
+  .times-grid { grid-template-columns: 1fr; }
+}
+
+.times-col-title {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-dim);
+}
+
+.times-empty {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  color: var(--ink-dim);
+}
+
+.times-tag-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.times-tag-row {
+  display: grid;
+  grid-template-columns: minmax(60px, auto) 1fr auto auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.28rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+.times-tag-row.nucleus { background: var(--accent-soft); }
+
+.times-tag-name {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--ink);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+.times-tag-name:hover { color: var(--accent); }
+
+/* Name labels reuse .times-tag-name's typography but aren't clickable (they
+ * show a count, not a co-occurrence action), so drop the pointer affordance. */
+.times-name-label {
+  cursor: default;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Zine names in the Times leaderboard: a display name (often longer than a
+   tag), truncated so the row stays one line. */
+.times-zines { width: 100%; }
+.times-zine-name {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.times-name-label:hover { color: var(--ink); }
+
+.times-tag-bar {
+  height: 6px;
+  min-width: 2px;
+  background: var(--accent);
+  border-radius: 2px;
+  opacity: 0.7;
+}
+
+.times-tag-count {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink);
+  text-align: right;
+  min-width: 2ch;
+}
+.times-tag-time {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+  min-width: 5ch;
+  text-align: right;
+}
+
+.times-chip {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
+}
+
+/* --- Listings view ------------------------------------------------------ */
+/* The operator's curatorial surface. Mirrors the times-* vocabulary (pills,
+ * chips, rows, run-agent-btn) so it reads as the same surface, then adds a
+ * health strip, triage row actions, and a doctrine editor on top. */
+
+.listings-view {
+  /* Left-aligned like times-view (the row content is scannable left-to-right);
+   * .times-view's centered variant reads worse for triage rows, so override. */
+  align-items: stretch;
+  text-align: left;
+}
+
+/* Stacks buttons read as outline buttons, not solid accent fills. The solid
+ * .run-agent-btn base is the primary affordance elsewhere; here the triage
+ * actions are a row of peers, so a transparent surface with a thin rule lets
+ * the colored text carry the intent (promote = accent, keep/cut = ink-dim).
+ * Scoped to .listings-view so the solid fill survives everywhere else. */
+.listings-view .run-agent-btn {
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  color: var(--ink);
+}
+.listings-view .run-agent-btn:hover:not(:disabled) {
+  background: var(--accent-soft);
+  filter: none;
+}
+
+.listings-header {
+  width: 100%;
+  max-width: 880px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+.listings-header .view-placeholder-title { margin-bottom: 0.1rem; }
+.listings-count {
+  font-family: var(--font-mono);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+
+.listings-refresh { white-space: nowrap; }
+.listings-empty { max-width: 880px; }
+
+/* --- Stacks (editorial sections) -----------------------------------------
+   Stacks is the reader-facing editorial output: named sections of zine cards,
+   arranged by the operator + curator team. Builds on the existing token system. */
+
+.stacks-view { align-items: stretch; text-align: left; }
+.stacks-view .listings-header { max-width: 1080px; }
+
+.stacks-sections {
+  width: 100%;
+  max-width: 1080px;
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+}
+.stack-section { display: flex; flex-direction: column; gap: 0.6rem; }
+.stack-section-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 0.3rem;
+}
+.stack-section-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.15rem;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+.stack-section-count {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+}
+.stack-section-empty { margin: 0.25rem 0; }
+
+/* The responsive zine-card grid — mirrors .download-grid's recipe. */
+.stack-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.75rem;
+}
+
+/* A zine card. 8px radius, --surface-raised, --rule border — the card grammar.
+   .featured gets the accent ring (the section's #1). */
+.stack-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  position: relative;
+  transition: border-color 0.12s ease;
+}
+.stack-card:hover { border-color: var(--rule-strong); }
+.stack-card.featured {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.stack-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 1rem;
+}
+.stack-card-featured-badge {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+.stack-card-assign-toggle {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0.05rem 0.2rem;
+  border-radius: 3px;
+  transition: background 0.12s, color 0.12s;
+}
+.stack-card-assign-toggle:hover { background: var(--accent-soft); color: var(--accent); }
+.stack-card-assign-menu {
+  position: absolute;
+  top: 1.6rem;
+  right: 0.6rem;
+  z-index: 5;
+  min-width: 12rem;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--rule-strong);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+.stack-card-assign-item {
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  padding: 0.4rem 0.6rem;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.stack-card-assign-item:hover { background: var(--accent-soft); color: var(--accent); }
+.stack-card-assign-item.current { color: var(--accent); font-weight: 600; }
+.stack-card-title-btn {
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.stack-card-title-btn:disabled { cursor: default; }
+.stack-card-title {
+  display: block;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1rem;
+  line-height: 1.2;
+  color: var(--ink);
+  /* Clamp to two lines so cards in a row stay aligned. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.stack-card-title-btn:hover:not(:disabled) .stack-card-title { color: var(--accent); }
+.stack-card-id {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+}
+.stack-card-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+}
+.stack-card-time { margin-left: auto; }
+.stack-card-tags { display: flex; flex-wrap: wrap; gap: 0.2rem; }
+
+/* The staff-only inline stack editor. */
+.stack-editor {
+  width: 100%;
+  max-width: 1080px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  padding: 0.5rem 0.75rem;
+}
+.stack-editor-toggle { font-size: 0.75rem; }
+.stack-editor-body { display: flex; flex-direction: column; gap: 0.6rem; margin-top: 0.5rem; }
+.stack-editor-add { display: flex; gap: 0.5rem; align-items: center; }
+.stack-editor-input {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.stack-editor-input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+.stack-editor-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+.stack-editor-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+.stack-editor-title { font-family: var(--font-body); font-size: 0.9rem; color: var(--ink); }
+.stack-editor-id {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+  background: var(--surface);
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+}
+.stack-editor-controls { margin-left: auto; display: flex; align-items: center; gap: 0.2rem; }
+.stack-editor-remove {
+  background: transparent;
+  border: none;
+  color: var(--ink-dim);
+  cursor: pointer;
+  padding: 0.15rem;
+  border-radius: 3px;
+  transition: color 0.12s, background 0.12s;
+}
+.stack-editor-remove:hover { color: var(--reject-fg); background: var(--reject-bg); }
+
+/* --- folder-orchestration replay (§3.3/§8) -----------------------------
+   Collapsible section under the content ReplayTransport. A chronological stream
+   of folder-level events (add/remove/rename + focus mount/unmount) plus a
+   reconstructed state panel (members + panel occupancy) up to the selected row.
+   Textual v1 — visual panel grid is deferred. */
+
+.sidebar-orchestration {
+  flex: 0 0 auto;
+  width: 100%;
+  border-bottom: 1px solid var(--rule);
+  background: var(--surface-sunken);
+}
+.sidebar-orchestration-toggle {
+  width: 100%;
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--ink-dim);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.sidebar-orchestration-toggle:hover { color: var(--ink); }
+
+.orchestration {
+  display: flex;
+  flex-direction: column;
+  max-height: 14rem;
+  border-top: 1px solid var(--rule);
+}
+.orchestration-empty {
+  padding: 0.5rem 0.6rem 0.6rem;
+  font-size: 0.7rem;
+  color: var(--ink-dim);
+  border-top: 1px solid var(--rule);
+}
+
+/* Running state panel: members + panel occupancy reconstructed up to the
+   selected row. Compact two-column header so it stays scannable. */
+.orchestration-state {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--rule);
+  font-size: 0.68rem;
+}
+.orchestration-state-section { flex: 1 1 0; min-width: 0; }
+.orchestration-state-label {
+  display: block;
+  font-weight: 600;
+  color: var(--ink-dim);
+  margin-bottom: 0.15rem;
+}
+.orchestration-state-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  line-height: 1.35;
+  word-break: break-all;
+}
+.orchestration-state-list .muted { color: var(--ink-dim); }
+
+/* The event stream: scrollable, one row per delta. Color-coded by kind so the
+   shape of the session reads at a glance (entries green, exits red, moves
+   amber, mounts/unmounts blue). Selected row is highlighted. */
+.orchestration-stream {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0.15rem 0;
+  list-style: none;
+}
+.orchestration-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.18rem 0.6rem;
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+.orchestration-row:hover { background: var(--surface-hover, rgba(0,0,0,0.04)); }
+.orchestration-row.is-selected {
+  background: var(--accent-soft, #4f8cff1f);
+  box-shadow: inset 2px 0 0 var(--accent, #4f8cff);
+}
+.orchestration-row-label { color: var(--ink); word-break: break-all; }
+.orchestration-row-time {
+  flex: 0 0 auto;
+  color: var(--ink-dim);
+  font-size: 0.6rem;
+  white-space: nowrap;
+}
+.orchestration-add .orchestration-row-label { color: #2a8a3e; }
+.orchestration-remove .orchestration-row-label { color: #b03a3a; }
+.orchestration-rename .orchestration-row-label { color: #9a6a00; }
+.orchestration-mount .orchestration-row-label { color: #3a6db0; }
+.orchestration-unmount .orchestration-row-label { color: #7a6a8a; }
+
+/* --- §3.7 LLM reconstruction panel (Seals modal) ------------------------
+   Renders below the content/diff pane when the selected seal is an LLM call.
+   Shows the reconstructed system/user prompts, the model config, and the scope.
+   Degrades visibly when reconstruction isn't possible (unknown algorithm,
+   unresolvable rule) rather than hiding the failure. */
+
+.llm-recon {
+  margin-top: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  border-top: 1px solid var(--rule);
+  font-size: 0.72rem;
+  color: var(--ink);
+}
+.llm-recon-loading, .llm-recon-error, .llm-recon-degraded {
+  color: var(--ink-dim);
+  font-style: italic;
+}
+.llm-recon-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+.llm-recon-title { font-weight: 600; }
+.llm-recon-model {
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  color: var(--ink-dim);
+}
+.llm-recon-section { margin-top: 0.35rem; }
+.llm-recon-label {
+  display: block;
+  font-weight: 600;
+  color: var(--ink-dim);
+  margin-bottom: 0.15rem;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.llm-recon-pre {
+  margin: 0;
+  padding: 0.4rem 0.5rem;
+  background: var(--surface-sunken);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+.llm-recon-scope {
+  margin: 0;
+  padding: 0 0 0 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  color: var(--ink);
+}
+.llm-recon-scope-action { color: var(--ink-dim); }
+.llm-recon-scope .muted { color: var(--ink-dim); font-style: italic; }
+.llm-recon-manifest { color: var(--ink-dim); }
+
+/* --- operator view + setup modal ------------------------------------------- */
+/* The operator view is a settings-family page (see .keys-view / .relays-view):
+   left-aligned column, the blurb leads, sections stack with consistent spacing.
+   Scroll containment matches the other tall views. */
+.operator-view {
+  overflow-y: auto;
+  min-height: 0;
+  align-items: flex-start;
+  justify-content: flex-start;
+  text-align: left;
+  gap: 1.5rem;
+}
+.operator-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+  color: var(--ink);
+}
+.operator-header svg { flex-shrink: 0; margin-top: 0.4rem; }
+.operator-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: 100%;
+  max-width: 35rem;
+}
+.operator-section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.2rem;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+.operator-hint {
+  margin: 0 0 0.4rem;
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: var(--ink-dim);
+}
+.operator-empty {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--ink-dim);
+  opacity: 0.8;
+}
+.operator-identity-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.operator-identity-label {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-dim);
+}
+.operator-pubkey {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--ink);
+  background: var(--surface-raised, rgba(127, 127, 127, 0.08));
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+}
+.operator-inline-btn {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid var(--hairline, rgba(127, 127, 127, 0.25));
+  border-radius: 4px;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+}
+.operator-inline-btn:hover { color: var(--ink); }
+
+.operator-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.operator-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.operator-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid var(--hairline, rgba(127, 127, 127, 0.25));
+  border-radius: 4px;
+  cursor: pointer;
+}
+.operator-icon-btn:hover:not(:disabled) { color: var(--ink); }
+.operator-icon-btn:disabled { opacity: 0.4; cursor: default; }
+
+.operator-add {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+.operator-add-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--ink);
+  background: var(--surface-raised, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--hairline, rgba(127, 127, 127, 0.25));
+  border-radius: 4px;
+  padding: 0.4rem 0.55rem;
+}
+.operator-add-input:focus { outline: none; border-color: var(--accent, gold); }
+.operator-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--ink);
+  background: var(--surface-raised, rgba(127, 127, 127, 0.12));
+  border: 1px solid var(--hairline, rgba(127, 127, 127, 0.25));
+  border-radius: 4px;
+  padding: 0.4rem 0.7rem;
+  cursor: pointer;
+}
+.operator-add-btn:disabled { opacity: 0.4; cursor: default; }
+.operator-add-btn-danger { color: #b00; }
+.operator-error {
+  margin: 0.3rem 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: #b00;
+}
+
+/* The setup modal rides in the SampleModal shell; these styles shape the form
+   body it contains. Matches the compose-dialog width and spacing family. */
+.operator-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 1rem 1.2rem 1.2rem;
+  max-width: 32rem;
+}
+.operator-setup-lede {
+  margin: 0 0 0.4rem;
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.operator-setup-label {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-dim);
+}
+.operator-setup-input {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--ink);
+  background: var(--surface-raised, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--hairline, rgba(127, 127, 127, 0.25));
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+}
+.operator-setup-input:focus { outline: none; border-color: var(--accent, gold); }
+.operator-setup-hint {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--ink-dim);
+}
+.operator-setup-error {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: #b00;
+}
+.operator-setup-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 0.4rem;
+}
+
+
+
