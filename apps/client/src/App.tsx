@@ -100,7 +100,6 @@ import { KeysView } from "./KeysView.js";
 import { GlobeView } from "./Globe.js";
 import { TimesView } from "./TimesView.js";
 import { ListingsView } from "./ListingsView.js";
-import { TracesView } from "./TracesView.js";
 import { PinPanel } from "./PinPanel.js";
 import { OperatorView } from "./OperatorView.js";
 import {
@@ -135,7 +134,6 @@ import {
   defaultFolder,
   getAttachedFolder,
   createDiskWorkspace,
-  reifyMount,
   scanExternal,
   reifyToDisk,
   type Run,
@@ -147,12 +145,6 @@ import {
 import { createLocalWorkspace, pullFromRelay, type StagedMerge } from "./workspace-local.js";
 import { loadLocalFolder, saveLocalFile, mirrorPad, clearPadPath, loadPad, type LocalFile } from "./local-store.js";
 import { saveAttachedFolder } from "./registry.js";
-import {
-  listMounts,
-  saveMount,
-  removeMount,
-  setActiveMount,
-} from "./mounts.js";
 import { changedRegion, dominantVoiceInRegion, type Workspace } from "./workspace-core.js";
 import { getPublicKey } from "nostr-tools/pure";
 import { isTauri } from "./identity.js";
@@ -303,7 +295,7 @@ interface PlayFrame {
 // Views reachable from the nav rail. `editor` is the existing two-panel
 // workspace; the rest are placeholders awaiting real implementations
 // (globe → maplibre, keys/relays → nostr, models → LLM keys).
-type View = "about" | "listings" | "editor" | "stats" | "globe" | "keys" | "networking" | "models" | "download" | "operator" | "traces";
+type View = "about" | "listings" | "editor" | "stats" | "globe" | "keys" | "networking" | "models" | "download" | "operator";
 
 // Theme: "auto" follows prefers-color-scheme; "light"/"dark" are explicit
 // overrides applied via <html data-theme>. main.tsx sets the attribute before
@@ -4971,12 +4963,6 @@ const RAIL_LISTS: RailItem[] = [
 const RAIL_BOTTOM_TOP: RailItem[] = [
   { view: "download", Icon: Download, label: "Download" },
 ];
-// The trace view: durable chains on the relay — mount, unmount, reify
-// into a folder, or delete. Sits ahead of Keys as the content-plumbing
-// entry of the management group.
-const RAIL_TRACES: RailItem[] = [
-  { view: "traces", Icon: History, label: "Traces" },
-];
 const RAIL_BOTTOM: RailItem[] = [
   { view: "keys", Icon: KeyRound, label: "Keys" },
   { view: "models", Icon: Cpu, label: "Models" },
@@ -5046,18 +5032,6 @@ function NavRail({
         <span className="rail-brand-emoji" aria-hidden="true">{EYE_SPEECH}</span>
         {expanded && <span className="rail-brand-wordmark">zine</span>}
       </button>
-      <div className="rail-divider" aria-hidden="true" />
-      <div className="nav-rail-traces">
-        {RAIL_TRACES.map((item, idx) => (
-          <RailButton
-            key={"traces-" + idx}
-            item={item}
-            active={activeView === item.view}
-            onSelect={onSelect}
-            expanded={expanded}
-          />
-        ))}
-      </div>
       <div className="rail-divider" aria-hidden="true" />
       <div className="nav-rail-top">
         {RAIL_TOP.map((item) => (
@@ -5182,7 +5156,6 @@ const VIEW_META: Record<Exclude<View, "editor">, { title: string; blurb: string 
   models: { title: "Models", blurb: "LLM providers for prompt injection." },
   download: { title: "Download", blurb: "Get the desktop app." },
   operator: { title: "Operator", blurb: "Relay operator: curation team and moderation." },
-  traces: { title: "Traces", blurb: "Your durable chains on the relay — mount, unmount, reify into a folder, or delete." },
 };
 
 // Top-left title for every view. Sourced from the same labels the nav rail uses
@@ -5199,7 +5172,6 @@ const VIEW_TITLES: Record<View, string> = {
   models: VIEW_META.models.title,
   download: VIEW_META.download.title,
   operator: VIEW_META.operator.title,
-  traces: VIEW_META.traces.title,
 };
 
 function viewTitle(view: View): string {
@@ -6446,12 +6418,6 @@ function App() {
   useEffect(() => {
     localStorage.setItem(RAIL_EXPANDED_KEY, String(railExpanded));
   }, [railExpanded]);
-
-  // Desktop mounts list: the (chain, directory) pairs currently mounted.
-  // Shown in the Traces view; updated via setMounts(listMounts()) after every
-  // attach/reify/unmount. The list is workspace-relevant (unmount can switch
-  // the active mount), so it stays in App.
-  const [mounts, setMounts] = useState<AttachedFolder[]>(() => listMounts());
 
   // --- sampler state ---------------------------------------------------
   // Defaults mix the local sidecar (where the app's own 4290 trace nodes live)
@@ -8017,7 +7983,6 @@ function App() {
       setFolder(attached);
       setFiles(scanned);
       openScanned(scanned, attached.id);
-      setMounts(listMounts()); // refresh sidebar — attachFolder saved the mount
       setBootState("ready");
       trackReconcile(reconciled, attached.id);
     } catch (e) {
@@ -8651,78 +8616,6 @@ function App() {
       if (!picked) return; // user cancelled
       setFailedFolder(null);
       await doAttach(picked);
-    } catch (e) {
-      setBootError(e instanceof Error ? e.message : String(e));
-      setBootState("idle");
-    }
-  }
-
-  /** Switch the workspace to a different already-mounted (chain, directory)
-   *  pair. Does NOT touch the mounts registry — the current mount stays
-   *  remembered; only the open workspace changes. Re-attaches via the disk
-   *  backend's `attach`, which baselines against the relay chain by id. */
-  async function onSwitchToMount(mount: AttachedFolder) {
-    if (!mount.path) return; // path is desktop-only; nothing to open otherwise
-    setBootState("scanning");
-    setBootError(null);
-    try {
-      const onReconciled = makeOnReconciled();
-      onReconciled.bind(mount.id);
-      const { files: scanned, reconciled } = await backendRef.current.attach(mount, onReconciled);
-      setFolder(mount);
-      setFiles(scanned);
-      openScanned(scanned, mount.id);
-      saveMount(mount); // bump lastOpened, move to front of MRU
-      setActiveMount(mount.id);
-      setMounts(listMounts());
-      setBootState("ready");
-      trackReconcile(reconciled, mount.id);
-    } catch (e) {
-      setBootError(e instanceof Error ? e.message : String(e));
-      setBootState("idle");
-    }
-  }
-
-  /** Unmount: drop the (chain, directory) pair from the registry. The chain is
-   *  untouched on the relay — only the local binding is removed, and the chain
-   *  can be reified into a new directory later. If the removed mount was the
-   *  active one, fall back to the MRU head or the empty folder-picker state. */
-  function onUnmountMount(id: string) {
-    const remaining = removeMount(id);
-    setMounts(remaining);
-    if (folder?.id === id) {
-      const next = remaining[0]; // listMounts returns MRU-first
-      if (next) {
-        void onSwitchToMount(next);
-      } else {
-        // Root is permanent: even if the mounts registry is drained, don't
-        // orphan the workspace to the empty-state picker. The trace lives in
-        // the app (on the relay); keep the current folder as the unmountable
-        // root. (The mounts UI itself is removed in a later phase; this guard
-        // just makes sure it can't drop root in the meantime.)
-        setBootState("idle");
-      }
-    }
-  }
-
-  /** Reify an existing chain into a new directory. TracesView owns the picker
-   *  UI (genesis-id input + "list my chains"); this is the workspace-attach
-   *  half — pick a target dir, mount the chain, refresh state. Mirrors
-   *  openFromStacks: an attach from a management view drops into the Press. */
-  async function onReify(genesisId: string) {
-    if (!genesisId.trim()) return;
-    try {
-      const picked = await chooseFolder();
-      if (!picked) return; // user cancelled
-      setBootState("scanning");
-      setBootError(null);
-      const { folder: attached, files: scanned } = await reifyMount(genesisId.trim(), picked);
-      setFolder(attached);
-      setFiles(scanned);
-      openScanned(scanned, attached.id);
-      setMounts(listMounts());
-      setActiveView("editor");
-      setBootState("ready");
     } catch (e) {
       setBootError(e instanceof Error ? e.message : String(e));
       setBootState("idle");
@@ -11732,21 +11625,6 @@ function App() {
         ) : activeView === "globe" ? (
           <ViewErrorBoundary view="globe">
             <GlobeView />
-          </ViewErrorBoundary>
-        ) : activeView === "traces" ? (
-          <ViewErrorBoundary view="traces">
-            <TracesView
-              mounts={mounts}
-              activeMountId={folder?.id ?? null}
-              onSwitchToMount={(m) => {
-                void onSwitchToMount(m).then(() => setActiveView("editor"));
-              }}
-              onUnmountMount={onUnmountMount}
-              onMountNew={() => {
-                void onChooseFolder().then(() => setActiveView("editor"));
-              }}
-              onReify={(genesisId) => void onReify(genesisId)}
-            />
           </ViewErrorBoundary>
         ) : activeView === "listings" ? (
           <ViewErrorBoundary view="listings">
