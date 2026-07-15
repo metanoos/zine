@@ -39,11 +39,17 @@ export interface ExternalVoice {
 
 const RECONCILER_KEY = "zine.external.reconciler";
 const MCP_ACTORS_KEY = "zine.external.mcp.actors";
+const SUBSTRATE_KEY = "zine.external.substrates";
 
 interface McpActorBinding {
   server: string;
   tool: string;
   model: string;
+  pubkey: string;
+}
+
+interface SubstrateBinding {
+  name: string;
   pubkey: string;
 }
 
@@ -122,5 +128,46 @@ export function getMcpActorVoice(server: string, tool: string, model: string): E
     actors.push({ server, tool, model, pubkey: voice.publicKey });
   }
   saveMcpActors(actors);
+  return voice;
+}
+
+function loadSubstrates(): SubstrateBinding[] {
+  try {
+    const stored = localStorage.getItem(SUBSTRATE_KEY);
+    if (stored) return JSON.parse(stored) as SubstrateBinding[];
+  } catch {
+    /* corrupt blob — treat as empty */
+  }
+  return [];
+}
+
+function saveSubstrates(substrates: SubstrateBinding[]): void {
+  localStorage.setItem(SUBSTRATE_KEY, JSON.stringify(substrates));
+}
+
+/** The voice for a named substrate (FILESYSTEM/LAPTOP/DESKTOP/EXTERNAL, or any
+ *  future substrate the scan/reify bar cycles to). Auto-provisions on first call
+ *  for a new name, reuses on subsequent calls. The substrate is a peer with a
+ *  voice: content scanned in from it is signed by *its* key, never the
+ *  authoring key — so a trace's provenance shows who actually contributed it,
+ *  whether that's a mesh peer or the local disk.
+ *
+ *  Same shape as getReconcilerVoice/getMcpActorVoice: workflow state, not
+ *  provenance (the binding is local setup; the signed node is what's durable). */
+export function getSubstrateVoice(name: string): ExternalVoice {
+  const substrates = loadSubstrates();
+  const match = substrates.find((s) => s.name === name);
+  if (match) {
+    const voice = resolvePubkey(match.pubkey);
+    if (voice) return voice;
+    // Key deleted — drop the stale binding and re-provision below.
+  }
+  const voice = provisionVoice(`Substrate · ${name}`);
+  if (match) {
+    match.pubkey = voice.publicKey;
+  } else {
+    substrates.push({ name, pubkey: voice.publicKey });
+  }
+  saveSubstrates(substrates);
   return voice;
 }

@@ -137,6 +137,7 @@ import {
   createDiskWorkspace,
   reifyMount,
   scanExternal,
+  reifyToDisk,
   type Run,
   type FileState,
   type ScannedFile,
@@ -155,6 +156,7 @@ import {
 import { changedRegion, dominantVoiceInRegion, type Workspace } from "./workspace-core.js";
 import { getPublicKey } from "nostr-tools/pure";
 import { isTauri } from "./identity.js";
+import { getSubstrateVoice } from "./external-voice-store.js";
 import { gatherContextBlock, clearChainMemo, renderLimelightLog } from "./context-gather.js";
 import { SYSTEM_PREAMBLE } from "./system-preamble.js";
 import {
@@ -8735,9 +8737,9 @@ function App() {
    *
    *  The picked snapshot is read OUTSIDE the attached root (scan_external does
    *  not confine to root — that's the substrate-acquisition contract). Each
-   *  file is sealed to disk-under-root + the relay, attributed to the AUTHOR
-   *  voice for now. TODO(Phase 3+): give the substrate its own keypair so
-   *  scanned content is voiced by the substrate itself. Desktop-only. */
+   *  file is sealed to disk-under-root + the relay, attributed to the SUBSTRATE's
+   *  own voice — the substrate is a peer with a keypair, so scanned content is
+   *  signed by it, not the authoring key. Desktop-only. */
   async function onScan(kind: "file" | "folder") {
     if (!folder) return;
     const idx = opTargetPanel();
@@ -8751,6 +8753,11 @@ function App() {
       return;
     }
     if (scanned.length === 0) return;
+    // The substrate speaks with its own voice: content scanned in from it is
+    // signed by its key, never the authoring key. Auto-provisions on first use.
+    const substrateVoice = getSubstrateVoice(substrate);
+    const voice = substrateVoice.publicKey;
+    const signer = substrateVoice.secretKey;
     // Land under the scope-folder. The scope mount's path (or ROOT when the
     // whole folder is in scope) is the destination prefix.
     const destFolder = scopeRef.current?.kind === "folder" ? (scopeRef.current.path ?? ROOT) : ROOT;
@@ -8767,8 +8774,7 @@ function App() {
       created.push({ path: unique, content: f.content });
     }
     // Optimistic insert: each new trace appears immediately, attributed to the
-    // AUTHOR voice, marked pending so any in-flight op's hold can't drop it.
-    const voice = authorPubkey;
+    // substrate voice, marked pending so any in-flight op's hold can't drop it.
     setFiles((prev) => {
       const next = { ...prev };
       for (const c of created) {
@@ -8778,9 +8784,9 @@ function App() {
       return next;
     });
     // Seal each: writes the file under the attached root (the import lands on
-    // disk under root too, as a free reify-on-import) and seals the relay node.
+    // disk under root too, as a free reify-on-import) and seals the relay node,
+    // signed by the substrate's key.
     try {
-      const signer = secretKeyForVoice(authorPubkey) ?? undefined;
       for (const c of created) {
         await backendRef.current.writeFile(c.path, c.content, [], signer, [{ voice, text: c.content }]);
         pendingPaths.current.delete(c.path);
@@ -8788,6 +8794,54 @@ function App() {
       // Open the first imported file in the active panel.
       if (created.length > 0) openInActivePanel(created[0].path);
       setOpStatus(idx, "done", `${created.length} scanned`);
+    } catch (e) {
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /** Reify: the emission instant — flush a trace out to a picked destination
+   *  folder on disk. The inverse of scan. The trace's content (reconstructed
+   *  from the in-memory runs the app holds) is written to the destination
+   *  under its relative path. The app keeps its trace; reify serializes a copy
+   *  out to a substrate. Desktop-only.
+   *
+   *  What gets emitted: the focused file, or — if a folder is in scope — the
+   *  whole scope subtree (every file under it). A file emits as itself; a
+   *  folder emits as its tree, paths relative to the scope root. */
+  async function onReifyOp() {
+    if (!folder) return;
+    const idx = opTargetPanel();
+    // Resolve the emit set: the focus file, or the scope folder's subtree.
+    const scopePath = scopeRef.current?.kind === "folder" ? (scopeRef.current.path ?? ROOT) : null;
+    let entries: { relativePath: string; content: string }[];
+    if (scopePath != null) {
+      // Folder scope: emit every file under it, paths relative to the scope.
+      const prefix = scopePath === ROOT ? "" : `${scopePath}/`;
+      entries = Object.entries(files)
+        .filter(([p, s]) => s.kind !== "folder" && (scopePath === ROOT || p.startsWith(prefix)))
+        .map(([p, s]) => ({
+          relativePath: scopePath === ROOT ? p : p.slice(prefix.length),
+          content: flatten(s.runs),
+        }));
+    } else {
+      // No folder scope: emit the focused file.
+      const focus = panels[idx]?.active;
+      const fs = focus ? files[focus] : undefined;
+      if (!focus || !fs) {
+        setOpStatus(idx, "error", "Nothing to reify — focus a file or scope a folder");
+        return;
+      }
+      entries = [{ relativePath: focus, content: flatten(fs.runs) }];
+    }
+    if (entries.length === 0) {
+      setOpStatus(idx, "error", "Scope folder has no files to reify");
+      return;
+    }
+    const dest = await chooseFolder();
+    if (!dest) return; // user cancelled
+    try {
+      await reifyToDisk(dest, entries);
+      setOpStatus(idx, "done", `${entries.length} reified`);
     } catch (e) {
       setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
     }
@@ -11544,11 +11598,7 @@ function App() {
                 substrate={substrate}
                 onChooseSubstrate={chooseSubstrate}
                 onScan={() => setScanOpen(true)}
-                onReifyOp={() => {
-                  // Phase 2 placeholder: the explicit reify op is Phase 3.
-                  // For now this is inert — flush-trace-to-disk-folder lands next.
-                  setOpStatus(opTargetPanel(), "error", "Reify lands in Phase 3");
-                }}
+                onReifyOp={() => void onReifyOp()}
               />
               {sealsModal && (
                 <SealsModal

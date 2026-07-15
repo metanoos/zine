@@ -242,6 +242,26 @@ export async function defaultFolder(): Promise<string | null> {
   }
 }
 
+/** Reify (emit) a set of traces out to a picked destination folder on disk —
+ *  the emission instant, the inverse of scan. Each trace's content (reconstructed
+ *  from the in-memory runs the app holds) is written to `destRoot` under its
+ *  relative path, reusing write_text_file with the destination as root (the
+ *  containment check passes naturally). Desktop-only.
+ *
+ *  The trace lives in the app; reify serializes it to a substrate at an instant.
+ *  It does not unmount or detach anything — the app keeps its trace. A reify is
+ *  idempotent in content (same bytes → same files) and additive in the
+ *  destination (existing files there are overwritten with the trace's content,
+ *  which is the point of emission: make this disk folder match the trace). */
+export async function reifyToDisk(
+  destRoot: string,
+  entries: { relativePath: string; content: string }[],
+): Promise<void> {
+  for (const { relativePath, content } of entries) {
+    await invoke<null>("write_text_file", { root: destRoot, relativePath, contents: content });
+  }
+}
+
 /** Returns the currently attached folder from localStorage, or null. Does
  *  NOT verify the path still exists on disk — `attach` does that. */
 export function getAttachedFolder(): AttachedFolder | null {
