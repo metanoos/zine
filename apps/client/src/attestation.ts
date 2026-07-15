@@ -1,21 +1,29 @@
 /**
- * NIP-03 (OpenTimestamps) attestations for Affirm. The one place the protocol
- * reaches for a trustless third-party anchor: anteriority — proof that a
- * commitment existed *before* some Bitcoin block — cannot be made
- * self-sovereign (the author can't prove they didn't backdate their own claim).
- * Everywhere else the protocol's "asserted, cheaply checkable, degradable"
- * posture suffices because lineage/authorship/citation are recoverable from
- * signed graph structure; anteriority isn't, so it gets the trustless tool.
+ * NIP-03 (OpenTimestamps) attestations for Step — distributed anteriority.
+ * Anteriority (proof that a commitment existed *before* some Bitcoin block)
+ * cannot be made self-sovereign: the author can't prove they didn't backdate
+ * their own claim without a third party attesting to it. Everywhere else the
+ * protocol's "asserted, cheaply checkable, degradable" posture suffices
+ * because lineage/authorship/citation are recoverable from signed graph
+ * structure; anteriority isn't, so it gets the trustless tool.
  *
- * The attestation is a strictly-additive overlay on Affirm, not a modification
- * to it. The affirm node seals and publishes immediately; the kind-1040 event
- * is published later, in the background, when the OTS proof resolves. Readers
- * check it or ignore it; the affirm node stands on its own either way.
+ * The attestation is a strictly-additive overlay on Step, not a modification
+ * to it. The Step node seals immediately; the kind-1040 event is published
+ * later, in the background, when the OTS proof resolves. The Step stands on
+ * its own either way; readers check the attestation or ignore it.
  *
- * We stamp the AFFIRM node's id (the commitment act), not the affirmed node's
- * — the affirmed node was already Sent and public, so stamping its id would
- * prove nothing new. The affirm node's id is the moment the author stood
- * behind the work; that's what an anteriority proof should anchor.
+ * We stamp the STEP node's id (the content checkpoint), because the power of
+ * anteriority as a sybil filter is *density* — dozens of checkpoints provably
+ * committed across weeks at human rhythms — and density requires the frequent
+ * gesture to stamp. Step is frequent and time-distributed; an attest/publish
+ * is rare. Stamping the rare gesture gives one anchor (useless as a process
+ * signal); stamping Step builds the material the vet reads. See
+ * `protocol/rendezvous.md` §3 and `trace-provenance.md` §R11.22.
+ *
+ * Affirm no longer stamps on its own behalf — its anteriority is inherited
+ * transitively from the cited node (which was sealed by a Step, which stamps).
+ * Affirm MAY keep its own stamp later for a distinct "when endorsed" claim;
+ * that is not wired here.
  *
  * Hosted in Rust (stamp_ots / upgrade_ots commands) because the public OTS
  * calendars don't send CORS headers — a browser fetch dies. reqwest is already
@@ -23,7 +31,7 @@
  */
 
 import { finalizeEvent } from "nostr-tools/pure";
-import type { Event, EventTemplate } from "nostr-tools";
+import type { EventTemplate } from "nostr-tools";
 
 import {
   getReadRelays,
@@ -60,37 +68,40 @@ export function buildAttestationTemplate(
   };
 }
 
-/** Stamp an affirmed node against Bitcoin and publish the kind-1040 attestation.
+/** Stamp a sealed node against Bitcoin and publish the kind-1040 attestation.
  *
- *  Best-effort and fire-and-forget from `affirmNode`: a calendar failure, a
+ *  Best-effort and fire-and-forget from the Step path: a calendar failure, a
  *  network drop, or a Tauri absence (browser dev mode) logs and exits — the
- *  affirm node has already sealed and published by the time this runs, so the
- *  attestation layer failing can never block or corrupt the affirm gesture.
- *  Mirrors the focus-buffer / workspace-push posture (`void … .catch(() => {})`).
+ *  Step node has already sealed by the time this runs, so the attestation layer
+ *  failing can never block or corrupt the Step gesture. Mirrors the focus-buffer
+ *  / workspace-push posture (`void … .catch(() => {})`).
+ *
+ *  `attestedId` is the sealed node's Nostr event id — already a 64-char SHA-256
+ *  hex digest, which is exactly what the OTS calendar expects (no extra
+ *  hashing).
  *
  *  The proof returned by the calendar is typically *partial* (proves
  *  submission, upgradeable to a full Bitcoin anchor once a block lands). We
  *  publish it immediately — a partial proof is a valid OTS state, and
  *  `upgradePendingAttestations` will republish an upgraded one later. */
 export async function stampAndPublishAttestation(
-  affirmEvent: Event,
+  attestedId: string,
   signer: Uint8Array,
   relayHint: string,
 ): Promise<void> {
-  // Stamp the affirm node's event id. Nostr event ids are already SHA-256
-  // (hex, 64 chars), which is exactly the digest the OTS calendar expects — no
-  // extra hashing.
+  // Nostr event ids are already SHA-256 (hex, 64 chars), which is exactly the
+  // digest the OTS calendar expects — no extra hashing.
   let proofB64: string;
   try {
     const { invoke } = await import("@tauri-apps/api/core");
-    proofB64 = await invoke<string>("stamp_ots", { digestHex: affirmEvent.id });
+    proofB64 = await invoke<string>("stamp_ots", { digestHex: attestedId });
   } catch (e) {
-    console.warn("[attestation] OTS stamp failed (affirm node still valid):", e);
+    console.warn("[attestation] OTS stamp failed (node still sealed):", e);
     return;
   }
 
   const template = buildAttestationTemplate(
-    affirmEvent.id,
+    attestedId,
     proofB64,
     relayHint,
     Math.floor(Date.now() / 1000),

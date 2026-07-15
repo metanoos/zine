@@ -1009,17 +1009,12 @@ export async function affirmNode(
   };
   const signed = finalizeEvent(template, signer);
   await publishToMany(await getWriteRelays(), signed);
-  // §8/§R11.20: anteriority attestation. Fire-and-forget — the affirm node is
-  // already sealed and published; the OTS overlay is strictly additive and must
-  // never block the return. Dynamic import to avoid a circular module dep.
-  void import("./attestation.js")
-    .then(({ stampAndPublishAttestation }) =>
-      stampAndPublishAttestation(signed, signer, resolveRelayUrl()),
-    )
-    .catch(() => {
-      // Swallowed on purpose: a calendar/transport failure logs inside; the
-      // affirm node stands on its own regardless.
-    });
+  // §R11.22: Affirm no longer stamps on its own behalf. The load-bearing
+  // anteriority has moved to Step (the frequent gesture builds distributed
+  // anteriority — see protocol/rendezvous.md §3); the affirm node's
+  // anteriority is inherited transitively from the cited node, which was
+  // sealed by a Step that stamps. Affirm MAY carry its own stamp later for a
+  // distinct "when endorsed" claim, but that is not wired here.
   return signed;
 }
 

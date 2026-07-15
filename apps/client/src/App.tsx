@@ -143,11 +143,11 @@ import {
   type AttachedFolder,
 } from "./workspace.js";
 import { createLocalWorkspace, pullFromRelay, type StagedMerge } from "./workspace-local.js";
-import { loadLocalFolder, saveLocalFile, mirrorPad, clearPadPath, loadPad, type LocalFile } from "./local-store.js";
-import { saveAttachedFolder } from "./registry.js";
+import { loadLocalFolder, saveLocalFile, mirrorPad, clearPadPath, clearPad, loadPad, type LocalFile } from "./local-store.js";
+import { saveAttachedFolder, clearAttachedFolder } from "./registry.js";
 import { changedRegion, dominantVoiceInRegion, type Workspace } from "./workspace-core.js";
 import { getPublicKey } from "nostr-tools/pure";
-import { isTauri } from "./identity.js";
+import { isTauri, resolveRelayUrl } from "./identity.js";
 import { getSubstrateVoice } from "./external-voice-store.js";
 import { gatherContextBlock, clearChainMemo, renderLimelightLog } from "./context-gather.js";
 import { SYSTEM_PREAMBLE } from "./system-preamble.js";
@@ -1874,25 +1874,6 @@ function Sidebar({
             : undefined
         }
       />
-      {/* Folder-orchestration replay (§3.3/§8): entry/exit/rename/selection
-          over the folder's lifetime. Collapsible; independent of the content
-          ReplayTransport above. Only meaningful with a folder attached. */}
-      <div className="sidebar-orchestration">
-        <button
-          type="button"
-          className="sidebar-orchestration-toggle"
-          aria-expanded={orchestrationOpen}
-          onClick={onToggleOrchestration}
-        >
-          <span>{orchestrationOpen ? "▾" : "▸"} Orchestration</span>
-        </button>
-        {orchestrationOpen && (
-          <OrchestrationTimeline
-            folderId={folderId}
-            refreshKey={orchestrationRefreshKey}
-          />
-        )}
-      </div>
       <div
         className={"tree" + (dropTargetPath === ROOT && canDropOn(ROOT) ? " tree-drop-target" : "")}
         onDragEnter={(e) => {
@@ -7850,7 +7831,23 @@ function App() {
       // Step = localOnly (home relay only); Send = fan out. Both force the
       // checkpoint so a deliberate seal on unchanged content still mints.
       const localOnly = op === "step";
-      await sealNow(path, signer, localOnly, true);
+      const sealedId = await sealNow(path, signer, localOnly, true);
+      // §R11.22: distributed anteriority. Step stamps the sealed node id —
+      // the frequent gesture builds the time-distributed process record the
+      // vet reads (protocol/rendezvous.md §3). Strictly additive: the kind-1040
+      // overlay never blocks the gesture. Send takes the short-circuit (§8:
+      // Send touches nothing about time). Fire-and-forget mirrors the old
+      // affirmNode posture; dynamic import avoids a circular module dep.
+      if (sealedId && op === "step") {
+        void import("./attestation.js")
+          .then(({ stampAndPublishAttestation }) =>
+            stampAndPublishAttestation(sealedId, signer, resolveRelayUrl()),
+          )
+          .catch(() => {
+            // Best-effort: the node is sealed regardless. Calendar/transport
+            // failures log inside stampAndPublishAttestation.
+          });
+      }
       setOpStatus(idx, "done", undefined, op);
       flashPanelFn(idx);
     } catch (e) {
@@ -8221,9 +8218,25 @@ function App() {
    *  (selection, replay, citations, the seals modal, collapsed-tree rows) —
    *  clear them explicitly so the fresh folder starts clean. */
   async function resetWorkspace() {
-    if (isTauri()) return; // desktop has no relay-folder concept to reset
-    if (folder) forgetFolder(folder.id);
+    // Desktop: clear the permanent-root binding (zine.attachedFolder) and the
+    // crash pad for it, then drop to the empty-state picker so a fresh folder
+    // can be mounted. The old chain stays on the relay under its old id — only
+    // the local pointer is cleared. This is the escape hatch when root is
+    // broken or misnamed (e.g. a stale mount from before root was permanent).
+    // Webapp: forget the known folder and provision a fresh one.
+    if (isTauri()) {
+      if (folder) clearPad(folder.id);
+      clearAttachedFolder();
+    } else {
+      if (folder) forgetFolder(folder.id);
+    }
+    setFolder(null);
+    setFiles({});
+    setBootState("idle");
+    setBootError(null);
+    setFailedFolder(null);
     setSelection(null);
+    setScope(folder ? { kind: "folder", path: ROOT } : null);
     setEditorSelection(null);
     setCollapsed(new Set());
     setReplay(null);
@@ -8236,7 +8249,7 @@ function App() {
     setInboundHeadByPath({});
     setEmptyFolders(new Set());
     setTabCtxMenu(null);
-    await webCreateFolder();
+    if (!isTauri()) await webCreateFolder();
   }
 
   /** Webapp: join an existing folder by id (e.g. copied from the desktop). */
@@ -10863,7 +10876,7 @@ function App() {
           onToggleExpanded={() => setRailExpanded((v) => !v)}
           theme={theme}
           onToggleTheme={toggleTheme}
-          onResetWorkspace={!isTauri() ? () => setConfirmReset(true) : undefined}
+          onResetWorkspace={() => setConfirmReset(true)}
           showOperator={!isTauri() && isStaff()}
         />
         <div className="view-column">
@@ -11780,8 +11793,9 @@ function App() {
         <div className="confirm-overlay" onClick={() => setConfirmReset(false)}>
           <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
             <p className="confirm-message">
-              Reset workspace? This clears the current folder and starts a fresh one. The old folder's
-              history stays on the relay under its old id.
+              Reset workspace? This unbinds the current root and returns to the folder picker
+              {isTauri() ? "" : " and provisions a fresh one"}. The old chain stays on the relay
+              under its old id; only the local binding is cleared.
             </p>
             <div className="confirm-actions">
               <button type="button" className="confirm-cancel" onClick={() => setConfirmReset(false)}>

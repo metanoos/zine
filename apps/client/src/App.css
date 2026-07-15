@@ -828,11 +828,13 @@ html[data-theme="light"] .rail-brand-wordmark {
   padding-top: 1rem;
 }
 
-/* About — the 1 · 2 · 3 tab row. One tab is always selected. */
+/* About — the page-number tab row (1 · 2 · 3 · 4 · 5 · 6 · 7). One always
+ * selected. Wraps on narrow viewports. */
 .about-variants {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  flex-wrap: wrap;
+  gap: 0.4rem;
   margin: 0.25rem 0 0.5rem;
   padding-bottom: 0.75rem;
   border-bottom: 1px solid var(--rule);
@@ -920,6 +922,76 @@ html[data-theme="light"] .rail-brand-wordmark {
   font-family: var(--font-mono);
   font-size: 0.9em;
   color: var(--accent);
+}
+
+/* Director's cut — reference tables, lists, and pull-quotes used across the
+ * 7-page tour. Max-width on the column keeps the prose readable; tables and
+ * lists sit inside that column. */
+.about-prose table {
+  width: 100%;
+  max-width: 42rem;
+  border-collapse: collapse;
+  margin: 0.25rem 0;
+  font-family: var(--font-body);
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+
+.about-prose th,
+.about-prose td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.about-prose th {
+  font-family: var(--font-display);
+  font-weight: 300;
+  letter-spacing: 0.01em;
+  color: var(--accent);
+}
+
+.about-prose td:first-child {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.about-prose ul {
+  margin: 0.25rem 0;
+  padding-left: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.about-prose li {
+  font-family: var(--font-body);
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--ink);
+}
+
+.about-prose li strong:first-child {
+  font-family: var(--font-display);
+  font-weight: 300;
+  letter-spacing: 0.01em;
+  color: var(--accent);
+  margin-right: 0.2em;
+}
+
+.about-prose blockquote {
+  margin: 0.5rem 0;
+  padding: 0.6rem 0.9rem;
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  font-family: var(--font-body);
+  font-style: italic;
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--ink);
 }
 
 /* Models view — provider cards laid out as a grid of editable rows. The shell
