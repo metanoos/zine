@@ -34,6 +34,7 @@ import {
   removeDoor,
   type DoorEntry,
 } from "./doors-store.js";
+import { detectCoCitations, type CoCitation } from "./co-citation.js";
 
 /**
  * The networking view — one surface for how this machine talks to the network.
@@ -170,6 +171,9 @@ export function NetworkingView() {
 
       {/* --- Peers (desktop only) ---------------------------------------- */}
       <PeersSection />
+
+      {/* --- Co-citations (desktop only) --------------------------------- */}
+      <CoCitationsSection />
     </section>
   );
 }
@@ -642,6 +646,129 @@ function PeersSection() {
           <span>Add peer</span>
         </button>
       </form>
+    </div>
+  );
+}
+
+/**
+ * Co-citations section — the v1 rendezvous surface (protocol/rendezvous.md §4).
+ *
+ * For each pair of peers who both quoted the same passage (same content hash H),
+ * shows an introduction card: the two pubkeys, how many passages they share,
+ * and a sample of the shared text. The introducer brokers but does not admit —
+ * adding either peer to the other's list stays a separate human act in the
+ * Peers section above.
+ *
+ * Desktop-only (peers are desktop-only). Runs the detection sweep on mount and
+ * every 5 minutes, mirroring the attestation-upgrade interval pattern. A peer's
+ * chain is readable only if replicated to a seed this machine reads — the honest
+ * v1 boundary noted in co-citation.ts.
+ */
+function CoCitationsSection() {
+  const [matches, setMatches] = useState<CoCitation[]>([]);
+  const [status, setStatus] = useState<"idle" | "scanning" | "done" | "error">("idle");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+
+    const run = async () => {
+      setStatus("scanning");
+      setError(null);
+      try {
+        const { peers } = await listPeers();
+        if (peers.length < 2) {
+          if (!cancelled) {
+            setMatches([]);
+            setStatus("done");
+          }
+          return;
+        }
+        const results = await detectCoCitations(peers);
+        if (!cancelled) {
+          setMatches(results);
+          setStatus("done");
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : String(e));
+          setStatus("error");
+        }
+      }
+    };
+
+    void run();
+    const interval = window.setInterval(run, 5 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  if (!isTauri()) {
+    return (
+      <div className="networking-section settings-card">
+        <h2 className="networking-section-title">Co-citations</h2>
+        <p className="view-placeholder-blurb">
+          Desktop-only — open this view in the desktop app.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="networking-section">
+      <h2 className="networking-section-title">Co-citations</h2>
+      <p className="networking-section-sub">
+        Pairs of your peers who quoted the same passage — a signal they might
+        know each other. You broker the intro; adding them stays your call in
+        Peers above.
+      </p>
+
+      {status === "scanning" && (
+        <p className="cocitation-status">Scanning peer chains…</p>
+      )}
+      {status === "error" && (
+        <p className="cocitation-error" role="alert">
+          Scan failed: {error}
+        </p>
+      )}
+      {status === "done" && matches.length === 0 && (
+        <p className="cocitation-empty">
+          No co-citations found among your peers yet.
+        </p>
+      )}
+
+      {matches.length > 0 && (
+        <ul className="cocitation-list">
+          {matches.map((m) => (
+            <li key={`${m.peerA}-${m.peerB}`} className="cocitation-card settings-card">
+              <div className="cocitation-pair">
+                <span className="cocitation-pubkey" title={m.peerA}>
+                  {m.peerA.slice(0, 12)}…
+                </span>
+                <span className="cocitation-shared-count">
+                  {m.hashes.length} shared {m.hashes.length === 1 ? "passage" : "passages"}
+                </span>
+                <span className="cocitation-pubkey" title={m.peerB}>
+                  {m.peerB.slice(0, 12)}…
+                </span>
+              </div>
+              {m.samples.slice(0, 3).map((s) => (
+                <blockquote key={s.hash} className="cocitation-sample">
+                  {s.quoteA ?? s.quoteB ?? "(quote unavailable)"}
+                </blockquote>
+              ))}
+              {m.samples.length > 3 && (
+                <p className="cocitation-more">
+                  +{m.samples.length - 3} more
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
