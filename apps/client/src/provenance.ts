@@ -392,6 +392,16 @@ export interface PublishEditInput {
    *  `snapshot`/`contentHash` are untouched — a tag never alters the body, the
    *  same stance `reply-to` already takes. Absent on every non-tagging write. */
   taggedTraces?: string[];
+  /** `role: "content"` cites (protocol/rendezvous.md §1): quotes of **orphan
+   *  text** with no origin node in the system (print, oral, sourceless). Each
+   *  entry carries the verbatim bytes (`quote`) and an OPTIONAL `source`
+   *  (work/edition/locator — distinguishes readers from scrapers, §R4). Unlike
+   *  every other cite role, this produces a `Q` tag (not `q`) keyed on the
+   *  quote's content hash `H`, because there is no node id to dereference. The
+   *  quote is **verification metadata, not body content** — it does not splice
+   *  into the snapshot (no `position`), so `snapshot`/`contentHash` are
+   *  untouched. Absent on every non-quoting write. */
+  contentCites?: { quote: string; source?: { work?: string; edition?: string; locator?: string } }[];
   /** `action: llm` only — the event id of the minted rule-manifest trace
    *  whose body names the expansion algorithm + params (protocol §3.7). Each
    *  LLM seal cites its rule so a reader can reconstruct the submitted prompt.
@@ -866,6 +876,33 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
       tags.push(["q", nodeId, ""]);
     }
   }
+  // Q-tags (rendezvous.md §1.2): one per orphan-text quote, keyed on the quote's
+  // content hash H (NOT a node id — there is no node to dereference). This is the
+  // first cite-delta→top-level-tag derivation in the codebase: unlike every other
+  // cite role, `role:"content"` emits a `Q` (not `q`) because its coordinate is
+  // the *text*, shared by everyone who quoted the same passage. The 4th slot is
+  // the trust-radius marker: `"implicit"` (carried because quoted; reachable only
+  // within the peer graph) vs `"attested"` (published to the DHT — not yet wired).
+  // Dedup by H so re-quoting the same passage in one seal emits one Q-tag.
+  const contentCiteDeltas: object[] = [];
+  if ((input.contentCites ?? []).length > 0) {
+    const seenH = new Set<string>();
+    for (const cite of input.contentCites ?? []) {
+      const hash = await quoteHash(cite.quote);
+      if (seenH.has(hash)) continue; // dedup by H within this seal
+      seenH.add(hash);
+      tags.push(["Q", hash, "", "implicit"]);
+      contentCiteDeltas.push({
+        type: "cite",
+        role: "content",
+        op: "add",
+        hash,
+        quote: cite.quote,
+        ...(cite.source ? { source: cite.source } : {}),
+        timestamp: sealedAt,
+      });
+    }
+  }
   // §3.7 advisory marker: this node carries LLM scope citations + a rule, so
   // readers reconstructing an LLM call can find these nodes by tag rather than
   // by content-shape sniffing. Non-normative — `q` semantics are unchanged.
@@ -914,6 +951,14 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
           sourceEventId: nodeId,
           timestamp: sealedAt,
         })),
+        // `role: "content"` — a quote of orphan text (no origin node). Keyed on
+        // `hash` (H = sha256(canonical(quote))), not sourceEventId — there is no
+        // node to dereference. The quote is verification metadata: it carries
+        // the verbatim bytes for co-citation verification + an optional source
+        // (work/edition/locator), but does NOT splice into the body (no
+        // `position`), so `snapshot`/`contentHash` are untouched. The paired
+        // top-level tag is `Q` (derived above), not `q`. See rendezvous.md §1.
+        ...contentCiteDeltas,
       ],
       snapshot: input.snapshot,
       contentHash: input.contentHash,
@@ -1084,6 +1129,24 @@ export async function sha256HexLocal(text: string): Promise<string> {
   const data = new TextEncoder().encode(text);
   const hash = await crypto.subtle.digest("SHA-256", data);
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Canonicalize quote text for the rendezvous content hash `H`
+ *  (protocol/rendezvous.md §1.3). Exact, not fuzzy: NFC normalize, collapse all
+ *  whitespace runs to a single space, trim. Deliberately NO case-folding — case
+ *  can carry meaning ("The" vs "the"), and `H` must stay a single value so the
+ *  "hash is the address of the room" property holds. Fuzzy matching is a
+ *  client-side layer above the coordinate, never part of `H` itself. */
+export function canonicalQuoteText(text: string): string {
+  return text.normalize("NFC").replace(/\s+/g, " ").trim();
+}
+
+/** The rendezvous coordinate: the content hash of a quote
+ *  (protocol/rendezvous.md §1.1). `H = sha256(canonical(quoteText))`. Not a
+ *  node id; an addressable property of the text shared by everyone who quoted
+ *  the same passage. */
+export async function quoteHash(quoteText: string): Promise<string> {
+  return sha256HexLocal(canonicalQuoteText(quoteText));
 }
 
 // --- injection rules (§3.7) ---------------------------------------------
