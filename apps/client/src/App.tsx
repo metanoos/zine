@@ -4045,6 +4045,12 @@ function TopBar({
   substrate: Substrate;
   /** Cycle/pick the substrate. */
   onChooseSubstrate: (s: Substrate) => void;
+  /** The keychain key id signing scans for the current substrate, or null when
+   *  no signer is wired (the dropdown shows blank until the first scan
+   *  auto-provisions one, or until the user picks one). */
+  substrateKeyId: string | null;
+  /** Pin which keychain key signs scans for the current substrate. */
+  onChooseSubstrateKey: (id: string) => void;
   /** Open the scan picker (acquire a foreign snapshot from the substrate). */
   onScan: () => void;
   /** Reify: flush a trace out to a picked destination folder. */
@@ -4304,7 +4310,14 @@ function TopBar({
         >
           {substrate}:
         </button>
-        <span className="topbar-slot" aria-hidden="true" />
+        {/* The substrate's pen/voice/key: which keychain key signs scans from
+            this substrate. Mirrors the AUTHOR row's KeySelect. Null until the
+            user picks one or the first scan auto-provisions. */}
+        <KeySelect
+          selectedId={substrateKeyId}
+          onSelect={onChooseSubstrateKey}
+          ariaLabel={`Signer for ${substrate}`}
+        />
         <button
           type="button"
           className="topbar-action op-scan"
