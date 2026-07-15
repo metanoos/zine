@@ -828,6 +828,100 @@ html[data-theme="light"] .rail-brand-wordmark {
   padding-top: 1rem;
 }
 
+/* About — the 1 · 2 · 3 tab row. One tab is always selected. */
+.about-variants {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.25rem 0 0.5rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.about-variant {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4em;
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem 0.3rem;
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  color: var(--ink-muted, var(--ink));
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease,
+    background-color 0.12s ease;
+}
+
+.about-variant:hover {
+  border-color: var(--accent);
+}
+
+.about-variant.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.about-variant-num {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 0.05em;
+}
+
+.about-variant-cap {
+  /* The caption sits at normal weight against the heavy number. */
+}
+
+/* Each telling is its own reading column. */
+.about-telling {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* Manifesto / plain-terms prose: flowing paragraphs, no per-beat counter. */
+.about-prose {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 42rem;
+}
+
+.about-prose p {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 1rem;
+  line-height: 1.7;
+  color: var(--ink);
+}
+
+/* The thesis line gets a little air before it. */
+.about-prose p.about-thesis {
+  margin-top: 0.4rem;
+  font-style: italic;
+  color: var(--accent);
+}
+
+/* Footnote sits below the manifesto, set apart like a colophon. */
+.about-footnote {
+  margin: 0;
+  max-width: 42rem;
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: var(--ink-muted, var(--ink));
+  border-top: 1px solid var(--rule);
+  padding-top: 1rem;
+}
+
+/* Inline code in the manifesto/plain tellings (e.g. `git clone`). */
+.about-code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  color: var(--accent);
+}
+
 /* Models view — provider cards laid out as a grid of editable rows. The shell
  * reuses .view-placeholder; .models-list is the only models-specific layout. */
 
@@ -1614,13 +1708,14 @@ html[data-theme="light"] .rail-brand-wordmark {
   letter-spacing: 0.14em;
   color: var(--accent);
   margin: 0;
-  /* Visually separate sections without a hard rule. */
-  margin-top: 0.5rem;
 }
 
-/* First section sits flush (no top margin). */
-.networking-view .networking-section:first-of-type .networking-section-title {
-  margin-top: 0;
+/* When a section is also a card, the title reads as the card header — give it a
+   bottom rule so it stands apart from the section's body rows. Sections without
+   the .settings-card class keep the plain (ruleless) title above. */
+.networking-section.settings-card > .networking-section-title {
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--rule);
 }
 
 .local-node-row {

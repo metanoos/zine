@@ -496,6 +496,35 @@ function SETTLE_MESSAGES(loose: string): ChatMessage[] {
   ];
 }
 
+/** Settle (de-dupe mode): collapse near-duplicate files into one. Triggered
+ *  when Settle runs with a folder in scope rather than a file focus. The user
+ *  message carries each candidate file under a numbered header; the model
+ *  returns a single merged version that preserves every load-bearing idea
+ *  across the duplicates and drops nothing essential. Scanning the same path
+ *  twice yields two copies by design; Settle is the deliberate gesture that
+ *  collapses that accumulated redundancy into one voiced revision. */
+function SETTLE_DEDUPE_MESSAGES(duplicates: { path: string; content: string }[]): ChatMessage[] {
+  const body = duplicates
+    .map((d, i) => `--- FILE ${i + 1}: ${d.path} ---\n${d.content}`)
+    .join("\n\n");
+  return [
+    {
+      role: "system",
+      content:
+        `${SYSTEM_PREAMBLE}\n\n` +
+        "YOUR ROLE — Settle (de-dupe): the reconciler. You are given several " +
+        "files that are near-duplicates of the same content (acquired by " +
+        "repeated scans of the same source). Merge them into ONE coherent, " +
+        "complete version: keep every load-bearing idea that appears in ANY " +
+        "copy, reconcile differences by preferring the more specific/complete " +
+        "reading, and drop pure redundancy. You do NOT add new content beyond " +
+        "what the copies contain. You do NOT emit fences, headers, or preamble. " +
+        "Return ONLY the merged text.",
+    },
+    { role: "user", content: body },
+  ];
+}
+
 /** Stir: rewrite the loose prose freely, applying every `(( command ))`, while
  *  preserving the bracketed anchors verbatim. Single model call: the commands
  *  ARE the editing instructions, applied directly to the loose prose in one
@@ -3911,7 +3940,7 @@ const VOICE_OPS: { op: OpKind; label: string; title: string; cls: string }[] = [
   { op: "reply", label: "Reply", title: "Write a response into a new doc in the other pane, citing traces", cls: "op-reply" },
   { op: "extend", label: "Extend", title: "Append an AI continuation to this file", cls: "op-extend" },
   { op: "stir", label: "Stir", title: "Reinvent loose prose, run (( commands )), preserve [[ anchors ]]", cls: "op-stir" },
-  { op: "settle", label: "Settle", title: "Condense loose prose; keep brackets. Repeated rounds → only brackets", cls: "op-settle" },
+  { op: "settle", label: "Settle", title: "File: condense loose prose, keep brackets. Folder: de-dupe near-duplicate scans into one", cls: "op-settle" },
 ];
 
 // Author ops (Step / Send / Affirm) live in the same voice menu but are not
@@ -7108,6 +7137,98 @@ function App() {
     }
   }
 
+  /** Settle (de-dupe mode): collapse near-duplicate files in the scope subtree
+   *  into one voiced revision. Triggered when Settle runs with a FOLDER in scope
+   *  (the whole-subtree target) rather than a single file focus. Candidate
+   *  duplicates are grouped by a cheap content signature (normalized prefix);
+   *  each group of 2+ is sent to the LLM to merge, the merged result overwrites
+   *  the first (keeper) file, and the redundant copies are deleted.
+   *
+   *  This is the deliberate gesture that collapses scan-introduced redundancy:
+   *  scanning the same path twice yields two copies by design, and Settle is
+   *  how the trace consolidates them. Nothing happens between gestures. */
+  async function settleDeDupeLLM(idx: number) {
+    const pubkey = modelPubkey;
+    const provider = resolveOpProvider(idx, pubkey);
+    if (!provider) return;
+    const started = beginOp(idx, secretKeyForVoice(pubkey) ?? undefined, "settle");
+    if (!started) return;
+    const { controller } = started;
+    // Collect candidate files in the scope subtree.
+    const scopePath = scopeRef.current?.kind === "folder" ? (scopeRef.current.path ?? ROOT) : null;
+    if (scopePath == null) {
+      setOpStatus(idx, "error", "De-dupe needs a folder in scope");
+      endOp(idx);
+      return;
+    }
+    const prefix = scopePath === ROOT ? "" : `${scopePath}/`;
+    const inScope = Object.entries(files).filter(
+      ([p, s]) => s.kind !== "folder" && (scopePath === ROOT || p.startsWith(prefix)),
+    );
+    // Group by a normalized content signature: lowercased, whitespace-collapsed
+    // first ~240 chars. Exact/near re-scans of the same source share it.
+    const sig = (text: string): string =>
+      text.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 240);
+    const groups = new Map<string, { path: string; content: string }[]>();
+    for (const [path, state] of inScope) {
+      const content = flatten(state.runs);
+      const key = sig(content);
+      if (!key) continue; // skip empty files — never a duplicate worth merging
+      const arr = groups.get(key) ?? [];
+      arr.push({ path, content });
+      groups.set(key, arr);
+    }
+    const dupGroups = [...groups.values()].filter((g) => g.length >= 2);
+    if (dupGroups.length === 0) {
+      setOpStatus(idx, "done", "nothing to de-dupe");
+      endOp(idx);
+      return;
+    }
+    try {
+      const signer = secretKeyForVoice(pubkey) ?? undefined;
+      for (const group of dupGroups) {
+        if (controller.signal.aborted) break;
+        const merged = await complete(
+          provider,
+          SETTLE_DEDUPE_MESSAGES(group),
+          { maxTokens: 2048, signal: controller.signal },
+        );
+        // Keeper = first file; overwrite it with the merge. The rest are deleted.
+        const [keeper, ...redundant] = group;
+        await backendRef.current.writeFile(keeper.path, merged, [], signer, [{ voice: pubkey, text: merged }]);
+        for (const r of redundant) {
+          setFiles((prev) => {
+            const next = { ...prev };
+            delete next[r.path];
+            return next;
+          });
+          // Close the tab if open, then tombstone on disk + relay.
+          setPanels((prev) =>
+            prev.map((p) =>
+              p.tabs.includes(r.path)
+                ? { ...p, tabs: p.tabs.filter((t) => t !== r.path), active: p.active === r.path ? (p.tabs.filter((t) => t !== r.path)[0] ?? "") : p.active }
+                : p,
+            ),
+          );
+          void backendRef.current.deletePath(r.path, false).catch((e) =>
+            console.warn(`[settle-de-dupe] deletePath failed for ${r.path}:`, e),
+          );
+        }
+        // Open the keeper so the merged result is visible.
+        openInActivePanel(keeper.path);
+      }
+      setOpStatus(idx, "done", `de-duped ${dupGroups.length} group(s)`);
+    } catch (e) {
+      if (controller.signal.aborted) {
+        setOpStatus(idx, "idle");
+        return;
+      }
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
+    } finally {
+      endOp(idx);
+    }
+  }
+
   /** SETTLE - condense the loose (non-bracketed) prose in place; preserve
    *  `[[ ]]` spans verbatim (never regenerate them). Repeated rounds drive the
    *  file toward only bracketed text. With a selection, condenses only the
@@ -7651,7 +7772,14 @@ function App() {
       }
     }
     if (op === "extend") void extendLLM(idx);
-    else if (op === "settle") void settleLLM(idx);
+    // Settle has two modes. When the op-target panel focuses a FOLDER tab,
+    // run de-dupe: collapse near-duplicate files in the scope subtree into one
+    // voiced revision (the gesture that cleans up scan-introduced redundancy).
+    // Otherwise the intra-file condenser (condense loose prose, keep brackets).
+    else if (op === "settle") {
+      const active = panels[idx]?.active;
+      void (active && isFolderTab(active) ? settleDeDupeLLM(idx) : settleLLM(idx));
+    }
     else if (op === "stir") void stirLLM(idx);
     else if (op === "reply") void replyLLM(idx);
     else if (op === "receive") void receiveLLM(idx);

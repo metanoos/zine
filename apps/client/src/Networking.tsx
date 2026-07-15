@@ -93,7 +93,7 @@ export function NetworkingView() {
       <NodeSection />
 
       {/* --- Seeds (external relays) ------------------------------------- */}
-      <div className="networking-section">
+      <div className="networking-section settings-card">
         <h2 className="networking-section-title">Seeds</h2>
         <p className="networking-section-sub">
           Durability backups — your node is primary, these hold a copy so peers can read when your desktop is offline.
@@ -558,7 +558,7 @@ function PeersSection() {
 
   if (!isTauri()) {
     return (
-      <div className="networking-section">
+      <div className="networking-section settings-card">
         <h2 className="networking-section-title">Peers</h2>
         <p className="view-placeholder-blurb">
           Desktop-only — open this view in the desktop app.

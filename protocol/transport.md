@@ -76,6 +76,20 @@ hosted docker-compose relay. Designating one as *your* super-peer is a config
 choice (add it to your relay set with `write: true`); the existing `publishToMany`
 fan-out already replicates every sealed trace there in parallel.
 
+The super-peer also serves two roles for the rendezvous layer (`rendezvous.md`):
+
+- **OTS calendar host.** Step's distributed anteriority (provenance §8,
+  `rendezvous.md` §3) stamps every save against Bitcoin via OpenTimestamps.
+  The calendar that aggregates digests and lands them in Bitcoin txs is
+  self-hosted on the super-peer, so save hashes never leave the author's own
+  infra — preserving Step's sovereignty semantics. An OTS calendar is a small
+  service (aggregate digests, batch into one tx, serve proofs); this is a
+  modest addition to the super-peer role, not a new trust boundary.
+- **DHT bootstrap.** The Kademlia DHT (`rendezvous.md` §2.3) needs seed nodes
+  to join. The author's own super-peer(s) serve as bootstrap, keeping the
+  network's trust character coherent: you join through the same infra that
+  already holds a replica of your archive.
+
 The `q`-tag relay hint (provenance §3.1, 3rd slot of the `e` tag) is the network
 primitive: it carries the author's address. It can name the author's `.onion`
 (direct, when their desktop is up) or their super-peer URL (durable). The reader
@@ -219,7 +233,10 @@ boundary, not friction. This is the change from "embedded server for one" to
 - **Iroh/libp2p direct sync.** An optional P2P fast lane for when two presses are
   mutually online — a latency/privacy optimization, not a correctness
   requirement (self-sufficiency §R1 makes it unnecessary for correctness).
-  Deferred.
+  The libp2p dependency is now also used by the rendezvous layer
+  (`rendezvous.md` §2.2: Kademlia DHT in the Rust backend); a direct-sync
+  fast lane would reuse that same libp2p transport. Deferred as an
+  optimization, not blocked on a missing dependency.
 - **Peer-list portability across devices.** The private local ACL is per-device.
   Multi-device sync of the peer list (not the key — that's NIP-46's job) is
   unsettled; a sealed trace on the owner's own relay is the likely vehicle.
