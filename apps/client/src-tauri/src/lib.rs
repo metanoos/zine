@@ -221,6 +221,108 @@ async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     }
 }
 
+/// Native single-file picker. Returns the chosen absolute path, or null if the
+/// user cancelled. Used by the Scan op to acquire a single file from a substrate
+/// (an external disk path). Mirrors pick_folder; async for the same deadlock reason.
+#[tauri::command]
+async fn pick_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let chosen = app
+        .dialog()
+        .file()
+        .set_title("Choose a file to scan")
+        .blocking_pick_file();
+    match chosen {
+        Some(fp) => {
+            let path = fp.into_path().map_err(|e| format!("invalid path: {}", e))?;
+            Ok(Some(path.to_string_lossy().into_owned()))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Read an external file or folder (an absolute path the user explicitly picked
+/// via pick_file/pick_folder) for the Scan op. Unlike read_text_file/list_dir,
+/// this does NOT confine the read to the attached folder root — the whole point
+/// of scan is to acquire a foreign snapshot from a substrate. Safety is the OS
+/// picker: the user chose this path on purpose.
+///
+/// Returns a list of (relativePath, content) pairs — for a single file, one
+/// entry with relativePath = its file name; for a folder, one entry per file
+/// under it, relativePath = the path relative to the picked folder. Non-UTF8
+/// files are skipped (binaries aren't editable).
+#[derive(Serialize)]
+struct ScannedFile {
+    relative_path: String,
+    content: String,
+}
+
+#[tauri::command]
+fn scan_external(abs_path: String) -> Result<Vec<ScannedFile>, String> {
+    let path = PathBuf::from(&abs_path);
+    let meta = fs::metadata(&path).map_err(|e| format!("stat {}: {}", path.display(), e))?;
+    if meta.is_file() {
+        let bytes = fs::read(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+        let content = match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                return Err(format!(
+                    "{} is not valid UTF-8 (binary files aren't scannable)",
+                    path.display()
+                ))
+            }
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "scanned".to_string());
+        return Ok(vec![ScannedFile { relative_path: name, content }]);
+    }
+    // Folder: recurse, one entry per file, relative to the picked root.
+    let canon = path
+        .canonicalize()
+        .map_err(|e| format!("root folder does not exist: {}", e))?;
+    let mut out = Vec::new();
+    scan_walk(&canon, &canon, &mut out)?;
+    out.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    Ok(out)
+}
+
+fn scan_walk(dir: &Path, root: &Path, out: &mut Vec<ScannedFile>) -> Result<(), String> {
+    let entries = fs::read_dir(dir)
+        .map_err(|e| format!("failed to read {}: {}", dir.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("entry error: {}", e))?;
+        let ft = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if ft.is_dir() {
+            scan_walk(&entry.path(), root, out)?;
+        } else if ft.is_file() {
+            let bytes = match fs::read(entry.path()) {
+                Ok(b) => b,
+                Err(_) => continue, // unreadable file: skip, don't abort the whole scan
+            };
+            let content = match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(_) => continue, // binary: skip (matches the editor's contract)
+            };
+            let rel = entry
+                .path()
+                .strip_prefix(root)
+                .map_err(|e| format!("strip_prefix failed: {}", e))?
+                .to_string_lossy()
+                .into_owned();
+            out.push(ScannedFile {
+                relative_path: rel,
+                content,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Recursively list a folder, returning relative paths (relative to `root`).
 /// Skips the ignored segments above. Both files AND directories are emitted as
 /// entries — directories carry `is_dir: true` with their own relative path,
@@ -1143,6 +1245,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             spawn_relay,
             pick_folder,
+            pick_file,
+            scan_external,
             list_dir,
             read_text_file,
             write_text_file,

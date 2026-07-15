@@ -5408,16 +5408,18 @@ body.panel-resizing {
   overflow: hidden;
 }
 
-/* Voices + actions bar: bottom region of the press. Two rows share one
+/* Voices + actions bar: bottom region of the press. Three rows share one
    column template — identity left, actions, then status right:
      label/model | key | a1 a2 a3 a4 a5 | (slot) | tokens | error | (slot)
-   Row 1: AUTHOR: | pen | Stp Snd Aff · · |  — |  —  | err |  —
-   Row 2: model▾  | inj | Rec Rep Ext Set Sti |  — | 1.2k | err |  —
+   Row 1: AUTHOR:    | pen | Stp Snd Aff · ·   |  — |  —  | err |  —
+   Row 2: model▾     | inj | Rec Rep Ext Set Sti |  — | 1.2k | err |  —
+   Row 3: FILESYSTEM | ·   | Scn Ref · · · ·     |  — |  —  |  —  |  —
    The MODEL row's leftmost cell IS the model selector (no "MODEL:" text — the
-   chosen model name reads as the label). Five equal action tracks. An in-flight
-   op re-renders its own button as the stop control (.topbar-action.running)
-   rather than a separate Stop button. Model options use the provider card
-   label. */
+   chosen model name reads as the label). The SUBSTRATE row mirrors the AUTHOR
+   row but cycles the external party a scan reads from / a reify writes to.
+   Five equal action tracks. An in-flight op re-renders its own button as the
+   stop control (.topbar-action.running) rather than a separate Stop button.
+   Model options use the provider card label. */
 .topbar {
   flex: 0 0 auto;
   display: grid;

@@ -210,6 +210,28 @@ export async function chooseFolder(): Promise<string | null> {
   return invoke<string | null>("pick_folder");
 }
 
+/** Show a native single-file picker and return the chosen absolute path, or
+ *  null if the user cancelled. Used by the Scan op. Mirrors chooseFolder. */
+export async function chooseFile(): Promise<string | null> {
+  return invoke<string | null>("pick_file");
+}
+
+/** A foreign snapshot acquired from a substrate: each scanned file as
+ *  (relativePath, content). For a single file, one entry named after it; for
+ *  a folder, one entry per file under it, relative to the picked folder. */
+export interface ScannedFile {
+  relativePath: string;
+  content: string;
+}
+
+/** Read an external file or folder at an absolute path the user explicitly
+ *  picked. Unlike read_text_file/list_dir this reads OUTSIDE the attached root
+ *  — that's the whole point of scan (acquire a foreign snapshot from a
+ *  substrate). Desktop-only (no substrate on the webapp). */
+export async function scanExternal(absPath: string): Promise<ScannedFile[]> {
+  return invoke<ScannedFile[]>("scan_external", { absPath });
+}
+
 /** A sensible default folder to offer on first run ($HOME/zine if it exists),
  *  so a user can start without navigating the picker. null if unavailable. */
 export async function defaultFolder(): Promise<string | null> {

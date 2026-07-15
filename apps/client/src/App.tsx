@@ -131,12 +131,15 @@ import {
   attachFolder,
   bootFromRelay,
   chooseFolder,
+  chooseFile,
   defaultFolder,
   getAttachedFolder,
   createDiskWorkspace,
   reifyMount,
+  scanExternal,
   type Run,
   type FileState,
+  type ScannedFile,
   type SampleEventMeta,
   type AttachedFolder,
 } from "./workspace.js";
@@ -3945,6 +3948,25 @@ function rollAuthorAlias(excluding: string): string {
   return others[Math.floor(Math.random() * others.length)];
 }
 
+// --- substrate bar -----------------------------------------------------
+//
+// The lower bar of the press mirrors the AUTHOR bar, but cycles the EXTERNAL
+// substrate (the foreign party a scan reads from / a reify writes to) instead
+// of the internal typing voice. The substrate is a peer with a voice: scanned
+// content is attributed to it, same provenance shape as a mesh peer's
+// contribution. Scan and reify are the two actions — acquisition and emission
+// instants against a substrate the app has no continuous bond with.
+//
+// The labels cycle on click (FILESYSTEM → LAPTOP → DESKTOP → EXTERNAL → …).
+// Persisted per-browser so the chosen substrate survives reload.
+const SUBSTRATE_LABEL_KEY = "zine.substrateLabel";
+const SUBSTRATES = ["FILESYSTEM", "LAPTOP", "DESKTOP", "EXTERNAL"] as const;
+type Substrate = (typeof SUBSTRATES)[number];
+function nextSubstrate(cur: Substrate): Substrate {
+  const i = SUBSTRATES.indexOf(cur);
+  return SUBSTRATES[(i + 1) % SUBSTRATES.length];
+}
+
 
 // --- top bar -----------------------------------------------------------
 //
@@ -3976,6 +3998,10 @@ function TopBar({
   canAffirm,
   targetInScope,
   onScopeToTarget,
+  substrate,
+  onChooseSubstrate,
+  onScan,
+  onReifyOp,
 }: {
   keys: KeyEntry[];
   /** The AUTHOR (typing + Save/send) voice's key id. */
@@ -4017,6 +4043,14 @@ function TopBar({
    *  out-of-scope block on write ops. Wired to a one-click affordance shown when
    *  `targetInScope` is false. */
   onScopeToTarget: () => void;
+  /** The currently-selected external substrate (the lower bar). */
+  substrate: Substrate;
+  /** Cycle/pick the substrate. */
+  onChooseSubstrate: (s: Substrate) => void;
+  /** Open the scan picker (acquire a foreign snapshot from the substrate). */
+  onScan: () => void;
+  /** Reify: flush a trace out to a picked destination folder. */
+  onReifyOp: () => void;
 }) {
   // --- AUTHOR alias label -----------------------------------------------
   // Cosmetic click-to-reroll for the AUTHOR row's label. Persisted so a chosen
@@ -4254,6 +4288,47 @@ function TopBar({
         {/* Former Stop-button slot: now empty. The stop affordance lives on the
             running op's own button (see .running above), so this track is a
             permanent placeholder to keep the grid's column alignment. */}
+        <span className="topbar-slot" aria-hidden="true" />
+      </div>
+
+      <div className="topbar-group">
+        {/* The SUBSTRATE row: mirrors the AUTHOR row but cycles the EXTERNAL
+            substrate (the foreign party a scan reads from / a reify writes to)
+            instead of the internal typing voice. Click the label to cycle
+            (FILESYSTEM → LAPTOP → DESKTOP → EXTERNAL). Scan and Reify are the
+            two instants against it. Desktop-only conceptually; on the webapp
+            there is no disk substrate, so both buttons are inert. */}
+        <button
+          type="button"
+          className="topbar-label topbar-label-clickable"
+          title={`Click to cycle the substrate — currently ${substrate}`}
+          onClick={() => onChooseSubstrate(nextSubstrate(substrate))}
+        >
+          {substrate}:
+        </button>
+        <span className="topbar-slot" aria-hidden="true" />
+        <button
+          type="button"
+          className="topbar-action op-scan"
+          disabled={!isTauri()}
+          title={isTauri() ? "Scan: acquire a file or folder from the substrate as new traces under the scope" : "Scanning is desktop-only (the substrate is the local disk)"}
+          onClick={onScan}
+        >
+          Scan
+        </button>
+        <button
+          type="button"
+          className="topbar-action op-reify"
+          disabled={!isTauri()}
+          title={isTauri() ? "Reify: flush a trace out to a picked destination folder" : "Reifying is desktop-only (the substrate is the local disk)"}
+          onClick={onReifyOp}
+        >
+          Reify
+        </button>
+        <span className="topbar-slot" aria-hidden="true" />
+        <span className="topbar-slot" aria-hidden="true" />
+        <span className="topbar-slot" aria-hidden="true" />
+        <span className="topbar-slot" aria-hidden="true" />
         <span className="topbar-slot" aria-hidden="true" />
       </div>
     </div>
@@ -6169,6 +6244,23 @@ function App() {
   useEffect(() => {
     setScope(folder ? { kind: "folder", path: ROOT } : null);
   }, [folder?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The SUBSTRATE bar's currently-selected foreign substrate — the party a
+  // scan reads from / a reify writes to. Persisted per-browser. Scan and reify
+  // are instants against this substrate; the app has no continuous bond with it.
+  const [substrate, setSubstrate] = useState<Substrate>(() => {
+    const stored = localStorage.getItem(SUBSTRATE_LABEL_KEY);
+    return stored && (SUBSTRATES as readonly string[]).includes(stored)
+      ? (stored as Substrate)
+      : "FILESYSTEM";
+  });
+  function chooseSubstrate(s: Substrate) {
+    localStorage.setItem(SUBSTRATE_LABEL_KEY, s);
+    setSubstrate(s);
+  }
+  // The scan picker modal. Open by the Scan button; the user picks a file or
+  // folder to acquire as new traces under the scope-folder.
+  const [scanOpen, setScanOpen] = useState(false);
   // Re-bootstrap the timeline when the scope mount changes: a different file or
   // folder is now the stepper subject, so its steps must be recomputed. Skips
   // the initial mount (handled by the auto-bootstrap above) and only fires when
@@ -8632,6 +8724,72 @@ function App() {
     } catch (e) {
       setBootError(e instanceof Error ? e.message : String(e));
       setBootState("idle");
+    }
+  }
+
+  /** Scan: acquire a foreign snapshot from a substrate. The user picks a file
+   *  or folder (an external disk path); each scanned file lands as a NEW trace
+   *  under the scope-folder. Always additive — scanning the same path twice
+   *  yields two copies (counter-suffixed via uniquePath), never an overwrite.
+   *  A held trace is never mutated by a scan; that's the whole point.
+   *
+   *  The picked snapshot is read OUTSIDE the attached root (scan_external does
+   *  not confine to root — that's the substrate-acquisition contract). Each
+   *  file is sealed to disk-under-root + the relay, attributed to the AUTHOR
+   *  voice for now. TODO(Phase 3+): give the substrate its own keypair so
+   *  scanned content is voiced by the substrate itself. Desktop-only. */
+  async function onScan(kind: "file" | "folder") {
+    if (!folder) return;
+    const idx = opTargetPanel();
+    const picked = kind === "file" ? await chooseFile() : await chooseFolder();
+    if (!picked) return; // user cancelled
+    let scanned: ScannedFile[];
+    try {
+      scanned = await scanExternal(picked);
+    } catch (e) {
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
+      return;
+    }
+    if (scanned.length === 0) return;
+    // Land under the scope-folder. The scope mount's path (or ROOT when the
+    // whole folder is in scope) is the destination prefix.
+    const destFolder = scopeRef.current?.kind === "folder" ? (scopeRef.current.path ?? ROOT) : ROOT;
+    const taken = new Set(Object.keys(files));
+    const created: { path: string; content: string }[] = [];
+    for (const f of scanned) {
+      // Clean the relative name so it satisfies the folder-name constraints
+      // (folder segments must be valid nostr t-tags). Slugify each segment.
+      const segs = f.relativePath.split("/").map((s) => slugifyFilename(s, s) || "file");
+      const clean = segs.join("/");
+      const candidate = destFolder === ROOT ? clean : `${destFolder}/${clean}`;
+      const unique = uniquePath(candidate, taken);
+      taken.add(unique);
+      created.push({ path: unique, content: f.content });
+    }
+    // Optimistic insert: each new trace appears immediately, attributed to the
+    // AUTHOR voice, marked pending so any in-flight op's hold can't drop it.
+    const voice = authorPubkey;
+    setFiles((prev) => {
+      const next = { ...prev };
+      for (const c of created) {
+        pendingPaths.current.add(c.path);
+        next[c.path] = { runs: [{ voice, text: c.content }], nodeId: "", tags: [] };
+      }
+      return next;
+    });
+    // Seal each: writes the file under the attached root (the import lands on
+    // disk under root too, as a free reify-on-import) and seals the relay node.
+    try {
+      const signer = secretKeyForVoice(authorPubkey) ?? undefined;
+      for (const c of created) {
+        await backendRef.current.writeFile(c.path, c.content, [], signer, [{ voice, text: c.content }]);
+        pendingPaths.current.delete(c.path);
+      }
+      // Open the first imported file in the active panel.
+      if (created.length > 0) openInActivePanel(created[0].path);
+      setOpStatus(idx, "done", `${created.length} scanned`);
+    } catch (e) {
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -11383,6 +11541,14 @@ function App() {
                   if (!p) return;
                   selectFolder(parentPath(p));
                 }}
+                substrate={substrate}
+                onChooseSubstrate={chooseSubstrate}
+                onScan={() => setScanOpen(true)}
+                onReifyOp={() => {
+                  // Phase 2 placeholder: the explicit reify op is Phase 3.
+                  // For now this is inert — flush-trace-to-disk-folder lands next.
+                  setOpStatus(opTargetPanel(), "error", "Reify lands in Phase 3");
+                }}
               />
               {sealsModal && (
                 <SealsModal
@@ -11406,6 +11572,52 @@ function App() {
                     });
                   }}
                 />
+              )}
+              {scanOpen && (
+                <div className="confirm-overlay" onClick={() => setScanOpen(false)}>
+                  <div
+                    className="confirm-dialog"
+                    onClick={(e) => e.stopPropagation()}
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="Scan from substrate"
+                  >
+                    <p className="confirm-message">
+                      Scan acquires a file or folder from {substrate} as new traces
+                      under the scope-folder. Each scan is additive — scanning the
+                      same path twice yields two copies, never an overwrite.
+                    </p>
+                    <div className="confirm-actions">
+                      <button
+                        type="button"
+                        className="confirm-cancel"
+                        onClick={() => setScanOpen(false)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="confirm-delete"
+                        onClick={() => {
+                          setScanOpen(false);
+                          void onScan("file");
+                        }}
+                      >
+                        Scan a file…
+                      </button>
+                      <button
+                        type="button"
+                        className="confirm-delete"
+                        onClick={() => {
+                          setScanOpen(false);
+                          void onScan("folder");
+                        }}
+                      >
+                        Scan a folder…
+                      </button>
+                    </div>
+                  </div>
+                </div>
               )}
             </div>
           ) : folder && bootState === "scanning" ? (
