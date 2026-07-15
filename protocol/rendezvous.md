@@ -82,11 +82,17 @@ In the citing node's `deltas` array:
 
 ### 1.2 Top-level tag (derived index)
 
-Emitted alongside the delta, mirroring how `role: "tag"` cites derive a `t`
-mirror (`trace-provenance.md` §3.1, §R8):
+Emitted alongside the delta. The tag name is **`Q`** (single uppercase letter),
+not `cite-content`, because NIP-01 generic tag queries (`#Q=H`) are defined
+only for single-letter-or-digit tag names — a multi-char name would not be
+relay-filterable, and filterability is what the DHT rendezvous path depends
+on. `q` (lowercase) is already taken for node-citation; `Q` is mnemonic
+(**Q**uote / rendezvous) and reads as a natural pair with `q` — lowercase
+cites a node, uppercase cites by content. The human-readable label
+"cite-content" lives in docs/code comments, not on the wire.
 
 ```
-["cite-content", H, relayHint, "implicit" | "attested"]
+["Q", H, relayHint, "implicit" | "attested"]
 ```
 
 The 4th slot is the **trust-radius marker**, the one bit separating free
@@ -252,8 +258,8 @@ works the moment two peers share a mutual, before any DHT density exists.
 For each pair of peers (A, B) that you — the introducer C — mutually trust:
 
 ```
-H_A = ⋃ top-level cite-content tags across A's readable chain
-H_B = ⋃ top-level cite-content tags across B's readable chain
+H_A = ⋃ top-level Q tags across A's readable chain
+H_B = ⋃ top-level Q tags across B's readable chain
 shared = H_A ∩ H_B
 if shared ≠ ∅:
     surface intro(A, B, shared, sample quotes, A↔B reachability hints)
