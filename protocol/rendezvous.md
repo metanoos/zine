@@ -588,6 +588,19 @@ nothing.
 
 # Open questions (deferred)
 
+**Implementation status.** The pure-logic layers are built and tested; the
+network/UI integration is pending (partly blocked on concurrent workspace
+refactoring). Implemented modules in `apps/client/src/`:
+- `quote-hash.ts` — `canonicalQuoteText`, `quoteHash` (the exact coordinate H)
+- `quote-fuzzy.ts` — MinHash signature + LSH banding (the fuzzy recall layer, §R2)
+- `co-citation.ts` — mutual-peer set intersection + relay fetch glue (§4)
+- `vet.ts` — anteriority + timing + revision signals composed into a verdict (§5)
+- `vet-walker.ts` — extracts `CheckpointMeta` from trace events (wire → vet data)
+The `role:"content"` cite delta + Q-tag emission is in `publishEdit`; the read
+side (eventMeta Q-arm) is in place. The contentCites threading through
+`writeFile` → `sealNow` → the SelectionMenu "attest" button is implemented in
+the working tree (pending the concurrent refactoring's commit).
+
 - **Doors-on-`H` (the ambitious endpoint).** `H` → HKDF → an onion address,
   reusing the `doors` primitive (`doors-store.ts`, `transport.md` §3 — doors
   derive extra onions from keychain keys). One adopter of the topic hosts a
@@ -599,14 +612,17 @@ nothing.
   your trust graph*, not a censorship-resistant public square. Defer; do not
   let the beautiful framing ("the hash is the address of the room")
   oversell what it is.
-- **LSH band parameters.** Shingle size (word vs char), signature length,
-  band count, similarity threshold — all tuneable. Need real corpora to
-  calibrate. Default conservative; revisit after observing co-citation
-  density.
-- **Timing-distribution model.** The human-typical inter-event distribution
-  (burstiness, circadian, weekly gaps) needs empirical calibration from real
-  traces. Until then the test is a coarse outlier-rejection ("too uniform")
-  rather than a fitted model.
+- **LSH band parameters — initial implementation in `quote-fuzzy.ts`, needs calibration.**
+  Defaults shipped: word tringles (SHINGLE_K=3), 128-hash signatures
+  (SIGNATURE_LEN=128), 32 bands (BANDS=32), yielding a ~42% Jaccard threshold.
+  These are reasoned defaults, not empirically tuned — need real corpora to
+  calibrate shingle size, band count, and the recall/precision tradeoff. The
+  module's parameters are exported and adjustable without protocol changes.
+- **Timing-distribution model — initial implementation in `vet.ts`, needs calibration.**
+  The timing signal uses coefficient-of-variation of inter-event intervals (a
+  coarse "too uniform → sybil" test). The human-typical distribution (burstiness,
+  circadian, weekly gaps) needs empirical calibration from real traces to fit a
+  proper model. Until then the CV-based outlier rejection is the floor.
 - **Calcarda routing-layer sybil defenses.** Redundant publish/get (publish
   to k closest, query several, intersect) is the floor and should ship with
   the DHT. PoW on node identity is held in reserve — turn on if spam becomes
