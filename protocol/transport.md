@@ -26,14 +26,14 @@ key, not three).
 
 Each press's relay serves **only that press owner's authored traces**. This is
 not gossip (SSB-style epidemic replication), and not a shared data plane. It is
-an **access-policy mesh**: friends are who may *connect and read*, never what you
-*cache or forward*. You host your words; your friends host theirs; nobody carries
+an **access-policy mesh**: peers are who may *connect and read*, never what you
+*cache or forward*. You host your words; your peers host theirs; nobody carries
 speech they did not sign.
 
 This is the design the trace protocol was built for. The load-bearing claim of
 `trace-provenance.md` §R1 is that "a cited node must resolve as one fetch against
 a self-contained object" — node self-sufficiency means you never need to cache a
-friend's trace, because any cited node resolves in one bounded fetch from its
+peer's trace, because any cited node resolves in one bounded fetch from its
 author. Gossip exists to solve a problem this protocol already solved. Adopting
 it would re-import the transitive-replication cost (anti-entropy, dedup,
 backfill, unbounded storage of others' words) that self-sufficiency was designed
@@ -43,7 +43,7 @@ seam edges" — a gossip relay's cached copy is an intermediary that seam has no
 concept of). The access-policy mesh keeps the chain verifiable end-to-end.
 
 **Amplification is citation, not replication.** When you want to amplify a
-friend's work, you publish a `TraceOpinion` (provenance §5) with a high `alpha`
+peer's work, you publish a `TraceOpinion` (provenance §5) with a high `alpha`
 — a signed, per-author visibility weight — or you cite it in a composite trace
 (§7) or tag it (§6). You do not re-broadcast their content. The relay stays a
 dumb pipe (§5: "the relay stays a dumb pipe — operator-as-chief-curator means an
@@ -55,11 +55,11 @@ your storage stays your own words only.
 | Pubkey | Connect | Read | Write |
 |---|---|---|---|
 | **Owner** (the manual/pen key) | always | ✅ own authored traces | ✅ |
-| **Friend** (in the ACL) | allowed | ✅ read-only | ❌ |
+| **Peer** (in the ACL) | allowed | ✅ read-only | ❌ |
 | **Unknown** | challenged (NIP-42) | ❌ until authed | ❌ |
 
-Friends are stored in a **private local ACL** (`~/.tracer/friends.json`), never
-published as a Nostr event. The friend list is a security boundary, and a
+Peers are stored in a **private local ACL** (`~/.tracer/peers.json`), never
+published as a Nostr event. The peer list is a security boundary, and a
 security boundary must not be a public artifact. A public kind-3 contact list is
 deferred as a *reader-side discovery feature* that never touches access control —
 it answers "whose recent work do I want to see," a different question from "who
@@ -69,7 +69,7 @@ may connect to my relay."
 
 A **super-peer** is a durable, always-online relay that holds a replica of *your*
 archive — your second copy for offline readability. It is not a discovery
-platform and not a place you go to read the network. When a friend's desktop is
+platform and not a place you go to read the network. When a peer's desktop is
 offline (laptop closed), their cited traces are still reachable from their
 super-peer. Any NIP-01+NIP-33 relay suffices (provenance §10), including the
 hosted docker-compose relay. Designating one as *your* super-peer is a config
@@ -177,9 +177,9 @@ identity. This is the honest reading of "stable across networks."
 
 ### Why Tor is the listener, not an IP-policy exception
 
-Tor forwards inbound friend connections to the relay, and they appear to
+Tor forwards inbound peer connections to the relay, and they appear to
 originate from localhost. The relay cannot distinguish "the owner's own desktop
-app" from "a friend arriving via Tor" by IP address. This is why access control
+app" from "a peer arriving via Tor" by IP address. This is why access control
 **must** be pubkey-based (NIP-42 AUTH), not IP-based: the IP-based trust model
 the sidecar previously relied on (localhost = trusted) breaks entirely once Tor
 is the listener. Everyone authenticates — including the owner.
@@ -192,34 +192,34 @@ challenge/response). So the allowlist gates at the event/filter level, not the
 connection level:
 
 - **`RejectEvent`**: if `GetAuthed(ctx)` is not the owner → reject with
-  `"auth-required: friends-only"` (the `"auth-required:"` prefix triggers khatru
-  to send the AUTH challenge). Friends are read-only, so an authed friend's
+  `"auth-required: peers-only"` (the `"auth-required:"` prefix triggers khatru
+  to send the AUTH challenge). Peers are read-only, so an authed peer's
   write attempt is rejected without the challenge prefix.
 - **`RejectFilter` / `RejectCountFilter`**: if `GetAuthed(ctx)` is empty → reject
-  with `"auth-required:"`. If authed as owner or friend → allow reads.
+  with `"auth-required:"`. If authed as owner or peer → allow reads.
 
-The owner is the manual (pen) key. `friends.json`'s `owner` field must match the
+The owner is the manual (pen) key. `peers.json`'s `owner` field must match the
 manual key's pubkey, or the owner cannot write to their own relay.
 
 ### What changed in the relay's security posture
 
 The relay's prior header rationale (limiting connections is "pure friction" for a
-localhost sidecar) inverts when the relay accepts inbound from friends. The
-connection rate limiter is reinstated, and the friend ACL is a real security
+localhost sidecar) inverts when the relay accepts inbound from peers. The
+connection rate limiter is reinstated, and the access policy is a real security
 boundary, not friction. This is the change from "embedded server for one" to
 "actual server."
 
 ## Open questions
 
-- **Outbound Tor reads.** Reading a friend's `.onion` from the browser requires a
+- **Outbound Tor reads.** Reading a peer's `.onion` from the browser requires a
   SOCKS-proxied WebSocket; the browser `WebSocket` API can't do SOCKS directly.
-  First pass: Tor is inbound-only (friends reach you); outbound reads go via
+  First pass: Tor is inbound-only (peers reach you); outbound reads go via
   clearnet/super-peer. A Rust-side relay proxy or a WebSocket-to-SOCKS bridge is
   the later path.
 - **Iroh/libp2p direct sync.** An optional P2P fast lane for when two presses are
   mutually online — a latency/privacy optimization, not a correctness
   requirement (self-sufficiency §R1 makes it unnecessary for correctness).
   Deferred.
-- **Friend-list portability across devices.** The private local ACL is per-device.
-  Multi-device sync of the friend list (not the key — that's NIP-46's job) is
+- **Peer-list portability across devices.** The private local ACL is per-device.
+  Multi-device sync of the peer list (not the key — that's NIP-46's job) is
   unsettled; a sealed trace on the owner's own relay is the likely vehicle.

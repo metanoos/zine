@@ -6,18 +6,18 @@ import { Relay } from "nostr-tools/relay";
 import { loadOrCreateVoice, resolveRelayUrl } from "./identity.js";
 import { writeRelays, readRelays } from "./relay-config.js";
 import type { Run } from "./workspace-core.js";
-import { flattenRuns } from "./workspace-core.js";
+import { flattenRuns, dominantVoiceInRegion } from "./workspace-core.js";
+import { nodeSecretKey } from "./keys-store.js";
 
 /**
- * Bridge between the editor and the local relay. Mirrors the harness's
- * `ProvenanceStore` publish/fetch shapes exactly so events are
- * interoperable: a kind-4290 sealed here is queryable by the CLI, and
- * vice versa.
+ * Bridge between the editor and the local relay. Publishes and fetches the
+ * wire shapes defined by the protocol (trace-provenance.md) — a kind-4290
+ * sealed here is readable by any spec-compliant reader (other presses, the
+ * MCP headless press, the hosted relay).
  *
- * One deliberate divergence from the harness: this producer follows the
- * spec (trace-provenance.md) and OMITS `oldValue` on delta serialization.
- * The harness still ships it (a stale carryover the spec marks "removed");
- * `applyDeltas` ignores it either way, so omitting is safe and correct.
+ * `oldValue` is intentionally OMITTED on delta serialization: the spec marks
+ * it "removed," and `applyDeltas` ignores it either way. Older output that
+ * carries it is still read correctly (see the snapshot fallback below).
  */
 
 const FILE_TRACE_NODE_KIND = 4290;
@@ -29,7 +29,6 @@ const TRACE_NAME_KIND = 4291;
 /** Legacy: folder-trace nodes minted before kind consolidation. Readers
  *  accept these (querying both 4290 + 4292 and merging); no new writes. */
 const FOLDER_TRACE_NODE_KIND = 4292;
-const TRACE_ALPHA_KIND = 4293;
 const FOLDER_MANIFEST_KIND = 34290;
 /** Spec §4: TraceHead — parameterized replaceable head-pointer cache. Same
  *  number as the legacy folder manifest (34290); new writes use the spec's
@@ -65,12 +64,12 @@ export interface SampleEventMeta {
 }
 
 /** One file's entry in its folder's membership (kind-4292 `snapshot.members`).
- *  Mirrors `apps/harness/src/models.ts` bit-for-bit so a folder-trace node
- *  written here is readable by the harness CLI and vice versa. Under spec-clean
- *  tombstones (protocol §FolderTraceNode), a deleted file leaves the snapshot
- *  via a `remove` delta rather than staying as an `isDeleted` entry — so this
- *  type has no tombstone field. `isDeleted` is kept optional purely so the
- *  three workspace backends' `markDeleted` callers compile unchanged while
+ *  Shape is fixed by the protocol so a folder-trace node written here is
+ *  readable by any spec-compliant reader. Under spec-clean tombstones
+ *  (protocol §FolderTraceNode), a deleted file leaves the snapshot via a
+ *  `remove` delta rather than staying as an `isDeleted` entry — so this type
+ *  has no tombstone field. `isDeleted` is kept optional purely so the three
+ *  workspace backends' `markDeleted` callers compile unchanged while
  *  tombstone semantics finish migrating; the 4292 path always omits it. */
 export interface ManifestFileEntry {
   /** "file" or "folder". Absent on legacy entries (pre-nesting) — readers
@@ -97,10 +96,10 @@ export interface EditorDelta {
  * Minimal common-prefix/suffix diff. Returns the deltas that turn `oldText`
  * into `newText`. For the debounce-level publish path this is enough: a run
  * of consecutive typing produces one contiguous change region, which this
- * captures exactly. The harness uses diff-match-patch for finer granularity
- * (merging adjacent delete+insert into replace); we don't need that here
- * because the editor's own transactions are already the per-op granularity —
- * this diff is only to summarize the accumulated change since last seal.
+ * captures exactly. Finer granularity (merging adjacent delete+insert into
+ * replace) isn't needed here because the editor's own transactions are
+ * already the per-op granularity — this diff is only to summarize the
+ * accumulated change since last seal.
  */
 export function diffToDeltas(oldText: string, newText: string): EditorDelta[] {
   if (oldText === newText) return [];
@@ -270,6 +269,48 @@ export function parseAuthors(authors: unknown, snapshot: string): Run[] | null {
   return runs;
 }
 
+/**
+ * Attribute each delta to its dominant voice and build the node-local voices
+ * table (protocol §3.3, §3.6). For each insert/replace delta, find the dominant
+ * voice in the delta's region of the post-edit runs. If it's the signer, no
+ * authorIndex is set (wire stays byte-identical to legacy). If it's a non-signer
+ * voice, the voices table is built with the signer at [0] and the delta gets
+ * authorIndex pointing into it.
+ *
+ * Returns the (possibly annotated) deltas and the voices table. An empty voices
+ * table means the caller omits the field — pure mono-author nodes stay compact.
+ */
+export function attributeDeltas(
+  deltas: EditorDelta[],
+  runs: Run[],
+  signerPubkey: string,
+): { deltas: (EditorDelta & { authorIndex?: number })[]; voices: string[] } {
+  // Collect all non-signer voices that appear in any delta's dominant region.
+  // The voices table is [signer, ...non-signers in first-seen order].
+  const nonSignerVoices: string[] = [];
+  const voiceIndex = new Map<string, number>();
+  voiceIndex.set(signerPubkey, 0);
+
+  // First pass: determine which deltas need attribution and collect voices.
+  const annotated = deltas.map((d) => {
+    if (d.type === "delete" || !d.newValue) return { ...d }; // no inserted text
+    const regionLen = d.newValue.length;
+    if (regionLen === 0) return { ...d };
+    // The delta's region in the post-edit snapshot is [positionStart, positionStart + regionLen].
+    const dominant = dominantVoiceInRegion(runs, d.positionStart, d.positionStart + regionLen);
+    if (!dominant || dominant === signerPubkey) return { ...d }; // signer — no index
+    // Non-signer voice — add to the table if not already present.
+    if (!voiceIndex.has(dominant)) {
+      nonSignerVoices.push(dominant);
+      voiceIndex.set(dominant, nonSignerVoices.length); // signer is [0], so first non-signer is [1]
+    }
+    return { ...d, authorIndex: voiceIndex.get(dominant) };
+  });
+
+  const voices = nonSignerVoices.length > 0 ? [signerPubkey, ...nonSignerVoices] : [];
+  return { deltas: annotated, voices };
+}
+
 export interface PublishEditInput {
   prevEventId: string | null;
   relativePath: string;
@@ -425,10 +466,10 @@ function delay(ms: number): Promise<void> {
  *  challenge arrives as a message on the open WebSocket, and if onauth isn't
  *  set by then it's silently dropped. Constructing → setting onauth →
  *  connecting is the race-free order nostr-tools' own pool uses (nostr.bundle.
- *  js:3620-3634). In friend mode (transport.md §5) the sidecar challenges every
- *  connection; this handler signs the kind-22242 AUTH event with the manual
- *  (pen) key so the relay recognizes us as owner or friend. In open mode the
- *  relay never challenges, so this is dead code that costs nothing. */
+ *  js:3620-3634). In networked mode (transport.md §5) the sidecar challenges
+ *  every connection; this handler signs the kind-22242 AUTH event with the
+ *  manual (pen) key so the relay recognizes us as owner or peer. In local mode
+ *  the relay never challenges, so this is dead code that costs nothing. */
 function getRelay(url: string): Promise<Relay> {
   let p = relayCache.get(url);
   if (!p) {
@@ -450,10 +491,10 @@ function getRelay(url: string): Promise<Relay> {
  *
  *  AUTH race: nostr-tools' onauth fires when the challenge arrives and calls
  *  relay.auth() internally, but publish()/subscribe() don't wait for auth to
- *  complete. In friend mode the relay rejects every event/filter with
+ *  complete. In networked mode the relay rejects every event/filter with
  *  "auth-required:" until AUTH is processed. We bridge this by tracking the
  *  auth completion as a promise and awaiting it (with a short timeout) before
- *  returning the relay. In open mode the relay never challenges, so the
+ *  returning the relay. In local mode the relay never challenges, so the
  *  promise never resolves — the timeout (1.5s) handles that gracefully. */
 async function connectWithAuth(url: string): Promise<Relay> {
   const relay = new Relay(url);
@@ -462,7 +503,16 @@ async function connectWithAuth(url: string): Promise<Relay> {
     authResolve = resolve;
   });
   relay.onauth = async (evt) => {
-    const signed = finalizeEvent(evt, loadOrCreateVoice().secretKey) as unknown as
+    // The AUTH challenge is signed with the NODE (owner) key — the identity the
+    // relay recognizes as owner (the `owner` field in peers.json). Before the
+    // NODE role existed this hardcoded loadOrCreateVoice(); that worked only
+    // because the builtin key was seeded from the same legacy slot. Routing
+    // through the node key keeps AUTH consistent with the onion derivation and
+    // the owner record, so networked mode honors whichever key the user designated
+    // as the machine identity. Falls back to the legacy voice when the keychain
+    // can't resolve a node key (headless/Node press, tests).
+    const secret = nodeSecretKey() ?? loadOrCreateVoice().secretKey;
+    const signed = finalizeEvent(evt, secret) as unknown as
       Awaited<ReturnType<NonNullable<Relay["onauth"]>>>;
     // Resolve the ready promise once the signed AUTH event is produced.
     // The relay still needs to process it (a round-trip), so the caller
@@ -532,7 +582,7 @@ async function getRelayRetrying(url: string, maxAttempts = 5): Promise<Relay | n
 }
 
 /** Connect to every write-enabled relay. Order matches the user's list. */
-async function getWriteRelays(): Promise<Relay[]> {
+export async function getWriteRelays(): Promise<Relay[]> {
   const urls = writeRelays().map((e) => e.url);
   const out: Relay[] = [];
   for (const url of urls) {
@@ -544,7 +594,7 @@ async function getWriteRelays(): Promise<Relay[]> {
 }
 
 /** Connect to every read-enabled relay. Order matches the user's list. */
-async function getReadRelays(): Promise<Relay[]> {
+export async function getReadRelays(): Promise<Relay[]> {
   const urls = readRelays().map((e) => e.url);
   const out: Relay[] = [];
   for (const url of urls) {
@@ -559,7 +609,7 @@ async function getReadRelays(): Promise<Relay[]> {
  * Publish to one relay, retrying once after NIP-42 AUTH if the relay rejects
  * with "auth-required:". nostr-tools' individual Relay.publish() does NOT
  * retry after auth (only the SimpleRelayPool does); we replicate the pool's
- * retry pattern here so friend-mode relays accept our writes. The relay's
+ * retry pattern here so networked-mode relays accept our writes. The relay's
  * onauth handler (set in connectWithAuth) signs the AUTH event with the
  * manual key.
  */
@@ -586,7 +636,7 @@ async function publishWithAuth(relay: Relay, event: Event): Promise<string> {
  * than any other. The call rejects only when *every* relay failed (or when the
  * set was empty to begin with), so a save is never a silent no-op.
  */
-async function publishToMany(relays: Relay[], event: Event): Promise<void> {
+export async function publishToMany(relays: Relay[], event: Event): Promise<void> {
   if (relays.length === 0) {
     throw new Error(
       "no relays available to publish to — enable write on at least one relay (the home relay is off)",
@@ -603,6 +653,67 @@ async function publishToMany(relays: Relay[], event: Event): Promise<void> {
       .join("; ");
     throw new Error(`publish failed on every relay${msgs ? ` (${msgs})` : ""}`);
   }
+}
+
+// --- Voice identity declarations (kind 34292) ----------------------------
+//
+// A voice's visual identity (font, hue, sat) is a personal choice, not a hash.
+// kind-34292 is a NIP-33 replaceable parameterized event: the `d` tag is the
+// owner's pubkey, content is the JSON { font, hue, sat }. Foreign readers fetch
+// it so they see the author's chosen colors instead of the deterministic hash
+// fallback. Published best-effort by KeysView.updateIdentity; fetched by
+// keys-store.identityForPubkey when resolving colors for a pubkey the local
+// keychain doesn't own (e.g. the Times chart minters).
+
+/** Fetch the latest kind-34292 voice-identity declaration for a pubkey from the
+ *  read relays. Returns null if none is found (caller falls back to the hash).
+ *  Best-effort: a down relay contributes nothing. */
+export async function fetchVoiceIdentity(pubkey: string): Promise<{ font: string; hue: number; sat: number } | null> {
+  const relays = await getReadRelays();
+  const events = await queryMany(relays, {
+    kinds: [34292],
+    authors: [pubkey],
+    "#d": [pubkey],
+    limit: 1,
+  });
+  if (events.length === 0) return null;
+  // Pick the newest (queryMany dedupes by id; multiple relays may return the
+  // same event, or different replacements — newest wins).
+  const newest = events.sort((a, b) => b.created_at - a.created_at)[0];
+  try {
+    const parsed = JSON.parse(newest.content);
+    if (
+      typeof parsed === "object" && parsed !== null &&
+      typeof parsed.font === "string" &&
+      typeof parsed.hue === "number" &&
+      typeof parsed.sat === "number"
+    ) {
+      return { font: parsed.font, hue: parsed.hue, sat: parsed.sat };
+    }
+  } catch {
+    // Malformed content — fall through to null.
+  }
+  return null;
+}
+
+/** Publish a kind-34292 voice-identity declaration so foreign readers see the
+ *  author's chosen colors. NIP-33 replaceable: `d` tag = the voice's pubkey.
+ *  Fire-and-forget from KeysView — a publish failure only means a foreign
+ *  reader sees the hash fallback. */
+export async function publishVoiceIdentity(
+  identity: { font: string; hue: number; sat: number },
+  signer: Uint8Array,
+  pubkey: string,
+): Promise<void> {
+  const template = {
+    kind: 34292,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [["d", pubkey]],
+    content: JSON.stringify(identity),
+  };
+  const signed = finalizeEvent(template, signer);
+  const relays = await getWriteRelays();
+  await publishToMany(relays, signed);
 }
 
 /** Dedupe user tags case-insensitively, keeping first-seen casing. Containment
@@ -847,11 +958,18 @@ export async function sendSealed(event: Event): Promise<void> {
   await publishToMany(relays, event);
 }
 
-/** Affirm: mark a sent node as the author's published position. Seals a new
- *  node with `action: "affirm"` citing the sent node via a `q` tag. Per §8,
- *  affirm requires prior Send — affirming a node that was never sent would
- *  claim a public position for something no one can fetch. The caller is
- *  responsible for ensuring the cited node has been sent. */
+/** Affirm: mark a sealed node as the author's published position (protocol §8).
+ *  Seals a new kind-4290 node with `action: "affirm"` citing the target node via
+ *  a `q` tag. Available to ALL: on your own zine you seal-first then attest; on
+ *  a foreign zine you cite-and-attest (prevEventId null — you have no prior seal
+ *  on someone else's chain).
+ *
+ *  `z` ("file" | "folder") tags the affirm so it's queryable by what it attests
+ *  — a folder-affirm carries z=folder, keeping it out of file-only queries. The
+ *  optional `message` lets the author attach a brief curatorial note (content-
+ *  only; the OTS stamp covers it automatically via the event id). `geohash` pins
+ *  the affirm to a location (§3.1 `g` tag). The OTS attestation (kind-1040) is
+ *  fired fire-and-forget after publish — the affirm node stands on its own. */
 export async function affirmNode(
   citedNodeId: string,
   citedOwnerPubkey: string,
@@ -862,6 +980,9 @@ export async function affirmNode(
     snapshot: string;
     contentHash: string;
     signer?: Uint8Array;
+    z?: "file" | "folder";
+    message?: string;
+    geohash?: string;
   },
 ): Promise<Event> {
   const signer = input.signer ?? loadOrCreateVoice().secretKey;
@@ -869,23 +990,36 @@ export async function affirmNode(
     kind: 4290,
     created_at: Math.floor(Date.now() / 1000),
     tags: [
-      ["z", "file"],
+      ["z", input.z ?? "file"],
       ["f", input.folderId],
       ["action", "affirm"],
-      // Cite the sent node being affirmed (NIP-18 quote shape, §3.1).
+      // Cite the node being affirmed (NIP-18 quote shape, §3.1).
       ["q", citedNodeId, "", citedOwnerPubkey],
       ...(input.prevEventId
         ? [["e", input.prevEventId, "", "prev"] as string[]]
         : []),
+      ...(input.geohash ? [["g", input.geohash] as string[]] : []),
     ],
     content: JSON.stringify({
       snapshot: input.snapshot,
       deltas: [],
       contentHash: input.contentHash,
+      ...(input.message ? { message: input.message } : {}),
     }),
   };
   const signed = finalizeEvent(template, signer);
   await publishToMany(await getWriteRelays(), signed);
+  // §8/§R11.20: anteriority attestation. Fire-and-forget — the affirm node is
+  // already sealed and published; the OTS overlay is strictly additive and must
+  // never block the return. Dynamic import to avoid a circular module dep.
+  void import("./attestation.js")
+    .then(({ stampAndPublishAttestation }) =>
+      stampAndPublishAttestation(signed, signer, resolveRelayUrl()),
+    )
+    .catch(() => {
+      // Swallowed on purpose: a calendar/transport failure logs inside; the
+      // affirm node stands on its own regardless.
+    });
   return signed;
 }
 
@@ -1192,30 +1326,11 @@ export async function fetchRelayActivity(
   );
 }
 
-// --- folder index + folder-level alpha addressing (Listings) --------------
+// --- folder index (Listings) ---------------------------------------------
 //
-// The Listings view needs two things fetchRelayActivity alone doesn't give it:
-//   1. An enumeration of every distinct folder on the relay with rolled-up
-//      stats per folder (the inbox/kept/cut lists are per-folder).
-//   2. A stable addressing key for a *project-as-a-whole*, because TraceAlpha
-//      (kind 4293) is keyed on contentHash and a folder has no hash of its
-//      own — only its member files do.
-//
-// `folderHash(folderId)` resolves (2): a synthetic, deterministic contentHash
-// for a folder's identity, so an operator's promote/demote opinion lives on
-// one stable address per project rather than being scattered across the
-// folder's file hashes. publishTraceAlpha / fetchAlphaHeads are contentHash-
-// agnostic (they carry/look-up the string opaquely), so this needs no
-// protocol change — it's a client convention, documented here.
-
-/** A stable, synthetic contentHash for a folder-as-a-project. Used as the
- *  `contentHash` argument to publishTraceAlpha / fetchAlphaHeads when the
- *  operator is promoting or demoting a whole project, not any single file.
- *  `sha256("folder:" + folderId)` — deterministic across readers, so every
- *  press that tunes the same project addresses the same alpha chain. */
-export async function folderHash(folderId: string): Promise<string> {
-  return sha256HexLocal(`folder:${folderId}`);
-}
+// The Listings view needs an enumeration of every distinct folder on the relay
+// with rolled-up stats per folder (the inbox/kept/cut lists are per-folder) —
+// something fetchRelayActivity alone doesn't give it.
 
 /** One folder's rolled-up activity, the unit of the Listings inbox. Built by
  *  `fetchFolderIndex` from a relay-wide scan; never stored, always recomputed.
@@ -1400,6 +1515,11 @@ export interface CitationChip {
   nodeId: string;
   name: string;
   kind: "file" | "span";
+  /** The pubkey of the event that minted this node — the minter's identity,
+   *  used by TimesView's voice mode to resolve each minter's published color.
+   *  Optional: absent when the node couldn't be fetched (null chip) or on
+   *  callers that don't need it. */
+  pubkey?: string;
 }
 
 /** Truncate a span phrase for chip display: collapse to one whitespace run and
@@ -1446,8 +1566,8 @@ export async function resolveNodeName(nodeId: string): Promise<CitationChip | nu
   // tag at all is also a nameless trace (e.g. an older node, or a foreign kind).
   const isNameless = !path || path.includes("#");
   const chip: CitationChip | null = isNameless
-    ? { nodeId, name: truncatePhrase(snapshot) || nodeId.slice(0, 8), kind: "span" }
-    : { nodeId, name: path.split("/").pop() || path, kind: "file" };
+    ? { nodeId, name: truncatePhrase(snapshot) || nodeId.slice(0, 8), kind: "span", pubkey: event.pubkey }
+    : { nodeId, name: path.split("/").pop() || path, kind: "file", pubkey: event.pubkey };
   nodeNameCache.set(nodeId, chip);
   return chip;
 }
@@ -1663,8 +1783,8 @@ function buildFolderNodeTemplate(
   // Spec §3.1: `f`/`D`/`folder` carry the folder's own genesis id on every node
   // EXCEPT genesis itself — an event can't know its own id before signing.
   // Genesis (folderId null) emits none; its event id becomes the identity every
-  // later node references. This matches the harness (store.ts:556) and closes
-  // the Phase 5 divergence: new folders adopt the genesis event id as identity.
+  // later node references. This closes the genesis-identity question: new
+  // folders adopt the genesis event id as identity.
   if (folderId) {
     tags.push(["folder", folderId], ["f", folderId], ["D", folderId]);
   }
@@ -1847,8 +1967,7 @@ async function publishFolderNode(
   // Spec §4: also publish a TraceHead (kind 34290) head-pointer cache so the
   // folder's head resolves as one bounded fetch for O(1) consumers. `d` = trace
   // identity. Genesis (folderId null) IS the identity — nothing to point at yet,
-  // so no TraceHead (matches the harness at store.ts:588: if (folderId)). The
-  // first non-genesis seal caches it.
+  // so no TraceHead. The first non-genesis seal caches it.
   if (folderId) {
     await publishTraceHead(folderId, signed.id, key, relays);
   }
@@ -2426,6 +2545,42 @@ export async function forkFile(
   });
 }
 
+/** Fork a specific historical node (by id) into a new file trace under the
+ *  destination folder. Unlike `forkFile` (which forks the *latest* node of a
+ *  folder+path), this forks an arbitrary node — used by the stepper's
+ *  "fork from this step" gesture, where the user picks a historical checkpoint
+ *  to branch from. The snapshot is taken verbatim from the source node. */
+export async function forkFileFromNode(
+  sourceNodeId: string,
+  destFolderId: string,
+  destRelativePath: string,
+  opts?: { signer?: Uint8Array },
+): Promise<Event> {
+  const sourceEvent = await fetchEventById(sourceNodeId);
+  if (!sourceEvent) {
+    throw new Error(`Cannot fork: source node ${sourceNodeId} not fetchable.`);
+  }
+  const parsed = JSON.parse(sourceEvent.content) as {
+    snapshot?: string;
+    contentHash?: string;
+  };
+  const snapshot = typeof parsed.snapshot === "string" ? parsed.snapshot : "";
+  const contentHash = parsed.contentHash ?? (await sha256HexLocal(snapshot));
+
+  return publishEdit({
+    prevEventId: null, // genesis under a new owner
+    relativePath: destRelativePath,
+    folderId: destFolderId,
+    deltas: [],
+    snapshot,
+    contentHash,
+    action: "fork",
+    summary: `forked from ${sourceNodeId.slice(0, 8)}`,
+    signer: opts?.signer,
+    forkedFrom: sourceNodeId,
+  });
+}
+
 // --- merging (action: merge) --------------------------------------------
 //
 // Spec §3.8 Merging: unilateral acceptance by the owner of the *receiving*
@@ -2620,52 +2775,6 @@ export async function renameInPalette(nodeId: string, label: string): Promise<vo
       : i,
   );
   await publishPalette(next);
-}
-
-// --- alpha (kind 4293) ---------------------------------------------------
-//
-// A trace's alpha is a signed, per-author opinion of that body's visibility —
-// the lever an operator (anyone running a press) tunes to make a body more
-// likely to surface in a relevant sample (say, a sample of traces bearing an
-// intersecting tag). It is an exact sibling of TraceName (kind 4291): same
-// chain shape, same (pubkey, contentHash) key, same non-replaceable posture.
-// See protocol/trace-provenance.md §TraceAlpha.
-//
-// The wire format carries only the opinion. How a reader turns the set of
-// per-author alpha heads into a single weight is client policy — `effectiveAlpha`
-// below is one reasonable default (author + curator + operator opinions summed
-// with the reader's own weighting), not a protocol rule. The relay stays a dumb
-// pipe: "operator-as-chief-curator" means an operator running their own press
-// under a known pubkey and signing alpha events like any other author.
-
-/** Build, sign, and publish a TraceOpinion (kind 34291) carrying an `alpha`
- *  visibility weight for a body. Spec §5: one replaceable event per
- *  `(pubkey, subject)`, `d = "x:" + contentHash` (the immutable-body axis),
- *  content `{ alpha }`, last-write-wins. The `prevEventId` parameter is
- *  accepted for caller compatibility but ignored — TraceOpinion is
- *  replaceable, so "current" is the latest `created_at`, not a prev-chain.
- *  (Pre-spec code used a non-replaceable kind-4293 chain; readers still query
- *  that as a legacy fallback — see `fetchAlphaHeads`.) */
-export async function publishTraceAlpha(input: {
-  contentHash: string;
-  alpha: number;
-  prevEventId?: string | null;
-  signer?: Uint8Array;
-}): Promise<Event> {
-  const relays = await getWriteRelays();
-  const signer = input.signer ?? loadOrCreateVoice().secretKey;
-  const sealedAt = Date.now();
-
-  const template: EventTemplate = {
-    kind: TRACE_OPINION_KIND,
-    created_at: Math.floor(sealedAt / 1000),
-    tags: [["d", `x:${input.contentHash}`]],
-    content: JSON.stringify({ alpha: input.alpha, sealedAt }),
-  };
-
-  const signed = finalizeEvent(template, signer);
-  await publishToMany(relays, signed);
-  return signed;
 }
 
 /** All uncited heads in a prev-graph: events whose id no other event in the
@@ -3158,262 +3267,6 @@ export async function loadMergeSides(
   return { base, ours, theirs: candidate.snapshot };
 }
 
-/** One author's current alpha for one body. The authoritative value is on the
- *  referenced event's content; `alpha` is parsed out for convenience. */
-export interface AlphaHead {
-  pubkey: string;
-  alpha: number;
-  event: Event;
-}
-
-/** Fetch the current alpha head per (pubkey, contentHash) for every hash in
- *  `contentHashes`, in a single batched query. One round-trip covers a whole
- *  sample's worth of bodies. The filter is NIP-01 multi-value on `#d`, which
- *  returns every alpha event for any of the hashes; we then head-resolve per
- *  pubkey+hash client-side (the relay can't, because "current" depends on the
- *  prev-graph, not on created_at).
- *
- *  Returns a Map keyed by contentHash → the set of distinct-author heads for
- *  that body. Absent hashes have no opinions. */
-export async function fetchAlphaHeads(
-  contentHashes: string[],
-): Promise<Map<string, AlphaHead[]>> {
-  const out = new Map<string, AlphaHead[]>();
-  if (contentHashes.length === 0) return out;
-  const relays = await getReadRelays();
-  // Spec §5: opinions are keyed on `x:<bodyHash>` subjects (the immutable-body
-  // axis). Also query legacy kind-4293 (bare-hash, non-replaceable) so old
-  // alpha events keep reading.
-  const xSubjects = contentHashes.map((h) => `x:${h}`);
-  const [modern, legacy] = await Promise.all([
-    queryMany(relays, { kinds: [TRACE_OPINION_KIND], "#d": xSubjects }),
-    queryMany(relays, { kinds: [TRACE_ALPHA_KIND], "#d": contentHashes }),
-  ]);
-
-  // Bucket by bare contentHash (the caller's key), reconciling both sources.
-  // For modern (34291, replaceable): current = latest created_at per pubkey.
-  // For legacy (4293, non-replaceable): current = uncited-head per pubkey.
-  const byHash = new Map<string, Map<string, Event[]>>();
-  const record = (bareHash: string, e: Event) => {
-    let perPubkey = byHash.get(bareHash);
-    if (!perPubkey) {
-      perPubkey = new Map();
-      byHash.set(bareHash, perPubkey);
-    }
-    let arr = perPubkey.get(e.pubkey);
-    if (!arr) {
-      arr = [];
-      perPubkey.set(e.pubkey, arr);
-    }
-    arr.push(e);
-  };
-  for (const e of modern) {
-    const dTag = e.tags.find((t) => t[0] === "d");
-    if (!dTag || typeof dTag[1] !== "string") continue;
-    const subject = dTag[1];
-    if (!subject.startsWith("x:")) continue;
-    record(subject.slice(2), e);
-  }
-  for (const e of legacy) {
-    const dTag = e.tags.find((t) => t[0] === "d");
-    if (!dTag || typeof dTag[1] !== "string") continue;
-    record(dTag[1], e);
-  }
-
-  for (const [hash, perPubkey] of byHash) {
-    const heads: AlphaHead[] = [];
-    for (const evs of perPubkey.values()) {
-      // Mixed sources: prefer the modern (replaceable) latest; fall back to
-      // the legacy uncited-head resolution only when no modern event exists.
-      const modern = evs.filter((e) => e.kind === TRACE_OPINION_KIND);
-      const legacy = evs.filter((e) => e.kind === TRACE_ALPHA_KIND);
-      let head: Event | null;
-      if (modern.length > 0) {
-        head = modern.reduce((a, b) => (b.created_at > a.created_at ? b : a));
-      } else {
-        head = resolveHead(legacy);
-      }
-      if (!head) continue;
-      const parsed = safeParse(head.content);
-      const alpha =
-        parsed && typeof parsed === "object" && typeof (parsed as { alpha?: unknown }).alpha === "number"
-          ? (parsed as { alpha: number }).alpha
-          : 0;
-      heads.push({ pubkey: head.pubkey, alpha, event: head });
-    }
-    out.set(hash, heads);
-  }
-  return out;
-}
-
-/** Per-reader weights for aggregating alpha opinions. Defaults live in
- *  alpha-config.ts; this is the pure shape the aggregator consumes. An author's
- *  own alpha on their own body counts at `authorWeight`; any other pubkey at
- *  `curatorWeight`; pubkeys in `operatorPubkeys` at `operatorWeight` (the
- *  "relay-operator-as-chief-curator" default, expressed as a client-side
- *  multiplier, not a protocol role). */
-export interface AlphaAggOpts {
-  /** The reader's own pubkey — alpha events signed by this key count as author
-   *  self-tuning. */
-  authorPubkey?: string;
-  operatorPubkeys?: string[];
-  authorWeight?: number;
-  curatorWeight?: number;
-  operatorWeight?: number;
-}
-
-/** The default multiplier for an operator's alpha opinion. Mirrors the default
- *  in alpha-config.ts; duplicated here so the aggregator is usable with an
- *  empty opts object (zero-config regression-safe behavior). */
-const DEFAULT_OPERATOR_WEIGHT = 3.0;
-
-/** Sum the weighted alpha opinions for one body. Pure function: given the heads
- *  for one contentHash and the reader's weighting, returns the effective alpha.
- *  Empty heads → 0 (baseline, not exclusion — a body with no opinions is still
- *  sampleable on its other merits). */
-export function effectiveAlpha(heads: AlphaHead[], opts: AlphaAggOpts = {}): number {
-  const author = opts.authorPubkey;
-  const operators = new Set(opts.operatorPubkeys ?? []);
-  const authorWeight = opts.authorWeight ?? 1.0;
-  const curatorWeight = opts.curatorWeight ?? 1.0;
-  const operatorWeight = opts.operatorWeight ?? DEFAULT_OPERATOR_WEIGHT;
-  let total = 0;
-  for (const h of heads) {
-    const w =
-      h.pubkey === author
-        ? authorWeight
-        : operators.has(h.pubkey)
-          ? operatorWeight
-          : curatorWeight;
-    total += h.alpha * w;
-  }
-  return total;
-}
-
-// --- trace rank (manual arrangement of folders) -------------------------
-
-/** The synthetic contentHash a folder's manual stack-position is addressed on.
- *  A *separate* namespace from `folderHash` (which carries promote/demote
- *  verdicts): `rank:<folderId>` keeps stack-position opinions on their own
- *  relay `#d` axis, so they never collide with verdict alpha and a reader can
- *  query one without the other. Same client-convention stance as `folderHash`
- *  — needs no protocol change, every press that arranges the same project
- *  addresses the same rank chain. */
-export async function rankHash(folderId: string): Promise<string> {
-  return sha256HexLocal(`rank:${folderId}`);
-}
-
-/** One author's current manual rank for one folder. `rank` is a position
- *  integer (lower = earlier in the stack), parsed from the head event's
- *  content; the authoritative value lives on `event`. Sibling of `AlphaHead`
- *  for a different wire payload (rank, not alpha). */
-export interface RankHead {
-  pubkey: string;
-  rank: number;
-  event: Event;
-}
-
-/** Build, sign, and publish a kind-4293 TraceAlpha event carrying a *rank*
- *  payload instead of an alpha one. The kind and tags are identical to
- *  `publishTraceAlpha`; only the content differs (`{ rank, sealedAt }`), and
- *  the separation comes from the `rank:<folderId>` contentHash namespace
- *  (callers pass `rankHash(folderId)`), not from any wire-level discriminator.
- *  Structurally a near-clone of `publishTraceAlpha`.
- *
- *  `prevEventId` is the current head for (this signer, rankHash); null on the
- *  first arrangement. Now a TraceOpinion (kind 34291, replaceable) keyed on
- *  `d = "r:" + contentHash` — the rank subject namespace, a client convention
- *  parallel to alpha's `x:` axis. `prevEventId` accepted but ignored. */
-export async function publishTraceRank(input: {
-  contentHash: string;
-  rank: number;
-  prevEventId?: string | null;
-  signer?: Uint8Array;
-}): Promise<Event> {
-  const relays = await getWriteRelays();
-  const signer = input.signer ?? loadOrCreateVoice().secretKey;
-  const sealedAt = Date.now();
-
-  const template: EventTemplate = {
-    kind: TRACE_OPINION_KIND,
-    created_at: Math.floor(sealedAt / 1000),
-    tags: [["d", `r:${input.contentHash}`]],
-    content: JSON.stringify({ rank: input.rank, sealedAt }),
-  };
-
-  const signed = finalizeEvent(template, signer);
-  await publishToMany(relays, signed);
-  return signed;
-}
-
-/** Fetch the current rank head per (pubkey, rankHash) for every hash in
- *  `rankHashes`, in a single batched query. Queries both TraceOpinion (34291,
- *  `r:`-prefixed) and legacy TraceAlpha (4293, bare hash) and reconciles.
- *  Modern: current = latest created_at per pubkey. Legacy: uncited-head scan.
- *  Absent hashes have no opinions. */
-export async function fetchRankHeads(
-  rankHashes: string[],
-): Promise<Map<string, RankHead[]>> {
-  const out = new Map<string, RankHead[]>();
-  if (rankHashes.length === 0) return out;
-  const relays = await getReadRelays();
-  const rSubjects = rankHashes.map((h) => `r:${h}`);
-  const [modern, legacy] = await Promise.all([
-    queryMany(relays, { kinds: [TRACE_OPINION_KIND], "#d": rSubjects }),
-    queryMany(relays, { kinds: [TRACE_ALPHA_KIND], "#d": rankHashes }),
-  ]);
-
-  // Bucket by bare rankHash (the caller's key), reconciling both sources.
-  const byHash = new Map<string, Map<string, Event[]>>();
-  const record = (bareHash: string, e: Event) => {
-    let perPubkey = byHash.get(bareHash);
-    if (!perPubkey) {
-      perPubkey = new Map();
-      byHash.set(bareHash, perPubkey);
-    }
-    let arr = perPubkey.get(e.pubkey);
-    if (!arr) {
-      arr = [];
-      perPubkey.set(e.pubkey, arr);
-    }
-    arr.push(e);
-  };
-  for (const e of modern) {
-    const dTag = e.tags.find((t) => t[0] === "d");
-    if (!dTag || typeof dTag[1] !== "string") continue;
-    const subject = dTag[1];
-    if (!subject.startsWith("r:")) continue;
-    record(subject.slice(2), e);
-  }
-  for (const e of legacy) {
-    const dTag = e.tags.find((t) => t[0] === "d");
-    if (!dTag || typeof dTag[1] !== "string") continue;
-    record(dTag[1], e);
-  }
-  for (const [hash, perPubkey] of byHash) {
-    const heads: RankHead[] = [];
-    for (const evs of perPubkey.values()) {
-      const modernEvs = evs.filter((e) => e.kind === TRACE_OPINION_KIND);
-      const legacyEvs = evs.filter((e) => e.kind === TRACE_ALPHA_KIND);
-      let head: Event | null;
-      if (modernEvs.length > 0) {
-        head = modernEvs.reduce((a, b) => (b.created_at > a.created_at ? b : a));
-      } else {
-        head = resolveHead(legacyEvs);
-      }
-      if (!head) continue;
-      const parsed = safeParse(head.content);
-      const rank =
-        parsed && typeof parsed === "object" && typeof (parsed as { rank?: unknown }).rank === "number"
-          ? (parsed as { rank: number }).rank
-          : 0;
-      heads.push({ pubkey: head.pubkey, rank, event: head });
-    }
-    out.set(hash, heads);
-  }
-  return out;
-}
-
 // --- named stacks (the editorial output of Stacks) ----------------------
 //
 // A "stack" is a named section in the Stacks view — the editorial presentation
@@ -3632,49 +3485,17 @@ export function effectiveStackRank(
   return heads.reduce((sum, h) => sum + h.rank, 0) / heads.length;
 }
 
-/** Reorder sample hits by rank = citationCount + effectiveAlpha. Deterministic:
- *  same query → same order. Stable sort preserves the sampler's first-seen
- *  insertion order as the tiebreak, so equal-rank hits keep sampleRelays'
- *  output order rather than reshuffling on refresh.
- *
- *  Alpha is fetched in a single batched query keyed by every hit's contentHash
- *  (the `x` tag for 4290 minted-span nodes, hashed snapshot as a fallback for
- *  named file traces that don't emit `x`). With no alpha opinions present, every
- *  effectiveAlpha is 0 and the order collapses to citationCount-only — exactly
- *  today's behavior, so this is a safe drop-in for runSample. */
-export async function rankSampleHits(
-  hits: SampleHit[],
-  opts: AlphaAggOpts = {},
-): Promise<SampleHit[]> {
-  // Gather content hashes. `x` is authoritative for minted spans; fall back to
-  // hashing the snapshot so named file traces (which don't emit x) still rank.
-  const hashes = new Set<string>();
-  const hashFor = new Map<Event, string>();
-  for (const hit of hits) {
-    const xTag = hit.event.tags.find((t) => t[0] === "x");
-    let hash: string | undefined;
-    if (xTag && typeof xTag[1] === "string") {
-      hash = xTag[1];
-    } else if (hit.event.kind === FILE_TRACE_NODE_KIND) {
-      const parsed = safeParse(hit.event.content);
-      if (parsed && typeof parsed === "object" && typeof (parsed as { snapshot?: unknown }).snapshot === "string") {
-        hash = await sha256HexLocal((parsed as { snapshot: string }).snapshot);
-      }
-    }
-    if (hash) {
-      hashes.add(hash);
-      hashFor.set(hit.event, hash);
-    }
-  }
-
-  const alphaByHash = hashes.size > 0 ? await fetchAlphaHeads([...hashes]) : new Map<string, AlphaHead[]>();
-
+/** Reorder sample hits by citation count (which folds in affirms — an affirm
+ *  is a `q`-tag citation). Deterministic: same query → same order. Stable sort
+ *  preserves the sampler's first-seen insertion order as the tiebreak, so
+ *  equal-rank hits keep sampleRelays' output order rather than reshuffling on
+ *  refresh. (The former effectiveAlpha signal was removed — it had no
+ *  publishers, so citation count is now the sole visibility weight.) */
+export async function rankSampleHits(hits: SampleHit[]): Promise<SampleHit[]> {
   // Decorate each hit with a score, then stable-sort descending by score.
   const scored = hits.map((hit, i) => {
     const meta = eventMeta(hit.event);
-    const hash = hashFor.get(hit.event);
-    const alpha = hash ? effectiveAlpha(alphaByHash.get(hash) ?? [], opts) : 0;
-    return { hit, score: meta.citationCount + alpha, i };
+    return { hit, score: meta.citationCount, i };
   });
   scored.sort((a, b) => b.score - a.score || a.i - b.i);
   return scored.map((s) => s.hit);
@@ -3779,9 +3600,9 @@ export function reconstructRunsFromChain(chain: Event[]): Run[] {
     if (contentDeltas.length === 0) {
       // No content deltas on this seal. Two sub-cases:
       //  (a) a bare snapshot that differs from the running content — a
-      //      wholesale reset with no delta info (genesis/import on older
-      //      harness data). The only honest attribution is the whole snapshot
-      //      to this signer.
+      //      wholesale reset with no delta info (genesis, or legacy output
+      //      that shed deltas). The only honest attribution is the whole
+      //      snapshot to this signer.
       //  (b) a tag/reply-only edit — the snapshot matches the current text,
       //      so attribution is preserved (the signer touched metadata, not
       //      text). Re-attributing here would hand the whole document to the
@@ -3911,7 +3732,7 @@ function queryOnce(relay: Relay, filter: Filter): Promise<Event[]> {
  * nothing. This is the read-side equivalent of publishToMany: the local
  * sidecar and external relays are treated as a federated set.
  */
-async function queryMany(relays: Relay[], filter: Filter, perRelayMs = 4000): Promise<Event[]> {
+export async function queryMany(relays: Relay[], filter: Filter, perRelayMs = 4000): Promise<Event[]> {
   if (relays.length === 0) return [];
   // Every relay gets its own timeout so a half-open WS (sub accepted, EOSE
   // never arrives) can't hang forever — without that, baselineScan → doAttach
@@ -4014,7 +3835,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
  *
  * Body extraction by kind:
  *  - 4290 FileTraceNode — `snapshot` is authoritative; deltas replayed as a
- *    fallback for older harness output that shed the snapshot.
+ *    fallback for legacy output that shed the snapshot.
  *  - 4291 TraceName — the name chain carries a `name` field; rendered as a
  *    heading so the body reads as the trace's current name.
  *  - 4292 FolderTraceNode — `snapshot.members` rendered as an unordered list.
@@ -4125,7 +3946,7 @@ function isObject(v: unknown): v is ParsedRecord {
 }
 
 // Replay a single event's deltas onto an empty string. Used only when a 4290
-// node lacks a snapshot (non-normative but seen in older harness output).
+// node lacks a snapshot (non-normative but seen in legacy output).
 function replayDeltas(
   deltas: Array<{ type: string; position: { start: number; end: number }; newValue: string | null }>,
 ): string {
@@ -4365,6 +4186,5 @@ export {
   FILE_TRACE_NODE_KIND,
   TRACE_NAME_KIND,
   FOLDER_TRACE_NODE_KIND,
-  TRACE_ALPHA_KIND,
   FOLDER_MANIFEST_KIND,
 };

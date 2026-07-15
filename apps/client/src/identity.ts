@@ -5,10 +5,10 @@ import type { Event } from "nostr-tools";
 /**
  * Browser-side signing identity for the desktop client.
  *
- * This mirrors `apps/harness/src/voice.ts`'s `createLocal` posture: the only
- * way key material enters the system here is fresh local generation. There is
- * deliberately no import-existing-key path — "paste your nsec" is the phishing
- * pattern this app refuses, in any surface. NIP-46 (an external signer) is the
+ * Key-generation posture: the only way key material enters the system here is
+ * fresh local generation. There is deliberately no import-existing-key path —
+ * "paste your nsec" is the phishing pattern this app refuses, in any surface.
+ * NIP-46 (an external signer) is the
  * later path for unifying this browser identity with the CLI's voices.
  *
  * The key lives in `localStorage`, so it persists across reloads but is scoped
@@ -42,28 +42,85 @@ export function loadOrCreateVoice(): Voice {
   return cached;
 }
 
-const RELAY_URL = "ws://127.0.0.1:4869";
+/**
+ * The local sidecar relay that the desktop app spawns. Always 127.0.0.1; only
+ * the desktop ever uses this as a write target. Kept as a constant because
+ * the Tauri sidecar's listen port is fixed (see src-tauri/src/lib.rs).
+ */
+export const LOCAL_RELAY_URL = "ws://127.0.0.1:4869";
 
 /**
- * Connects to the local relay, retrying briefly while the Tauri-spawned
- * sidecar finishes booting. Mirrors the harness's connectLocalRelay retry
- * loop, minus the spawn (the client relies on Tauri to spawn, not Node).
+ * Resolve the relay URL for *this* runtime. One build serves three shapes:
+ *
+ *   - Explicit override: `VITE_RELAY_URL` (power user / self-host pointing the
+ *     webapp at a relay other than same-origin).
+ *   - Desktop (Tauri): the local sidecar at ws://127.0.0.1:4869. This is the
+ *     local-first posture — the webview never needs to know where it's served
+ *     from, because writes go to the user's own machine.
+ *   - Browser (webapp on the hosted image): derive from the page origin so the
+ *     site and relay share a host. `http(s)://` → `ws(s)://`, path `/relay`.
+ *     Deriving rather than hardcoding means the same bundle works behind any
+ *     proxy/domain/TLS setup without a rebuild.
+ *
+ * NOTE: this is the *primary* relay. Multi-relay fan-out (read from many,
+ * publish to many) lives in relay-config.ts + provenance.ts; this is just
+ * the "where do I connect first" answer.
+ */
+export function resolveRelayUrl(): string {
+  // Node (zine-mcp headless press): the `--relay` arg is exported here as
+  // ZINE_RELAY_URL by apps/mcp before any shared module loads. Checked first
+  // so the headless press pins its home relay without `import.meta.env`
+  // (Vite-only) or `window`/`location` (browser-only). Unset in the browser
+  // and Tauri, so existing desktop/webapp behavior is unchanged. The cast is
+  // type-only: `process` exists under Node and is absent in the browser/Tauri
+  // webview, so the typeof guard makes this a safe no-op there.
+  const g = globalThis as unknown as { process?: { env?: Record<string, string | undefined> } };
+  const nodeOverride = g.process?.env?.ZINE_RELAY_URL;
+  if (nodeOverride) return nodeOverride;
+  const override = import.meta.env.VITE_RELAY_URL as string | undefined;
+  if (override) return override;
+  if (isTauri()) return LOCAL_RELAY_URL;
+  // Browser: same-origin /relay. An https page yields wss://; http yields ws://.
+  const scheme = globalThis.location?.protocol === "https:" ? "wss" : "ws";
+  return `${scheme}://${globalThis.location.host}/relay`;
+}
+
+/** True when running inside the Tauri desktop shell. */
+export function isTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/**
+ * Connects to the primary relay, retrying briefly while the Tauri-spawned
+ * sidecar finishes booting. The retry loop tolerates the sidecar's startup
+ * latency; the client relies on Tauri to spawn it, not Node.
  */
 export async function connectRelay(maxAttempts = 30): Promise<Relay> {
+  const url = resolveRelayUrl();
   let lastErr: unknown;
   for (let i = 0; i < maxAttempts; i++) {
     try {
-      return await Relay.connect(RELAY_URL);
+      return await withTimeout(Relay.connect(url), 4000, `connect ${url}`);
     } catch (e) {
       lastErr = e;
       await delay(150);
     }
   }
   throw new Error(
-    `Could not connect to local relay at ${RELAY_URL} after ${maxAttempts} attempts. ` +
+    `Could not connect to local relay at ${url} after ${maxAttempts} attempts. ` +
       `Last error: ${lastErr instanceof Error ? lastErr.message : lastErr}. ` +
       `Is the Tauri sidecar running?`,
   );
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
 }
 
 function delay(ms: number): Promise<void> {

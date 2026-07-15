@@ -67,6 +67,13 @@ export interface LocalFile {
    *  cleared) by `pushToRelay` on the next push. Absent → fan out (the
    *  default Send posture). */
   pendingLocalOnly?: boolean;
+  /** When true, the next debounced relay push mints a new checkpoint node
+   *  even when content/tags/citations are unchanged since the last seal — the
+   *  deliberate-gesture path (Step/Send, protocol §8: "When a Step does seal,
+   *  it mints a node"). One-shot like `pendingLocalOnly`: consumed (and
+   *  cleared) by `pushToRelay`. Absent → the content-hash no-op branch
+   *  collapses a redundant trailing debounce, as before. */
+  pendingForce?: boolean;
 }
 
 export interface LocalFolder {
@@ -130,6 +137,7 @@ export function saveLocalFile(
     pendingReplyingTo?: string;
     taggedTraces?: string[];
     pendingLocalOnly?: boolean;
+    pendingForce?: boolean;
   },
   label?: string,
 ): void {
@@ -145,6 +153,11 @@ export function saveLocalFile(
     ...(data.voicePubkey ? { voicePubkey: data.voicePubkey } : {}),
     ...(data.pendingReplyingTo ? { pendingReplyingTo: data.pendingReplyingTo } : {}),
     ...(data.taggedTraces && data.taggedTraces.length > 0 ? { taggedTraces: data.taggedTraces } : {}),
+    // One-shot flags consumed by the next pushToRelay. Persisted so they survive
+    // the debounce gap (writeFile returns; pushToRelay fires later from the same
+    // record). Cleared by pushToRelay after the seal lands.
+    ...(data.pendingLocalOnly ? { pendingLocalOnly: data.pendingLocalOnly } : {}),
+    ...(data.pendingForce ? { pendingForce: data.pendingForce } : {}),
   };
   if (label !== undefined) existing.label = label;
   saveLocalFolder(existing);
@@ -234,4 +247,98 @@ export function rememberLocalFolder(ref: FolderRef): void {
 /** Delete a folder's local record entirely. */
 export function forgetLocalFolder(folderId: string): void {
   localStorage.removeItem(key(folderId));
+}
+
+// --- crash pad (desktop) ------------------------------------------------
+//
+// On desktop, the real on-disk folder is a committed snapshot: it only moves
+// when the user Steps (Cmd+S) the active file. Every other dirty file's
+// buffer lives here, in a localStorage "crash pad" under a distinct prefix.
+// The pad survives crashes/reloads/folder-switches and auto-restores on boot,
+// so work is never lost — but the disk file stays pristine until the user
+// explicitly Steps it. One pad key holds every buffered file for a folder:
+//
+//   zine.pad.<folderId> = { [relativePath]: LocalFile }
+//
+// This is desktop-only. The webapp uses `zine.folder.` as its primary store
+// (its "disk"), and that path is untouched. The pad is the webapp store's
+// structure borrowed for the desktop crash-safety role.
+
+const PAD_PREFIX = "zine.pad.";
+
+function padKey(folderId: string): string {
+  return PAD_PREFIX + folderId;
+}
+
+/** Write/update a single buffered file into a folder's pad. Synchronous.
+ *  Stores the live editor state (content/runs/tags/nodeId/etc.) so a buffer
+ *  reconstructs exactly on restore. Creates the pad record on first write. */
+export function mirrorPad(
+  folderId: string,
+  relativePath: string,
+  data: {
+    content: string;
+    tags: string[];
+    nodeId: string;
+    runs?: Run[];
+    voicePubkey?: string;
+    taggedTraces?: string[];
+  },
+): void {
+  try {
+    const raw = localStorage.getItem(padKey(folderId));
+    const pad = raw ? (JSON.parse(raw) as Record<string, LocalFile>) : {};
+    pad[relativePath] = {
+      content: data.content,
+      tags: data.tags,
+      nodeId: data.nodeId,
+      updatedAt: Date.now(),
+      ...(data.runs && data.runs.length > 0 ? { runs: data.runs } : {}),
+      ...(data.voicePubkey ? { voicePubkey: data.voicePubkey } : {}),
+      ...(data.taggedTraces && data.taggedTraces.length > 0 ? { taggedTraces: data.taggedTraces } : {}),
+    };
+    localStorage.setItem(padKey(folderId), JSON.stringify(pad));
+  } catch {
+    // Quota exceeded or disabled storage — the buffer just won't survive a
+    // crash this session. Non-fatal: the editor still works in-memory.
+  }
+}
+
+/** Read a folder's full crash pad. `null` if the pad is absent. */
+export function loadPad(folderId: string): Record<string, LocalFile> | null {
+  try {
+    const raw = localStorage.getItem(padKey(folderId));
+    if (!raw) return null;
+    const pad = JSON.parse(raw) as Record<string, LocalFile>;
+    return pad;
+  } catch {
+    return null;
+  }
+}
+
+/** Remove one path from a folder's pad (called after a successful seal).
+ *  If the pad becomes empty, the key is removed entirely. Synchronous. */
+export function clearPadPath(folderId: string, relativePath: string): void {
+  try {
+    const raw = localStorage.getItem(padKey(folderId));
+    if (!raw) return;
+    const pad = JSON.parse(raw) as Record<string, LocalFile>;
+    delete pad[relativePath];
+    if (Object.keys(pad).length === 0) {
+      localStorage.removeItem(padKey(folderId));
+    } else {
+      localStorage.setItem(padKey(folderId), JSON.stringify(pad));
+    }
+  } catch {
+    // Non-fatal — a stale pad entry just gets overwritten on the next mirror.
+  }
+}
+
+/** Wipe a folder's entire crash pad. Synchronous. */
+export function clearPad(folderId: string): void {
+  try {
+    localStorage.removeItem(padKey(folderId));
+  } catch {
+    // Non-fatal.
+  }
 }

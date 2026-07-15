@@ -38,10 +38,10 @@ this.
 > x86-64 host for arm64 (or vice versa), set the Go target:
 > `GOOS=darwin GOARCH=arm64 go build -o .../binaries/zine-relay .`
 
-## 1b. Source the Tor binary (for friend-mode reachability)
+## 1b. Source the Tor binary (for networked-mode reachability)
 
-Tor is an optional sidecar — only needed for inbound friend reachability over
-onion services (see `protocol/transport.md`). In open mode (no `friends.json`),
+Tor is an optional sidecar — only needed for inbound peer reachability over
+onion services (see `protocol/transport.md`). In local mode (no `peers.json`),
 the app works without it. The binary is bundled the same way as the relay, so
 drop it at `apps/client/src-tauri/binaries/tor`:
 
@@ -57,7 +57,7 @@ drop it at `apps/client/src-tauri/binaries/tor`:
 > `PATH` as a fallback, so a plain `brew install tor` may work with no env var.
 
 > **Missing tor is non-fatal:** `spawn_tor` returns an error if no binary is
-> found, but the app continues without onion reachability — friends can't reach
+> found, but the app continues without onion reachability — peers can't reach
 > you, but local authoring and clearnet publishing work normally.
 
 ## 2. Build the Tauri bundle

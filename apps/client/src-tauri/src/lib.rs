@@ -10,10 +10,12 @@ use std::time::{Duration, Instant};
 use futures_util::StreamExt;
 use serde::Serialize;
 use tauri::{ipc::Channel, Manager, path::BaseDirectory};
+use base64::Engine;
 
 static RELAY_SPAWNED: AtomicBool = AtomicBool::new(false);
 
-// Same set the harness skips when walking a watched folder (store.ts).
+// Segments skipped when walking an attached folder — non-content noise that
+// should never become a trace node (VCS, deps, build artifacts, OS cruft).
 const IGNORED_SEGMENTS: &[&str] = &[
     ".git",
     "node_modules",
@@ -35,7 +37,7 @@ const IGNORED_SEGMENTS: &[&str] = &[
 ///      crate (`tauri dev` from a checkout)
 ///
 /// Then connects to ws://127.0.0.1:4869 — if that's already accepting TCP, we
-/// assume a relay is already running (e.g. the harness CLI started one) and
+/// assume a relay is already running (e.g. another launch started one) and
 /// don't spawn a second. Otherwise spawn detached and poll the port until it's
 /// listening (or timeout).
 ///
@@ -98,6 +100,14 @@ async fn spawn_relay(app: tauri::AppHandle) -> Result<String, String> {
     }
 }
 
+/// The platform-specific executable suffix — empty on Unix, `.exe` on Windows.
+/// Used so the dev-resolver and the build script look for the same filename Go
+/// actually produces on each platform.
+#[cfg(windows)]
+const EXE_SUFFIX: &str = ".exe";
+#[cfg(not(windows))]
+const EXE_SUFFIX: &str = "";
+
 /// Resolve the relay binary path across dev and installed-app layouts.
 fn resolve_relay_binary(app: &tauri::AppHandle) -> Result<String, String> {
     // 1. Explicit env override (dev convenience / custom build).
@@ -108,21 +118,25 @@ fn resolve_relay_binary(app: &tauri::AppHandle) -> Result<String, String> {
         return Err(format!("TRACER_RELAY_BIN set but not found: {}", bin));
     }
     // 2. Bundled resource — the path that matters for a distributed build.
-    //    `binaries/zine-relay` is declared in tauri.conf.json bundle.resources.
-    if let Ok(resource) = app.path().resolve("binaries/zine-relay", BaseDirectory::Resource) {
+    //    `binaries/zine-relay` / `binaries/zine-relay.exe` is declared in
+    //    tauri.conf.json bundle.resources.
+    let resource_name = format!("binaries/zine-relay{}", EXE_SUFFIX);
+    if let Ok(resource) = app.path().resolve(&resource_name, BaseDirectory::Resource) {
         if resource.exists() {
             return Ok(resource.to_string_lossy().into_owned());
         }
     }
     // 3. Monorepo default: src-tauri/ -> ../../../relay/zine-relay (tauri dev).
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let candidate = Path::new(manifest_dir).join("../../../relay/zine-relay");
+    let candidate = Path::new(manifest_dir)
+        .join(format!("../../../relay/zine-relay{}", EXE_SUFFIX));
     let candidate = candidate.canonicalize().unwrap_or(candidate);
     if candidate.exists() {
         return Ok(candidate.to_string_lossy().into_owned());
     }
     Err(format!(
-        "no relay binary found. Build it: cd relay && go build -o zine-relay . — or set TRACER_RELAY_BIN. (looked for bundled resource, then: {})",
+        "no relay binary found. Build it: cd relay && go build -o zine-relay{} . — or set TRACER_RELAY_BIN. (looked for bundled resource, then: {})",
+        EXE_SUFFIX,
         candidate.display()
     ))
 }
@@ -208,17 +222,15 @@ async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
 }
 
 /// Recursively list a folder, returning relative paths (relative to `root`).
-/// Skips the same ignored segments as the harness walker. Both files AND
-/// directories are emitted as entries — directories carry `is_dir: true` with
-/// their own relative path, then recursion populates their contents. This
-/// mirrors the harness's `scanDir` (store.ts), which uses `readdirSync({
-/// withFileTypes: true })` and branches on `entry.isDirectory()`.
+/// Skips the ignored segments above. Both files AND directories are emitted as
+/// entries — directories carry `is_dir: true` with their own relative path,
+/// then recursion populates their contents.
 ///
 /// The client's `baselineScan` (workspace.ts) groups entries by directory and
 /// dispatches on `is_dir`: a directory entry mints a `kind: "folder"` member
-/// with its own genesis and recurses, exactly like the harness. Returning
-/// only files (an earlier shape) left the `isDir` branch dead and silently
-/// dropped every nested file on attach — empty subdirectories were lost too.
+/// with its own genesis and recurses. Returning only files (an earlier shape)
+/// left the `isDir` branch dead and silently dropped every nested file on
+/// attach — empty subdirectories were lost too.
 #[tauri::command]
 fn list_dir(root: String) -> Result<Vec<DirEntry>, String> {
     let root_path = PathBuf::from(&root);
@@ -254,8 +266,7 @@ fn walk_dir(dir: &Path, root: &Path, out: &mut Vec<DirEntry>) -> Result<(), Stri
                 .to_string_lossy()
                 .into_owned();
             // Emit the directory itself before recursing, so the client's
-            // baselineScan sees the folder-member and mints its genesis —
-            // mirroring the harness's readdirSync withFileTypes branch.
+            // baselineScan sees the folder-member and mints its genesis.
             out.push(DirEntry {
                 relative_path: rel,
                 is_dir: true,
@@ -319,7 +330,7 @@ fn delete_folder(root: String, relative_path: String) -> Result<(), String> {
 
 /// Create a directory (including parents). No-op if it already exists.
 /// Folders have no provenance node of their own — they're implicit in file
-/// paths, same as the harness.
+/// paths.
 #[tauri::command]
 fn create_folder(root: String, relative_path: String) -> Result<(), String> {
     let abs = resolve_under(&root, &relative_path)?;
@@ -543,54 +554,226 @@ fn extract_sse_data(raw_event: &str) -> String {
     lines.join("\n")
 }
 
-// --- Friend ACL management ----------------------------------------------
+// --- OpenTimestamps (NIP-03) --------------------------------------------
 //
-// The relay reads ~/.tracer/friends.json (siblings to the relay DB) to decide
+// Hosts HTTP for OTS calendar submission. The browser can't reach the public
+// calendars directly (they don't send CORS headers), so like `llm_fetch` this
+// is a thin Rust proxy: it takes a Nostr event id (hex SHA-256), submits the
+// raw 32-byte digest to a calendar, and returns the .ots proof base64-encoded.
+// The JS side builds + signs the NIP-03 kind-1040 attestation around it.
+//
+// Single calendar for now (plumbing). The submission is one POST per calendar,
+// so multi-calendar redundancy is additive later — it just needs binary proof
+// merging, which is out of scope here.
+
+/// Default calendar. Public, free, run by Peter Todd. The OTS submission
+/// protocol is: POST the raw 32-byte digest as the binary body, receive the
+/// .ots proof (binary) as the response body. No content-type required.
+const OTS_CALENDAR: &str = "https://alice.btc.calendar.opentimestamps.org";
+
+/// Stamp a Nostr event id against Bitcoin via OpenTimestamps. Takes the event
+/// id as lowercase hex (64 chars = 32 bytes), POSTs the raw digest to the
+/// calendar, and returns the .ots proof as base64. The returned proof is
+/// typically *partial* — it proves calendar submission and is upgradeable to a
+/// full Bitcoin-anchored proof once the digest lands in a block (minutes to
+/// hours; occasionally never if the calendar drops it).
+#[tauri::command]
+async fn stamp_ots(digest_hex: String) -> Result<String, String> {
+    let bytes = hex::decode(&digest_hex)
+        .map_err(|e| format!("invalid hex digest: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("expected 32-byte digest, got {}", bytes.len()));
+    }
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(OTS_CALENDAR)
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|e| format!("OTS stamp request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        let snippet = if text.len() > 500 {
+            format!("{}…", &text[..500])
+        } else {
+            text
+        };
+        return Err(format!("OTS stamp HTTP {}: {}", status.as_u16(), snippet));
+    }
+    let proof = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read OTS proof: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&proof))
+}
+
+/// Attempt to upgrade a partial .ots proof to a full Bitcoin-anchored one.
+/// POSTs the existing proof to the calendar's `/upgrade` endpoint. Returns
+/// `Some(base64)` if the proof was upgraded (the calendar returned a longer
+/// proof containing the Bitcoin attestation), or `None` if it's still pending
+/// (the digest hasn't landed in a block yet — try again later). Errors only on
+/// transport failure, not on "still pending," which is a normal OTS state.
+#[tauri::command]
+async fn upgrade_ots(proof_b64: String) -> Result<Option<String>, String> {
+    let proof = base64::engine::general_purpose::STANDARD
+        .decode(&proof_b64)
+        .map_err(|e| format!("invalid base64 proof: {e}"))?;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{OTS_CALENDAR}/upgrade"))
+        .header("Accept", "application/vnd.opentimestamps.v1")
+        .body(proof.clone())
+        .send()
+        .await
+        .map_err(|e| format!("OTS upgrade request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        let snippet = if text.len() > 500 {
+            format!("{}…", &text[..500])
+        } else {
+            text
+        };
+        return Err(format!("OTS upgrade HTTP {}: {}", status.as_u16(), snippet));
+    }
+    let upgraded = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read upgraded OTS proof: {e}"))?;
+    // The upgraded proof contains the Bitcoin attestation when confirmed; a
+    // still-pending proof comes back unchanged (same bytes). If nothing grew,
+    // there's nothing to republish.
+    if upgraded.len() > proof.len() {
+        Ok(Some(base64::engine::general_purpose::STANDARD.encode(&upgraded)))
+    } else {
+        Ok(None)
+    }
+}
+
+// --- Access policy management -------------------------------------------
+//
+// The relay reads ~/.tracer/peers.json (sibling to the relay DB) to decide
 // who may connect. These commands let the webview manage that file without
 // touching the filesystem directly (no tauri-plugin-fs exposed to JS). The
 // relay re-reads the file on its 5s poll, so changes take effect without a
-// restart. See relay/friends.go + protocol/transport.md §5.
+// restart. See relay/access-policy.go + protocol/transport.md §5.
 
-/// On-disk shape, matching relay/friends.go's FriendsFile.
+/// On-disk shape, matching relay/access-policy.go's PeersFile. The `writers`
+/// field is omitted on older files — serde defaults it to empty, and writing
+/// it back adds the key (harmless; old relays ignore the field).
 #[derive(serde::Deserialize, serde::Serialize, Clone)]
-struct FriendsFile {
+struct PeersFile {
     owner: String,
-    friends: Vec<String>,
+    peers: Vec<String>,
+    /// May publish events signed as themselves (read+write, own pubkey only).
+    /// The canonical writer is a headless press (zine-mcp). Absent on older
+    /// peers.json files → empty; serialized back as `writers: []`.
+    #[serde(default)]
+    writers: Vec<String>,
 }
 
-/// Resolve ~/.tracer/friends.json — the same path the relay uses (sibling to
-/// the relay DB at ~/.tracer/relay.sqlite3).
-fn friends_json_path() -> Result<PathBuf, String> {
+/// Resolve ~/.tracer/peers.json — the same path the relay uses (sibling to the
+/// relay DB at ~/.tracer/relay.sqlite3).
+fn peers_json_path() -> Result<PathBuf, String> {
+    let home = dirs_home().ok_or("could not determine home directory")?;
+    Ok(home.join(".tracer").join("peers.json"))
+}
+
+/// The pre-rename filename. Kept for one-shot migration (friends.json →
+/// peers.json); see migrate_legacy_friends_file.
+fn legacy_friends_json_path() -> Result<PathBuf, String> {
     let home = dirs_home().ok_or("could not determine home directory")?;
     Ok(home.join(".tracer").join("friends.json"))
 }
 
-/// Read friends.json. Returns a default (empty owner, no friends) if the file
-/// doesn't exist yet — that's the open-mode state.
-fn read_friends_file() -> Result<FriendsFile, String> {
-    let path = friends_json_path()?;
+/// One-shot migration: if peers.json is absent but the legacy friends.json
+/// exists, rename it into place. The relay and the MCP server each run the
+/// same check, so whichever process reads first performs the rename and the
+/// others find peers.json and skip. Idempotent — a second call is a no-op.
+/// We do NOT rewrite the JSON key here: serde reads `friends` into `peers`
+/// via the tolerant path below, and the next *write* persists the new shape.
+/// (If no write ever happens, the relay's own migration rewrites the key.)
+fn migrate_legacy_friends_file() {
+    let Ok(peers_path) = peers_json_path() else { return };
+    if peers_path.exists() {
+        return; // already migrated (or never legacy)
+    }
+    let Ok(legacy) = legacy_friends_json_path() else { return };
+    if !legacy.exists() {
+        return;
+    }
+    // Read + remap the JSON key `friends` → `peers` so the on-disk shape is
+    // correct post-rename, not just the filename.
+    if let Ok(raw) = fs::read_to_string(&legacy) {
+        if let Ok(mut generic) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(obj) = generic.as_object_mut() {
+                if let Some(f) = obj.remove("friends") {
+                    obj.insert("peers".to_string(), f);
+                }
+            }
+            if let Ok(remapped) = serde_json::to_string_pretty(&generic) {
+                let tmp = legacy.with_extension("json.tmp");
+                if fs::write(&tmp, remapped).is_ok() {
+                    if fs::rename(&tmp, &peers_path).is_ok() {
+                        let _ = fs::remove_file(&legacy);
+                        eprintln!("[zine] migrated access-policy file: friends.json -> peers.json");
+                        return;
+                    }
+                    let _ = fs::remove_file(&tmp);
+                }
+            }
+        }
+    }
+    // Fall back to a plain rename (key stays `friends` until next write; the
+    // relay's tolerant reader handles it the same way we do below).
+    let _ = fs::rename(&legacy, &peers_path);
+    eprintln!("[zine] migrated access-policy file: friends.json -> peers.json (filename only)");
+}
+
+/// Read peers.json tolerantly: accepts both the new `peers` key and the
+/// legacy `friends` key (written before the rename), so a partial/failed
+/// migration never locks the owner out. Returns a default (empty owner, no
+/// peers) if the file doesn't exist yet — that's the local-mode state.
+fn read_peers_file() -> Result<PeersFile, String> {
+    migrate_legacy_friends_file();
+    let path = peers_json_path()?;
     if !path.exists() {
-        return Ok(FriendsFile {
+        return Ok(PeersFile {
             owner: String::new(),
-            friends: Vec::new(),
+            peers: Vec::new(),
+            writers: Vec::new(),
         });
     }
     let raw = fs::read_to_string(&path)
         .map_err(|e| format!("read {}: {}", path.display(), e))?;
-    serde_json::from_str(&raw).map_err(|e| format!("parse {}: {}", path.display(), e))
+    // Tolerant parse: accept `friends` as a legacy alias for `peers`.
+    if let Ok(mut generic) = serde_json::from_str::<serde_json::Value>(&raw) {
+        if let Some(obj) = generic.as_object_mut() {
+            if obj.get("peers").is_none() {
+                if let Some(f) = obj.remove("friends") {
+                    obj.insert("peers".to_string(), f);
+                }
+            }
+        }
+        serde_json::from_value::<PeersFile>(generic)
+            .map_err(|e| format!("parse {}: {}", path.display(), e))
+    } else {
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {}", path.display(), e))
+    }
 }
 
-/// Write friends.json atomically (temp + rename), mirroring operator.go's
+/// Write peers.json atomically (temp + rename), mirroring operator.go's
 /// persistence pattern. Writes to a sibling temp file then renames, so a crash
 /// mid-write never leaves a corrupt file.
-fn write_friends_file(data: &FriendsFile) -> Result<(), String> {
-    let path = friends_json_path()?;
+fn write_peers_file(data: &PeersFile) -> Result<(), String> {
+    let path = peers_json_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("create {}: {}", parent.display(), e))?;
     }
     let json = serde_json::to_string_pretty(data)
-        .map_err(|e| format!("serialize friends.json: {e}"))?;
+        .map_err(|e| format!("serialize peers.json: {e}"))?;
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, json)
         .map_err(|e| format!("write {}: {}", tmp.display(), e))?;
@@ -599,81 +782,122 @@ fn write_friends_file(data: &FriendsFile) -> Result<(), String> {
 }
 
 /// Validate a hex pubkey: 64 lowercase hex chars (32 bytes). Matches
-/// relay/friends.go's isValidPubkey.
+/// relay/access-policy.go's isValidPubkey.
 fn is_valid_pubkey(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 #[derive(Serialize)]
-struct FriendsState {
+struct PeersState {
     owner: String,
-    friends: Vec<String>,
-    /// Whether the relay is in friend mode (owner is set) vs open mode.
-    friend_mode: bool,
+    peers: Vec<String>,
+    /// Keys authorized to publish their own events (read+write, own pubkey
+    /// only). Surfaced so a UI can show/manage them; the relay's write gate
+    /// enforces `ev.PubKey == authed` for writer events.
+    writers: Vec<String>,
+    /// Whether the relay is in networked mode (owner is set) vs local mode.
+    #[serde(rename = "networkedMode")]
+    networked_mode: bool,
 }
 
-/// Read the current friend ACL. friend_mode is true when an owner is set —
-/// that's what activates the relay's NIP-42 AUTH requirement.
+/// Read the current access policy. networked_mode is true when an owner is set
+/// — that's what activates the relay's NIP-42 AUTH requirement.
 #[tauri::command]
-fn list_friends() -> Result<FriendsState, String> {
-    let ff = read_friends_file()?;
-    Ok(FriendsState {
-        friend_mode: is_valid_pubkey(&ff.owner),
-        owner: ff.owner,
-        friends: ff.friends,
+fn list_peers() -> Result<PeersState, String> {
+    let pf = read_peers_file()?;
+    Ok(PeersState {
+        networked_mode: is_valid_pubkey(&pf.owner),
+        owner: pf.owner,
+        peers: pf.peers,
+        writers: pf.writers,
     })
 }
 
-/// Set the owner pubkey. This is what activates friend mode — until an owner is
-/// set, the relay stays in open mode (no AUTH required).
+/// Set the owner pubkey. This is what activates networked mode — until an owner
+/// is set, the relay stays in local mode (no AUTH required).
 #[tauri::command]
-fn set_owner(pubkey: String) -> Result<FriendsState, String> {
+fn set_owner(pubkey: String) -> Result<PeersState, String> {
     if !is_valid_pubkey(&pubkey) {
         return Err(format!(
             "invalid pubkey (expected 64 lowercase hex chars): {}",
             pubkey
         ));
     }
-    let mut ff = read_friends_file()?;
-    ff.owner = pubkey;
-    write_friends_file(&ff)?;
-    list_friends()
+    let mut pf = read_peers_file()?;
+    pf.owner = pubkey;
+    write_peers_file(&pf)?;
+    list_peers()
 }
 
-/// Add a friend pubkey (read-only access). Dedupes — adding the same key twice
-/// is a no-op. Refuses to add the owner as a friend (the owner has write
-/// access, not read-only).
+/// Add a peer pubkey (read-only access). Dedupes — adding the same key twice
+/// is a no-op. Refuses to add the owner as a peer (the owner has write access,
+/// not read-only).
 #[tauri::command]
-fn add_friend(pubkey: String) -> Result<FriendsState, String> {
+fn add_peer(pubkey: String) -> Result<PeersState, String> {
     if !is_valid_pubkey(&pubkey) {
         return Err(format!(
             "invalid pubkey (expected 64 lowercase hex chars): {}",
             pubkey
         ));
     }
-    let mut ff = read_friends_file()?;
-    if ff.owner == pubkey {
-        return Err("that pubkey is the owner (owners have write access, not friend access)".into());
+    let mut pf = read_peers_file()?;
+    if pf.owner == pubkey {
+        return Err("that pubkey is the owner (owners have write access, not peer access)".into());
     }
-    if !ff.friends.contains(&pubkey) {
-        ff.friends.push(pubkey);
-        write_friends_file(&ff)?;
+    if !pf.peers.contains(&pubkey) {
+        pf.peers.push(pubkey);
+        write_peers_file(&pf)?;
     }
-    list_friends()
+    list_peers()
 }
 
-/// Remove a friend pubkey.
+/// Remove a peer pubkey.
 #[tauri::command]
-fn remove_friend(pubkey: String) -> Result<FriendsState, String> {
-    let mut ff = read_friends_file()?;
-    ff.friends.retain(|p| p != &pubkey);
-    write_friends_file(&ff)?;
-    list_friends()
+fn remove_peer(pubkey: String) -> Result<PeersState, String> {
+    let mut pf = read_peers_file()?;
+    pf.peers.retain(|p| p != &pubkey);
+    write_peers_file(&pf)?;
+    list_peers()
+}
+
+/// Add a writer pubkey (read+write access, own events only). Dedupes. Refuses
+/// to add the owner as a writer (the owner already writes everything; a writer
+/// entry for it is noise) and refuses to add an existing peer (a key is one
+/// role at a time — peer is read-only, writer is read+write-as-self).
+#[tauri::command]
+fn add_writer(pubkey: String) -> Result<PeersState, String> {
+    if !is_valid_pubkey(&pubkey) {
+        return Err(format!(
+            "invalid pubkey (expected 64 lowercase hex chars): {}",
+            pubkey
+        ));
+    }
+    let mut pf = read_peers_file()?;
+    if pf.owner == pubkey {
+        return Err("that pubkey is the owner (owners have full write access)".into());
+    }
+    if pf.peers.contains(&pubkey) {
+        return Err("that pubkey is a peer (read-only) — remove it as a peer first".into());
+    }
+    if !pf.writers.contains(&pubkey) {
+        pf.writers.push(pubkey);
+        write_peers_file(&pf)?;
+    }
+    list_peers()
+}
+
+/// Remove a writer pubkey.
+#[tauri::command]
+fn remove_writer(pubkey: String) -> Result<PeersState, String> {
+    let mut pf = read_peers_file()?;
+    pf.writers.retain(|p| p != &pubkey);
+    write_peers_file(&pf)?;
+    list_peers()
 }
 
 // --- Tor sidecar: inbound reachability via onion service -----------------
 //
-// The desktop relay is 127.0.0.1-only. Friends reach it through a Tor onion
+// The desktop relay is 127.0.0.1-only. Peers reach it through a Tor onion
 // service: Tor forwards inbound onion connections to the relay's localhost
 // port. The onion address is derived from the Nostr key (see onion-key.ts +
 // protocol/transport.md §3), so it's stable across reinstalls and networks.
@@ -761,7 +985,10 @@ fn resolve_tor_binary(app: &tauri::AppHandle) -> Result<String, String> {
         }
         return Err(format!("TRACER_TOR_BIN set but not found: {}", bin));
     }
-    if let Ok(resource) = app.path().resolve("binaries/tor", BaseDirectory::Resource) {
+    if let Ok(resource) =
+        app.path()
+            .resolve(&format!("binaries/tor{}", EXE_SUFFIX), BaseDirectory::Resource)
+    {
         if resource.exists() {
             // Ensure the exec bit is set (same fixup as the relay binary).
             #[cfg(unix)]
@@ -779,9 +1006,12 @@ fn resolve_tor_binary(app: &tauri::AppHandle) -> Result<String, String> {
         }
     }
     // 3. System tor on PATH — `which tor` equivalent. Common in dev (brew/apt).
+    //    PATH is `;`-delimited on Windows, `:` elsewhere.
+    let path_sep = if cfg!(windows) { ';' } else { ':' };
+    let tor_name = format!("tor{}", EXE_SUFFIX);
     if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(':') {
-            let candidate = Path::new(dir).join("tor");
+        for dir in path.split(path_sep) {
+            let candidate = Path::new(dir).join(&tor_name);
             if candidate.exists() {
                 return Ok(candidate.to_string_lossy().into_owned());
             }
@@ -923,13 +1153,17 @@ pub fn run() {
             rename_path,
             attached_folder_default,
             llm_fetch,
+            stamp_ots,
+            upgrade_ots,
             spawn_tor,
             setup_onion,
             derive_onion_address,
-            list_friends,
+            list_peers,
             set_owner,
-            add_friend,
-            remove_friend,
+            add_peer,
+            remove_peer,
+            add_writer,
+            remove_writer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

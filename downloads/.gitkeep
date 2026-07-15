@@ -1,0 +1,10 @@
+# Desktop installers land here.
+#
+# Drop per-platform Tauri build outputs into this directory (see
+# apps/client/src-tauri/BUILD.md):
+#   *.dmg / *.app.tar.gz   → macOS
+#   *.msi / *.exe          → Windows
+#   *.AppImage / *.deb     → Linux
+#
+# The hosted server scans this dir and exposes /downloads/manifest.json
+# automatically, so adding a build is just `cp` + reload.

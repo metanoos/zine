@@ -56,6 +56,70 @@ export function flattenRuns(runs: Run[]): string {
   return runs.map((r) => r.text).join("");
 }
 
+/**
+ * The voice (pubkey) that owns the most characters in `[start, end)` of the
+ * flattened run list, by total UTF-16 code-unit length. Offsets are clamped to
+ * the document bounds and `start >= end` returns `null` (no region → no voice).
+ *
+ * Used by the seal path to pick a signer that actually matches the *new* text a
+ * seal commits, so a node's `event.pubkey` attributes its net-new content
+ * truthfully even when the `authors` map is later lost (see sealNow in App.tsx).
+ * Tie-breaking is first-seen-wins (stable across equal-content runs).
+ */
+export function dominantVoiceInRegion(
+  runs: Run[],
+  start: number,
+  end: number,
+): string | null {
+  if (start >= end) return null;
+  let cursor = 0;
+  const tally = new Map<string, number>();
+  for (const r of runs) {
+    const len = r.text.length;
+    if (len === 0) continue;
+    const overlapStart = Math.max(start, cursor);
+    const overlapEnd = Math.min(end, cursor + len);
+    if (overlapEnd > overlapStart) {
+      tally.set(r.voice, (tally.get(r.voice) ?? 0) + (overlapEnd - overlapStart));
+    }
+    cursor += len;
+    if (cursor >= end) break;
+  }
+  let best: string | null = null;
+  let bestLen = -1;
+  for (const [voice, n] of tally) {
+    if (n > bestLen) {
+      best = voice;
+      bestLen = n;
+    }
+  }
+  return best;
+}
+
+/**
+ * The single contiguous region where `prev` and `next` differ, expressed as
+ * offsets into `next` — the same common-prefix/suffix shape as
+ * provenance.ts's `stepDeltaRange`. A pure local copy so workspace-core callers
+ * don't take a provenance import just for the diff. Returns `null` when the
+ * texts are identical (no new-text region to attribute).
+ */
+export function changedRegion(
+  prev: string,
+  next: string,
+): { from: number; to: number } | null {
+  if (prev === next) return null;
+  const maxPrefix = Math.min(prev.length, next.length);
+  let start = 0;
+  while (start < maxPrefix && prev[start] === next[start]) start++;
+  let oldEnd = prev.length;
+  let newEnd = next.length;
+  while (oldEnd > start && newEnd > start && prev[oldEnd - 1] === next[newEnd - 1]) {
+    oldEnd--;
+    newEnd--;
+  }
+  return { from: start, to: newEnd };
+}
+
 export interface FileState {
   /** "file" or "folder". Absent on legacy entries — readers default "file".
    *  A folder-member (kind: "folder") is a subfolder trace cited by the parent
@@ -83,6 +147,26 @@ export interface FileState {
    *  on disk is clean text with no frontmatter). Drives the event-metadata
    *  strip in the editor pane. */
   eventMeta?: SampleEventMeta;
+}
+
+/** A folder's effective trace-tags: the transitive union of every descendant
+ *  file's `taggedTraces` (de-duplicated). Folders don't carry their own tag
+ *  store — they inherit from their contents, so a folder's tags are exactly the
+ *  traces anything inside it names. `ROOT` ("") collects over the whole tree.
+ *  Returns node ids; callers resolve names via the same path used for file
+ *  chips. Pure + cheap; memoize at the call site if profiling warrants. */
+export function folderTags(
+  files: Record<string, FileState>,
+  folderPath: string,
+): string[] {
+  const prefix = folderPath === "" ? "" : folderPath + "/";
+  const out = new Set<string>();
+  for (const [rel, state] of Object.entries(files)) {
+    if (state.kind === "folder") continue;
+    if (folderPath !== "" && !rel.startsWith(prefix)) continue;
+    for (const id of state.taggedTraces ?? []) out.add(id);
+  }
+  return [...out];
 }
 
 /**
@@ -114,9 +198,14 @@ export interface FolderRef {
   lastOpened?: number;
 }
 
-/** The result of attaching a folder: the reconstructed in-memory file set. */
+/** The result of attaching a folder: the reconstructed in-memory file set.
+ *  On desktop with `onReconciled`, `files` is the relay-only skeleton and
+ *  `reconciled` resolves once the background disk-drift reconcile finishes (so
+ *  the caller can clear a progress indicator). Without `onReconciled`, `files`
+ *  is fully reconciled and `reconciled` is already-resolved. */
 export interface AttachResult {
   files: Record<string, FileState>;
+  reconciled: Promise<void>;
 }
 
 /**
@@ -132,8 +221,16 @@ export interface Workspace {
   /** Attach (or re-attach) a folder: reconcile against the relay and return
    *  the reconstructed file set. Throws if the folder can't be read (e.g. a
    *  desktop path that no longer exists, or a relay folder id with no
-   *  manifest). */
-  attach(ref: FolderRef): Promise<AttachResult>;
+   *  manifest).
+   *
+   *  On desktop, when `onReconciled` is passed the call returns a relay-only
+   *  skeleton immediately and the disk-drift reconcile runs in the background,
+   *  emitting each reconciled file via the callback (`file` = null signals a
+   *  deletion: the file was tombstoned and should drop from the tree). This is
+   *  what lets the press render from the db before the folder is scanned.
+   *  Without it, the reconcile completes inline and the returned map is fully
+   *  reconciled. */
+  attach(ref: FolderRef, onReconciled?: (path: string, file: FileState | null) => void): Promise<AttachResult>;
 
   /** Read a file's current text content. */
   readFile(relativePath: string): Promise<string>;
@@ -165,6 +262,13 @@ export interface Workspace {
      *  checkpoint that doesn't leave the machine. Default false (fan out
      *  to all write-enabled relays, the Send posture). */
     localOnly?: boolean,
+    /** When true, mint a new checkpoint node even when content/tags/citations
+     *  are unchanged since the last seal. This is the deliberate-gesture path
+     *  (Step/Send/Cmd+S — protocol §8: "When a Step does seal, it mints a node
+     *  carrying the snapshot"). The debounced auto-save leaves this false so a
+     *  redundant trailing seal stays a no-op; only an explicit author action
+     *  forces the checkpoint. */
+    force?: boolean,
   ): Promise<string>;
 
   /** Create a new empty file. If it already exists, just open it. */

@@ -28,7 +28,7 @@ import {
   type ManifestFileEntry,
 } from "./provenance.js";
 import { findResolvedBrackets } from "./brackets.js";
-import { manualVoice } from "./keys-store.js";
+import { authorVoice } from "./keys-store.js";
 import type {
   AttachResult,
   FileState,
@@ -44,11 +44,11 @@ async function sha256Hex(text: string): Promise<string> {
 }
 
 function runsFromText(text: string): FileState["runs"] {
-  // The editor attributes baseline content to the manual (pen) voice as a
-  // single run; finer-grained attribution happens through subsequent edits.
-  // Resolves to the manual key's pubkey (not the old "alice" label) so the
-  // run renders under that key's identity.
-  return text.length === 0 ? [] : [{ voice: manualVoice(), text }];
+  // The editor attributes baseline content to the AUTHOR voice as a single
+  // run; finer-grained attribution happens through subsequent edits. Resolves
+  // to the AUTHOR key's pubkey (not the old "alice" label) so the run renders
+  // under that key's identity.
+  return text.length === 0 ? [] : [{ voice: authorVoice(), text }];
 }
 
 function basename(path: string): string {
@@ -79,7 +79,7 @@ export function createRelayWorkspace(): Workspace {
      * content. This is the "sync read" — whatever's on the relay is what the
      * webapp shows.
      */
-    async attach(folderRef: FolderRef): Promise<AttachResult> {
+    async attach(folderRef: FolderRef, _onReconciled?: (path: string, file: FileState | null) => void): Promise<AttachResult> {
       ref = { ...folderRef };
       const manifest = await fetchManifest(ref.id);
       const files: Record<string, FileState> = {};
@@ -117,7 +117,7 @@ export function createRelayWorkspace(): Workspace {
           ...(taggedTraces.length > 0 ? { taggedTraces } : {}),
         };
       }
-      return { files };
+      return { files, reconciled: Promise.resolve() };
     },
 
     async readFile(relativePath: string): Promise<string> {
@@ -142,6 +142,7 @@ export function createRelayWorkspace(): Workspace {
       replyingTo?: string,
       taggedTraces?: string[],
       localOnly?: boolean,
+      force?: boolean,
     ): Promise<string> {
       const id = requireId();
       const manifest = await fetchManifest(id);
@@ -174,13 +175,14 @@ export function createRelayWorkspace(): Workspace {
         entry.contentHash === contentHash &&
         !entry.isDeleted &&
         tagsUnchanged &&
-        citationsUnchanged
+        citationsUnchanged &&
+        !force
       ) {
         return entry.latestNodeId; // no-op touch
       }
 
       const deltas = diffToDeltas(prevContent, content);
-      if (deltas.length === 0 && entry && tagsUnchanged && citationsUnchanged) {
+      if (deltas.length === 0 && entry && tagsUnchanged && citationsUnchanged && !force) {
         return entry.latestNodeId;
       }
 
@@ -189,9 +191,15 @@ export function createRelayWorkspace(): Workspace {
         prevEventId: entry?.latestNodeId ?? null,
         relativePath,
         folderId: id,
+        // A forced checkpoint with no content change mints a clean `deltas: []`
+        // node — the rhythm-layer gesture (§8). See disk writeFile for the full
+        // rationale; the synthesized-insert fallback is only for the tag/
+        // citation-only seal (content identical but metadata changed).
         deltas: deltas.length > 0
           ? deltas
-          : [{ type: "insert", positionStart: 0, positionEnd: 0, newValue: content, timestamp: Date.now() }],
+          : force
+            ? []
+            : [{ type: "insert", positionStart: 0, positionEnd: 0, newValue: content, timestamp: Date.now() }],
         snapshot: content,
         contentHash,
         action: entry ? "edit" : "import",

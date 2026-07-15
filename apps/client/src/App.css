@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;500&family=Big+Shoulders+Display:wght@600;800&family=Fraunces:opsz,wght@9..144,400;9..144,500&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&family=Lora:wght@400;500&family=Newsreader:ital,wght@0,400;0,500;1,400&family=Spectral:wght@400;500&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;500&family=Big+Shoulders+Display:wght@600;800&family=Fraunces:opsz,wght@9..144,400;9..144,500&family=IBM+Plex+Mono:wght@200;400;500&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&family=Lora:wght@400;500&family=Newsreader:ital,wght@0,400;0,500;1,400&family=Spectral:wght@400;500&display=swap");
 @import url("maplibre-gl/dist/maplibre-gl.css");
 
 :root {
@@ -7,8 +7,8 @@
   --surface-sunken: #d4d4d4;
   --ink: #17171a;
   --ink-dim: #6b6a66;
-  --accent: #d99a0a;
-  --accent-soft: #d99a0a1f;
+  --accent: #b87d05;
+  --accent-soft: #b87d051f;
   --on-accent: #5c3d00;
   --reject-fg: #b23a48;
   --reject-bg: #b23a481f;
@@ -18,6 +18,11 @@
   --font-display: "Big Shoulders Display", sans-serif;
   --font-body: "Newsreader", Georgia, serif;
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  /* Header band height shared across every view: the per-view .view-header and
+     the press's split top band (.sidebar-switch + .tab-bar) all read as one
+     continuous line, so they pin to the same height. */
+  --header-h: 2.5rem;
 
   /* Lightness token for the generative keychain voice identity (see
      keys-store.ts identityColors). Keychain keys store a hue/sat and derive
@@ -37,15 +42,6 @@
   --v4-bg: #2a5f9e1f;
   --v5-fg: #46519e;
   --v5-bg: #46519e1f;
-
-  /* Times stacked-area bands — a muted qualitative palette kept clear of the
-     gold accent (reserved for chrome). Six steps + --rule-strong for "other". */
-  --times-stack-1: #2a5f9e;
-  --times-stack-2: #157a63;
-  --times-stack-3: #6a3fa0;
-  --times-stack-4: #a63465;
-  --times-stack-5: #2d6a2f;
-  --times-stack-6: #46519e;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -77,13 +73,6 @@
     --v4-bg: #7ab8f022;
     --v5-fg: #9aa5f5;
     --v5-bg: #9aa5f522;
-
-    --times-stack-1: #7ab8f0;
-    --times-stack-2: #4fd6b8;
-    --times-stack-3: #b48af0;
-    --times-stack-4: #f28fb0;
-    --times-stack-5: #82cf85;
-    --times-stack-6: #9aa5f5;
   }
 }
 
@@ -118,13 +107,6 @@ html[data-theme="dark"] {
   --v4-bg: #7ab8f022 !important;
   --v5-fg: #9aa5f5 !important;
   --v5-bg: #9aa5f522 !important;
-
-  --times-stack-1: #7ab8f0 !important;
-  --times-stack-2: #4fd6b8 !important;
-  --times-stack-3: #b48af0 !important;
-  --times-stack-4: #f28fb0 !important;
-  --times-stack-5: #82cf85 !important;
-  --times-stack-6: #9aa5f5 !important;
 }
 
 html[data-theme="light"] {
@@ -133,8 +115,8 @@ html[data-theme="light"] {
   --surface-sunken: #d4d4d4 !important;
   --ink: #17171a !important;
   --ink-dim: #6b6a66 !important;
-  --accent: #d99a0a !important;
-  --accent-soft: #d99a0a1f !important;
+  --accent: #b87d05 !important;
+  --accent-soft: #b87d051f !important;
   --on-accent: #3d2800 !important;
   --reject-fg: #b23a48 !important;
   --reject-bg: #b23a481f !important;
@@ -155,13 +137,6 @@ html[data-theme="light"] {
   --v4-bg: #2a5f9e1f !important;
   --v5-fg: #46519e !important;
   --v5-bg: #46519e1f !important;
-
-  --times-stack-1: #2a5f9e !important;
-  --times-stack-2: #157a63 !important;
-  --times-stack-3: #6a3fa0 !important;
-  --times-stack-4: #a63465 !important;
-  --times-stack-5: #2d6a2f !important;
-  --times-stack-6: #46519e !important;
 }
 
 * {
@@ -258,18 +233,19 @@ body {
   align-items: center;
   gap: 0.55rem;
   font-family: var(--font-mono);
+  font-weight: 200;
   font-size: 0.75rem;
   letter-spacing: 0.03em;
-  color: var(--surface-sunken);
-  background: var(--accent);
-  border: none;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent);
   border-radius: 4px;
   padding: 0.4rem 0.7rem 0.4rem 0.85rem;
   cursor: pointer;
 }
 
 .run-agent-btn:hover:not(:disabled) {
-  filter: brightness(1.1);
+  background: var(--accent-soft);
 }
 
 .run-agent-btn:active:not(:disabled) {
@@ -304,52 +280,58 @@ body {
 /* Nav rail (far-left icon column) */
 
 .nav-rail {
-  flex: 0 0 52px;
+  flex: 0 0 auto;
+  width: 52px;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--rule-strong);
+  /* The right-edge divider is a box-shadow, not a border-right: a 1px border
+     straddling the boundary to the adjacent view is prone to sub-pixel
+     rounding when the neighbor is a scroll container (the press view's
+     .sidebar gets promoted to its own compositing layer, which thins the
+     shared border). A shadow paints entirely inside the rail's own layer, so
+     the hairline reads the same 1px regardless of what abuts it. */
+  box-shadow: inset -1px 0 0 var(--rule-strong);
   background: var(--surface-sunken);
   overflow: hidden;
-  transition: flex-basis 0.16s ease;
+  transition: width 0.16s ease;
 }
 
 .nav-rail.expanded {
-  flex-basis: 168px;
+  width: fit-content;
 }
 
-/* Brand block at the rail head: the eye-speech glyph doubles as the
-   About button, with the wordmark beside it (expanded) or below (collapsed). */
+/* Brand block at the rail head: the whole row is the About button (matching
+   the rail-item rows), with the eye glyph + wordmark inside it. */
 .rail-brand {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 0.25rem;
-  padding: 0.6rem 0 0.5rem;
+  width: 100%;
+  height: 52px;
+  /* Pin the brand cell: the rail is a flex column, and without this a short
+     window compresses the 52px below its height, squeezing out the spacing
+     above the glyph/wordmark (the "padding above zine"). Non-shrinking like
+     the other fixed-height sections (nav-rail-top/bottom). */
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  transition: background 0.12s ease;
 }
 
 .nav-rail.expanded .rail-brand {
   flex-direction: row;
   justify-content: flex-start;
   gap: 0.6rem;
-  padding: 0.6rem 0.85rem;
+  padding: 0 1.4rem 0 0.85rem;
 }
 
-.rail-brand-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  flex: 0 0 36px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  cursor: pointer;
-  transition: background 0.12s ease;
-}
-
-.rail-brand-icon:hover {
+.rail-brand:hover {
   background: var(--accent-soft);
 }
 
@@ -360,11 +342,26 @@ body {
 
 .rail-brand-wordmark {
   font-family: var(--font-mono);
-  font-weight: 800;
-  font-size: 0.8rem;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--ink-dim);
+  font-weight: 400;
+  font-size: 1rem;
+  letter-spacing: 0.08em;
+  color: #000; /* pure black in light mode */
+}
+
+/* Pure white in dark mode — covers both auto (prefers-color-scheme) and the
+   manual data-theme override, since the latter wins via specificity here. */
+@media (prefers-color-scheme: dark) {
+  .rail-brand-wordmark {
+    color: #fff;
+  }
+}
+
+html[data-theme="dark"] .rail-brand-wordmark {
+  color: #fff;
+}
+
+html[data-theme="light"] .rail-brand-wordmark {
+  color: #000;
 }
 
 .rail-divider {
@@ -372,6 +369,7 @@ body {
   margin: 0 8px;
   background: var(--rule);
 }
+
 
 .nav-rail-top {
   flex: 0 0 auto;
@@ -383,7 +381,6 @@ body {
 
 .nav-rail-bottom {
   flex: 0 0 auto;
-  border-top: 1px solid var(--rule);
 }
 
 .rail-item {
@@ -404,7 +401,7 @@ body {
 
 .nav-rail.expanded .rail-item {
   justify-content: flex-start;
-  padding: 0 0.95rem;
+  padding: 0 1.4rem 0 0.95rem;
 }
 
 .rail-item:hover {
@@ -447,6 +444,12 @@ body {
   flex-direction: column;
 }
 
+/* The footer divider is the chrome boundary (content above, controls below),
+   so it runs the full rail width — unlike the inset group dividers above. */
+.rail-footer .rail-divider {
+  margin: 0;
+}
+
 /* View placeholder (non-editor views until they're built out) */
 
 .view-placeholder {
@@ -460,6 +463,17 @@ body {
   color: var(--ink-dim);
 }
 
+/* Bare splash states — a .view-placeholder with no `*-view` modifier is a
+   loading/empty/error splash (press scanning, webapp boot, error boundary,
+   empty-folder picker, "coming soon"). These read as a single centered
+   spinner+caption, so center them. Views that carry a real `*-view` class
+   keep their own alignment from the rules below. */
+.view-placeholder:not([class*="-view"]) {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
 .view-placeholder-title {
   margin: 0;
   font-family: var(--font-display);
@@ -469,11 +483,124 @@ body {
   color: var(--ink);
 }
 
+/* Shared per-view column: a pinned top-left title above the view body. Sits in
+   .body next to the nav rail and fills the remaining width. The header is a
+   non-scrolling band (flex: 0 0 auto) so the view below keeps its own
+   overflow containment. */
+.view-column {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.view-header {
+  flex: 0 0 var(--header-h);
+  display: flex;
+  align-items: center;
+  padding: 0 0.85rem 0 0.6rem;
+  border-bottom: 1px solid var(--rule);
+}
+.view-header-title {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 1rem;
+  letter-spacing: 0.02em;
+  color: var(--ink-dim);
+}
+
 .view-placeholder-blurb {
   margin: 0;
   font-family: var(--font-body);
   font-size: 1.05rem;
   text-align: left;
+}
+
+/* Animated loading icon shown while the press is scanning/attaching a folder. */
+.press-loading-spinner {
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 50%;
+  border: 0.18em solid var(--rule-strong);
+  border-top-color: var(--accent);
+  animation: press-loading-spin 0.8s linear infinite;
+}
+
+@keyframes press-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .press-loading-spinner {
+    animation: none;
+  }
+}
+
+/* Background provenance reconcile indicator: shown while the post-skeleton
+   relay backfill runs after the press has already rendered. Sits as a subtle
+   pill above the editor row so the user knows nodeIds/attribution are still
+   loading without blocking anything. */
+.reconcile-banner {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.6rem;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.2rem 0.6rem 0.2rem 0.4rem;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  color: var(--text-dim, inherit);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+.reconcile-banner-spinner {
+  width: 0.85rem;
+  height: 0.85rem;
+  border-width: 0.14em;
+}
+
+/* Staged background-pull merges awaiting review. Shares the reconcile-banner
+   pill shape but is interactive (pointer-events on) and offset down so it
+   doesn't collide with the "Syncing provenance…" spinner. */
+.staged-merges-banner {
+  pointer-events: auto;
+  top: auto;
+  bottom: 0.6rem;
+  right: 0.6rem;
+  opacity: 1;
+  background: var(--surface-raised, var(--surface));
+  border-color: var(--accent, var(--rule));
+  color: var(--text, inherit);
+}
+.staged-merges-icon {
+  line-height: 1;
+}
+.staged-merges-review {
+  margin-left: 0.15rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent, var(--rule));
+  background: var(--accent, transparent);
+  color: var(--accent-contrast, #fff);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+.staged-merges-review:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .view-placeholder-soon {
@@ -492,10 +619,12 @@ body {
 .keys-view,
 .models-view,
 .relays-view,
+.networking-view,
 .download-view,
 .web-home,
 .times-view,
-.listings-view {
+.listings-view,
+.traces-view {
   overflow-y: auto;
   min-height: 0;
 }
@@ -510,18 +639,21 @@ body {
   text-align: center;
 }
 
-/* Settings views — Keys, Relays, Models, Download. One consistent left-aligned
+/* Settings views — Keys, Relays, Models, Download. One consistent centered
    column: the blurb, list/grid, add control, and storage note all share the
-   same measure (--settings-col) and the same left edge, so the four pages read
-   as a family. The nav rail already marks the active page (gold icon + inset
-   accent bar on .rail-item.active), so these views carry no <h1> of their own
-   — the blurb leads directly. */
+   same measure (--settings-col) and center as a block, matching the centered
+   reading columns of Times/Stacks/About. Text stays left-aligned (the cards
+   are dense form rows that read left-to-right). The nav rail already marks the
+   active page (gold icon + inset accent bar on .rail-item.active), so these
+   views carry no <h1> of their own — the blurb leads directly. */
 .keys-view,
 .models-view,
 .relays-view,
-.download-view {
+.networking-view,
+.download-view,
+.traces-view {
   --settings-col: 35rem;
-  align-items: flex-start;
+  align-items: center;
   justify-content: flex-start;
   text-align: left;
   gap: 1rem;
@@ -530,6 +662,7 @@ body {
 .keys-view .view-placeholder-blurb,
 .models-view .view-placeholder-blurb,
 .relays-view .view-placeholder-blurb,
+.networking-view .view-placeholder-blurb,
 .download-view .view-placeholder-blurb {
   max-width: var(--settings-col);
 }
@@ -566,6 +699,33 @@ body {
   background: var(--surface-raised);
 }
 
+/* Reorder grip for Keys/Models cards. Only the handle is draggable so the
+   card's own inputs (label, fields) keep working; dragging starts a native
+   move drag carrying the entry's id, dropped onto a sibling card to reorder.
+   Faint at rest, brightened on hover/active so it reads as interactive. */
+.drag-handle {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  color: var(--ink-dim);
+  opacity: 0.45;
+  border-radius: 3px;
+}
+.drag-handle:hover {
+  opacity: 1;
+}
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+/* The card currently being dragged (source). Dims like .tree-dragging so the
+   two reorder surfaces read as one family. */
+.settings-card.is-dragging {
+  opacity: 0.4;
+}
+
 /* About view — the pitch. Shared lede, then Write / Curate side by side.
  * The .about-view reuses .view-placeholder as a top-aligned reading surface. */
 
@@ -590,6 +750,16 @@ body {
   padding: 0 0.5rem;
 }
 
+.about-heading {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 300;
+  letter-spacing: 0.01em;
+  font-size: 1.85rem;
+  line-height: 1.2;
+  color: var(--accent);
+}
+
 .about-lede {
   margin: 0;
   max-width: 42rem;
@@ -610,6 +780,7 @@ body {
   flex-direction: column;
   gap: 1.25rem;
   max-width: 42rem;
+  counter-reset: beat;
 }
 
 .about-beat {
@@ -617,14 +788,32 @@ body {
   font-family: var(--font-body);
   font-size: 1rem;
   line-height: 1.6;
-  color: var(--ink-dim);
+  color: var(--ink);
+  counter-increment: beat;
+}
+
+.about-beat::before {
+  content: counter(beat, decimal-leading-zero);
+  font-family: var(--font-display);
+  font-weight: 800;
+  color: var(--ink);
+  letter-spacing: 0.05em;
+  margin-right: 0.6em;
 }
 
 .about-beat strong {
   font-family: var(--font-display);
-  font-weight: 800;
+  font-weight: 300;
   letter-spacing: 0.01em;
   color: var(--accent);
+}
+
+.about-mark {
+  color: var(--accent);
+}
+
+.about-mark-text {
+  color: var(--ink);
 }
 
 .about-closer {
@@ -754,12 +943,6 @@ body {
   align-self: flex-start;
 }
 
-.models-add {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-}
-
 .models-add-menu {
   position: absolute;
   top: calc(100% + 0.3rem);
@@ -807,22 +990,12 @@ body {
   background: var(--rule);
 }
 
-.models-storage-note {
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
-  color: var(--ink-dim);
-  max-width: var(--settings-col);
-  line-height: 1.4;
-  margin: 0.5rem 0 0;
-  opacity: 0.8;
-}
-
 /* Keys view — Nostr keychain. Card layout differs from models cards: a left
    preview swatch (the label rendered in the key's own font + colors) anchors
    a right meta column (label input, delete/copy actions, pubkey). The swatch
    IS the identity — what you see there is how that key's text renders in the
    editor. Reuses the same tokens and .icon-btn patterns for the action
-   controls. Author/inject assignment lives in Press (AUTHOR + model / keys). */
+   controls. AUTHOR/MODEL assignment lives in Press (AUTHOR + model / keys). */
 
 .keys-list {
   display: flex;
@@ -841,8 +1014,11 @@ body {
 
 /* The preview swatch: label text in the key's font, fg on bg. Fixed min size
    so the row alignment holds regardless of label length; the text truncates.
-   fg/bg/font-family are injected inline by KeysView from identityColors(). */
+   fg/bg/font-family are injected inline by KeysView from identityColors().
+   Also hosts the Palette (style) toggle pinned to the bottom-right corner, so
+   the swatch itself is the affordance for restyling the voice. */
 .key-card-preview {
+  position: relative;
   flex-shrink: 0;
   width: 7.5rem;
   min-height: 3.5rem;
@@ -855,6 +1031,26 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Palette toggle lives on the swatch now, so it inherits the voice's fg (set
+   inline on .key-card-preview) and reads directly against the voice's bg. The
+   .icon-btn base is largely overridden: no surface background, its own hit area,
+   and a small backdrop so the glyph stays legible on light/low-sat voices. */
+.key-card-preview > .key-style-toggle {
+  position: absolute;
+  right: 0.2rem;
+  bottom: 0.2rem;
+  width: 1.15rem;
+  height: 1.15rem;
+  color: inherit;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  backdrop-filter: blur(2px);
+  border: none;
+}
+
+.key-card-preview > .key-style-toggle:hover {
+  background: color-mix(in srgb, currentColor 18%, transparent);
 }
 
 .key-card-meta {
@@ -905,6 +1101,45 @@ body {
 .key-delete:disabled {
   opacity: 0.25;
   cursor: not-allowed;
+}
+
+/* --- Role chips (NODE / AUTHOR / MODEL / DOOR) on each key card --------- */
+.key-card-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0.3rem 0 0.1rem;
+}
+
+.role-chip {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.12rem 0.4rem;
+  border-radius: 3px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--ink-dim);
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.role-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.role-chip.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.role-chip.active:hover {
+  background: var(--accent);
+  color: var(--bg);
 }
 
 /* npub / nsec rows. Label + truncated monospace value + copy (and reveal for
@@ -1081,20 +1316,7 @@ body {
 }
 
 .keys-add {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
   align-self: flex-start;
-}
-
-.keys-storage-note {
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
-  color: var(--ink-dim);
-  max-width: var(--settings-col);
-  line-height: 1.4;
-  margin: 0.5rem 0 0;
-  opacity: 0.8;
 }
 
 /* Download view */
@@ -1349,23 +1571,457 @@ body {
   color: var(--ink);
 }
 
-.relay-add-btn {
+/* Shared primary "add/create" button for the settings views (Keys: Generate
+   keypair, Models: Add model, Networks: Add / Add peer). One consistent
+   treatment — filled accent, body font, 4px radius — so the create action
+   reads the same across the family. Per-view classes (.keys-add, .models-add)
+   now carry only layout (align-self / positioning), not visual styling. */
+.settings-add-btn {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  font-family: var(--font-body);
-  font-weight: 600;
+  font-family: var(--font-mono);
+  font-weight: 200;
   font-size: 0.9rem;
   padding: 0.5rem 0.9rem;
   border: 1px solid var(--accent);
   border-radius: 4px;
-  background: var(--accent);
-  color: var(--on-accent);
+  background: transparent;
+  color: var(--accent);
   cursor: pointer;
 }
 
-.relay-add-btn:hover {
-  opacity: 0.9;
+.settings-add-btn:hover {
+  background: var(--accent-soft);
+}
+
+/* Networking view — sections (local node, inbound, outbound). The view reuses
+   the relay/peer list classes above; these are only the section scaffolding
+   that didn't exist when those were separate views. */
+.networking-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  width: 100%;
+  max-width: var(--settings-col);
+}
+
+.networking-section-title {
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  font-weight: 200;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  margin: 0;
+  /* Visually separate sections without a hard rule. */
+  margin-top: 0.5rem;
+}
+
+/* First section sits flush (no top margin). */
+.networking-view .networking-section:first-of-type .networking-section-title {
+  margin-top: 0;
+}
+
+.local-node-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.local-node-hint {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+  flex-shrink: 0;
+}
+
+.relay-empty,
+.peer-empty {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+}
+
+/* Inbound section — onion address, owner/mode, peer list. Mirrors the
+   Outbound (relay) list language: .settings-row rows, mono addresses, the
+   same delete button as relay-delete. The owner row reads like the local-node
+   row (accent-soft surface) since it is the access-control centerpiece. */
+
+.onion-address-display {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.5rem 0.55rem;
+  border-radius: 4px;
+  background: var(--surface-raised);
+  border: 1px solid var(--rule);
+}
+
+.onion-label {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-dim);
+}
+
+.onion-addr {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--ink);
+  word-break: break-all;
+}
+
+.onion-hint {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+}
+
+.owner-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+/* --- Node identity picker (Peers section) ------------------------------- */
+.node-identity-section {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.node-identity-main {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.node-label,
+.node-hint {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+}
+
+.node-hint {
+  font-family: var(--font-body);
+  flex-basis: 100%;
+  font-size: 0.7rem;
+}
+
+.node-key-select {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  cursor: pointer;
+  max-width: 14rem;
+}
+
+.node-key-select:focus {
+  outline: 1px solid var(--accent);
+  border-color: var(--accent);
+}
+
+/* --- Section subtitle (one-liner under a section title) ----------------- */
+.networking-section-sub {
+  font-family: var(--font-body);
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+  margin: 0 0 0.6rem 0;
+  line-height: 1.4;
+}
+
+/* --- Tor reachability status -------------------------------------------- */
+.tor-status {
+  margin-top: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.tor-start-btn {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+
+.tor-start-btn:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.tor-badge {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 3px;
+  max-width: 28rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tor-badge.starting {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tor-badge.live {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tor-badge.error {
+  background: var(--reject-bg);
+  color: var(--reject-fg);
+}
+
+/* --- Doors (extra .onion addresses) ------------------------------------- */
+.doors-subsection {
+  margin: 0.4rem 0;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border);
+}
+
+.doors-subsection-title {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+  margin: 0 0 0.3rem 0;
+}
+
+.door-list {
+  list-style: none;
+  margin: 0 0 0.5rem 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.door-row {
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.door-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.door-label {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  color: var(--ink);
+}
+
+.door-addr {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--ink-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.door-delete {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--ink-dim);
+  cursor: pointer;
+  padding: 0.2rem;
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.door-delete:hover {
+  color: var(--reject-fg);
+  background: var(--reject-bg);
+}
+
+.door-add {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.3rem;
+}
+
+.door-add-select {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  flex: 1;
+  max-width: 16rem;
+}
+
+.door-add-select:focus {
+  outline: 1px solid var(--accent);
+  border-color: var(--accent);
+}
+
+.owner-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.owner-label {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+  flex-shrink: 0;
+}
+
+.owner-pubkey {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.owner-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.mode-badge {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.15rem 0.45rem;
+  border-radius: 3px;
+}
+
+.mode-badge.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.mode-badge.inactive {
+  background: var(--surface-raised);
+  color: var(--ink-dim);
+}
+
+.owner-activate-btn {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 3px;
+  border: 1px solid var(--accent);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.owner-activate-btn:hover {
+  background: var(--accent-soft);
+}
+
+.peer-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.peer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.peer-pubkey {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.peer-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.3rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+
+.peer-delete:hover {
+  color: var(--danger, #c33);
+  border-color: var(--danger, #c33);
+}
+
+.peer-add {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  flex-wrap: wrap;
+}
+
+.peer-add-input {
+  flex: 1 1 14rem;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.peer-add-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.peers-error {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  color: var(--danger, #c33);
 }
 
 /* Empty state (no folder attached yet) */
@@ -1380,27 +2036,26 @@ body {
 
 .empty-primary-btn,
 .empty-secondary-btn {
-  font-family: var(--font-body);
+  font-family: var(--font-mono);
+  font-weight: 200;
   font-size: 0.95rem;
   padding: 0.55rem 1.1rem;
   border-radius: 8px;
   border: 1px solid var(--border);
   cursor: pointer;
-  background: var(--surface-raised);
+  background: transparent;
   color: var(--ink);
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .empty-primary-btn {
-  background: var(--accent);
   border-color: var(--accent);
-  color: var(--surface);
-  font-weight: 600;
+  color: var(--accent);
 }
 
 .empty-primary-btn:hover,
 .empty-secondary-btn:hover {
-  filter: brightness(1.08);
+  background: var(--surface-sunken);
 }
 
 .empty-error {
@@ -1410,6 +2065,45 @@ body {
   color: #c00;
   text-align: center;
   max-width: 32rem;
+}
+
+/* Boot re-attach failed: the remembered folder couldn't be read. We keep the
+   path in localStorage rather than wiping it, so this offers a retry instead of
+   forcing a re-pick on every launch. */
+.empty-failed {
+  margin-top: 1.25rem;
+  font-family: var(--font-body);
+  font-size: 0.88rem;
+  color: var(--ink);
+  text-align: center;
+  max-width: 34rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.empty-failed code {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  word-break: break-all;
+}
+
+.empty-retry-btn {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  padding: 0.45rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  cursor: pointer;
+  background: transparent;
+  color: var(--accent);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.empty-retry-btn:hover {
+  background: var(--accent);
+  color: var(--surface);
 }
 
 /* Sidebar / file tree */
@@ -1427,12 +2121,12 @@ body {
    press and return to the folder/home picker. Styled to read as a quiet header
    affordance, matching the mono/uppercase language of the section titles. */
 .sidebar-switch {
-  flex: 0 0 auto;
+  flex: 0 0 var(--header-h);
   display: flex;
   align-items: center;
   gap: 0.4rem;
   width: 100%;
-  padding: 0.6rem 0.9rem;
+  padding: 0 0.9rem;
   font-family: var(--font-mono);
   font-size: 0.7rem;
   letter-spacing: 0.04em;
@@ -1444,6 +2138,153 @@ body {
 }
 .sidebar-switch:hover {
   color: var(--accent);
+}
+
+/* --- Traces view (desktop) ------------------------------------------------
+   A lazy directory tree of every chain your voice authored on the relay. Each
+   chain root is an abstract container; expand it to browse its files/subfolders
+   (fetched from the relay on demand). Chain roots carry reify/unmount/open. */
+.traces-view .view-placeholder-blurb {
+  max-width: var(--settings-col);
+}
+
+.trace-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  width: 100%;
+  max-width: var(--settings-col);
+}
+
+.trace-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.7rem;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.trace-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.trace-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.trace-btn.primary {
+  color: var(--ink);
+  border-color: var(--ink-dim);
+}
+.trace-btn.sm {
+  padding: 0.15rem 0.4rem;
+  font-size: 0.66rem;
+}
+.trace-btn.danger:hover:not(:disabled) {
+  color: var(--danger, #c33);
+  border-color: var(--danger, #c33);
+}
+
+.trace-tree {
+  width: 100%;
+  max-width: var(--settings-col);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.trace-loading,
+.trace-empty,
+.trace-error {
+  padding: 0.4rem 0.2rem;
+  color: var(--ink-faint);
+  line-height: 1.5;
+}
+.trace-loading.empty {
+  font-style: italic;
+  opacity: 0.6;
+}
+.trace-error {
+  color: var(--danger, #c33);
+}
+
+.trace-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.18rem 0.2rem;
+  border-radius: 3px;
+  color: var(--ink);
+}
+.trace-tree-row:hover {
+  background: var(--rule);
+}
+.trace-tree-row.active {
+  background: var(--accent-bg, rgba(255, 204, 0, 0.1));
+}
+.trace-tree-row.chain-root {
+  border-bottom: 1px solid var(--rule);
+  padding-top: 0.3rem;
+  padding-bottom: 0.3rem;
+}
+
+.trace-tree-toggle {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  background: transparent;
+  border: none;
+  color: var(--ink-dim);
+  cursor: pointer;
+  padding: 0;
+}
+.trace-tree-toggle.placeholder {
+  cursor: default;
+}
+
+.trace-tree-icon {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  color: var(--ink-dim);
+}
+
+.trace-tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-tree-id {
+  flex: 0 0 auto;
+  font-size: 0.62rem;
+  color: var(--ink-faint);
+}
+
+.trace-tree-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.trace-tree-tag {
+  font-size: 0.6rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.trace-tree-children {
+  display: flex;
+  flex-direction: column;
 }
 
 /* Horizontal resize handle between the collection sidebar and the workspace.
@@ -1906,17 +2747,18 @@ body.sidebar-resizing {
 .foreign-banner-fork {
   flex-shrink: 0;
   padding: 5px 14px;
-  background: var(--amber, #c08a2a);
-  color: #1a1a1a;
-  border: none;
+  background: transparent;
+  color: var(--amber, #c08a2a);
+  border: 1px solid var(--amber, #c08a2a);
   border-radius: 4px;
+  font-family: var(--font-mono);
+  font-weight: 200;
   font-size: 13px;
-  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
 }
 .foreign-banner-fork:hover {
-  background: var(--amber-bright, #e0a838);
+  background: var(--surface-sunken);
 }
 
 /* Branch-detection banner: incoming forks / sibling heads on the active file.
@@ -1940,20 +2782,42 @@ body.sidebar-resizing {
   color: var(--ink);
   min-width: 0;
 }
+.merge-banner-summary {
+  justify-content: flex-start;
+}
+.merge-banner-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--ink);
+  font-size: 13px;
+  cursor: pointer;
+}
+.merge-banner-toggle:hover {
+  color: var(--accent);
+}
+.merge-banner-caret {
+  font-size: 10px;
+  color: var(--ink-dim);
+}
 .merge-banner-incorporate {
   flex-shrink: 0;
   padding: 5px 14px;
-  background: var(--accent);
-  color: var(--on-accent);
-  border: none;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
   border-radius: 4px;
+  font-family: var(--font-mono);
+  font-weight: 200;
   font-size: 13px;
-  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
 }
 .merge-banner-incorporate:hover:not(:disabled) {
-  filter: brightness(1.08);
+  background: var(--accent-soft);
 }
 .merge-banner-incorporate:disabled {
   opacity: 0.6;
@@ -1965,6 +2829,41 @@ body.sidebar-resizing {
   color: var(--ink-dim);
   font-style: italic;
   white-space: nowrap;
+}
+
+/* Crash-pad restore banner (desktop): shown when the last session left dirty
+   buffers overlaid on the scanned files. Matches the merge-banner's accent-soft
+   treatment so the two banners read as the same family. */
+.crash-restore-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--rule-strong);
+  font-size: 13px;
+}
+.crash-restore-text {
+  color: var(--ink);
+  min-width: 0;
+}
+.crash-restore-dismiss {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  border: none;
+  border-radius: 4px;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.crash-restore-dismiss:hover {
+  background: var(--surface-raised);
+  color: var(--ink);
 }
 
 /* Three-way merge panel (conflict reconcile) */
@@ -2019,16 +2918,17 @@ body.sidebar-resizing {
 }
 .merge-panel-confirm {
   padding: 5px 14px;
-  background: var(--accent);
-  color: var(--on-accent);
-  border: none;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
   border-radius: 4px;
+  font-family: var(--font-mono);
+  font-weight: 200;
   font-size: 13px;
-  font-weight: 600;
   cursor: pointer;
 }
 .merge-panel-confirm:hover:not(:disabled) {
-  filter: brightness(1.08);
+  background: var(--accent-soft);
 }
 .merge-panel-confirm:disabled,
 .merge-panel-cancel:disabled {
@@ -2042,10 +2942,57 @@ body.sidebar-resizing {
   background: var(--accent-soft);
   border-radius: 4px;
 }
+.merge-error {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--danger, #c0392b);
+  padding: 6px 8px;
+  margin: 0;
+  background: var(--accent-soft);
+  border-radius: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .merge-conflicts {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+.merge-conflict-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.merge-conflict-pager-count {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--ink-dim);
+}
+.merge-conflict-pager-remaining {
+  color: var(--accent);
+}
+.merge-conflict-pager-nav {
+  display: flex;
+  gap: 6px;
+}
+.merge-pager-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  border: 1px solid var(--rule-strong);
+  background: transparent;
+  color: var(--ink);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.merge-pager-btn:hover:not(:disabled) {
+  background: var(--surface-sunken);
+}
+.merge-pager-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .merge-conflict {
   border: 1px solid var(--rule-strong);
@@ -2150,6 +3097,83 @@ body.sidebar-resizing {
   line-height: 1.4;
 }
 
+/* Clean-merge preview modal — compose-dialog shell with a diff body. The
+   accent colors mirror seals-diff so green/red read consistently across the
+   app. */
+.merge-preview-dialog {
+  width: min(760px, 94vw);
+}
+.merge-preview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.merge-preview-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 600;
+}
+.merge-preview-sub {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--ink-dim);
+  max-width: 56ch;
+}
+.merge-preview-close {
+  background: transparent;
+  border: none;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--ink-dim);
+  cursor: pointer;
+  padding: 0 4px;
+}
+.merge-preview-close:hover:not(:disabled) {
+  color: var(--ink);
+}
+.merge-preview-close:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+.merge-preview-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.merge-preview-diff {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  background: var(--surface-sunken);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink);
+  max-height: 50vh;
+  overflow: auto;
+}
+.merge-preview-add {
+  background: color-mix(in srgb, #2da44e 22%, transparent);
+}
+.merge-preview-remove {
+  background: color-mix(in srgb, #cf222e 22%, transparent);
+  text-decoration: line-through;
+  opacity: 0.8;
+}
+.merge-preview-same {
+  color: var(--ink-dim);
+}
+.merge-preview-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
 /* Thin toolbar replacing the old Masthead controls. Holds the run-agent
    action for the editor view (cmd+enter still works). */
 .workspace-panels {
@@ -2248,6 +3272,7 @@ body.panel-resizing {
 }
 
 .tab-bar {
+  flex: 0 0 var(--header-h);
   display: flex;
   align-items: stretch;
   gap: 0;
@@ -2309,6 +3334,18 @@ body.panel-resizing {
    on the same trace. A non-focused panel's front tab stays .active only. */
 .tab.trace-active {
   box-shadow: inset 0 2px 0 var(--accent);
+}
+
+/* A dirty buffer: the file's in-editor content differs from what's on disk.
+   A filled dot before the label — the same marker the window title carries
+   ("● zine"). Neutral ink, not gold, so it doesn't compete with the active
+   trace's accent. Desktop-only: the webapp writes through on every edit, so
+   no tab is ever dirty there. */
+.tab.dirty::before {
+  content: "●";
+  font-size: 0.5rem;
+  color: var(--ink-dim);
+  margin-right: -0.1rem;
 }
 
 .tab-label {
@@ -3085,11 +4122,10 @@ body.panel-resizing {
 
 /* Horizontal rule — the `---` text is replaced by a widget that draws a thin
    centered line; the line class adds vertical breathing room. */
-.panel-mode-preview .md-hr-line { margin: 0.6rem 0; }
+.panel-mode-preview .md-hr-line { margin: 0.3rem 0; }
 .panel-mode-preview .md-hr {
   display: block;
   height: 1px;
-  margin: 0.35rem 0;
   background: var(--rule-strong);
 }
 
@@ -3336,6 +4372,7 @@ body.panel-resizing {
   padding: 0.35rem 0.8rem;
   border-radius: 4px;
   font-family: var(--font-mono);
+  font-weight: 200;
   font-size: 0.78rem;
   cursor: pointer;
 }
@@ -3349,6 +4386,114 @@ body.panel-resizing {
 .confirm-cancel:hover {
   background: var(--surface-sunken);
   color: var(--ink);
+}
+
+/* --- reify picker modal --------------------------------------------------
+   Reuses the confirm-dialog shell; widened to fit the chain list. Reifies
+   an existing chain into a new directory (the inverse of unmount). */
+.reify-dialog {
+  max-width: 380px;
+}
+
+.reify-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 0.7rem;
+  padding: 0.4rem 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--ink);
+  background: var(--surface-sunken);
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+}
+.reify-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.reify-chains {
+  margin-bottom: 0.9rem;
+}
+
+.reify-list-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.55rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.reify-list-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.reify-list-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.reify-error {
+  display: block;
+  margin-top: 0.4rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--danger, #c33);
+}
+
+.reify-chain-list {
+  margin-top: 0.5rem;
+  max-height: 9rem;
+  overflow-y: auto;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+
+.reify-chain-empty {
+  display: block;
+  padding: 0.4rem 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+}
+
+.reify-chain-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.3rem 0.5rem;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-mono);
+}
+.reify-chain-row:last-child {
+  border-bottom: none;
+}
+.reify-chain-row:hover {
+  background: var(--rule);
+}
+.reify-chain-row.selected {
+  background: var(--accent-bg, rgba(255, 204, 0, 0.12));
+}
+
+.reify-chain-label {
+  font-size: 0.74rem;
+  color: var(--ink);
+}
+
+.reify-chain-id {
+  font-size: 0.64rem;
+  color: var(--ink-faint);
 }
 
 /* Compose surface — the prompt-injection modal (palette → LLM → document).
@@ -3376,6 +4521,124 @@ body.panel-resizing {
   display: flex;
   flex-direction: column;
   gap: 0.8rem;
+}
+
+/* Affirm modal — wider than compose-dialog (the map needs room) and capped so
+ * the map region stays a fixed height. Reuses compose-overlay/dialog shape. */
+.affirm-dialog {
+  width: min(900px, 94vw);
+  max-height: 92vh;
+}
+.affirm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.affirm-title {
+  margin: 0;
+  font-size: 1rem;
+  font-family: var(--font-mono);
+}
+.affirm-close {
+  background: transparent;
+  border: none;
+  font-size: 1.4rem;
+  line-height: 1;
+  color: var(--ink-dim);
+  cursor: pointer;
+  padding: 0 0.3rem;
+}
+.affirm-close:hover {
+  color: var(--ink);
+}
+.affirm-blurb {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+  line-height: 1.4;
+}
+.affirm-blurb strong {
+  color: var(--ink);
+}
+.affirm-map {
+  width: 100%;
+  height: min(56vh, 460px);
+  border-radius: 6px;
+  border: 1px solid var(--rule);
+  overflow: hidden;
+}
+.affirm-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+  min-height: 1.2rem;
+}
+.affirm-geohash-label {
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  color: var(--accent);
+  font-weight: 600;
+}
+.affirm-precision {
+  color: var(--ink-dim);
+}
+.affirm-repick {
+  color: var(--ink-faint, var(--ink-dim));
+  font-style: italic;
+  font-size: 0.75rem;
+}
+.affirm-clock-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  padding-top: 0.2rem;
+  border-top: 1px solid var(--rule);
+}
+.affirm-clock-label {
+  color: var(--ink-dim);
+}
+.affirm-clock {
+  font-family: var(--font-mono);
+  color: var(--ink);
+}
+.affirm-clock-note {
+  color: var(--ink-faint, var(--ink-dim));
+  font-size: 0.72rem;
+  font-style: italic;
+  width: 100%;
+}
+.affirm-message {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border, #ccc);
+  border-radius: 4px;
+  background: var(--bg, #fff);
+  color: var(--ink, inherit);
+}
+.affirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+/* The on-map cell label marker — a small monospaced chip centered on the cell. */
+.affirm-cell-label {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--surface-raised);
+  background: var(--accent);
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .compose-header {
@@ -3519,13 +4782,48 @@ body.panel-resizing {
 }
 
 .confirm-delete {
-  background: var(--accent);
+  background: transparent;
   border: 1px solid var(--accent);
-  color: var(--surface-raised);
+  color: var(--accent);
 }
 
 .confirm-delete:hover {
-  filter: brightness(1.08);
+  background: var(--accent-soft);
+}
+
+/* Fork-from-snapshot modal buttons. "Skip to latest" is a neutral secondary
+   action (same shape as cancel, but with a subtle accent to distinguish it);
+   "Fork from here" is the primary action (accent-filled, like confirm-delete). */
+.confirm-skip {
+  padding: 0.35rem 0.8rem;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  color: var(--ink-dim);
+}
+
+.confirm-skip:hover {
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+
+.confirm-fork {
+  padding: 0.35rem 0.8rem;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-weight: 200;
+  font-size: 0.78rem;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
+.confirm-fork:hover {
+  background: var(--accent-soft);
 }
 
 /* --- create / sample modals ----------------------------------------------
@@ -3659,6 +4957,14 @@ body.panel-resizing {
 
 .seals-row-action {
   text-transform: lowercase;
+}
+
+/* External edits arrive from outside the traced editor (disk drift, an MCP
+ * tool) and seal under a different voice than the authoring key — read them as
+ * "not authored by you" at a glance. */
+.seals-row-action--external {
+  opacity: 0.7;
+  font-style: italic;
 }
 
 .seals-row-id {
@@ -3829,7 +5135,7 @@ body.panel-resizing {
   flex: 0 0 auto;
   font-family: var(--font-mono);
   font-size: 0.66rem;
-  font-weight: 600;
+  font-weight: 200;
   color: var(--ink-dim);
   background: transparent;
   border: 1px solid var(--rule);
@@ -3865,7 +5171,44 @@ body.panel-resizing {
   height: 1.4rem;
   margin: 0;
   cursor: pointer;
-  accent-color: var(--accent, #4f8cff);
+  /* Styled explicitly rather than via accent-color: that leaves the UA track
+     white on some engines and only tints the thumb/fill. The thumb takes the
+     navbar's inactive-icon color (--ink-dim) so it reads as part of the chrome
+     rather than a stray white control; the track is translucent (--rule) so
+     the savepoint ticks layered behind it still show through. Mirrors the
+     .key-style-slider pattern across WebKit + Firefox. */
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+}
+.sidebar-replay-slider::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--rule);
+}
+.sidebar-replay-slider::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--rule);
+}
+.sidebar-replay-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 0.85rem;
+  height: 0.85rem;
+  margin-top: -0.42rem; /* center on the 3px track */
+  border-radius: 50%;
+  background: var(--ink-dim);
+  border: 1px solid var(--surface-raised);
+  cursor: pointer;
+}
+.sidebar-replay-slider::-moz-range-thumb {
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 50%;
+  background: var(--ink-dim);
+  border: 1px solid var(--surface-raised);
+  cursor: pointer;
 }
 
 /* Savepoint tick marks: one per replay step, positioned along the track at
@@ -3888,6 +5231,39 @@ body.panel-resizing {
   background: var(--ink-dim);
   opacity: 0.5;
   border-radius: 1px;
+}
+
+/* Scan gap ribbon — a thin strip beneath the slider. Each gap chip flags a
+   large idle span between adjacent save points (e.g. "3d") and seeks to the
+   step after the gap on click. Positioned over the same left% axis as the
+   slider ticks. */
+.sidebar-replay-gaps {
+  position: relative;
+  height: 14px;
+  margin-top: 2px;
+}
+.sidebar-replay-gap {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  padding: 0 5px;
+  height: 14px;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--ink-dim);
+  background: var(--surface-raised, var(--bg, #eee));
+  border: 1px solid var(--border, #ccc);
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sidebar-replay-gap:hover {
+  color: var(--ink, inherit);
+  border-color: var(--ink-dim);
+}
+.sidebar-replay-gap.is-current {
+  border-color: var(--accent, currentColor);
+  color: var(--accent, inherit);
 }
 
 /* Empty panel — shown when the open file was deleted. Keeps the panel slot
@@ -4026,27 +5402,35 @@ body.panel-resizing {
   display: flex;
   min-height: 0;
   min-width: 0;
+  /* Anchor for the .reconcile-banner (absolute, top-right). */
+  position: relative;
   /* Collections stay pinned; .workspace-panels is the horizontal scrollport. */
   overflow: hidden;
 }
 
 /* Voices + actions bar: bottom region of the press. Two rows share one
-   column template — identity left, actions, then model + status right:
-     label  | key | a1 a2 a3 a4 | model | tokens | error | stop
-   Row 1: AUTHOR | pen | Save SEND · · |  —    |  —   |  —  |  —
-   Row 2: MODEL  | inj | Ext Set Sti Rep | model▾ | 1.2k | err | Stop?
-   Four equal action tracks; Save/SEND are normal single-track width.
-   Model options use the provider card label. */
+   column template — identity left, actions, then status right:
+     label/model | key | a1 a2 a3 a4 a5 | (slot) | tokens | error | (slot)
+   Row 1: AUTHOR: | pen | Stp Snd Aff · · |  — |  —  | err |  —
+   Row 2: model▾  | inj | Rec Rep Ext Set Sti |  — | 1.2k | err |  —
+   The MODEL row's leftmost cell IS the model selector (no "MODEL:" text — the
+   chosen model name reads as the label). Five equal action tracks. An in-flight
+   op re-renders its own button as the stop control (.topbar-action.running)
+   rather than a separate Stop button. Model options use the provider card
+   label. */
 .topbar {
   flex: 0 0 auto;
   display: grid;
-  /* Identity, four equal action tracks, model + status, then trailing 1fr so
-     the row (and its divider) spans the full bar width. */
+  /* Identity, five equal action tracks, model + status, then trailing 1fr so
+     the row (and its divider) spans the full bar width. Col 1 holds the
+     AUTHOR: label (AUTHOR row) and the MODEL selector (MODEL row) — sized to
+     fit the select. Col 8 is now an empty alignment slot (the select moved to
+     col 1), so it collapses to max-content. */
   grid-template-columns:
-    max-content
-    minmax(5rem, 8rem)
-    repeat(4, minmax(4.5rem, 5.75rem))
     minmax(5.5rem, 10rem)
+    minmax(5rem, 8rem)
+    repeat(5, minmax(4.5rem, 5.75rem))
+    max-content
     max-content
     minmax(0, 10rem)
     max-content
@@ -4094,6 +5478,24 @@ body.panel-resizing {
   justify-self: end;
   text-align: right;
 }
+/* AUTHOR label is a <button> that re-rolls its alias on click. Reset button
+   chrome so it still reads as the row label, with a pointer cursor + hover
+   tint as the only clickable affordance. */
+.topbar-label-clickable {
+  font: inherit;
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  border-radius: 2px;
+}
+.topbar-label-clickable:hover,
+.topbar-label-clickable:focus-visible {
+  color: var(--ink);
+  outline: 1px solid var(--rule);
+  outline-offset: 1px;
+}
 .topbar-select {
   font: inherit;
   color: inherit;
@@ -4115,7 +5517,28 @@ body.panel-resizing {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Base action button: fills its grid track (one of four equal columns). */
+/* Wraps the MODEL select + its trailing colon so the pair share col 1 while
+   the row below's KeySelect stays aligned with the AUTHOR row. The select
+   grows to fill; the colon takes its natural width at the cell's right edge. */
+.topbar-model-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  min-width: 0;
+  width: 100%;
+}
+.topbar-model-cell .topbar-model-select {
+  flex: 1 1 auto;
+  width: auto;
+}
+/* Colon to the right of the MODEL selector — mirrors the AUTHOR: label. */
+.topbar-model-colon {
+  color: var(--ink-dim);
+  font-size: 0.62rem;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+/* Base action button: fills its grid track (one of five equal columns). */
 .topbar-action {
   min-width: 0;
   width: 100%;
@@ -4126,6 +5549,7 @@ body.panel-resizing {
   background: transparent;
   color: var(--ink);
   font: inherit;
+  font-weight: 200;
   cursor: pointer;
   white-space: nowrap;
   text-align: center;
@@ -4138,12 +5562,28 @@ body.panel-resizing {
   opacity: 0.5;
   cursor: default;
 }
-.topbar-action.stop {
+/* The in-flight op's own button becomes the stop control: accent-filled and
+   gently pulsing so the affordance reads as "click again to abort" right where
+   the click that started it landed. It's the only live button while running —
+   the others are disabled — so the focus stays unambiguous. */
+.topbar-action.running {
   color: var(--accent);
   border-color: var(--accent);
-  width: auto;
-  padding-left: 0.5rem;
-  padding-right: 0.5rem;
+  background: var(--accent-soft);
+  animation: topbar-action-pulse 1.2s ease-in-out infinite;
+}
+@keyframes topbar-action-pulse {
+  0%, 100% { background: var(--accent-soft); }
+  50% { background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .topbar-action.running { animation: none; }
+}
+/* Affirm is the "publish your position" gesture — accent-bordered to mark it
+ * as the heaviest author act (attestation, not just a seal). */
+.topbar-action.op-affirm {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 .topbar-action-error {
   color: var(--danger, #c0392b);
@@ -4153,17 +5593,25 @@ body.panel-resizing {
   white-space: nowrap;
   min-width: 0;
 }
+.topbar-action-done {
+  color: var(--accent, #2d7d46);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 .topbar-token-count {
   color: var(--ink-dim);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-/* Very tight: shed token estimate and error. */
+/* Very tight: shed token estimate and status. */
 @container topbar (max-width: 36rem) {
   .topbar-token-count {
     display: none;
   }
   .topbar-action-error {
+    display: none;
+  }
+  .topbar-action-done {
     display: none;
   }
 }
@@ -4291,35 +5739,6 @@ body.panel-resizing {
   font-weight: 600;
 }
 .globe-pin-geo { font-size: 0.68rem; color: var(--ink-dim); }
-
-/* The legend overlay, top-left of the globe. */
-.globe-legend {
-  position: fixed;
-  top: 1rem;
-  left: 4.5rem; /* clear of the 52px rail */
-  z-index: 5;
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-  padding: 0.45rem 0.65rem;
-  border: 1px solid var(--rule);
-  border-radius: 6px;
-  background: var(--surface-raised);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
-  pointer-events: none;
-}
-.globe-legend-main {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  color: var(--ink);
-  text-transform: lowercase;
-  letter-spacing: 0.02em;
-}
-.globe-legend-hint {
-  font-family: var(--font-mono);
-  font-size: 0.64rem;
-  color: var(--ink-dim);
-}
 
 /* PinPanel — the Spaces authoring modal (pin a zine to a geohash). */
 .pin-overlay {
@@ -4525,6 +5944,19 @@ body.panel-resizing {
   border: 1px solid var(--rule);
   border-radius: 4px;
   padding: 0.25rem 0.4rem;
+}
+
+/* "color by" toggle for the stacked chart: trace vs. voice. Mirrors the
+   rank-by metric in styling, but uses the pill group for the two options. */
+.times-color-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.times-color-toggle-label {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink-dim);
 }
 
 .times-nucleus-note {
@@ -4988,7 +6420,7 @@ body.panel-resizing {
   text-align: left;
   padding: 0.4rem 0.6rem;
   font-size: 0.72rem;
-  font-weight: 600;
+  font-weight: 200;
   color: var(--ink-dim);
   background: transparent;
   border: none;
@@ -5143,12 +6575,12 @@ body.panel-resizing {
 
 /* --- operator view + setup modal ------------------------------------------- */
 /* The operator view is a settings-family page (see .keys-view / .relays-view):
-   left-aligned column, the blurb leads, sections stack with consistent spacing.
+   centered column, the blurb leads, sections stack with consistent spacing.
    Scroll containment matches the other tall views. */
 .operator-view {
   overflow-y: auto;
   min-height: 0;
-  align-items: flex-start;
+  align-items: center;
   justify-content: flex-start;
   text-align: left;
   gap: 1.5rem;
@@ -5157,6 +6589,8 @@ body.panel-resizing {
   display: flex;
   align-items: flex-start;
   gap: 0.85rem;
+  width: 100%;
+  max-width: 35rem;
   color: var(--ink);
 }
 .operator-header svg { flex-shrink: 0; margin-top: 0.4rem; }

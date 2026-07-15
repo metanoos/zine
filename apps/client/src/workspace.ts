@@ -7,9 +7,9 @@
  * Disk is the source of truth for *what exists*; the relay is the source of
  * truth for *how it got there*. On open, `baselineScan` reconciles the two:
  * files new on disk get imported, files gone from disk get marked deleted,
- * changed files get an edit node. This mirrors the harness's
- * `ProvenanceStore` (apps/harness/src/store.ts) postures exactly, so the
- * same folder is interoperable between the desktop app and the CLI.
+ * changed files get an edit node. The reconcile postures follow the protocol
+ * (trace-provenance.md), so the same folder is interoperable across any
+ * conforming press.
  *
  * All disk access goes through Tauri commands that resolve relative paths
  * against the attached folder root inside Rust and reject escapes — the
@@ -22,6 +22,10 @@ import {
   loadAttachedFolder,
   saveAttachedFolder,
 } from "./registry.js";
+import {
+  saveMount,
+  setActiveMount,
+} from "./mounts.js";
 import {
   createFolderGenesis,
   diffToDeltas,
@@ -43,7 +47,8 @@ import {
   type SampleEventMeta,
 } from "./provenance.js";
 import { findResolvedBrackets } from "./brackets.js";
-import { manualVoice } from "./keys-store.js";
+import { authorVoice } from "./keys-store.js";
+import { getReconcilerVoice } from "./external-voice-store.js";
 import type { Event } from "nostr-tools";
 import type {
   AttachResult,
@@ -93,22 +98,22 @@ async function sha256Hex(text: string): Promise<string> {
 }
 
 function runsFromText(text: string): Run[] {
-  // The editor attributes all baseline/reconstructed content to the manual
-  // (pen) voice as a single run. Finer-grained voice attribution happens
-  // through subsequent edits, which splice in the editing voice. Resolves to
-  // the manual key's pubkey so the run renders under that key's identity;
-  // the old "alice" string-literal was a label, not a pubkey, and fell into
-  // the decoration's hash-bucket fallback (wrong color) — see keys-store.ts
-  // manualVoice() and buildVoiceDecorations in App.tsx.
-  return text.length === 0 ? [] : [{ voice: manualVoice(), text }];
+  // The editor attributes all baseline/reconstructed content to the AUTHOR
+  // voice as a single run. Finer-grained voice attribution happens through
+  // subsequent edits, which splice in the editing voice. Resolves to the
+  // AUTHOR key's pubkey so the run renders under that key's identity; the
+  // old "alice" string-literal was a label, not a pubkey, and fell into the
+  // decoration's hash-bucket fallback (wrong color) — see keys-store.ts
+  // authorVoice() and buildVoiceDecorations in App.tsx.
+  return text.length === 0 ? [] : [{ voice: authorVoice(), text }];
 }
 
 // --- attribution sidecar ------------------------------------------------
 //
 // Per-line voice attribution (the editor's run list) is persisted to a JSON
 // sidecar at `.zine/attribution.json` inside the folder, keyed by relative
-// path. The content file itself stays plain text (preserving harness-CLI /
-// git / other-editor interop); the sidecar is the desktop's private mirror of
+// path. The content file itself stays plain text (preserving git /
+// other-editor interop); the sidecar is the desktop's private mirror of
 // the voice layer. `.zine` is in IGNORED_SEGMENTS so the walker never treats
 // the sidecar as a content file.
 //
@@ -223,18 +228,25 @@ export function getAttachedFolder(): AttachedFolder | null {
 
 /** Forget the currently attached folder (the user wants to pick a different
  *  one). Provenance records stay in the relay; only the local pointer is
- *  cleared. */
+ *  cleared. The mounts-registry entry is NOT removed here — detaching only
+ *  unbinds the workspace, the mount stays remembered for re-switching. The
+ *  active-mount pointer is cleared since nothing is open. */
 export function detachFolder(): void {
   clearAttachedFolder();
+  setActiveMount(null);
 }
 
 /** Attach (or re-attach) a folder: mint a stable folderId, persist it, and
  *  baseline the folder against the relay. Returns the reconstructed in-memory
  *  file state for the initial sidebar/editor. Throws if the path doesn't
  *  exist or can't be read. */
-export async function attachFolder(absPath: string): Promise<{
+export async function attachFolder(
+  absPath: string,
+  onReconciled?: (path: string, file: FileState | null) => void,
+): Promise<{
   folder: AttachedFolder;
   files: Record<string, FileState>;
+  reconciled: Promise<void>;
 }> {
   // Reuse an existing folderId if this path was attached before — its
   // provenance chain is keyed on the id, so a new id would orphan it.
@@ -243,8 +255,10 @@ export async function attachFolder(absPath: string): Promise<{
     // Re-attach: keep the existing id (UUID for legacy, genesis id for new).
     const folder: AttachedFolder = { id: existing.id, path: absPath };
     saveAttachedFolder(folder);
-    const files = await baselineScan(folder);
-    return { folder, files };
+    saveMount(folder);
+    setActiveMount(folder.id);
+    const { files, reconciled } = await attachScan(folder, onReconciled);
+    return { folder, files, reconciled };
   }
   // Phase 5: publish genesis first, adopt its event id as the folder identity
   // (spec §3.1: trace identity IS the genesis node id). This replaces the
@@ -253,7 +267,58 @@ export async function attachFolder(absPath: string): Promise<{
   const genesisId = await createFolderGenesis();
   const folder: AttachedFolder = { id: genesisId, path: absPath };
   saveAttachedFolder(folder);
+  saveMount(folder);
+  setActiveMount(folder.id);
 
+  const { files, reconciled } = await attachScan(folder, onReconciled);
+  return { folder, files, reconciled };
+}
+
+/**
+ * Skeleton-first attach: return a disk-only file set immediately so the press
+ * can render, then reconcile against the relay. With `onReconciled`, the
+ * reconcile runs in the background and emits each reconciled FileState via the
+ * callback; `files` is the skeleton only and `reconciled` resolves when the
+ * background pass finishes. Without it, the reconcile runs inline and `files`
+ * is the fully-reconciled set (back-compat).
+ */
+async function attachScan(
+  folder: AttachedFolder,
+  onReconciled?: (path: string, file: FileState | null) => void,
+): Promise<{ files: Record<string, FileState>; reconciled: Promise<void> }> {
+  if (onReconciled) {
+    const skeleton = await skeletonScan(folder);
+    // Background reconcile: emit per-path; resolve (or reject) when done. The
+    // promise is a completion signal only (Promise<void>), so both branches
+    // resolve to void — the files reach the caller via onReconciled callbacks,
+    // not through this promise.
+    const reconciled = reconcileScan(folder, onReconciled).then(
+      () => {},
+      (e) => console.warn("[workspace] background reconcile failed:", e),
+    );
+    return { files: skeleton, reconciled };
+  }
+  const files = await reconcileScan(folder);
+  return { files, reconciled: Promise.resolve() };
+}
+
+/** Reify an EXISTING chain into a NEW directory. Binds the given genesis id
+ *  to `absPath`, persists it as both the workspace's attached folder and a
+ *  mounts-registry entry, and baselines — `baselineScan` reconstructs the
+ *  manifest + file content from the relay's `#D` chain, so a chain mounted
+ *  at a fresh/empty dir materializes its full working tree.
+ *
+ *  This is the inverse of unmount: the chain was never affected by dropping
+ *  the (id, path) binding, so re-pointing it at a new dir just re-reads the
+ *  relay. No genesis is minted — the identity is supplied by the caller. */
+export async function reifyMount(
+  genesisId: string,
+  absPath: string,
+): Promise<{ folder: AttachedFolder; files: Record<string, FileState> }> {
+  const folder: AttachedFolder = { id: genesisId, path: absPath };
+  saveAttachedFolder(folder);
+  saveMount(folder);
+  setActiveMount(folder.id);
   const files = await baselineScan(folder);
   return { folder, files };
 }
@@ -270,8 +335,7 @@ export async function attachFolder(absPath: string): Promise<{
  *  node id on the folder's chain. A folder member's `latestNodeId` is the
  *  current head (advances on every seal), but the identity that file nodes
  *  carry on their `f`/`D` tags is the genesis. Reads the node by id, returns
- *  its `f` tag; for a genesis node (no `f` tag) the input is returned as-is.
- *  Ports the harness's resolveFolderIdentity (store.ts). */
+ *  its `f` tag; for a genesis node (no `f` tag) the input is returned as-is. */
 async function resolveFolderIdentity(nodeId: string): Promise<string> {
   const events = await fetchFolderNodes(nodeId);
   const event = events.find((e) => e.id === nodeId);
@@ -284,8 +348,7 @@ async function resolveFolderIdentity(nodeId: string): Promise<string> {
  *  trace that owns the file. Under nesting, 'blog/refs/cite.md' resolves
  *  through two folder-members (blog, then refs) to find the folder trace that
  *  owns 'cite.md'. Returns the leaf folder's genesis id and the single-segment
- *  leaf member name. For a top-level file the leaf folder IS the root.
- *  Ports the harness's resolveLeafFolder (store.ts). */
+ *  leaf member name. For a top-level file the leaf folder IS the root. */
 async function resolveLeafFolder(
   rootFolderId: string,
   displayPath: string,
@@ -350,10 +413,98 @@ async function refreshFolderMemberHash(
   });
 }
 
+/** Group the flat list_dir output by directory. Each directory becomes a level
+ *  in the nesting tree: its immediate file children publish to its folder id,
+ *  its subdirectories recurse as folder-members. Shared by the skeleton and the
+ *  reconcile passes so they see the same tree.
+ *  e.g. "blog/draft.md" → dir="blog", name="draft.md", isDir=false
+ *       "blog"           → dir="",     name="blog",    isDir=true
+ */
+interface DiskChild { name: string; isDir: boolean; }
+function groupByDir(diskEntries: DirEntry[]): Map<string, DiskChild[]> {
+  const childrenByDir = new Map<string, DiskChild[]>();
+  for (const e of diskEntries) {
+    const rp = e.relative_path;
+    const slash = rp.lastIndexOf("/");
+    const dir = slash < 0 ? "" : rp.slice(0, slash);
+    const name = slash < 0 ? rp : rp.slice(slash + 1);
+    if (!childrenByDir.has(dir)) childrenByDir.set(dir, []);
+    childrenByDir.get(dir)!.push({ name, isDir: e.is_dir });
+  }
+  return childrenByDir;
+}
+
+/**
+ * Fast skeleton pass: render the folder from the RELAY ONLY (manifest + chains),
+ * with zero disk reads. This is what the editor actually displays on the
+ * unchanged-file path anyway — `reconstructFromChain` is the authoritative
+ * content, and the disk read in `reconcileScan` exists purely to detect drift.
+ * So we skip the disk entirely here and let the drift scan happen in the
+ * background.
+ *
+ * Cost: one fetchManifest per directory level + one fetchChain per file — all
+ * relay reads, no file I/O. This is the boot critical path; `reconcileScan`
+ * runs after it to seal import/edit/delete nodes for any disk drift.
+ *
+ * Files missing from the manifest (brand-new on disk, never sealed) are
+ * invisible here — they appear when the background reconcile imports them.
+ */
+export async function skeletonScan(folder: AttachedFolder): Promise<Record<string, FileState>> {
+  const files: Record<string, FileState> = {};
+
+  async function walk(folderId: string, dirPrefix: string): Promise<void> {
+    const manifest = await fetchManifest(folderId);
+    for (const entry of manifest) {
+      if (entry.isDeleted) continue;
+      const childDisplayPath = dirPrefix ? `${dirPrefix}/${entry.relativePath}` : entry.relativePath;
+      if (entry.kind === "folder") {
+        // Subfolder: record the placeholder and recurse into its manifest.
+        files[childDisplayPath] = { kind: "folder", runs: [], nodeId: entry.latestNodeId, tags: [] };
+        await walk(entry.latestNodeId, childDisplayPath);
+        continue;
+      }
+      // File: reconstruct content + attribution straight from the chain. This is
+      // the same path reconcileScan takes for an unchanged file — the chain is
+      // the source of truth for what the editor shows.
+      const chain = await fetchChain(folderId, entry.relativePath);
+      const content = chain.length > 0 ? reconstructFromChain(chain) : "";
+      const runs = chain.length > 0 ? reconstructRunsFromChain(chain) : runsFromText(content);
+      const taggedTraces = headTaggedTraces(
+        chain,
+        findResolvedBrackets(content).map((b) => b.nodeId),
+      );
+      files[childDisplayPath] = {
+        runs,
+        nodeId: entry.latestNodeId,
+        tags: headUserTags(chain),
+        ...(taggedTraces.length > 0 ? { taggedTraces } : {}),
+      };
+    }
+  }
+
+  await walk(folder.id, "");
+  return files;
+}
+
+/**
+ * Boot an existing root from the relay skeleton only — zero disk reads. This
+ * is the steady-state boot path: the trace lives in the app, the relay holds
+ * it, and disk is a substrate scanned from / reified to at an instant rather
+ * than a continuously-authoritative source. The first-time attach (via
+ * `attachFolder`) is the one acquisition instant that seeds the chain; every
+ * boot after reads the skeleton here.
+ *
+ * `openScanned` overlays the crash pad on top of the returned skeleton, so
+ * un-reified edits survive a reload even though the relay only carries sealed
+ * nodes.
+ */
+export async function bootFromRelay(folder: AttachedFolder): Promise<Record<string, FileState>> {
+  return skeletonScan(folder);
+}
+
 /**
  * Reconcile the folder on disk with the relay's manifest, sealing nodes for
- * any drift, and return the current file set as in-memory state. Mirrors the
- * harness's baselineScan/importFile/markDeleted flow:
+ * any drift. The reconcile flow (same as the pre-split baselineScan):
  *
  * - file on disk, unknown to manifest → seal an `import` node, upsert entry.
  * - file on disk, in manifest, content hash unchanged → no node; reconstruct
@@ -362,15 +513,31 @@ async function refreshFolderMemberHash(
  *   `edit` node (disk is source of truth), upsert entry.
  * - file in manifest, missing from disk → seal a `delete` node, mark deleted.
  *
- * The hash check keeps the baseline idempotent: opening the app a second time
+ * The hash check keeps the reconcile idempotent: opening the app a second time
  * doesn't republish everything, only what actually changed.
+ *
+ * Two modes:
+ * - `onReconciled` omitted → runs to completion and returns the fully-
+ *   reconciled map (back-compat for callers that need the whole result).
+ * - `onReconciled` provided → emits each reconciled FileState via the callback
+ *   and returns an empty map. The caller merges results incrementally; this is
+ *   the background path so the press can render from the skeleton first.
  */
-export async function baselineScan(folder: AttachedFolder): Promise<Record<string, FileState>> {
+export async function reconcileScan(
+  folder: AttachedFolder,
+  onReconciled?: (path: string, file: FileState | null) => void,
+): Promise<Record<string, FileState>> {
   const diskEntries = await invoke<DirEntry[]>("list_dir", { root: folder.path });
   // Voice attribution lives in the sidecar (one read for the whole folder).
   // Validated per-file against content below: external edits invalidate stale
   // attribution, which falls back to a single run.
   const attribution = await readAttribution(folder.path);
+  // Disk drift detected here means a process other than the traced editor moved
+  // the machine's state. Such nodes seal under the reconciler voice — a distinct
+  // per-machine key — never the authoring key, so the authoring key only ever
+  // signs changes the editor's own transactions produced (§3.4 `external`, §8).
+  const reconciler = getReconcilerVoice();
+  const childrenByDir = groupByDir(diskEntries);
 
   /** Resolve runs for a file, in three tiers: (1) the persisted attribution
    *  sidecar when it still matches the content (it can be ahead of the chain
@@ -388,23 +555,11 @@ export async function baselineScan(folder: AttachedFolder): Promise<Record<strin
     return runsFromText(content);
   };
 
-  // Group the flat list_dir output by directory. Each directory becomes a level
-  // in the nesting tree: its immediate file children publish to its folder id,
-  // its subdirectories recurse as folder-members.
-  // e.g. "blog/draft.md" → dir="blog", name="draft.md", isDir=false
-  //      "blog"           → dir="",     name="blog",    isDir=true
-  interface DiskChild { name: string; isDir: boolean; }
-  const childrenByDir = new Map<string, DiskChild[]>();
-  for (const e of diskEntries) {
-    const rp = e.relative_path;
-    const slash = rp.lastIndexOf("/");
-    const dir = slash < 0 ? "" : rp.slice(0, slash);
-    const name = slash < 0 ? rp : rp.slice(slash + 1);
-    if (!childrenByDir.has(dir)) childrenByDir.set(dir, []);
-    childrenByDir.get(dir)!.push({ name, isDir: e.is_dir });
-  }
-
   const files: Record<string, FileState> = {};
+  const emit = (path: string, file: FileState | null) => {
+    if (onReconciled) onReconciled(path, file);
+    else if (file) files[path] = file;
+  };
 
   /** Recursive reconcile of one directory level. `dirPrefix` is the display
    *  path prefix (slash-joined, "" at root); `folderId` is the folder trace
@@ -445,7 +600,7 @@ export async function baselineScan(folder: AttachedFolder): Promise<Record<strin
           await refreshFolderMemberHash(folderId, child.name, subFolderId);
         }
         // Record the folder-member as a placeholder FileState so the tree renders it.
-        files[childDisplayPath] = { kind: "folder", runs: [], nodeId: subFolderId, tags: [] };
+        emit(childDisplayPath, { kind: "folder", runs: [], nodeId: subFolderId, tags: [] });
         continue;
       }
 
@@ -461,34 +616,56 @@ export async function baselineScan(folder: AttachedFolder): Promise<Record<strin
       const contentHash = await sha256Hex(content);
 
       if (!entry) {
-        // New on disk, unknown to the relay: import it.
-        const event = await sealImport(folderId, memberName, content, contentHash, null, []);
-        files[childDisplayPath] = { runs: runsFor(childDisplayPath, content), nodeId: event.id, tags: [] };
+        // New on disk, unknown to the relay: import it. Signed by the
+        // reconciler voice — the file appeared from outside the traced editor,
+        // so its genesis is honestly attributed to that voice, not the authoring
+        // key. `action: "import"` stays: a brand-new file's first node is
+        // genuinely a genesis; the signer is the honest part. (§8)
+        const event = await sealImport(
+          folderId,
+          memberName,
+          content,
+          contentHash,
+          null,
+          [],
+          { signer: reconciler.secretKey },
+        );
+        emit(childDisplayPath, { runs: runsFor(childDisplayPath, content), nodeId: event.id, tags: [] });
         manifestByName.delete(memberName);
         manifestByName.delete(childDisplayPath);
         continue;
       }
 
       if (entry.contentHash === contentHash && !entry.isDeleted) {
-        // Unchanged since last seal: reconstruct from the chain (authoritative).
-        const chain = await fetchChain(folderId, memberName);
-        const reconstructed = chain.length > 0 ? reconstructFromChain(chain) : content;
-        const taggedTraces = headTaggedTraces(
-          chain,
-          findResolvedBrackets(reconstructed).map((b) => b.nodeId),
-        );
-        files[childDisplayPath] = {
-          runs: runsFor(childDisplayPath, reconstructed, chain),
-          nodeId: entry.latestNodeId,
-          tags: headUserTags(chain),
-          ...(taggedTraces.length > 0 ? { taggedTraces } : {}),
-        };
+        // Unchanged since last seal. On the background path the skeleton already
+        // rendered this exact state from the chain, so skip the re-emit (the
+        // merge would be a no-op anyway). On the inline path we still need it —
+        // no skeleton ran, so this is the first time the caller sees the file.
+        if (!onReconciled) {
+          const chain = await fetchChain(folderId, memberName);
+          const reconstructed = chain.length > 0 ? reconstructFromChain(chain) : content;
+          const taggedTraces = headTaggedTraces(
+            chain,
+            findResolvedBrackets(reconstructed).map((b) => b.nodeId),
+          );
+          emit(childDisplayPath, {
+            runs: runsFor(childDisplayPath, reconstructed, chain),
+            nodeId: entry.latestNodeId,
+            tags: headUserTags(chain),
+            ...(taggedTraces.length > 0 ? { taggedTraces } : {}),
+          });
+        }
         manifestByName.delete(memberName);
         manifestByName.delete(childDisplayPath);
         continue;
       }
 
       // Changed on disk (or was marked deleted and reappeared): seal an edit.
+      // The change came from outside the traced editor, so it seals as
+      // `action: "external"` under the reconciler voice — not the authoring key
+      // (§3.4, §8). `authors` is omitted on this path, so reconstruction
+      // attributes the bytes to the reconciler's pubkey (Tier-2 signer
+      // attribution) rather than the human's voice.
       const priorChain = await fetchChain(folderId, memberName);
       const priorUserTags = headUserTags(priorChain);
       const event = await sealImport(
@@ -498,23 +675,40 @@ export async function baselineScan(folder: AttachedFolder): Promise<Record<strin
         contentHash,
         entry.latestNodeId,
         priorUserTags,
+        { signer: reconciler.secretKey, action: "external" },
       );
-      files[childDisplayPath] = { runs: runsFor(childDisplayPath, content), nodeId: event.id, tags: priorUserTags };
+      emit(childDisplayPath, { runs: runsFor(childDisplayPath, content), nodeId: event.id, tags: priorUserTags });
       manifestByName.delete(memberName);
       manifestByName.delete(childDisplayPath);
     }
 
     // Anything left in this folder's manifest has no file on disk → mark deleted.
     // Skip folder-members (they're handled by the recursion, not by disk files).
-    for (const [, entry] of manifestByName) {
+    for (const [name, entry] of manifestByName) {
       if (entry.isDeleted) continue;
       if (entry.kind === "folder") continue; // subfolder — not a missing file
       await markDeleted(folderId, entry);
+      // On the background path the skeleton still shows this file (it came from
+      // the manifest); signal the caller to drop it from the tree.
+      const childDisplayPath = dirPrefix ? `${dirPrefix}/${name}` : name;
+      emit(childDisplayPath, null);
     }
   }
 
   await scanDir("", folder.id);
   return files;
+}
+
+/**
+ * Back-compat wrapper: skeleton + inline reconcile, returning the full map.
+ * Kept so provenance.ts / context-gather.ts imports keep compiling; new boot
+ * callers should use skeletonScan + reconcileScan(folder, onReconciled) directly
+ * to keep the reconcile off the critical path.
+ */
+export async function baselineScan(folder: AttachedFolder): Promise<Record<string, FileState>> {
+  // Skeleton is redundant when reconcile runs inline (it re-reads disk), so skip
+  // it and go straight to the full reconcile — same behavior as pre-split.
+  return reconcileScan(folder);
 }
 
 // --- mutations ----------------------------------------------------------
@@ -540,6 +734,7 @@ export async function writeFile(
   replyingTo?: string,
   taggedTraces?: string[],
   localOnly?: boolean,
+  force?: boolean,
 ): Promise<string> {
   await invoke<null>("write_text_file", { root: folder.path, relativePath, contents: content });
   // Under nesting (spec §3.2), resolve the leaf folder trace that owns this
@@ -580,29 +775,39 @@ export async function writeFile(
     entry.contentHash === contentHash &&
     !entry.isDeleted &&
     tagsUnchanged &&
-    citationsUnchanged
+    citationsUnchanged &&
+    !force
   ) {
     nodeId = entry.latestNodeId; // no-op touch
   } else {
     // Diff against the last sealed content so the node carries a real delta,
-    // not a full replacement (matches the harness recordSnapshot path). When only
-    // tags changed (deltas empty, content identical), still seal so the new `t`
-    // tags land on the relay.
+    // not a full replacement. When only tags changed (deltas empty, content
+    // identical), still seal so the new `t` tags land on the relay.
     const deltas = diffToDeltas(prevContent, content);
-    if (deltas.length === 0 && entry && tagsUnchanged && citationsUnchanged) {
+    if (deltas.length === 0 && entry && tagsUnchanged && citationsUnchanged && !force) {
       nodeId = entry.latestNodeId;
     } else {
       const event = await publishEdit({
         prevEventId: entry?.latestNodeId ?? null,
         relativePath: leafMemberName,
         folderId: leafFolderId,
-        deltas: deltas.length > 0 ? deltas : [{
-          type: "insert",
-          positionStart: 0,
-          positionEnd: 0,
-          newValue: content,
-          timestamp: Date.now(),
-        }],
+        // A forced checkpoint with no content change mints a clean `deltas: []`
+        // node — the rhythm-layer gesture (§8: "saves are steps"). The
+        // synthesized-insert fallback below is for the tag/citation-only seal
+        // (where content is identical but metadata changed), not for a forced
+        // no-op seal; a checkpoint that claims the whole body was just
+        // inserted would misrepresent the edit rhythm.
+        deltas: deltas.length > 0
+          ? deltas
+          : force
+            ? []
+            : [{
+                type: "insert",
+                positionStart: 0,
+                positionEnd: 0,
+                newValue: content,
+                timestamp: Date.now(),
+              }],
         snapshot: content,
         contentHash,
         action: entry ? "edit" : "import",
@@ -909,6 +1114,7 @@ async function sealImport(
   contentHash: string,
   prevEventId: string | null,
   userTags: string[],
+  opts?: { signer?: Uint8Array; action?: string },
 ) {
   const event = await publishEdit({
     prevEventId,
@@ -919,8 +1125,11 @@ async function sealImport(
       : [],
     snapshot: content,
     contentHash,
-    action: prevEventId ? "edit" : "import",
+    // An explicit action (e.g. "external" for disk drift reconciled under the
+    // reconciler voice) overrides the import/edit default. §3.4 / §8.
+    action: opts?.action ?? (prevEventId ? "edit" : "import"),
     tags: userTags,
+    signer: opts?.signer,
   });
   await upsertManifestEntry(folderId, {
     relativePath,
@@ -981,7 +1190,7 @@ export function createDiskWorkspace(): Workspace & { detach(): void } {
       return folder ? { id: folder.id, path: folder.path, label: folder.label } : null;
     },
 
-    async attach(ref: FolderRef): Promise<AttachResult> {
+    async attach(ref: FolderRef, onReconciled?: (path: string, file: FileState | null) => void): Promise<AttachResult> {
       if (!ref.path) {
         throw new Error("disk workspace requires a FolderRef with a path");
       }
@@ -992,8 +1201,8 @@ export function createDiskWorkspace(): Workspace & { detach(): void } {
       const attached: AttachedFolder = { id, path: ref.path, label: ref.label };
       saveAttachedFolder(attached);
       folder = attached;
-      const files = await baselineScan(attached);
-      return { files };
+      const { files, reconciled } = await attachScan(attached, onReconciled);
+      return { files, reconciled };
     },
 
     /** Forget the attached folder (provenance records stay in the relay). */
@@ -1016,8 +1225,9 @@ export function createDiskWorkspace(): Workspace & { detach(): void } {
       replyingTo?: string,
       taggedTraces?: string[],
       localOnly?: boolean,
+      force?: boolean,
     ): Promise<string> {
-      return writeFile(requireFolder(), relativePath, content, tags, signer, runs, replyingTo, taggedTraces, localOnly);
+      return writeFile(requireFolder(), relativePath, content, tags, signer, runs, replyingTo, taggedTraces, localOnly, force);
     },
 
     async createFile(relativePath: string): Promise<string> {

@@ -1,10 +1,10 @@
 // Local-first relay for the zine trace protocol (see protocol/trace-provenance.md).
 //
 // Two deployment shapes share this binary:
-//   - Desktop sidecar: bound to 127.0.0.1 only, sqlite-backed. In open mode
-//     (no friends.json), nothing connects in and localhost is trusted. In
-//     friend mode (friends.json has an owner), the relay accepts inbound from
-//     friends over Tor and gates access via NIP-42 AUTH + a pubkey allowlist —
+//   - Desktop sidecar: bound to 127.0.0.1 only, sqlite-backed. In local mode
+//     (no peers.json), nothing connects in and localhost is trusted. In
+//     networked mode (peers.json has an owner), the relay accepts inbound from
+//     peers over Tor and gates access via NIP-42 AUTH + a pubkey allowlist —
 //     see protocol/transport.md §5.
 //   - Hosted (docker-compose, Postgres-backed): a separate main package
 //     will reuse the same khatru wiring with a Postgres eventstore; not
@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -40,21 +41,21 @@ func main() {
 	relay.Info.Version = "0.1.0"
 	relay.Info.SupportedNIPs = []any{1, 9, 11, 18, 33, 42}
 
-	// Friend ACL — opt-in access policy. When friends.json exists with an owner,
-	// the relay requires NIP-42 AUTH and gates reads/writes by pubkey (owner =
-	// read+write, friends = read-only). When absent, open mode: localhost is
-	// trusted, no AUTH required. See protocol/transport.md §5 and friends.go.
-	acl := NewFriendACL(DefaultFriendsPath(*dbPath))
-	if acl.Enabled() {
-		log.Printf("friend ACL active (owner=%s, friends=%d) — NIP-42 AUTH required",
-			acl.owner, len(acl.friends))
-		// Poll the file every 5s so add/remove-friend takes effect without a
+	// Access policy — opt-in. When peers.json exists with an owner, the relay
+	// requires NIP-42 AUTH and gates reads/writes by pubkey (owner = read+write,
+	// peers = read-only). When absent, local mode: localhost is trusted, no AUTH
+	// required. See protocol/transport.md §5 and access-policy.go.
+	policy := NewAccessPolicy(DefaultPeersPath(*dbPath))
+	if policy.Active() {
+		log.Printf("networked mode active (owner=%s, peers=%d, writers=%d) — NIP-42 AUTH required",
+			policy.owner, len(policy.peers), len(policy.writers))
+		// Poll the file every 5s so add/remove-peer takes effect without a
 		// restart. Zero-dep (no fsnotify) — just a stat on a small JSON file.
 		go func() {
 			t := time.NewTicker(5 * time.Second)
 			defer t.Stop()
 			for range t.C {
-				acl.Poll()
+				policy.Poll()
 			}
 		}()
 	}
@@ -64,59 +65,73 @@ func main() {
 	// plus the connection rate limiter that the sidecar previously dropped.
 	//
 	// The connection limiter's removal rationale (it was "pure friction" for a
-	// 127.0.0.1-only sidecar) inverts in friend mode: the relay now accepts
-	// inbound from friends over Tor, so limiting connections is load-bearing
-	// again. In open mode the limiter stays too — it's a no-op in practice
+	// 127.0.0.1-only sidecar) inverts in networked mode: the relay now accepts
+	// inbound from peers over Tor, so limiting connections is load-bearing
+	// again. In local mode the limiter stays too — it's a no-op in practice
 	// (only localhost connects) and uniform policy is simpler than branching.
 	relay.RejectConnection = append(relay.RejectConnection,
 		policies.ConnectionRateLimiter(2, 5*time.Minute, 100),
 	)
 	relay.RejectEvent = append(relay.RejectEvent,
 		// AUTH gate — prepended so it runs before rate-limit/media policies and
-		// before a would-be writer consumes a rate-limit token. In open mode
-		// (ACL disabled) this is a no-op. In friend mode: unauthed or unknown
-		// pubkeys get an AUTH challenge (the "auth-required:" prefix triggers
-		// khatru to send it, handlers.go:309-311); the owner may write, friends
-		// may not (read-only). See transport.md §5.
+		// before a would-be writer consumes a rate-limit token. In local mode
+		// (policy inactive) this is a no-op. In networked mode: unauthed or
+		// unknown pubkeys get an AUTH challenge (the "auth-required:" prefix
+		// triggers khatru to send it, handlers.go:309-311); the owner may write,
+		// peers may not (read-only). See transport.md §5.
 		func(ctx context.Context, ev *nostr.Event) (bool, string) {
-			if !acl.Enabled() {
+			if !policy.Active() {
 				return false, ""
 			}
 			authed := khatru.GetAuthed(ctx)
 			if authed == "" {
 				return true, "auth-required: this relay requires NIP-42 authentication"
 			}
-			if acl.IsOwner(authed) {
+			if policy.IsOwner(authed) {
 				return false, "" // owner may write
 			}
-			if acl.IsFriend(authed) {
-				return true, "restricted: friends have read-only access"
+			// Writer: may publish events signed as ITSELF, never impersonating
+			// the owner. The ev.PubKey == authed guard is the security boundary
+			// — khatru verifies the signature upstream, so a match proves the
+			// writer authored this event. The canonical writer is a headless
+			// press (zine-mcp) publishing traces as a distinct attributable
+			// author on the chain (§3.6/§R5).
+			if policy.IsWriter(authed) && ev.PubKey == authed {
+				return false, ""
 			}
-			return true, "auth-required: pubkey not in friends list"
+			if policy.IsPeer(authed) {
+				return true, "restricted: peers have read-only access"
+			}
+			return true, "auth-required: pubkey not in peer list"
 		},
 		policies.RejectEventsWithBase64Media,
-		// 20 events/min, burst 100 — matches the filter limiter's generosity.
-		// The prior 2/3min burst-10 setting was too tight for an authoring
-		// sidecar: sealing a folder with nested subdirs (one genesis + file
-		// nodes + membership seals + TraceHead caches per member) bursts well
-		// past 10 events in seconds, and the 2/3min refill never recovers
-		// within a session. The sqlite store is the real protection, and the
-		// burst is bounded by seal frequency (§8).
-		policies.EventIPRateLimiter(20, time.Minute, 100),
+		// Loopback-exempted 20 events/min, burst 100. On the desktop sidecar the
+		// only loopback client is the owner (and a trusted headless MCP press),
+		// so rate-limiting 127.0.0.1 just trips legitimate folder-seal fan-out:
+		// sealing a folder with nested subdirs (one genesis + file nodes +
+		// membership seals + TraceHead caches per member) bursts past 100 in
+		// seconds, which surfaced as "publish failed on every relay
+		// (rate-limited: slow down, please)". The AUTH gate above runs first
+		// and rejects peer writes before this limiter is reached, so in
+		// networked mode the exemption still covers only the owner/writers,
+		// never peers (and peers over Tor map to 127.0.0.1 but can't write
+		// anyway). The sqlite store is the real protection; the publicly exposed
+		// hosted relay keeps its un-exempted limiter. See relay/cmd/hosted.
+		loopbackExempt(policies.EventIPRateLimiter(20, time.Minute, 100)),
 	)
 	relay.RejectFilter = append(relay.RejectFilter,
-		// Read-side AUTH gate — same shape as the event gate. In friend mode,
-		// unauthed readers get challenged; owner+friends may read.
+		// Read-side AUTH gate — same shape as the event gate. In networked mode,
+		// unauthed readers get challenged; owner+peers may read.
 		func(ctx context.Context, _ nostr.Filter) (bool, string) {
-			if !acl.Enabled() {
+			if !policy.Active() {
 				return false, ""
 			}
 			authed := khatru.GetAuthed(ctx)
 			if authed == "" {
 				return true, "auth-required: this relay requires NIP-42 authentication"
 			}
-			if !acl.AllowRead(authed) {
-				return true, "restricted: pubkey not in friends list"
+			if !policy.AllowRead(authed) {
+				return true, "restricted: pubkey not in peer list"
 			}
 			return false, ""
 		},
@@ -126,17 +141,17 @@ func main() {
 	relay.RejectCountFilter = append(relay.RejectCountFilter,
 		// Count is a read op — gate it identically to filters so a caller can't
 		// learn aggregate facts (e.g. "how many events on this relay") without
-		// being authed as owner/friend.
+		// being authed as owner/peer.
 		func(ctx context.Context, _ nostr.Filter) (bool, string) {
-			if !acl.Enabled() {
+			if !policy.Active() {
 				return false, ""
 			}
 			authed := khatru.GetAuthed(ctx)
 			if authed == "" {
 				return true, "auth-required: this relay requires NIP-42 authentication"
 			}
-			if !acl.AllowRead(authed) {
-				return true, "restricted: pubkey not in friends list"
+			if !policy.AllowRead(authed) {
+				return true, "restricted: pubkey not in peer list"
 			}
 			return false, ""
 		},
@@ -171,4 +186,28 @@ func defaultDbPath() string {
 		return "relay.sqlite3"
 	}
 	return filepath.Join(home, ".tracer", "relay.sqlite3")
+}
+
+// loopbackExempt wraps an event/filter reject-fn so that connections from
+// 127.0.0.1 / ::1 bypass it. On the desktop sidecar loopback is the owner
+// (plus the trusted headless press), and their legitimate burst fan-out
+// (folder sealing) is what we want to stop rate-limiting — not throttle.
+// The real protections (AUTH gate, sqlite store) run independently; this
+// just stops the owner from tripping a cap meant for untrusted remote IPs,
+// which the sidecar never serves in local mode.
+func loopbackExempt(fn func(context.Context, *nostr.Event) (bool, string)) func(context.Context, *nostr.Event) (bool, string) {
+	return func(ctx context.Context, ev *nostr.Event) (bool, string) {
+		if isLoopback(khatru.GetIP(ctx)) {
+			return false, ""
+		}
+		return fn(ctx, ev)
+	}
+}
+
+func isLoopback(ipStr string) bool {
+	if ipStr == "" {
+		return false
+	}
+	ip := net.ParseIP(ipStr)
+	return ip != nil && ip.IsLoopback()
 }

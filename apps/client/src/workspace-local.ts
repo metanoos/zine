@@ -13,11 +13,15 @@
  * dev server, which has no relay endpoint). Local-primary makes the webapp
  * feel like a native app: open → editor, immediately.
  *
- * Reconciliation: per-file last-writer-wins by timestamp.
- *   - local `updatedAt` (ms) vs relay `created_at` (sec, ×1000).
- *   - On pull: relay wins iff it's strictly newer → overwrite local + editor.
- *   - On push: local always pushes (the relay accepts later created_at).
- * Character-level merge is out of scope; the chain history preserves both.
+ * Reconciliation (background pull): a 3-way merge keyed on the chain's common
+ * ancestor, not last-write-wins.
+ *   - noop       — ours and theirs identical (or remote didn't move off base).
+ *   - fastforward— local still at the ancestor; theirs overwrites silently.
+ *   - clean      — both sides changed, diff3 resolves; STAGED for review (not
+ *                  auto-sealed): the caller surfaces a badge, the user accepts.
+ *   - conflict   — overlapping edits; local untouched, surfaced in the banner.
+ * Local stays primary on every path that isn't a clean fast-forward, so an
+ * unsaved draft is never clobbered by remote activity.
  */
 
 import {
@@ -39,7 +43,8 @@ import {
   type ManifestFileEntry,
 } from "./provenance.js";
 import { findResolvedBrackets } from "./brackets.js";
-import { manualVoice, secretKeyForVoice } from "./keys-store.js";
+import { decidePullMerge } from "./three-way-merge.js";
+import { authorVoice, secretKeyForVoice } from "./keys-store.js";
 import { getPublicKey } from "nostr-tools/pure";
 import type {
   AttachResult,
@@ -61,9 +66,9 @@ import {
 } from "./local-store.js";
 
 function runsFromText(text: string): FileState["runs"] {
-  // Resolves to the manual (pen) key's pubkey (not the old "alice" label) so
-  // the run renders under that key's identity.
-  return text.length === 0 ? [] : [{ voice: manualVoice(), text }];
+  // Resolves to the AUTHOR key's pubkey (not the old "alice" label) so the run
+  // renders under that key's identity.
+  return text.length === 0 ? [] : [{ voice: authorVoice(), text }];
 }
 
 function basename(path: string): string {
@@ -166,7 +171,7 @@ export function createLocalWorkspace(): Workspace {
     let prevId: string | null = entry?.latestNodeId ?? (file.nodeId || null);
     if (entry && ref?.forkedFrom && prevId) {
       const owner = await fetchNodeOwner(prevId);
-      const mine = owner === manualVoice();
+      const mine = owner === authorVoice();
       if (!mine) {
         const forkEvent = await forkFile(ref.forkedFrom, relativePath, folderId);
         // The fork's genesis is now this file's head under the user's key.
@@ -204,21 +209,30 @@ export function createLocalWorkspace(): Workspace {
     const citationsUnchanged =
       prevCitations.length === nextCitations.length &&
       prevCitations.every((c, i) => c === nextCitations[i]);
-    if (entry && entry.contentHash === contentHash && tagsUnchanged && citationsUnchanged) return;
+    // A forced checkpoint (Step/Send gesture) mints a node even when nothing
+    // changed — the deliberate-gesture path (§8). The non-forced path keeps the
+    // no-op collapse so the trailing debounce after an edit doesn't re-publish.
+    if (entry && entry.contentHash === contentHash && tagsUnchanged && citationsUnchanged && !file.pendingForce) return;
 
     const deltas = diffToDeltas(prevContent, content);
     // Resolve the voice that authored this edit to its secret key, so the push
-    // signs as that voice — not just the manual default. Falls back to the
-    // manual (pen) key if the stored voice isn't in the keychain (defensive: a
-    // voice deleted after the edit was authored).
+    // signs as that voice — not just the AUTHOR default. Falls back to the
+    // AUTHOR key if the stored voice isn't in the keychain (defensive: a voice
+    // deleted after the edit was authored).
     const signer = file.voicePubkey ? secretKeyForVoice(file.voicePubkey) ?? undefined : undefined;
     const event = await publishEdit({
       prevEventId: prevId,
       relativePath,
       folderId,
+      // A forced checkpoint with no content change mints a clean `deltas: []`
+      // node (§8: the rhythm-layer gesture — nothing changed, but the author
+      // chose to checkpoint). The synthesized-insert fallback is only for the
+      // non-forced path where content is identical but tags/citations changed.
       deltas: deltas.length > 0
         ? deltas
-        : [{ type: "insert", positionStart: 0, positionEnd: 0, newValue: content, timestamp: Date.now() }],
+        : file.pendingForce
+          ? []
+          : [{ type: "insert", positionStart: 0, positionEnd: 0, newValue: content, timestamp: Date.now() }],
       snapshot: content,
       contentHash,
       action: entry ? "edit" : "import",
@@ -245,9 +259,10 @@ export function createLocalWorkspace(): Workspace {
     // Reflect the sealed node id back into local state so the next push's
     // prevId is correct. Preserve voicePubkey so re-pushes stay correctly signed,
     // and runs so the local record keeps the per-char attribution it just sealed
-    // (avoids a needless reload-from-chain on next open). `pendingReplyingTo`
-    // is deliberately NOT carried: it's one-shot (genesis-only), consumed by
-    // this push. `taggedTraces` IS carried — tags are persistent across seals.
+    // (avoids a needless reload-from-chain on next open). `pendingReplyingTo`,
+    // `pendingLocalOnly`, and `pendingForce` are deliberately NOT carried: all
+    // three are one-shot, consumed by this push. `taggedTraces` IS carried —
+    // tags are persistent across seals.
     saveLocalFile(folderId, relativePath, {
       content,
       tags: file.tags,
@@ -271,7 +286,7 @@ export function createLocalWorkspace(): Workspace {
      * calls `onRemoteUpdate` for any file the relay has newer than local —
      * the caller merges those into editor state without blocking.
      */
-    async attach(folderRef: FolderRef): Promise<AttachResult> {
+    async attach(folderRef: FolderRef, _onReconciled?: (path: string, file: FileState | null) => void): Promise<AttachResult> {
       ref = { ...folderRef };
       rememberLocalFolder(ref);
       const local = loadLocalFolder(ref.id);
@@ -279,7 +294,7 @@ export function createLocalWorkspace(): Workspace {
       // Kick off the background sync — don't await. The editor is already
       // usable from `files`.
       void pullFromRelay(ref.id);
-      return { files };
+      return { files, reconciled: Promise.resolve() };
     },
 
     async readFile(relativePath: string): Promise<string> {
@@ -297,15 +312,16 @@ export function createLocalWorkspace(): Workspace {
       replyingTo?: string,
       taggedTraces?: string[],
       localOnly?: boolean,
+      force?: boolean,
     ): Promise<string> {
       // Capture the voice (by pubkey) that authored this edit, so the debounced
-      // relay push signs with the correct key — not just the manual default.
+      // relay push signs with the correct key — not just the AUTHOR default.
       // This closes the per-voice signer gap that previously affected Send/zine
       // and that fork-on-write needs. The pubkey is persisted (never the
       // secret); pushToRelay resolves it to bytes via keys-store at push time.
-      // A missing signer (the legacy/defensive path) falls back to the manual
-      // (pen) voice; primary seal paths now always thread an explicit signer.
-      const voicePubkey = signer ? getPublicKey(signer) : manualVoice();
+      // A missing signer (the legacy/defensive path) falls back to the AUTHOR
+      // voice; primary seal paths now always thread an explicit signer.
+      const voicePubkey = signer ? getPublicKey(signer) : authorVoice();
       const id = requireId();
       // 1. Local write — synchronous, instant, survives reload/offline.
       const local = loadLocalFolder(id);
@@ -319,6 +335,7 @@ export function createLocalWorkspace(): Workspace {
         pendingReplyingTo: replyingTo,
         taggedTraces: taggedTraces,
         pendingLocalOnly: localOnly || undefined,
+        pendingForce: force || undefined,
       });
       // 2. Background relay push (debounced).
       schedulePush(relativePath);
@@ -407,22 +424,61 @@ export function createLocalWorkspace(): Workspace {
 // --- background relay pull ------------------------------------------------
 
 /**
- * Fetch the relay manifest + chains for the attached folder and merge any
- * files that are newer remotely than locally. Called on attach (non-blocking)
- * and could be called on focus/interval by the caller. Mutates localStorage
- * directly; the caller is responsible for refreshing editor state if needed.
- *
- * Reconciliation: relay file wins iff its created_at (sec × 1000) is strictly
- * greater than the local file's updatedAt (ms). Otherwise local (possibly an
- * unsaved draft) wins and will push on its next seal.
+ * A clean auto-merge from background pull — held for user review, not applied.
+ * Local storage is NOT modified while a merge is staged: applying it is what
+ * writes the merged snapshot and seals the merge node, so an edit between
+ * stage and review can't silently lose provenance or clobber the draft.
  */
-export async function pullFromRelay(folderId: string): Promise<Set<string>> {
-  const updatedPaths = new Set<string>();
+export interface StagedMerge {
+  path: string;
+  /** Common-ancestor snapshot (fork point body). */
+  base: string;
+  /** Local head body — what's in the editor right now. */
+  ours: string;
+  /** Remote head body — what the peer sealed. */
+  theirs: string;
+  /** Reconciled body produced by a clean diff3 (outcome === "clean"). */
+  merged: string;
+  /** Local node id at pull time; the merge node's `prev`. */
+  localNodeId: string;
+  /** Remote head event id; the merge node's `merge-parent`. */
+  remoteHeadId: string;
+  /** Pubkey of the remote head's signer, for attribution on seal. */
+  remoteOwnerPubkey: string;
+}
+
+/** Structured outcome of a background pull. */
+export interface PullResult {
+  /** Fast-forwards: silent overwrites (local was at the ancestor). Refresh UI. */
+  updated: Set<string>;
+  /** Clean merges awaiting review. Local untouched. */
+  staged: StagedMerge[];
+  /** Textual conflicts: local untouched; surfaced via the activation banner. */
+  conflicts: Set<string>;
+}
+
+/**
+ * Fetch the relay manifest + chains for the attached folder and reconcile each
+ * remote entry against local. Called on attach (non-blocking). Mutates
+ * localStorage directly for fast-forwards only; clean merges are staged and
+ * left for the caller to surface.
+ *
+ * Reconciliation is a 3-way merge keyed on the chain's common ancestor:
+ *   noop / fastforward / clean (staged) / conflict (untouched). See the module
+ * header. The 5-second "recent local draft" guard from `isLocalNewer` still
+ * defers any pull decision for a file mid-edit.
+ */
+export async function pullFromRelay(folderId: string): Promise<PullResult> {
+  const result: PullResult = {
+    updated: new Set<string>(),
+    staged: [],
+    conflicts: new Set<string>(),
+  };
   let manifest: ManifestFileEntry[];
   try {
     manifest = await fetchManifest(folderId);
   } catch {
-    return updatedPaths; // relay unreachable — fine, local is primary
+    return result; // relay unreachable — fine, local is primary
   }
   const local = loadLocalFolder(folderId);
   for (const entry of manifest) {
@@ -430,7 +486,7 @@ export async function pullFromRelay(folderId: string): Promise<Set<string>> {
       // Remote deleted it — reflect locally if we don't have a newer draft.
       if (local?.files[entry.relativePath] && !isLocalNewer(local, entry)) {
         deleteLocalFile(folderId, entry.relativePath);
-        updatedPaths.add(entry.relativePath);
+        result.updated.add(entry.relativePath);
       }
       continue;
     }
@@ -444,38 +500,113 @@ export async function pullFromRelay(folderId: string): Promise<Set<string>> {
           tags: [],
           nodeId: entry.latestNodeId,
         });
-        updatedPaths.add(entry.relativePath);
+        result.updated.add(entry.relativePath);
         continue;
       }
-      // Remote is newer (or local doesn't have it) → pull content.
+      // Remote may have moved (or local doesn't have it) → pull + decide.
       try {
         const chain = await fetchChain(folderId, entry.relativePath);
         const content = chain.length > 0 ? reconstructFromChain(chain) : "";
-        const tags = headUserTags(chain);
         const head = chain.length > 0 ? chain[chain.length - 1] : null;
-        // Recover tagged-but-not-quoted traces from the head, same as attach.
-        const taggedTraces = headTaggedTraces(
+        const remoteHeadId = head?.id ?? entry.latestNodeId;
+        const lf = local?.files[entry.relativePath];
+        const localContent = lf?.content ?? "";
+
+        // Decide how to reconcile against local. base = the snapshot at local's
+        // nodeId on the fetched chain (the common ancestor), if present; else
+        // empty (independent roots → diff3 will flag a conflict, which is safe).
+        const base = ancestorSnapshot(chain, lf?.nodeId);
+        const decision = localContent.length === 0
+          ? { outcome: "fastforward" as const } // no local copy → accept remote
+          : decidePullMerge(base, localContent, content);
+
+        if (decision.outcome === "noop") continue;
+
+        if (decision.outcome === "conflict") {
+          // Leave local untouched; the activation-driven merge banner will
+          // surface it when the user opens the file.
+          result.conflicts.add(entry.relativePath);
+          continue;
+        }
+
+        if (decision.outcome === "clean") {
+          // Stage for review. Do NOT modify local — applying is what writes.
+          result.staged.push({
+            path: entry.relativePath,
+            base,
+            ours: localContent,
+            theirs: content,
+            merged: decision.merged!,
+            localNodeId: lf?.nodeId ?? "",
+            remoteHeadId,
+            remoteOwnerPubkey: await safeOwnerPubkey(remoteHeadId),
+          });
+          continue;
+        }
+
+        // fastforward: accept the remote tip verbatim (local was at base).
+        applyFastForward(
+          folderId,
+          entry.relativePath,
           chain,
-          findResolvedBrackets(content).map((b) => b.nodeId),
-        );
-        // Reconstruct per-char attribution from the chain (author-aware: adopts
-        // an `authors` map when present, falls back to per-node-signer). Persist
-        // it locally so the next open keeps the attribution without re-fetching.
-        const runs = chain.length > 0 ? reconstructRunsFromChain(chain) : [];
-        saveLocalFile(folderId, entry.relativePath, {
           content,
-          tags,
-          nodeId: head?.id ?? entry.latestNodeId,
-          ...(runs.length > 0 ? { runs } : {}),
-          ...(taggedTraces.length > 0 ? { taggedTraces } : {}),
-        });
-        updatedPaths.add(entry.relativePath);
+          head,
+          remoteHeadId,
+        );
+        result.updated.add(entry.relativePath);
       } catch {
         // per-file fetch failure — skip, keep local
       }
     }
   }
-  return updatedPaths;
+  return result;
+}
+
+/** Snapshot at `localNodeId` on the chain, or "" if the node isn't on it
+ *  (true fork / multi-device split — caller falls back to best-effort). */
+function ancestorSnapshot(chain: import("nostr-tools").Event[], localNodeId: string | undefined): string {
+  if (!localNodeId || localNodeId === "" || chain.length === 0) return "";
+  const idx = chain.findIndex((e) => e.id === localNodeId);
+  if (idx === -1) return "";
+  // Nodes are self-sufficient (spec §3.1): reconstructing the prefix up to the
+  // ancestor yields its snapshot. (Slice copies; reconstructFromChain reads it.)
+  return reconstructFromChain(chain.slice(0, idx + 1));
+}
+
+/** Best-effort remote-owner lookup; never throws (merge staging must not fail
+ *  on a key-resolution blip — attribution falls back to the author voice). */
+async function safeOwnerPubkey(remoteHeadId: string): Promise<string> {
+  try {
+    const owner = await fetchNodeOwner(remoteHeadId);
+    return owner || authorVoice();
+  } catch {
+    return authorVoice();
+  }
+}
+
+/** Apply a fast-forward: overwrite local with the remote tip, reconstructing
+ *  tags / runs / tagged-traces exactly as the pre-merge pull did. */
+function applyFastForward(
+  folderId: string,
+  relativePath: string,
+  chain: import("nostr-tools").Event[],
+  content: string,
+  head: import("nostr-tools").Event | null,
+  remoteHeadId: string,
+): void {
+  const tags = headUserTags(chain);
+  const taggedTraces = headTaggedTraces(
+    chain,
+    findResolvedBrackets(content).map((b) => b.nodeId),
+  );
+  const runs = chain.length > 0 ? reconstructRunsFromChain(chain) : [];
+  saveLocalFile(folderId, relativePath, {
+    content,
+    tags,
+    nodeId: head?.id ?? remoteHeadId,
+    ...(runs.length > 0 ? { runs } : {}),
+    ...(taggedTraces.length > 0 ? { taggedTraces } : {}),
+  });
 }
 
 /** True if the local copy is newer than (or equal to) the relay entry. */
