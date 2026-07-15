@@ -1480,6 +1480,11 @@ export interface EventMeta {
    *  citation-chip list reads body-quotes first, then Reply source, then
    *  tagged zines. Empty for a leaf. */
   citationTargets: string[];
+  /** Every `Q` tag's content hash (rendezvous.md §1.2: orphan-text cites keyed
+   *  on `H = sha256(canonical(quote))`). Distinct from `citationTargets` (which
+   *  are lowercase-`q` node ids) — a `Q` cites the *text*, not a node. Empty on
+   *  every node that doesn't carry a `role: "content"` cite. */
+  contentCiteHashes: string[];
   sealedAtMs: number;
   createdAtSec: number;
 }
@@ -1492,6 +1497,7 @@ export function eventMeta(event: Event): EventMeta {
   let z: "file" | "folder" | undefined;
   let citationCount = 0;
   const citationTargets: string[] = [];
+  const contentCiteHashes: string[] = [];
   for (const tag of event.tags) {
     switch (tag[0]) {
       case "t":
@@ -1513,6 +1519,12 @@ export function eventMeta(event: Event): EventMeta {
         citationCount++;
         if (typeof tag[1] === "string") citationTargets.push(tag[1]);
         break;
+      case "Q":
+        // Rendezvous content-hash cite (rendezvous.md §1.2): the tag value is
+        // H = sha256(canonical(quote)), not a node id. Parallels the lowercase
+        // `q` arm above but populates a separate list — a `Q` cites text.
+        if (typeof tag[1] === "string") contentCiteHashes.push(tag[1]);
+        break;
     }
   }
 
@@ -1531,6 +1543,7 @@ export function eventMeta(event: Event): EventMeta {
     z,
     citationCount,
     citationTargets,
+    contentCiteHashes,
     sealedAtMs,
     createdAtSec: event.created_at ?? 0,
   };
@@ -1630,27 +1643,18 @@ export async function resolveNodeName(nodeId: string): Promise<CitationChip | nu
   return chip;
 }
 
-// --- folder trace nodes (kind 4292) -------------------------------------
+// --- folder trace nodes (kind 4290, z:folder) ----------------------------
 //
-// A folder is a trace whose body is an ordered membership list — a
-// `FolderTraceNode` (kind 4292), non-replaceable, carried on an `e…prev` chain
-// exactly like a file. Every node carries its full `snapshot.members`, so
-// resolving "what's in this folder now" is one bounded fetch (the uncited head
-// of the chain), not a fan-out to members. This is the property SEND, ZINE, and
-// (next milestone) forking lean on: a cited folder must be self-contained.
-// See protocol/trace-provenance.md §FolderTraceNode.
+// A folder is a trace whose body is an ordered membership list — a folder-
+// reified TraceNode (kind 4290 with a `z:folder` tag), non-replaceable, carried
+// on an `e…prev` chain exactly like a file. Every node carries its full
+// `snapshot.members`, so resolving "what's in this folder now" is one bounded
+// fetch (the uncited head of the chain), not a fan-out to members. This is the
+// property SEND, ZINE, and forking lean on: a cited folder must be
+// self-contained. See protocol/trace-provenance.md §FolderTraceNode.
 //
-// The public API keeps the old `*Manifest*` names so the three workspace
-// backends (workspace.ts, workspace-relay.ts, workspace-local.ts) compile
-// unchanged — underneath, they now read/write 4292 chain nodes, not a
-// replaceable 34290 manifest.
-//
-// Backward compatibility: folders published before this migration have a
-// kind-34290 manifest and no 4292 chain. `fetchManifest` falls back to that
-// legacy event when no 4292 head exists, so pre-existing folders keep reading
-// correctly. The first write to such a folder publishes a 4292 genesis whose
-// `snapshot.members` is seeded from the 34290 data — a lazy, per-folder,
-// on-first-write migration. 34290 events are never rewritten or deleted.
+// The public API keeps the `*Manifest*` names so the three workspace backends
+// (workspace.ts, workspace-relay.ts, workspace-local.ts) compile unchanged.
 
 /** The membership body of a folder-trace node — `snapshot.members` on the wire. */
 interface FolderSnapshot {
