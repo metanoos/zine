@@ -12,7 +12,7 @@
  *
  * The two agree because the protocol is already folder-keyed, not
  * author-keyed: a kind-4290 chain is walked by `prev` links (any signer can
- * extend it) and a kind-34290 manifest is addressed by `folderId` (any reader
+ * extend it) and a kind-34290 TraceHead is addressed by `folderId` (any reader
  * holding the id can list its files). So a webapp keypair can read and extend
  * a desktop-created folder's chain — the chain just becomes multi-author,
  * which `reconstructFromChain`/`fetchChain` already handle.
@@ -33,7 +33,7 @@
 // bridge owns the shape) and carried as an optional on FileState. Type-only,
 // so the storage interface doesn't take a runtime dep on nostr-tools.
 
-import type { SampleEventMeta } from "./provenance.js";
+import type { ContentCite, SampleEventMeta } from "./provenance.js";
 
 export interface Run {
   voice: string;
@@ -248,7 +248,11 @@ export interface Workspace {
    *  node ids tagged onto this file without a body bracket (the protocol's
    *  `tag-add`); each emits a `q` tag + `tag-add` delta, folded into the same
    *  dedup as body quotes and the reply source so a trace cited more than one
-   *  way never doubles up. Omit for every write that doesn't tag a trace. */
+   *  way never doubles up. Omit for every write that doesn't tag a trace.
+   *  `contentCites` are one-shot rendezvous quotes (rendezvous.md §1): orphan-
+   *  text passages the author is attesting interest in, producing `Q` tags
+   *  keyed on the content hash. Transient — consumed by the next seal, not
+   *  persisted on FileState (unlike `taggedTraces`). Omit for every write. */
   writeFile(
     relativePath: string,
     content: string,
@@ -257,6 +261,9 @@ export interface Workspace {
     runs?: Run[],
     replyingTo?: string,
     taggedTraces?: string[],
+    /** One-shot content-cite quotes (rendezvous.md §1). Transient: consumed
+     *  by the next seal, not persisted on FileState. Produces `Q` tags. */
+    contentCites?: ContentCite[],
     /** When true, seal to the home relay only — don't fan out to external
      *  write relays. This is the Step gesture (protocol §8): a local
      *  checkpoint that doesn't leave the machine. Default false (fan out
