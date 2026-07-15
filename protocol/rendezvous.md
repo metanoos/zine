@@ -11,7 +11,7 @@ It introduces three things the provenance and transport protocols do not have:
 1. **Content-addressed rendezvous** — a coordinate shared by the *text* of a
    quote, independent of any node id, author, or relay.
 2. **Distributed anteriority** — NIP-03/OTS timestamps carried on the frequent
-   gesture (Step), not the rare one (Affirm), so that a trace's save history
+   gesture (Step), not the rare one (Attest), so that a trace's save history
    becomes a forgeable-in-theory-but-not-in-practice record of real process.
 3. **Automated process-vetting** — the machine-readable "captcha" that rejects
    sybils by reading the timestamped save graph, a thing no human eyeballing
@@ -92,20 +92,16 @@ cites a node, uppercase cites by content. The human-readable label
 "cite-content" lives in docs/code comments, not on the wire.
 
 ```
-["Q", H, relayHint, "implicit" | "attested"]
+["Q", H, relayHint]
 ```
-
-The 4th slot is the **trust-radius marker**, the one bit separating free
-serendipity from opted-in global reachability:
-
-- `"implicit"` — carried because the author quoted the text. Reachable only
-  within the author's existing peer graph (mutual-peer co-citation, §4).
-- `"attested"` — the author took the explicit "attest interest" gesture
-  (§5.2). Published to the global DHT (§3). Reachable by strangers.
 
 A reader scanning for "does this chain contain `H`?" reads top-level tags
 only — no body parsing. The delta is the source of truth; the tag is the
-cheap index. Same derivation pattern the protocol already runs for `t`.
+cheap index. There is no trust-radius marker on the tag — the Q-tag's
+reachability is derived from whether the carrying node is Sent (Step = local
+relay only, invisible to the network; Send = fans out, discoverable). The
+"attest interest" gesture that would have set a 4th-slot flag is retired
+(§6, `trace-provenance.md` §R11.24c): quoting doesn't signal, publishing does.
 
 ### 1.3 Canonicalization
 
@@ -160,9 +156,11 @@ owner-key-derived `.onion` (`transport.md` §3) — the DHT node advertises the
 same onion the mesh already serves, so the laptop joins the DHT via bootstrap
 nodes, advertises its onion for inbound, and routes for others while online.
 
-- **Put** — publish `{onion, pubkey}` under key `H`. Fires when the author
-  takes the "attest interest" gesture (§5.2) on a content-hash cite. Published
-  to the k closest nodes to `H` (default k=8) for redundancy (§R6).
+- **Put** — publish `{onion, pubkey}` under key `H`. Fires as a side-effect of
+  Send: when the author Sends a node carrying a Q-tag, the DHT publish runs
+  fire-and-forget alongside the relay fan-out. No separate gesture — quoting
+  doesn't signal, publishing signals (§R5). Published to the k closest nodes to
+  `H` (default k=8) for redundancy (§R6).
 - **Get** — query "who published under `H`?" Returns the value list. A querier
   computes `H` for a quote they care about, asks the DHT, and receives
   candidate contacts. Each candidate is verified by fetching the cited trace
@@ -186,25 +184,25 @@ users rely on operator-provided super-peers in this role.
 ## 3. Distributed anteriority — NIP-03 on Step
 
 This is the load-bearing change, and it reverses a decision in the current
-spec. Today anteriority is layered on **Affirm** alone
-(`trace-provenance.md` §8 AFFIRM, §R11.20): one stamp, at the publish moment.
+spec. Today anteriority is layered on **Attest** alone
+(`trace-provenance.md` §8 ATTEST, §R11.20): one stamp, at the publish moment.
 That gives the vetting layer (§5) one anchor — which is to say, nothing. The
 whole power of anteriority as a sybil filter is **density**: dozens of
 checkpoints provably committed across weeks at human rhythms, showing real
 work happening over time. Density requires the *frequent* gesture to stamp.
-Step is frequent and time-distributed; Affirm is rare and deliberate. **Step
+Step is frequent and time-distributed; Attest is rare and deliberate. **Step
 must stamp.**
 
 ### 3.1 The gesture reassignment
 
-Stamping moves from Affirm to Step, and each gesture ends up doing exactly
+Stamping moves from Attest to Step, and each gesture ends up doing exactly
 one job:
 
 | Gesture | Job | Stamps? |
 |---|---|---|
 | **Step** (Cmd+S) | record process: seal locally **and** anchor in time | **yes — every seal** |
 | **Send** | change reachability (fan out to seeds) | no |
-| **Affirm** | take a position: cite + geohash + "this is my published node" | inherited transitively from the cited node (§3.4) |
+| **Attest** | take a position: cite + geohash + "this is my published node" | inherited transitively from the cited node (§3.4) |
 
 Stamping is now a property of the *process-recording* gesture, accruing
 continuously in the background — not a special act bolted onto the
@@ -229,20 +227,20 @@ the save never blocks on a Bitcoin block.
   per Bitcoin transaction; per-stamp cost is ~zero, proofs are sub-KB.
 - **A blocking round-trip on Cmd+S would destroy the gesture** (§R3). The
   seal returns immediately; the OTS proof upgrades in place by a later sweep
-  — exactly the partial-proof workflow the current Affirm path already
+  — exactly the partial-proof workflow the current Attest path already
   describes (`trace-provenance.md` §R11.20).
 - **Throttle only if load demands.** One stamp per N-minute window still
   gives a time-distributed process signal. Don't pre-optimize; stamp every
   Step until there is a reason not to.
 
-### 3.4 Affirm inherits anteriority transitively
+### 3.4 Attest inherits anteriority transitively
 
-An Affirm cites a sent node via `q` (`trace-provenance.md` §8). The cited
-node was sealed by a Step — which now stamps. So the affirmed node's
-anteriority is already anchored by the save that produced it; Affirm does not
+An Attest cites a sent node via `q` (`trace-provenance.md` §8). The cited
+node was sealed by a Step — which now stamps. So the attested node's
+anteriority is already anchored by the save that produced it; Attest does not
 need to be the timestamping gesture to give the vet material.
 
-Affirm MAY still carry its own stamp, for a different purpose: proving *when
+Attest MAY still carry its own stamp, for a different purpose: proving *when
 the author endorsed* (a distinct claim from *when the content existed*). Both
 can coexist. The load-bearing stamps for vetting are the saves.
 
@@ -350,27 +348,33 @@ exactly what a captcha is too. The point is to make "forge a vettable
 corpus" cost *months of real process* instead of *an afternoon of
 generation*. That asymmetry is the goal, and it is achievable.
 
-## 6. The escalating attest verb
+## 6. The two attest rungs (was three)
 
-Across the whole pipeline, one verb escalates in commitment, same "put it on
-the record" semantics throughout:
+Previously this section described a three-rung escalating attest verb: attest
+a node / **attest interest** / attest a peer. The middle rung — "attest
+interest" as a separate opt-in gesture for publishing to the DHT — is **retired**
+(`trace-provenance.md` §R11.24). It duplicated Send: a quote's Q-tag visibility
+is already controlled by whether the carrying node is Sent (Step = local only,
+Send = fans out to relays). A separate "signal interest" gesture asked the
+author to say twice what Send already said once.
+
+The pipeline collapses to two attest rungs:
 
 | Stage | Gesture | What you attest |
 |---|---|---|
-| Author publish | **attest a node** (was: Affirm) | "this is my published position" |
-| Match opt-in | **attest interest** in a quote | "I'll be findable on `H`" — publishes to the DHT |
+| Author publish | **attest a node** | "this is my published position" — commitment stance |
 | Admission | **attest a peer** | "I vetted and trust this person" — adds to `peers.json` |
 
-The same verb at three escalating commitments. This is also the home of the
-copy change from the first turn of this design: **the publish gesture should
-read "attest" not "affirm."** A zine is an attested trace; the noun state and
-the verb line up. The semantic case: *affirm* connotes inward stance;
-*attest* connotes outward bearing-witness, putting something on the record —
-which is what the gesture does (cite + geohash + declare, with an optional
-anteriority stamp that is now inherited transitively from Step).
+Between them sits Send — not an attest at all, but the **discussion stance**:
+"I want to talk about this." Send auto-steps and fans out; the Q-tag goes
+public as a side-effect of Send, not as a separate interest gesture. You
+Send freely (discussion is common), you Attest rarely (commitment is
+deliberate). The match→vet→admit path runs on Sent content; Attest is the
+rare signal that a specific sent node is a position worth standing behind.
 
-See §R7 for the collision this rename creates ("attestation" already names
-the NIP-03 sub-thing) and the recommended resolution.
+The attest/affirm rename and the "attestation"/"anchor" noun/verb split are
+landed (`trace-provenance.md` §R11.23). A zine is an attested trace; the noun
+state and the verb line up.
 
 ---
 
@@ -418,7 +422,7 @@ fetch the chain, read the *actual* quote, and a human (or threshold check)
 confirms "yes, same passage." Fuzzy matching is recall; the signed chain +
 human is precision. Never make the DHT do precision; it cannot.
 
-## R3. Why Step stamps, not Affirm — the dependency this whole layer rests on
+## R3. Why Step stamps, not Attest — the dependency this whole layer rests on
 
 The vet (§5) needs *distributed* anteriority. A proof-of-process that says
 "this existed by time T" is useless as a single point; its power is density
@@ -429,24 +433,24 @@ only on publish, the vet gets one anchor and collapses to nothing. The
 captcha designed in §5 is *impossible against the current codebase* until
 Step stamps.
 
-This decouples stamping from Affirm and recouples it to where it belongs:
+This decouples stamping from Attest and recouples it to where it belongs:
 - Step = record process. Seal + anchor in time. *Builds* the captcha material.
 - Send = change reachability. Touches nothing about time.
-- Affirm = take a position. Its anteriority is now *inherited transitively*
+- Attest = take a position. Its anteriority is now *inherited transitively*
   from the cited node (which was a Step, which stamps).
 
 Cleaner than the current coupling. Stamping is a property of the
 process-recording gesture, accruing continuously — not a special act bolted
 onto the position-taking gesture.
 
-This **reverses `trace-provenance.md` §R11.20(b)**, which argued "Why Affirm
+This **reverses `trace-provenance.md` §R11.20(b)**, which argued "Why Attest
 and not Step?" on the grounds that (i) Step is local and has no anteriority
 claim to make, and (ii) OTS's round-trip cannot hang off Cmd+S without
 destroying the gesture's frequency. Both arguments are addressed: (i) is
 reversed by this layer — Step's anteriority is what *makes* the vet possible,
 so Step now has the strongest possible anteriority claim; (ii) is solved by
 the fire-and-forget, proof-upgrades-in-background workflow (§3.3), which is
-exactly the partial-proof workflow §R11.20 already specifies for Affirm.
+exactly the partial-proof workflow §R11.20 already specifies for Attest.
 Where §R11.20 argued the OTS round-trip was incompatible with Cmd+S's
 frequency, the fire-and-forget model dissolves the incompatibility: the
 *seal* is instant, the *proof* is async. The two can coexist at save
@@ -466,10 +470,10 @@ those citing `quote` alone.
 This is domain-specific (it only works for quotable material that has
 sources), cannot be faked cheaply, and maps onto a real distinction: someone
 who read it vs. someone who scraped it. It connects to something true about
-the domain — an attestation of interest in a quote is stronger when it
+the domain — an attesting of interest in a quote is stronger when it
 attests to *reading the source*.
 
-## R5. The mesh and the DHT carry different things; sovereignty holds
+## R5. The mesh and the DHT carry different things; Send is the sovereignty filter
 
 The honest framing: global findability is global visibility of your
 interests. You cannot have "the whole network can find anyone who quoted `H`"
@@ -478,18 +482,21 @@ property requested; it is not a flaw to engineer away, it is the trade.
 
 What you *can* do: the DHT value is an onion address + ephemeral pubkey, not
 your identity. You reveal "someone at this onion cares about `H`," not "you,
-specifically, care about `H`." And it can be **per-quote opt-in** — which is
-where "attest interest" (§6) lands: attesting interest in a quote = publishing
-it to the DHT. Default quotes stay local+peer-only (the hash exists but is
-not published globally; reachable only via mutual-peer co-citation §4);
-attested quotes go global.
+specifically, care about `H`." And the filter is not a per-quote opt-in gesture
+— it's Send. A quote's Q-tag rides on the parent document's node; a Step keeps
+that node local (home relay only, invisible to the network); a Send fans it out
+to relays and (when the DHT lands) auto-publishes the Q-tag globally. Quoting
+doesn't signal; **publishing signals.** Drafts stay private by default; the
+moment you Send the carrying document, every Q-tag on it becomes discoverable.
+No separate "attest interest" gesture — that rung is retired (§6,
+`trace-provenance.md` §R11.24c).
 
 The counter-pressure is bootstrapping: a DHT with nobody publishing is dead.
-Defaults determine whether the network has enough density to be useful at
-all. Resolution: the *local* path (mutual-peer co-citation, §4) works from
-day one with zero DHT density; the global DHT path is the opt-in accelerator.
-The network is alive at launch via the mesh; the DHT is what lets it outgrow
-the mesh.
+Resolution: the *local* path (mutual-peer co-citation, §4) works from day one
+with zero DHT density — any Sent quote is visible to peers who share your
+seeds. The global DHT path is the accelerator for non-mutual discovery. The
+network is alive at launch via the mesh (every Sent quote feeds co-citation);
+the DHT is what lets it outgrow the mesh.
 
 ## R6. Sybil at the network layer is unsolvable; the vet is the filter
 
@@ -513,24 +520,27 @@ prevent fake nodes from existing — you need each person to not *admit* fake
 ones, and that's a much lower bar. This is how every real social layer works:
 email is 90% spam and it's fine, because your address book isn't.
 
-## R7. The attest/affirm rename and the "attestation" collision
+## R7. The attest/affirm rename and the "attestation" collision — landed
 
-Renaming the publish gesture from "affirm" to "attest" creates a collision:
+Renaming the publish gesture from "affirm" to "attest" created a collision:
 "attestation" already names the NIP-03/OTS timestamp artifact
 (`stampAndPublishAttestation`, "anteriority attestation" in §R11.20).
 
-Recommended resolution — **lean into the noun/verb split, and rename the
-sub-thing:** `attest` = the gesture (verb); the NIP-03 artifact = the
-`timestamp stamp` / `OTS anchor` / `anteriority proof` (noun). The gesture is
-the concept users should feel, so it owns the clean word; the cryptographic
-sub-mechanism can afford a technical name. `stampAndPublishAttestation` →
-e.g. `stampAndPublishAnchor`.
+Resolution landed — **the noun/verb split, with the sub-thing renamed:**
+`attest` = the gesture (verb); the NIP-03 artifact = the `anchor` (noun).
+The gesture is the concept users should feel, so it owns the clean word; the
+cryptographic sub-mechanism took the technical name. `stampAndPublishAttestation`
+→ `stampAndPublishAnchor`; `attestation.ts` → `anchor.ts`;
+`OTS_ATTESTATION_KIND` → `OTS_ANCHOR_KIND`; `upgradePendingAttestations` →
+`upgradePendingAnchors`. The gesture owns `attest`; the OTS sub-mechanism
+owns `anchor`.
 
-The rename is bounded: `trace-provenance.md` §3.4/§8/§R11.19–20, the wire
-`action: "affirm"` tag value, `OpKind`/`affirmNode`/`canAffirm`/`affirmAsVoice`
-in the client, `AffirmModal.tsx` → `AttestModal.tsx`, the `.op-affirm` CSS,
-and `zine_affirm` in the MCP tools. The codebase is pre-1.0 on a feature
-branch, so the wire-format change is cheap now and expensive later.
+The sweep that landed: `trace-provenance.md` §3.4/§8/§R11.19–20, the wire
+`action: "attest"` tag value, `OpKind`/`attestNode`/`canAttest`/`attestAsVoice`
+in the client, `AttestModal.tsx`, the `.op-attest` CSS, and `zine_attest` in
+the MCP tools. The codebase is pre-1.0 on a feature branch, so the
+wire-format change was cheap. See `trace-provenance.md` §R11.23 for the
+design-history entry.
 
 The semantic case for the rename itself: *attest* connotes outward
 bearing-witness, putting something on the record — which is what the gesture
@@ -597,8 +607,6 @@ nothing.
   (burstiness, circadian, weekly gaps) needs empirical calibration from real
   traces. Until then the test is a coarse outlier-rejection ("too uniform")
   rather than a fitted model.
-- **The attest/affirm rename sweep.** Bounded (§R7) but real. Decide
-  whether to land the rename in the same change as this layer or separately.
 - **Calcarda routing-layer sybil defenses.** Redundant publish/get (publish
   to k closest, query several, intersect) is the floor and should ship with
   the DHT. PoW on node identity is held in reserve — turn on if spam becomes
@@ -610,7 +618,7 @@ nothing.
   (`transport.md` §2) needs a concrete spec: digest aggregation batch size,
   Bitcoin tx cadence, proof-serving endpoint, proof upgrade sweep. Modest
   service, not yet specified.
-- **Affirm's own stamp.** Whether Affirm keeps its own anteriority stamp
+- **Attest's own stamp.** Whether Attest keeps its own anteriority stamp
   (§3.4, for proving *when endorsed* as distinct from *when content existed*)
   or drops it entirely as redundant once Step stamps. Likely: keep, different
   purpose, both coexist. Decide at implementation.
