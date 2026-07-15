@@ -148,7 +148,12 @@ import { saveAttachedFolder } from "./registry.js";
 import { changedRegion, dominantVoiceInRegion, type Workspace } from "./workspace-core.js";
 import { getPublicKey } from "nostr-tools/pure";
 import { isTauri, resolveRelayUrl } from "./identity.js";
-import { getSubstrateVoice } from "./external-voice-store.js";
+import {
+  getSubstrateVoice,
+  getSubstrateSignerKeyId,
+  setSubstrateSignerKeyId,
+  getSubstrateBindingPubkey,
+} from "./external-voice-store.js";
 import { gatherContextBlock, clearChainMemo, renderLimelightLog } from "./context-gather.js";
 import { SYSTEM_PREAMBLE } from "./system-preamble.js";
 import {
@@ -182,6 +187,7 @@ import {
   Quote,
   Radio,
   RotateCcw,
+  Settings,
   Sun,
   Tag as TagIcon,
   type LucideIcon,
@@ -1440,6 +1446,7 @@ function Sidebar({
   onTogglePlay,
   onCycleSpeed,
   onOpenFolder,
+  onOpenSettings,
 }: {
   tree: TreeNode[];
   collapsed: Set<string>;
@@ -1492,6 +1499,8 @@ function Sidebar({
    *  "Open"). Mirrors onActivateFile but for folders: opens the special
    *  folder tab instead of leaving the folder as a selection-only trace. */
   onOpenFolder: (path: string) => void;
+  /** Open the settings panel (factory reset lives here). */
+  onOpenSettings: () => void;
   /** Bootstrap folder-wide replay (async fetch of the folder's seals). Called
    *  by the transport's ▶ when no timeline is loaded yet. */
   onBeginReplay: () => void;
@@ -2099,6 +2108,17 @@ function Sidebar({
           {tagBrowser}
         </SampleModal>
       )}
+      <div className="sidebar-footer-bar">
+        <button
+          type="button"
+          className="icon-btn sidebar-settings-btn"
+          title="Settings"
+          aria-label="Settings"
+          onClick={onOpenSettings}
+        >
+          <Settings size={16} aria-hidden="true" />
+        </button>
+      </div>
     </nav>
   );
 }
@@ -3986,6 +4006,7 @@ function TopBar({
   onChooseAuthorKey,
   onChooseModelKey,
   providers,
+  providerTick,
   onSelectProvider,
   selection,
   runningOp,
@@ -4010,6 +4031,9 @@ function TopBar({
   onChooseModelKey: (id: string) => void;
   /** Configured providers for the model select (MODEL-side mode cell). */
   providers: ProviderConfig[];
+  /** Render-tick bumped after a MODEL-model provider pin changes, so the
+   *  model select re-reads the voice-provider store (its true source). */
+  providerTick: number;
   /** Pin which provider LLM ops run against (per MODEL voice). */
   onSelectProvider: (pubkey: string, providerId: string) => void;
   /** The currently-outlined trace, or null. Drives which actions are live. */
@@ -4081,6 +4105,7 @@ function TopBar({
   // first configured provider is the effective choice — same fallback
   // resolveOpProvider uses, so the dropdown matches what ops run.
   const modelPubkey = (keys.find((k) => k.id === modelKeyId) ?? null)?.pubkey ?? "";
+  void providerTick; // re-render signal for the store-backed modelProviderId below
   const modelProviderId = modelPubkey ? getVoiceProvider(modelPubkey) ?? "" : "";
   const resolvedProviderId =
     providers.find((p) => p.id === modelProviderId)?.id ?? providers[0]?.id ?? "";
@@ -5838,6 +5863,9 @@ function App() {
   // fresh one. Gated by a dialog so the destructive action can't fire on a
   // stray click.
   const [confirmReset, setConfirmReset] = useState(false);
+  // Settings modal (opened from the sidebar's gear button). Holds the
+  // factory-reset action — nukes all zine.* localStorage and reloads.
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [files, setFiles] = useState<Record<string, FileState>>({});
   // Sibling traces available as tag-trace picker candidates: every file in the
   // current folder that has sealed a node this session (has a head nodeId to
@@ -6289,6 +6317,24 @@ function App() {
     const stored = localStorage.getItem("zine.roles.inject");
     return stored && loadKeys().some((k) => k.id === stored) ? stored : loadKeys()[0]?.id ?? null;
   });
+  // The effective signer key id for the current substrate, for the bar's
+  // pen/voice/key dropdown. If the user pinned a key, that's the id. If not but
+  // a scan already auto-provisioned one, reflect *that* key's id so the dropdown
+  // shows who is actually signing. Null when nothing is wired yet. Recomputed per
+  // render from the store (the source of truth) so a substrate switch re-reads it.
+  const substrateKeyId = (() => {
+    const pinned = getSubstrateSignerKeyId(substrate);
+    if (pinned) return pinned;
+    const pubkey = getSubstrateBindingPubkey(substrate);
+    return pubkey ? keys.find((k) => k.pubkey === pubkey)?.id ?? null : null;
+  })();
+  /** Pin which keychain key signs scans for the current substrate. Persisted per
+   *  substrate in the external-voice store. Bumps `substrate` to re-render (the
+   *  effective id above is read from the store, not React state). */
+  function chooseSubstrateKey(id: string) {
+    setSubstrateSignerKeyId(substrate, id);
+    setSubstrate((s) => s); // force re-read of substrateKeyId
+  }
   // The first keychain key's pubkey — the fallback both roles resolve to when
   // no AUTHOR/MODEL has been picked (or its key was deleted), then "alice".
   const fallbackPubkey = keys[0]?.pubkey ?? "alice";
@@ -8244,6 +8290,21 @@ function App() {
     setEmptyFolders(new Set());
     setTabCtxMenu(null);
     await webCreateFolder();
+  }
+
+  /** Factory reset: nuke EVERY zine.* localStorage key and reload. This wipes
+   *  the root binding, crash pads, keychain, relay config, substrate voices,
+   *  models, layout — everything — returning the app to a first-run state.
+   *  Relay chains on the sidecar / remote relays are untouched; only this
+   *  machine's local state is cleared. No undo; the confirm modal gates it. */
+  function factoryReset() {
+    const toRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith("zine.")) toRemove.push(key);
+    }
+    for (const key of toRemove) localStorage.removeItem(key);
+    window.location.reload();
   }
 
   /** Webapp: join an existing folder by id (e.g. copied from the desktop). */
@@ -11023,6 +11084,7 @@ function App() {
                   })
                 }
                 onOpenFolder={openFolder}
+                onOpenSettings={() => setSettingsOpen(true)}
               />
               {/* Horizontal resize handle for the press: drag to change the
                   collection/palette sidebar width; double-click resets. */}
@@ -11580,6 +11642,7 @@ function App() {
                 onChooseAuthorKey={chooseAuthorKey}
                 onChooseModelKey={chooseModelKey}
                 providers={providers}
+                providerTick={voiceProviderTick}
                 onSelectProvider={(pk, pid) => selectVoiceProvider(pk, pid)}
                 selection={selection}
                 runningOp={(() => {
@@ -11614,6 +11677,8 @@ function App() {
                 }}
                 substrate={substrate}
                 onChooseSubstrate={chooseSubstrate}
+                substrateKeyId={substrateKeyId}
+                onChooseSubstrateKey={chooseSubstrateKey}
                 onScan={() => setScanOpen(true)}
                 onReifyOp={() => void onReifyOp()}
               />
@@ -11794,6 +11859,47 @@ function App() {
                 Reset workspace
               </button>
             </div>
+          </div>
+        </div>
+      )}
+      {settingsOpen && (
+        <div className="confirm-overlay" onClick={() => setSettingsOpen(false)}>
+          <div
+            className="confirm-dialog settings-dialog"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Settings"
+          >
+            <h2 className="settings-heading">Settings</h2>
+            <section className="settings-section">
+              <h3 className="settings-section-heading">Factory reset</h3>
+              <p className="settings-section-blurb">
+                Erases every <code>zine.*</code> local key — the root binding, crash pads,
+                keychain, relay config, substrate voices, models, and layout. The app reloads
+                to a first-run state. Relay chains on the sidecar / remote relays are untouched;
+                only this machine's local state is cleared. There is no undo.
+              </p>
+              <div className="confirm-actions">
+                <button
+                  type="button"
+                  className="confirm-cancel"
+                  onClick={() => setSettingsOpen(false)}
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  className="confirm-delete"
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    factoryReset();
+                  }}
+                >
+                  Erase everything
+                </button>
+              </div>
+            </section>
           </div>
         </div>
       )}

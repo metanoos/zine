@@ -2284,6 +2284,59 @@ html[data-theme="light"] .rail-brand-wordmark {
   overflow-y: auto;
 }
 
+/* Settings button pinned to the bottom of the sidebar. */
+.sidebar-footer-bar {
+  flex: 0 0 auto;
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0.3rem 0.6rem;
+  border-top: 1px solid var(--rule);
+}
+.sidebar-settings-btn {
+  opacity: 0.6;
+}
+.sidebar-settings-btn:hover {
+  opacity: 1;
+}
+
+/* Settings modal (factory reset). Reuses .confirm-dialog. */
+.settings-dialog {
+  max-width: 30rem;
+}
+.settings-heading {
+  margin: 0 0 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.settings-section-heading {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.settings-section-blurb {
+  margin: 0 0 0.5rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--ink-dim);
+}
+.settings-section-blurb code {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+}
+
 /* Switch-folder button pinned to the top of the sidebar: detach the current
    press and return to the folder/home picker. Styled to read as a quiet header
    affordance, matching the mono/uppercase language of the section titles. */
@@ -2681,17 +2734,6 @@ body.sidebar-resizing {
 
 .sampler-status.error {
   color: var(--danger, #c33);
-}
-
-/* Palette section — the curated set of hardened spans. Sits below the tree as
- * a second sidebar section; mirrors the sampler panel's compactness. Each row
- * is a citation you can copy to the clipboard (Copy = full `[[ text | nodeId ]]`)
- * or remove from the curation (Trash = drop the reference, not the node). */
-
-.sidebar-header--palette {
-  border-top: 1px solid var(--rule);
-  margin-top: 0.25rem;
-  padding-top: 0.55rem;
 }
 
 .palette-panel {
