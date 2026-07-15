@@ -89,7 +89,7 @@ import {
   type Mode,
 } from "./brackets.js";
 import { markdownPreviewExtensions } from "./markdown-preview.js";
-import { PalettePanel } from "./PalettePanel.js";
+
 import { OrchestrationTimeline } from "./OrchestrationTimeline.js";
 import { LlmReconstructPanel } from "./LlmReconstructPanel.js";
 import { DownloadView } from "./Download.js";
@@ -143,8 +143,8 @@ import {
   type AttachedFolder,
 } from "./workspace.js";
 import { createLocalWorkspace, pullFromRelay, type StagedMerge } from "./workspace-local.js";
-import { loadLocalFolder, saveLocalFile, mirrorPad, clearPadPath, clearPad, loadPad, type LocalFile } from "./local-store.js";
-import { saveAttachedFolder, clearAttachedFolder } from "./registry.js";
+import { loadLocalFolder, saveLocalFile, mirrorPad, clearPadPath, loadPad, type LocalFile } from "./local-store.js";
+import { saveAttachedFolder } from "./registry.js";
 import { changedRegion, dominantVoiceInRegion, type Workspace } from "./workspace-core.js";
 import { getPublicKey } from "nostr-tools/pure";
 import { isTauri, resolveRelayUrl } from "./identity.js";
@@ -1422,7 +1422,6 @@ function Sidebar({
   tagBrowserOpen,
   onToggleTagBrowser,
   tagBrowser,
-  palette,
   folderId,
   orchestrationOpen,
   onToggleOrchestration,
@@ -1469,7 +1468,6 @@ function Sidebar({
   tagBrowserOpen: boolean;
   onToggleTagBrowser: () => void;
   tagBrowser: React.ReactNode;
-  palette: React.ReactNode;
   /** Id of the attached folder. A change (switch/detach) clears the tree
    *  multi-selection so it never refers to paths that no longer exist. */
   folderId: string | null;
@@ -1478,7 +1476,7 @@ function Sidebar({
   /** Toggle the orchestration-replay section. */
   onToggleOrchestration: () => void;
   /** Bumped by App() after a folder-chain mutation so the orchestration panel
-   *  re-fetches its stream. Mirrors PalettePanel's `refreshKey`. */
+   *  re-fetches its stream. */
   orchestrationRefreshKey: number;
   /** The focused panel's active trace path (a file path, or a folder relpath
    *  when its active tab is a folder sentinel; "" when the panel is empty).
@@ -2101,10 +2099,6 @@ function Sidebar({
           {tagBrowser}
         </SampleModal>
       )}
-      <div className="sidebar-header sidebar-header--palette">
-        <span className="sidebar-title">PALETTE</span>
-      </div>
-      {palette}
     </nav>
   );
 }
@@ -6520,8 +6514,11 @@ function App() {
   useEffect(() => {
     activeEditorView.current = panelViews.current[activePanel] ?? null;
   }, [activePanel]);
-  // paletteRefreshKey bumps after a palette mutation so PalettePanel re-fetches.
-  const [paletteRefreshKey, setPaletteRefreshKey] = useState(0);
+  // voiceProviderTick bumps after a MODEL-model provider pin changes (written to
+  // the localStorage-backed voice-provider-store). TopBar's ModelSelect reads
+  // that store during render, so it needs this App-level bump to re-render and
+  // reflect the new selection — there's no React state for the store to flow through.
+  const [voiceProviderTick, setVoiceProviderTick] = useState(0);
   // orchestrationRefreshKey bumps when the folder's membership set or any file's
   // node id changes, so the OrchestrationTimeline panel re-fetches its stream
   // after a folder-chain mutation (create/move/delete/rename/import). The bump
@@ -6771,7 +6768,7 @@ function App() {
   /** Pin the MODEL model for a voice and re-render so the menu updates. */
   function selectVoiceProvider(pubkey: string, providerId: string) {
     setVoiceProvider(pubkey, providerId || null);
-    setPaletteRefreshKey((k) => k + 1); // cheap re-render trigger
+    setVoiceProviderTick((k) => k + 1); // force ModelSelect to re-read the store
   }
 
   /** Set the per-panel op status (shared by all four ops). The `op` kind is
@@ -8218,25 +8215,9 @@ function App() {
    *  (selection, replay, citations, the seals modal, collapsed-tree rows) —
    *  clear them explicitly so the fresh folder starts clean. */
   async function resetWorkspace() {
-    // Desktop: clear the permanent-root binding (zine.attachedFolder) and the
-    // crash pad for it, then drop to the empty-state picker so a fresh folder
-    // can be mounted. The old chain stays on the relay under its old id — only
-    // the local pointer is cleared. This is the escape hatch when root is
-    // broken or misnamed (e.g. a stale mount from before root was permanent).
-    // Webapp: forget the known folder and provision a fresh one.
-    if (isTauri()) {
-      if (folder) clearPad(folder.id);
-      clearAttachedFolder();
-    } else {
-      if (folder) forgetFolder(folder.id);
-    }
-    setFolder(null);
-    setFiles({});
-    setBootState("idle");
-    setBootError(null);
-    setFailedFolder(null);
+    if (isTauri()) return; // desktop has no relay-folder concept to reset
+    if (folder) forgetFolder(folder.id);
     setSelection(null);
-    setScope(folder ? { kind: "folder", path: ROOT } : null);
     setEditorSelection(null);
     setCollapsed(new Set());
     setReplay(null);
@@ -8249,7 +8230,7 @@ function App() {
     setInboundHeadByPath({});
     setEmptyFolders(new Set());
     setTabCtxMenu(null);
-    if (!isTauri()) await webCreateFolder();
+    await webCreateFolder();
   }
 
   /** Webapp: join an existing folder by id (e.g. copied from the desktop). */
@@ -8931,17 +8912,15 @@ function App() {
    *  a citation chip (Preview mode) — the chip still owns its own clipboard
    *  write (so copy stays a pasteable citation), and this is the "also save for
    *  reuse" side effect. `appendToPalette` is idempotent (deduped by nodeId), so
-   *  re-copying an already-curated span is a no-op. Fire-and-forget; on success
-   *  the refresh key bumps so PalettePanel re-fetches and surfaces the entry. */
+   *  re-copying an already-curated span is a no-op. Fire-and-forget; errors only
+   *  log — the chip's own copy still succeeds either way. */
   function copySpan(nodeId: string, phrase: string, originPath: string) {
     appendToPalette({
       nodeId,
       text: phrase,
       originPath,
       mintedAt: Date.now(),
-    })
-      .then(() => setPaletteRefreshKey((k) => k + 1))
-      .catch((e) => console.warn("[zine] palette append failed:", e));
+    }).catch((e) => console.warn("[zine] palette append failed:", e));
   }
 
   // Keep the selected *file* trace's nodeId fresh: a sampled file, for instance,
@@ -10876,7 +10855,7 @@ function App() {
           onToggleExpanded={() => setRailExpanded((v) => !v)}
           theme={theme}
           onToggleTheme={toggleTheme}
-          onResetWorkspace={() => setConfirmReset(true)}
+          onResetWorkspace={!isTauri() ? () => setConfirmReset(true) : undefined}
           showOperator={!isTauri() && isStaff()}
         />
         <div className="view-column">
@@ -10964,15 +10943,6 @@ function App() {
                     onSelectCandidate={(c) => void runTagBrowse(c)}
                     status={tagBrowserStatus}
                     onFind={findTagCandidates}
-                  />
-                }
-                palette={
-                  <PalettePanel
-                    refreshKey={paletteRefreshKey}
-                    selectedNodeId={
-                      selection?.kind === "span" ? selection.nodeId : undefined
-                    }
-                    onSelect={(item) => selectSpan(item.nodeId, item.text)}
                   />
                 }
                 onOpenToSide={openToSide}
@@ -11793,9 +11763,8 @@ function App() {
         <div className="confirm-overlay" onClick={() => setConfirmReset(false)}>
           <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
             <p className="confirm-message">
-              Reset workspace? This unbinds the current root and returns to the folder picker
-              {isTauri() ? "" : " and provisions a fresh one"}. The old chain stays on the relay
-              under its old id; only the local binding is cleared.
+              Reset workspace? This clears the current folder and starts a fresh one. The old folder's
+              history stays on the relay under its old id.
             </p>
             <div className="confirm-actions">
               <button type="button" className="confirm-cancel" onClick={() => setConfirmReset(false)}>
