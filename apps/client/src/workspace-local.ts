@@ -28,8 +28,10 @@ import {
   diffToDeltas,
   fetchChain,
   fetchEventById,
+  fetchFolderOwner,
   fetchManifest,
   fetchNodeOwner,
+  forkFileFromNode,
   eventMeta,
   headUserTags,
   headTaggedTraces,
@@ -119,6 +121,14 @@ export async function completeDeletion(
 ): Promise<void> {
   await Promise.all(paths.map((path) => tombstone(path)));
   for (const path of paths) deleteLocal(path);
+}
+
+export function ownershipDisposition(
+  ownerPubkey: string | null,
+  signerPubkey: string,
+): "owned" | "foreign" | "unverifiable" {
+  if (!ownerPubkey) return "unverifiable";
+  return ownerPubkey === signerPubkey ? "owned" : "foreign";
 }
 
 async function sha256Hex(text: string): Promise<string> {
@@ -289,9 +299,9 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     const fromEntry = file.pendingMove
       ? manifest.find((candidate) => candidate.relativePath === file.pendingMove!.fromPath)
       : undefined;
-    const prevId: string | null = entry?.latestNodeId ?? (file.nodeId || fromEntry?.latestNodeId || null);
+    let prevId: string | null = entry?.latestNodeId ?? (file.nodeId || fromEntry?.latestNodeId || null);
 
-    const traceId =
+    let traceId =
       file.traceId ??
       (prevId ? await resolveTraceIdentity(prevId) : null);
 
@@ -310,7 +320,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     if (chain.length === 0 && (entry || fromEntry)) {
       chain = await fetchChain(folderId, entry?.relativePath ?? fromEntry!.relativePath);
     }
-    const prevContent = prevId && chain.length > 0 ? reconstructFromChain(chain) : "";
+    let prevContent = prevId && chain.length > 0 ? reconstructFromChain(chain) : "";
 
     // Skip if nothing changed since the last push. The no-op test covers
     // content hash, topical tags, AND the citation set (body brackets + reply
@@ -336,12 +346,59 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       return entry.latestNodeId;
     }
 
-    const deltas = diffToDeltas(prevContent, content);
     // Resolve the voice that authored this edit to its secret key, so the push
     // signs as that voice — not just the AUTHOR default. Falls back to the
     // AUTHOR key if the stored voice isn't in the keychain (defensive: a voice
     // deleted after the edit was authored).
     const signer = file.voicePubkey ? secretKeyForVoice(file.voicePubkey) ?? undefined : undefined;
+    const signerPubkey = signer ? getPublicKey(signer) : authorVoice();
+
+    // A folder chain has one owner too. Extending a foreign folder membership
+    // would be the same ownership violation as extending a foreign file. Root
+    // folders must be explicitly forked before attach; recursive nested-folder
+    // fork-on-write remains a separate operation, so this path fails closed.
+    const folderOwner = await fetchFolderOwner(folderId);
+    if (folderOwner && folderOwner !== signerPubkey) {
+      throw new Error(`cannot write through foreign folder ${folderId}; fork the folder first`);
+    }
+
+    // Shallow folder forks deliberately cite foreign file members. The first
+    // edit must seed an owned genesis from that exact source node, repoint the
+    // membership, and only then append the requested edit to the owned chain.
+    if (entry) {
+      const disposition = ownershipDisposition(
+        await fetchNodeOwner(entry.latestNodeId),
+        signerPubkey,
+      );
+      if (disposition === "unverifiable") {
+        throw new Error(`cannot verify owner of ${relativePath} at ${entry.latestNodeId}`);
+      }
+      if (disposition === "foreign") {
+        const fork = await forkFileFromNode(
+          entry.latestNodeId,
+          folderId,
+          relativePath,
+          { signer, localOnly: file.pendingLocalOnly },
+        );
+        await upsertManifestEntry(
+          folderId,
+          {
+            kind: "file",
+            relativePath,
+            latestNodeId: fork.id,
+            contentHash: entry.contentHash,
+          },
+          signer,
+          { localOnly: file.pendingLocalOnly },
+        );
+        prevId = fork.id;
+        traceId = fork.id;
+        chain = [fork];
+        prevContent = reconstructFromChain(chain);
+      }
+    }
+
+    const deltas = diffToDeltas(prevContent, content);
     const event = await publishEdit({
       prevEventId: prevId,
       ...(traceId ? { traceId } : {}),

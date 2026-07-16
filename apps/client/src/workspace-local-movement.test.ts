@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   completeDeletion,
   completeStagedWrite,
+  ownershipDisposition,
   pendingMoveForPath,
 } from "./workspace-local.js";
 
@@ -102,4 +103,10 @@ test("failed tombstones leave local copies intact for retry", async () => {
     /relay unavailable/,
   );
   assert.deepEqual(deleted, []);
+});
+
+test("ownership disposition distinguishes owned, foreign, and unverifiable nodes", () => {
+  assert.equal(ownershipDisposition("alice", "alice"), "owned");
+  assert.equal(ownershipDisposition("bob", "alice"), "foreign");
+  assert.equal(ownershipDisposition(null, "alice"), "unverifiable");
 });
