@@ -20,8 +20,10 @@ import type { CheckpointMeta } from "./vet.js";
 /** A parsed body-edit delta (the shape publishEdit emits in the content JSON). */
 interface BodyEditDelta {
   type: "insert" | "delete" | "replace";
-  positionStart: number;
-  positionEnd: number;
+  position: {
+    start: number;
+    end: number;
+  };
   newValue: string | null;
 }
 
@@ -59,7 +61,7 @@ export function checkpointsFromChain(
       if (Array.isArray(parsed.deltas)) {
         for (const d of parsed.deltas) {
           if (isBodyEdit(d)) {
-            const regionLen = d.positionEnd - d.positionStart;
+            const regionLen = d.position.end - d.position.start;
             const insertedLen = d.newValue?.length ?? 0;
             charDelta += insertedLen - regionLen;
             deltaCount++;
@@ -87,7 +89,9 @@ function isBodyEdit(d: unknown): d is BodyEditDelta {
   const obj = d as Record<string, unknown>;
   return (
     (obj.type === "insert" || obj.type === "delete" || obj.type === "replace") &&
-    typeof obj.positionStart === "number" &&
-    typeof obj.positionEnd === "number"
+    !!obj.position &&
+    typeof obj.position === "object" &&
+    typeof (obj.position as Record<string, unknown>).start === "number" &&
+    typeof (obj.position as Record<string, unknown>).end === "number"
   );
 }

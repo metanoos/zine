@@ -37,7 +37,7 @@ function delta(
   end: number,
   newValue: string,
 ): object {
-  return { type, positionStart: start, positionEnd: end, newValue, timestamp: 1 };
+  return { type, position: { start, end }, newValue, timestamp: 1 };
 }
 
 // --- Basic extraction --------------------------------------------------
@@ -161,7 +161,7 @@ test("checkpointsFromChain: no deltas field → charDelta 0, count 0", () => {
 
 test("checkpointsFromChain: null newValue treated as zero-length insert", () => {
   const ev = nodeEvent("e1", 1, {
-    deltas: [{ type: "delete", positionStart: 0, positionEnd: 5, newValue: null, timestamp: 1 }],
+    deltas: [{ type: "delete", position: { start: 0, end: 5 }, newValue: null, timestamp: 1 }],
   });
   const [cp] = checkpointsFromChain([ev]);
   assert.equal(cp?.charDelta, -5); // 0 inserted - 5 region
