@@ -7,6 +7,7 @@ import {
   openAIModelOptions,
 } from "./model-config.js";
 import type { ProviderConfig } from "./models-store.js";
+import { prepareChatMessages } from "./llm.js";
 
 const BASE: ProviderConfig = {
   id: "m1",
@@ -70,4 +71,21 @@ test("personality and free-form instructions compose into transparent system tex
       "Prefer small, reviewable patches.",
   );
   assert.equal(modelSystemInstruction({ ...BASE, personality: "none" }), "");
+});
+
+test("prepareChatMessages exposes the exact provider system layer used on the wire", () => {
+  const input = [
+    { role: "system" as const, content: "zine operation contract" },
+    { role: "user" as const, content: "document data" },
+  ];
+  const prepared = prepareChatMessages({
+    ...BASE,
+    personality: "friendly",
+    instructions: "Avoid a model-specific markdown bug.",
+  }, input);
+
+  assert.equal(prepared.length, 3);
+  assert.match(prepared[0].content, /warm, approachable/);
+  assert.match(prepared[0].content, /model-specific markdown bug/);
+  assert.deepEqual(prepared.slice(1), input);
 });

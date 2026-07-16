@@ -17,7 +17,9 @@ Scored by hand against the
 
 The sections below preserve the ground truth, draw-level scoring, and final
 cross-trace comparison. Raw prompts and model draws remain in `ab-outputs/`
-and `c2-outputs/`.
+and `c2-outputs/`. For contrast strengths at N=5 and the scoring/model
+caveats, see the 2026-07-15 statistical framing note in the
+[rubric's chronological record](narration-rubric.md).
 
 ## Ground truth (lookup, pre-registered)
 

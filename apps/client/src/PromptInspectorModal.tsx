@@ -4,13 +4,11 @@
  * Opens when the user clicks the `~tokens` indicator beside the op buttons
  * (App.tsx threads `onInspect` onto `.action-palette-token-count`). Shows the full
  * `messages[]` layout a chosen op (Extend / Settle / Stir / Reply / Receive)
- * would hand to `complete()` against the op-target panel's focused file and
- * the current scope:
+ * would send against the op-target panel's focused file and current scope:
  *
- *   1. system — the MODEL voice's voice prompt (if any), spliced in first
- *   2. system — SYSTEM_PREAMBLE + the op's role preamble
- *   3. user   — the injected context block (=== CONTEXT === … === END CONTEXT ===)
- *   4. user   — the op body (seed / loose prose / source / limelight log)
+ *   1. system — provider-card personality/instructions (if any)
+ *   2. system — SYSTEM_PREAMBLE + op role + optional voice/lens layers
+ *   3. user   — injected context block + op body
  *
  * This is a pre-send view: there is no attempt to rebuild a past call from
  * incomplete provenance. It reads the same builders as the live operation
@@ -22,9 +20,8 @@
  * App.tsx matches RunModal's pattern (App owns logic, modal is the surface).
  *
  * Cheap inputs are derived live (Extend seed, Settle/Stir loose prose). Relay-
- * fetched inputs (Reply's minted traces, Receive's limelight log) can't be
- * reconstructed without a fetch, so they're shown as an honest note rather than
- * an empty box — the user sees what's missing and why.
+ * fetched inputs (Reply's minted traces, Receive's limelight log) are captured
+ * by App when the modal opens. Fetch failures are shown as honest notes.
  *
  * Agent-run insight is NOT here: the Run/agent-loop path injects differently
  * (AGENT_PREAMBLE, not SYSTEM_PREAMBLE; tool specs; a per-step ReAct log that
@@ -34,12 +31,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  buildOpMessages,
+  assembleOpMessages,
   OP_ORDER,
   OP_LABELS,
   type OpKind,
   type OpInputs,
 } from "./op-prompts.js";
+import { prepareChatMessages } from "./llm.js";
+import { OP_LENSES, lensForOp, type OpLensId, type OpLensSelections } from "./op-lenses.js";
+import type { ProviderConfig } from "./models-store.js";
 
 export interface PromptInspectorProps {
   /** The op to show first. Defaults to "extend". */
@@ -62,8 +62,11 @@ export interface PromptInspectorProps {
   activeFileStepped: boolean;
   /** The MODEL voice's custom prompt (voice-prompt-store), or "" if none. */
   voicePrompt: string;
-  /** The resolved provider/model label for the header, or null. */
-  modelLabel: string | null;
+  /** Resolved provider. Its system layer is applied through the live helper. */
+  provider: ProviderConfig | null;
+  /** Browser-local lens choice for each operation. */
+  lensSelections: OpLensSelections;
+  onLensChange: (op: OpKind, lensId: OpLensId) => void;
   /** Estimates total payload tokens from char count. Passed in so the modal
    *  uses the same ~4 chars/token heuristic as the action-palette indicator. */
   estimateTokens: (chars: number) => number;
@@ -89,7 +92,9 @@ export function PromptInspectorModal({
   contextBlock,
   activeFileStepped,
   voicePrompt,
-  modelLabel,
+  provider,
+  lensSelections,
+  onLensChange,
   estimateTokens,
   onClose,
 }: PromptInspectorProps) {
@@ -106,36 +111,28 @@ export function PromptInspectorModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Build the op's base messages (system + user body), then apply the same
-  // wrappers the live op uses: voice prompt spliced as the leading system
-  // message, context block prepended to the first user message. This mirrors
-  // withContext(withVoicePrompt(...)) in App.tsx exactly.
-  const { rows, totalChars } = useMemo(() => {
-    const base = buildOpMessages(op, inputs[op] ?? {});
-    // Splice the voice prompt as the leading system message (matches
-    // withVoicePrompt: only when non-empty).
-    const withVoice =
-      voicePrompt.trim().length > 0
-        ? [{ role: "system" as const, content: voicePrompt.trim() }, ...base]
-        : base;
-    // Prepend the context block to the first user message (matches withContext).
-    const idx = withVoice.findIndex((m) => m.role === "user");
-    const withCtx =
-      contextBlock && idx >= 0
-        ? withVoice.map((m, i) =>
-            i === idx ? { ...m, content: `${contextBlock}\n\n${m.content}` } : m,
-          )
-        : withVoice;
+  const selectedLens = lensForOp(op, lensSelections[op]);
 
-    const out: MsgRow[] = withCtx.map((m, i) => {
-      const isVoice = voicePrompt.trim().length > 0 && i === 0 && m.role === "system";
-      const isFirstUser = m.role === "user" && withCtx.slice(0, i).every((x) => x.role !== "user");
+  // Build every non-provider layer through the live assembler, then apply the
+  // provider system layer through the same helper complete() uses.
+  const { rows, totalChars } = useMemo(() => {
+    const assembled = assembleOpMessages(op, inputs[op] ?? {}, {
+      voicePrompt,
+      contextBlock,
+      lensId: lensSelections[op],
+    });
+    const prepared = provider ? prepareChatMessages(provider, assembled) : assembled;
+    const hasProviderSystem = prepared.length > assembled.length;
+
+    const out: MsgRow[] = prepared.map((m, i) => {
+      const isProviderSystem = hasProviderSystem && i === 0 && m.role === "system";
+      const isFirstUser = m.role === "user" && prepared.slice(0, i).every((x) => x.role !== "user");
       const ctxPresent = contextBlock.length > 0;
       let label = "";
       let hint: string | undefined;
       if (m.role === "system") {
         label = "System prompt";
-        if (isVoice) hint = "MODEL voice";
+        hint = isProviderSystem ? "provider card" : "zine role + local layers";
       } else if (m.role === "user") {
         if (isFirstUser && ctxPresent) {
           label = "User message";
@@ -149,9 +146,9 @@ export function PromptInspectorModal({
       return { role: m.role, content: m.content, key: `${m.role}-${i}`, label, hint };
     });
 
-    const chars = withCtx.reduce((n, m) => n + m.content.length, 0);
+    const chars = prepared.reduce((n, m) => n + m.content.length, 0);
     return { rows: out, totalChars: chars };
-  }, [op, inputs, voicePrompt, contextBlock]);
+  }, [op, inputs, voicePrompt, contextBlock, lensSelections, provider]);
 
   const note = inputNotes?.[op];
 
@@ -187,14 +184,37 @@ export function PromptInspectorModal({
           ))}
         </div>
 
+        <label className="prompt-inspector-lens">
+          <span>Editorial lens</span>
+          <select
+            value={selectedLens.id}
+            onChange={(event) => onLensChange(op, event.target.value as OpLensId)}
+            aria-label={`Editorial lens for ${OP_LABELS[op]}`}
+          >
+            {OP_LENSES[op].map((lens) => (
+              <option key={lens.id} value={lens.id}>{lens.label}</option>
+            ))}
+          </select>
+          <small>{selectedLens.description}</small>
+        </label>
+
         <div className="prompt-inspector-meta">
-          {modelLabel ? <span className="prompt-inspector-model">{modelLabel}</span> : null}
+          {provider ? (
+            <span className="prompt-inspector-model">
+              {provider.label || provider.protocol} · {provider.modelId}
+            </span>
+          ) : null}
           <span className="prompt-inspector-size">
             {estimateTokens(totalChars).toLocaleString()} tokens · {totalChars.toLocaleString()} chars
           </span>
           {voicePrompt.trim().length > 0 ? (
-            <span className="prompt-inspector-flag" title="The MODEL voice has a custom prompt spliced in">
+            <span className="prompt-inspector-flag" title="The MODEL voice has a custom preference folded into the operation contract">
               voice prompt
+            </span>
+          ) : null}
+          {selectedLens.id !== "default" ? (
+            <span className="prompt-inspector-flag" title="An operation-scoped editorial lens is active">
+              {selectedLens.label}
             </span>
           ) : null}
           {contextBlock.length > 0 ? (

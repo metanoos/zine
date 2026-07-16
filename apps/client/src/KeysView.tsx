@@ -6,8 +6,9 @@
  *
  * Each key is a card showing its generative visual identity (the label set in
  * that key's font, on that key's bg, in that key's fg) plus its pubkey. This
- * view manages the keychain itself (create, restyle, copy, remove); which key
- * is the AUTHOR or MODEL voice is chosen in the ActionPalette, not here.
+ * view manages the keychain itself (create, restyle, set a local LLM voice
+ * preference, copy, remove); which key is the AUTHOR or MODEL voice is chosen
+ * in the ActionPalette, not here.
  *
  * Async state follows the sampler convention where applicable, but most actions
  * here are synchronous localStorage commits — there's no network round-trip, so
@@ -34,6 +35,7 @@ import {
 } from "./keys-store.js";
 import { publishVoiceIdentity } from "./provenance.js";
 import { loadDoors } from "./doors-store.js";
+import { getVoicePrompt, setVoicePrompt } from "./voice-prompt-store.js";
 
 /** Alpha for the card swatch bg — denser than the editor-run bg (0.13). */
 const CARD_BG_ALPHA = 0.22;
@@ -57,6 +59,9 @@ export function KeysView({
   // Which cards have their Style section unfolded. One toggle per card so a
   // user can compare two voices' settings side by side.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [voicePrompts, setVoicePrompts] = useState<Record<string, string>>(() =>
+    Object.fromEntries(keys.map((key) => [key.pubkey, getVoicePrompt(key.pubkey)])),
+  );
   // The id of the key being dragged, or null. Held over the duration of a
   // drag-and-drop reorder so a card knows to dim itself while it's the source.
   const [dragId, setDragId] = useState<string | null>(null);
@@ -143,10 +148,17 @@ export function KeysView({
   }
 
   function handleRemove(id: string) {
+    const removed = keys.find((key) => key.id === id);
+    if (removed) setVoicePrompt(removed.pubkey, "");
     const next = removeKey(id);
     setKeys(next);
     setDoors(loadDoors()); // prune any doors that referenced the deleted key
     onKeysChange(next);
+  }
+
+  function updateVoicePrompt(pubkey: string, prompt: string) {
+    setVoicePrompts((current) => ({ ...current, [pubkey]: prompt }));
+    setVoicePrompt(pubkey, prompt);
   }
 
   return (
@@ -206,7 +218,7 @@ export function KeysView({
                 <button
                   type="button"
                   className={"icon-btn key-style-toggle" + (isOpen ? " is-open" : "")}
-                  title={isOpen ? "Hide style" : "Customize style"}
+                  title={isOpen ? "Hide voice settings" : "Customize voice"}
                   onClick={() => toggleStyle(k.id)}
                   aria-expanded={isOpen}
                 >
@@ -321,6 +333,19 @@ export function KeysView({
                       />
                       <span className="key-style-value">{k.identity.sat}%</span>
                     </div>
+                    <label className="key-voice-prompt">
+                      <span>Voice preference</span>
+                      <textarea
+                        value={voicePrompts[k.pubkey] ?? ""}
+                        onChange={(event) => updateVoicePrompt(k.pubkey, event.target.value)}
+                        placeholder="Optional style preference for this voice’s single-shot LLM operations…"
+                        rows={3}
+                        spellCheck={true}
+                      />
+                      <small>
+                        Shapes expression across operations. Use the Prompt Inspector’s editorial lens for an operation-specific stance.
+                      </small>
+                    </label>
                   </div>
                 )}
               </div>

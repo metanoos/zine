@@ -467,6 +467,21 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     return event.id;
   }
 
+  /** Flush one explicitly-staged gesture now. Background retry remains armed
+   *  on failure, but callers only observe completion after provenance is
+   *  durable, which gives live replay a reliable refresh boundary. */
+  async function flushStagedFile(relativePath: string): Promise<string> {
+    const timer = pushTimers.get(relativePath);
+    if (timer) {
+      clearTimeout(timer);
+      pushTimers.delete(relativePath);
+    }
+    return completeStagedWrite(
+      () => pushToRelay(requireId(), relativePath),
+      () => schedulePush(relativePath),
+    );
+  }
+
   return {
     get ref(): FolderRef | null {
       return ref ? { ...ref } : null;
@@ -561,27 +576,11 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       // returned prevNodeId and queued the publish, which made Step/Send point
       // at stale history. Retain local-first durability by scheduling a retry
       // if the synchronous relay barrier fails, but surface that failure now.
-      return completeStagedWrite(
-        () => pushToRelay(id, relativePath),
-        () => schedulePush(relativePath),
-      );
+      return flushStagedFile(relativePath);
     },
 
     async flushFile(relativePath: string): Promise<string> {
-      const timer = pushTimers.get(relativePath);
-      if (timer) {
-        clearTimeout(timer);
-        pushTimers.delete(relativePath);
-      }
-      try {
-        return await pushToRelay(requireId(), relativePath);
-      } catch (error) {
-        // Preserve local-first durability: a synchronous mint barrier may fail
-        // while the home relay restarts, but the staged write must still retry
-        // through the ordinary debounce instead of becoming a silent orphan.
-        schedulePush(relativePath);
-        throw error;
-      }
+      return flushStagedFile(relativePath);
     },
 
     async createFile(relativePath: string): Promise<string> {
@@ -590,8 +589,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       const local = loadLocalFolder(id);
       if (local?.files[relativePath]) return local.files[relativePath].nodeId;
       saveLocalFile(id, relativePath, { content: "", tags: [], nodeId: "" });
-      schedulePush(relativePath);
-      return "";
+      return flushStagedFile(relativePath);
     },
 
     async createFolder(_relativePath: string): Promise<void> {
@@ -634,7 +632,18 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         if (!file || file.kind === "folder") continue;
         const pendingMove = pendingMoveForPath(oldRel, newRel, file.pendingMove);
         moveLocalFile(id, oldRel, newRel, pendingMove);
-        schedulePush(newRel);
+      }
+      // The App updates paths optimistically, but this promise resolves only
+      // after each resulting file/folder Step is queryable by replay. If one
+      // flush fails, it schedules itself and every not-yet-attempted descendant
+      // so the durable movement journal still converges in the background.
+      for (let i = 0; i < moves.length; i++) {
+        try {
+          await flushStagedFile(moves[i].newRel);
+        } catch (error) {
+          for (let j = i + 1; j < moves.length; j++) schedulePush(moves[j].newRel);
+          throw error;
+        }
       }
     },
 
@@ -657,7 +666,14 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           kind: "move",
           fromPath: file.pendingMove?.fromPath ?? oldRel,
         });
-        schedulePush(newRel);
+      }
+      for (let i = 0; i < moves.length; i++) {
+        try {
+          await flushStagedFile(moves[i].newRel);
+        } catch (error) {
+          for (let j = i + 1; j < moves.length; j++) schedulePush(moves[j].newRel);
+          throw error;
+        }
       }
     },
 

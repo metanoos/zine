@@ -1,24 +1,30 @@
-# Zine — Director's Cut
+# Protocol
 
-Seven pages for anyone about to run a press.
+Seven sections for anyone about to run a press.
 
-Page one describes how Zine feels to use. Pages two through seven explain the
-machinery needed to build a client, run a node, or extend the protocol. Design
-history and research notes stay in the full specs. `trace-provenance.md` owns
-trace events and gestures, `transport.md` owns network identity, access, and
-reachability, and `rendezvous.md` owns quote discovery and process vetting.
-The app's About view renders these seven page sections directly.
+The Pitch describes how Zine feels to use. The remaining sections explain the
+machinery needed to build a client, run a node, or extend the protocol. This
+is the tour, not the law: design history and normative rules live in the full
+specifications, which win wherever the two disagree. The
+[trace specification](../protocol/trace-provenance.md) owns trace events and
+gestures, the [transport specification](../protocol/transport.md) owns network
+identity, access, and reachability, and the
+[rendezvous specification](../protocol/rendezvous.md) owns quote discovery and
+process vetting.
 
 ---
 
-## Page 1 — Pitch
+## Pitch
 
-An AI text editor need not be a black box. Zine ships as source. Run
-`git clone` and `npm run dev`, and you have a trace editor backed by your own
-peer-to-peer node.
+AI can rewrite a document in seconds, then leave behind a polished file whose
+process is gone. Ordinary version history does not reliably say what a model
+saw, which passages it produced, what a person accepted, or where copied
+material came from. Looking only at the final text is too late.
 
 A **trace** is a file or folder that keeps a high-fidelity edit history. You
-can play it back and see how the work changed, not just where it ended.
+can play it back and see how the work changed, not just where it ended. Each
+deliberate checkpoint is signed and self-contained, so another reader can
+inspect the evidence without trusting one editor account.
 
 That history gives human and LLM readers something plain text loses: process.
 You cannot fully explain your taste in phrasing, especially when a sentence is
@@ -28,29 +34,44 @@ The model writes into the same files you do, so its work enters the record as
 well. Fonts and colors distinguish interleaved voices. The result shows who
 wrote what and how the text came to be.
 
-`Ctrl/Cmd+S` places a **Step** in the log. Those deliberate checkpoints give
-playback its rhythm while leaving keystrokes private.
+`Ctrl/Cmd+S` places a **Step** in the trace. Each Step batches the editor-action
+log into a signed checkpoint; no event fires per keystroke. Send later
+publishes that exact checkpoint, including its high-resolution action log, for
+playback and process vetting.
+
+Zine is to authorship provenance what Git is to source history. The protocol
+and local press are open; each author can keep a private home relay, add a
+remote for reachability, and verify the signed history without depending on a
+single host.
+
+The desktop app is the reference press. The headless MCP press lets an agent
+write through the same protocol under its own voice key. That makes agent
+authorship useful before any social network exists: a reviewer can inspect the
+artifact's history, not merely the model-call log.
 
 Text inside `[[ double square brackets ]]` is protected from silent LLM
 rewrites. Minting turns that text into an immutable trace called a **coin**.
 Citing a coin can place you near other people who preserved the same words.
 
-A **Zine** is a published trace whose exact sent version you have attested.
-The attestation is a separate, signed commitment and may include a note or
-location. Step history may also carry completed Bitcoin time anchors.
+**Zine** is the press; a **zine** is a published trace whose exact sent
+version you have attested. The attestation is a separate, signed commitment
+and may include a note or location. Step history may also carry completed
+Bitcoin time anchors.
 
 Forking begins a proposal under your key. Merging accepts chosen work into
 your chain. To fork is to propose; to merge is to accept.
 
-Everyone runs their own press.
+Everyone runs their own press. Presses may meet through optional remotes and
+peers, but local authoring never requires them.
 
 Underneath, Zine uses Nostr events over local and configured remote WebSocket
 relays: SHA-256 ids, Schnorr signatures, and the seven NIP-01 fields. Tor can
-expose a private relay. Global peer discovery remains planned.
+expose a private relay. Global peer discovery remains planned and is dormant
+until real usage produces enough citation density to justify it.
 
 ---
 
-## Page 2 — Model
+## Model
 
 One primitive: a **trace**, a body carried on an append-only chain of signed
 checkpoints. Its body is either file text or an ordered folder membership
@@ -100,7 +121,7 @@ genesis.
 
 ---
 
-## Page 3 — Gestures
+## Gestures
 
 Three words define the author-facing protocol.
 
@@ -113,7 +134,11 @@ affordable. The protocol uses *Step*, not *save*, to keep it distinct from Send.
 **Send.** Open the current state for discussion. If the buffer has changed,
 Send first Steps it; otherwise it reuses the latest Step. It then fans that
 node out to write-enabled external relays. Most Steps are never Sent, so
-drafts, experiments, and dead ends remain local.
+drafts, experiments, and dead ends remain local. Send publishes everything the
+checkpoint carries, including its high-resolution editor-action log when
+present. That log enables typo-level playback and process vetting, while its
+timing rhythm can also fingerprint an author. Send is therefore a content and
+identity disclosure.
 
 **Attest.** Mark one *sent* node as a position you stand behind. Attestation is
 optional and later: discussion is common; commitment is rare. A local-only
@@ -144,12 +169,13 @@ carry its own completed proof only to show *when it was endorsed*, a different
 claim from *when the content existed*.
 
 Completed anchors can turn parts of a trace's save history into time-bounded
-process evidence. Page seven uses available evidence as one input to an
-admission filter, without treating it as proof of author identity or humanity.
+process evidence. The final section, Rendezvous & vetting, uses available
+evidence as one input to an admission filter, without treating it as proof of
+author identity or humanity.
 
 ---
 
-## Page 4 — Composition
+## Composition
 
 A trace has one owner: the key that signs its nodes. Five moves connect traces:
 mint, cite, tag, fork, and merge.
@@ -207,7 +233,7 @@ Parallel anthologies with the same informal name are not a conflict.
 
 ---
 
-## Page 5 — Attribution & verification
+## Attribution & verification
 
 Who wrote what. Two layers, in priority order.
 
@@ -243,7 +269,7 @@ readable from its inlined snapshot; only verification is lost.
 
 ---
 
-## Page 6 — Transport
+## Transport
 
 The press uses one keychain with **separate roles**. A fresh install assigns
 different secrets so a stable network address is not coupled to a pen the
@@ -312,7 +338,7 @@ the spec keeps non-normative on purpose.
 
 ---
 
-## Page 7 — Rendezvous & vetting
+## Rendezvous & vetting
 
 Two people who have never met, share no peer, and share no relay may find each
 other because their Sent traces cite coins with the same content. The
@@ -343,8 +369,9 @@ records the relation; Send controls its reachability.
 **The vet — process, not prose.** Fluent prose is easy to imitate, so the vet
 looks instead at the timestamped revision graph: anchors, edit timing, and the
 shape of revision. These signals can cheaply reject an instantly fabricated
-history and raise the cost of patient fabrication. They are admission
-heuristics, not proof that a human authored the work.
+history; a patient forger can still pre-plant a corpus, so what they impose on
+that forger is calendar delay, not effort. They are admission heuristics, not
+proof that a human authored the work.
 
 Three layers, weakest to strongest:
 
@@ -385,6 +412,8 @@ of admission spam without pretending to prove humanity.
 
 `git clone`, `npm run dev`, and the press is running.
 
-For the wire, the field-by-field spec is `trace-provenance.md`; for the key,
-the mesh, and the onion, `transport.md`; for the room and the vet,
-`rendezvous.md`. This was the tour.
+For the wire, use the
+[trace specification](../protocol/trace-provenance.md); for the key, mesh, and
+onion, use the [transport specification](../protocol/transport.md); for the
+room and vet, use the
+[rendezvous specification](../protocol/rendezvous.md). This was the tour.

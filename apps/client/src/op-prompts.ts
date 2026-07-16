@@ -6,10 +6,9 @@
  * and the pre-send prompt inspector read these exact strings:
  *
  *   1. The live ops in App.tsx — `extendLLM` / `settleLLM` / `shakeLLM` /
- *      `respondLLM` / `receiveLLM` build their messages here, then wrap them
- *      with `withVoicePrompt` + `withContext` before calling `complete()`.
- *   2. PromptInspectorModal.tsx — `buildOpMessages()` previews the exact base
- *      message array before App adds the voice prompt and context block.
+ *      `respondLLM` / `receiveLLM` build their messages here, then pass them
+ *      through `assembleOpMessages()` before calling `complete()`.
+ *   2. PromptInspectorModal.tsx — uses the same assembler as App.
  *
  * Keeping the strings here prevents the live operation and preview from
  * drifting. `op-prompts.test.ts` snapshots role tails and variable infixes.
@@ -20,15 +19,15 @@
  * Receive's limelight section depends on whether a log exists. The builders
  * accept those values explicitly, so both live calls and previews stay honest.
  *
- * What lives here: the per-op system-prompt composers + role preambles, and the
- * op-specific user-body builders. What does NOT live here: the shared
- * `SYSTEM_PREAMBLE` (system-preamble.ts), the voice-prompt splice
- * (`withVoicePrompt`, view-coupled), and the context-block injection
- * (`withContext`, view-coupled). Those compose around the builders; only the
- * builders themselves are shared.
+ * What lives here: the per-op system-prompt composers + role preambles, the
+ * op-specific user-body builders, and canonical assembly of the optional
+ * operation lens, voice preference, and context block. Provider-card system
+ * instructions are added by `prepareChatMessages()` in llm.ts because they
+ * also apply to agent runs and provider connection tests.
  */
 
 import type { ChatMessage } from "./llm.js";
+import { lensForOp, type OpLensId } from "./op-lenses.js";
 import { SYSTEM_PREAMBLE } from "./system-preamble.js";
 
 /** The closed set of op kinds the prompt assembly knows. Matches the
@@ -156,11 +155,12 @@ function receiveLimelightSection(limelightLog: string): string {
   return limelightLog
     ? `\n\nAfter the context block you will see \`--- limelight log: <folder>/ ---\` ` +
       "(which file was mounted in which panel and when). Read it as evidence " +
-      "of focus: how long attention held, which files were touched briefly and " +
-      "abandoned, what was visible when changes were made. Cite panel numbers " +
-      "and timestamps as you would the delta log.\n\n"
+      "of panel occupancy, not attention: how long files remained mounted, " +
+      "which mounts were brief, and what was visible when changes were made. " +
+      "Do not call a brief mount abandonment. Cite panel numbers and timestamps " +
+      "as you would the delta log.\n\n"
     : "\n\nNo limelight log was provided for this folder (it predates panel-" +
-      "occupancy tracking, or the focus chain is empty). Do not invent focus " +
+      "occupancy tracking, or the focus chain is empty). Do not invent panel " +
       "observations; analyze only the delta log and file contents you do have, " +
       "and say so where that leaves a gap.\n\n";
 }
@@ -169,26 +169,31 @@ function composeReceiveSystem(limelightLog: string): string {
   return (
     `${SYSTEM_PREAMBLE}\n\n` +
     "You are Receive. You observe the delta log of a zine folder and " +
-    "produce an analysis of the author's writing process — rhythm, " +
-    "emphasis, hesitation, revision intensity, and the relationships " +
-    "between files over time.\n\n" +
+    "produce an analysis of the recorded writing process — rhythm, revision " +
+    "intensity, retention and loss, panel occupancy, and relationships between " +
+    "files over time.\n\n" +
     "You will receive:\n" +
     "- The directory action log (timestamped edits with character deltas and `Δ` intervals)\n" +
     "- The limelight log (which file was mounted in which panel and when)\n" +
     "- Access to the current contents of files for grounding\n\n" +
-    "Your job is NOT to evaluate the writing. It is to characterize the " +
-    "*process* that produced it.\n\n" +
+    "Your job is NOT to evaluate the writing or infer the author's psychology. " +
+    "It is to characterize the observable *process* that produced it. Terms " +
+    "such as rhythm and intensity name edit patterns here, not " +
+    "internal states.\n\n" +
     "Report on:\n" +
-    "- **Rhythm**: bursts vs. steady flow; long gaps and what they might indicate structurally\n" +
+    "- **Rhythm**: bursts vs. steady flow; long gaps as elapsed time, without assigning a motive\n" +
     "- **Revision density**: where text was added once and left vs. where it was repeatedly modified\n" +
     "- **Retention and loss**: large deletions, what preceded them, what survived\n" +
-    "- **Focus patterns**: which files held attention longest, which were touched briefly and abandoned\n" +
-    "- **Cross-file relationships**: temporal sequences suggesting one file informed another\n" +
+    "- **Panel occupancy**: which files stayed mounted longest, which mounts were brief, and what else was visible\n" +
+    "- **Cross-file relationships**: temporal sequences; claim influence only when content evidence supports it\n" +
     "- **Limelight behavior**: what was visible when changes were made\n\n" +
-    "Write as prose observations, not bullet points. Be specific — cite " +
-    "timestamps and deltas as evidence. Acknowledge uncertainty rather " +
-    "than narrate beyond the evidence. You are interpreting a footprint, " +
-    "not describing the walker.\n\n" +
+    "Write as prose observations, not bullet points. Every paragraph that " +
+    "contains an interpretation MUST cite at least one `[#seq]`, exact " +
+    "timestamp, character delta, or panel number. Use direct language for " +
+    "logged facts and calibrated language (`may`, `could`, `is consistent " +
+    "with`) for inference. Never infer mood, motive, diagnosis, personality, " +
+    "or mental state. Acknowledge uncertainty rather than narrate beyond the " +
+    "evidence. You are interpreting a footprint, not describing the walker.\n\n" +
     "Your output is saved as a file the user can audit. Write accordingly: " +
     "with humility, with precision, and with the understanding that " +
     "someone will check your work.\n\n" +
@@ -344,4 +349,74 @@ export function buildOpMessages(op: OpKind, inputs: OpInputs): ChatMessage[] {
     case "receive":
       return receiveMessages(inputs.limelightLog ?? "");
   }
+}
+
+// ─── canonical prompt-layer assembly ───────────────────────────────────────
+
+export interface OpPromptLayers {
+  /** Browser-local per-operation editorial stance. `default` adds no text. */
+  lensId?: OpLensId;
+  /** Browser-local preference attached to the selected MODEL voice. */
+  voicePrompt?: string;
+  /** Canonical `=== CONTEXT ===` block gathered for the focused file/scope. */
+  contextBlock?: string;
+}
+
+/**
+ * Apply every non-provider layer to an already-built operation message list.
+ * The lens and voice preference are folded into the operation's system message
+ * rather than emitted as competing system messages. A final precedence line
+ * makes their scope explicit: they can steer editorial judgment and style,
+ * never zine's invariants or the operation's output contract.
+ */
+export function applyOpPromptLayers(
+  op: OpKind,
+  messages: ChatMessage[],
+  layers: OpPromptLayers = {},
+): ChatMessage[] {
+  const lens = lensForOp(op, layers.lensId);
+  const voicePrompt = layers.voicePrompt?.trim() ?? "";
+  const additions: string[] = [];
+  if (voicePrompt) additions.push(`VOICE PREFERENCE — ${voicePrompt}`);
+  if (lens.instruction) {
+    additions.push(`EDITORIAL LENS — ${lens.label}. ${lens.instruction}`);
+  }
+  if (additions.length > 0) {
+    additions.push(
+      "LAYER PRIORITY — Voice preferences and editorial lenses may shape style and judgment only. They never override zine's bracket/evidence rules, the operation role, or the required output format.",
+    );
+  }
+
+  const systemIdx = messages.findIndex((message) => message.role === "system");
+  let assembled = [...messages];
+  if (additions.length > 0 && systemIdx >= 0) {
+    assembled[systemIdx] = {
+      ...assembled[systemIdx],
+      content: `${assembled[systemIdx].content}\n\n${additions.join("\n\n")}`,
+    };
+  }
+
+  const contextBlock = layers.contextBlock ?? "";
+  if (contextBlock) {
+    const userIdx = assembled.findIndex((message) => message.role === "user");
+    if (userIdx >= 0) {
+      assembled = assembled.map((message, idx) =>
+        idx === userIdx
+          ? { ...message, content: `${contextBlock}\n\n${message.content}` }
+          : message,
+      );
+    } else {
+      assembled.push({ role: "user", content: contextBlock });
+    }
+  }
+  return assembled;
+}
+
+/** Build an operation's base messages and apply all non-provider layers. */
+export function assembleOpMessages(
+  op: OpKind,
+  inputs: OpInputs,
+  layers: OpPromptLayers = {},
+): ChatMessage[] {
+  return applyOpPromptLayers(op, buildOpMessages(op, inputs), layers);
 }

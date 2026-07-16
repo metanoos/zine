@@ -396,3 +396,19 @@ final report because they record decisions made at that point in time.
     just magnitude — without it, the model fabricates entirely new content.
     This is the strongest finding across both traces.
   - **No new architecture layer is warranted.** The framework is done.
+
+- 2026-07-15 — statistical framing note (post-hoc; labels the evidence,
+  changes no scores). At N = 5 draws per condition the pairwise C1 contrasts
+  differ sharply in strength: A vs C (5/5 vs 0/5 bound) has Fisher exact
+  p ≈ 0.004 one-tailed and is solid; A vs B (5/5 vs 2/5, p ≈ 0.083) and
+  B vs C (2/5 vs 0/5, p ≈ 0.22) are directional but not separable at this N.
+  Consequences: the retention argument (`trace-provenance.md` §R12) rests on
+  the strong A↔C cell — condition C is exactly what a reader sees after
+  `deltas` are shed — while the "two signals contribute independently" claim
+  rests on the weak middle cell and should be read as suggestive. Two further
+  caveats now recorded in §R12: scoring was by one hand scorer not blind to
+  condition (the pre-registered binary criteria bound but do not remove that
+  risk — see B-01's recorded deliberation in `results.md`), and all findings
+  are single-model (glm-5.2), so the model-dependence caveat applied to the
+  inert `Δ` label applies symmetrically to the positive char-delta finding.
+  A model-swap replication would strengthen both.

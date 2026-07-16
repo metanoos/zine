@@ -10,8 +10,9 @@ It introduces three things the provenance and transport protocols do not have:
    trace's verified content, without adding a second citation primitive.
 2. **Optional distributed anteriority** — NIP-03/OTS timestamps attached to
    the frequent gesture (Step), not the rare one (Attest). When available,
-   repeated proofs make a trace's save history harder to fabricate cheaply;
-   their absence never invalidates the trace.
+   repeated proofs make a trace's save history impossible to backdate: a
+   forger must plant a corpus in advance and wait, so anchors impose calendar
+   delay rather than effort (§5.4). Their absence never invalidates the trace.
 3. **Automated process-vetting** — cost-raising admission heuristics over the
    signed save graph and any available time anchors. They can reject cheap
    fabricated histories; they do not prove humanness.
@@ -76,6 +77,15 @@ Independent people may mint the same bytes into different node ids; `H` lets a
 future index cluster those independently minted targets without changing what
 a citation is. The carrying event remains the social statement; `H` is only a
 lookup coordinate.
+
+**`H` is not the `x` tag.** `x` hashes the exact bytes (`trace-provenance.md`
+§2, no normalization); `H` hashes the canonicalized text (§1.2). Two mints
+differing only in whitespace or Unicode normalization form share an `H` while
+carrying different `x` values — `x` clusters are subsets of `H` clusters. The
+consequences follow the keying, not intuition: `TraceOpinion` `x:` subjects key
+on `x`, so an opinion on one mint does NOT cover a whitespace-variant mint even
+though rendezvous would cluster the two. The coarser coordinate exists for
+discovery; the exact one carries opinion and duplicate detection.
 
 ### 1.2 Canonicalization
 
@@ -299,13 +309,21 @@ Three layers, weakest to strongest, each doing a different job:
 ### 5.4 The honest limit
 
 Anteriority defeats the cheap attack (instant deep history) but not the
-*patient* attack: someone who runs a fake corpus over six months, stamping
-faithfully, hits all three signals. No automated check can distinguish "a
-human who writes heavily with an LLM" from "an LLM with a patient operator,"
-because in principle the latter can mimic all process signals given enough
-commitment. So this is **cost-raising, not a hard proof**. The goal is to make
-"forge a vettable corpus" cost sustained time and coordination instead of one
-instant generation. How much cost it raises is an empirical question.
+*patient* attack — and the patient attack is cheaper than "patient" suggests.
+The attacker does not write for six months; they generate the whole corpus
+today and let a script replay it as Steps over weeks, stamping faithfully,
+with jittered timing and synthetic restructuring noise. That clears all three
+signals at a marginal cost of one cron job, and the waiting parallelizes: the
+same script plants ten thousand corpora at once. What anchors actually impose
+is **calendar delay, not effort** — a vettable sybil must be planted a season
+before it knocks and cannot be minted on demand. No automated check can
+distinguish "a human who writes heavily with an LLM" from "an LLM with a
+patient operator." The machine vet's floor is therefore exactly this: it
+rejects histories fabricated *after* the decision to attack, and nothing
+stronger. Against pre-planted corpora the remaining defense is §R6's admission
+framing — the human vet, and the fact that `peers.json` admits individuals,
+not populations. How much the planting delay deters in practice is an
+empirical question.
 
 ## 6. Attestation and admission
 
@@ -545,7 +563,7 @@ Current writers emit only lowercase `q` trace citations. The former
   coarse "too uniform → sybil" test). The human-typical distribution (burstiness,
   circadian, weekly gaps) needs empirical calibration from real traces to fit a
   proper model. Until then the CV-based outlier rejection is the floor.
-- **Calcarda routing-layer sybil defenses.** Redundant publish/get (publish
+- **Kademlia routing-layer sybil defenses.** Redundant publish/get (publish
   to k closest, query several, intersect) is the floor and should ship with
   the DHT. PoW on node identity is held in reserve — turn on if spam becomes
   real at scale, do not pay for it up front.
@@ -560,3 +578,12 @@ Current writers emit only lowercase `q` trace citations. The former
   (§3.4, for proving *when endorsed* as distinct from *when content existed*)
   or drops it as redundant when the target already has Step anchors. Likely:
   keep, different purpose, both coexist. Decide at implementation.
+- **Co-citation density — the existential empirical question.** Every
+  calibration above (LSH bands, timing models, rarity thresholds) presumes
+  co-citation events occur at reachable network sizes. That is untested. The
+  v1 mutual-peer path (§4) needs an introducer who already reads both chains;
+  at small scale that graph may produce no matches at all, and a perfectly
+  tuned vet over a rendezvous layer that never fires is dead weight. Unlike
+  the other open questions this one cannot be settled by argument or another
+  design reversal — only by usage — and it should discipline how much further
+  design investment the questions above receive before real corpora exist.

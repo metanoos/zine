@@ -29,7 +29,29 @@ test("Docs navigation uses a non-scrolling grid at the middle breakpoint", () =>
   assert.match(list, /display:\s*grid\s*;/);
   assert.match(
     list,
-    /grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)\s*;/,
+    /grid-template-columns:\s*repeat\(5,\s*minmax\(0,\s*1fr\)\)\s*;/,
   );
   assert.match(list, /overflow-x:\s*visible\s*;/);
+});
+
+test("About article explicitly allows native text selection", () => {
+  const detail = rule(css, ".about-telling");
+
+  assert.match(detail, /-webkit-user-select:\s*text\s*;/);
+  assert.match(detail, /(?:^|\s)user-select:\s*text\s*;/);
+});
+
+test("About document sections flow vertically instead of replacing one another", () => {
+  const sections = rule(css, ".about-document-sections");
+
+  assert.match(sections, /display:\s*flex\s*;/);
+  assert.match(sections, /flex-direction:\s*column\s*;/);
+});
+
+test("About document descriptors wrap instead of truncating", () => {
+  const description = rule(css, ".about-category .about-category-description");
+
+  assert.match(description, /white-space:\s*normal\s*;/);
+  assert.match(description, /overflow-wrap:\s*anywhere\s*;/);
+  assert.doesNotMatch(description, /text-overflow:\s*ellipsis\s*;/);
 });

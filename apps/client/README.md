@@ -1,8 +1,16 @@
-# zine client
+# Zine client
 
 The React/Vite client powers both the Tauri desktop press and the hosted web
 app. Tauri starts the local relay sidecar and gives the frontend access to the
 filesystem, Tor, and native LLM commands.
+
+This client is the reference authoring and review experience for the open
+trace protocol. The initial product wedge is the
+[headless MCP press](../mcp/README.md); see the
+[documentation hub](../../docs/README.md), [product framing](../../docs/PRODUCT.md),
+[protocol tour](../../docs/PROTOCOL.md), [evidence ledger](../../docs/EVIDENCE.md),
+and [roadmap](../../docs/ROADMAP.md) for the sequence around it. The app's
+About view renders those same reader-facing Markdown sources directly.
 
 ## Develop
 
@@ -23,6 +31,24 @@ npm run dev
 The browser build uses local storage and the configured web relay. Native
 filesystem and sidecar behavior requires the Tauri stack.
 
+## Agent run recipes
+
+The MODEL row's **Run** action supports one-off goals and browser-local saved
+recipes. A recipe can be manual-only, hourly, or daily; scheduled recipes are
+checked while Zine is open and the workspace is ready, and wait while another
+model operation is active. Each save captures the workspace's permanent id and
+the complete set of mounted scopes. An overdue recipe waits until that exact
+workspace is open, and switching workspaces stops an in-flight run. A
+browser-wide single-flight lock prevents two Zine windows from claiming the
+same scheduler slot. Closing Zine stops the scheduler.
+
+Every invocation uses the existing agent sandbox and can only read context and
+write unstepped drafts. Its read/list tools are restricted to the saved scope
+union (plus its own run folder). It cannot Step, Send, Attest, delete, or change peers.
+Each run writes a draft `run.json` beside `output.md` with its goal, safe model
+metadata, trigger, scope, timestamps, and terminal status. Provider API keys
+are never copied into the manifest.
+
 ## Verify
 
 ```sh
@@ -33,6 +59,41 @@ npm run build
 cd src-tauri
 cargo test
 ```
+
+### Cross-model prompt evaluation
+
+The prompt eval compares role-name-only prompts, the built-in operation
+contracts, and contracts plus operation-scoped lenses for Extend, Settle,
+Stir, Reply, and Receive. It requires at least two models and reads API keys
+from named environment variables rather than from the config file:
+
+```json
+{
+  "draws": 2,
+  "models": [
+    {
+      "id": "model-a",
+      "label": "Model A",
+      "protocol": "openai",
+      "baseUrl": "https://provider.example/v1",
+      "modelId": "model-a",
+      "apiKeyEnv": "MODEL_A_API_KEY"
+    },
+    {
+      "id": "model-b",
+      "label": "Model B",
+      "protocol": "anthropic",
+      "baseUrl": "https://api.anthropic.com",
+      "modelId": "model-b",
+      "apiKeyEnv": "MODEL_B_API_KEY"
+    }
+  ]
+}
+```
+
+Run `npm run eval:prompts -- ./prompt-eval.config.json`. Raw outputs and
+mechanical criterion scores are written under `research/prompt-evals/` by
+default. Do not commit a config containing credentials.
 
 See the [repository guide](../../README.md) and
 [protocol index](../../protocol/README.md). The deferred nested fork-on-write

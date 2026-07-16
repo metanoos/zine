@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { planDelivery } from "./step-policy.js";
+import { planAttestation, planDelivery } from "./step-policy.js";
 
 test("Step is unavailable when the trace is current", () => {
   assert.equal(planDelivery("step", false, "head"), "unavailable");
@@ -22,4 +22,17 @@ test("Send creates the first Step when the trace has no head", () => {
 
 test("Send reuses the latest Step when nothing changed", () => {
   assert.equal(planDelivery("send", false, "head"), "send-latest");
+});
+
+test("Attest composes Step and Send for pending or first revisions", () => {
+  assert.equal(planAttestation(true, "head", true), "append-send-attest");
+  assert.equal(planAttestation(false, "", false), "append-send-attest");
+});
+
+test("Attest sends an existing local-only Step before endorsement", () => {
+  assert.equal(planAttestation(false, "head", false), "send-attest");
+});
+
+test("Attest has no prerequisite for an already-Sent Step", () => {
+  assert.equal(planAttestation(false, "head", true), "attest-only");
 });

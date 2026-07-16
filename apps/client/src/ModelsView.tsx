@@ -334,13 +334,13 @@ export function ModelsView({
                   </label>
                   <label
                     className="models-field models-field-wide"
-                    title="Prepended as a provider-level system instruction for both ordinary ops and agent runs."
+                    title="Prepended for both ordinary ops and agent runs. Use this for model-specific compatibility guidance; operation personas belong in editorial lenses."
                   >
-                    <span>instructions</span>
+                    <span>model-specific instructions</span>
                     <textarea
                       value={p.instructions ?? ""}
                       onChange={(e) => updateField(p.id, { instructions: e.target.value || undefined })}
-                      placeholder="optional model-specific instructions or personality…"
+                      placeholder="optional compatibility guidance for this model…"
                       rows={3}
                       spellCheck={true}
                     />

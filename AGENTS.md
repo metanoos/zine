@@ -13,6 +13,9 @@
 
 ## Verification
 
+- Canonical full verification: `npm run verify`
+- Fast all-area checks without the production build or live relay: `npm run check`
+- Isolated real-relay protocol smoke: `npm run verify:relay`
 - Client: `cd apps/client && npm test && npm run build`
 - MCP: `cd apps/mcp && npm test && npm run build`
 - Relay: `cd relay && go test ./...`

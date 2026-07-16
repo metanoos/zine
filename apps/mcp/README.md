@@ -10,6 +10,20 @@ interface in which a trace is authored. The desktop app is a GUI press;
 zine-mcp is a **headless press**. It is the provenance layer beneath an editor,
 not another editor.
 
+## Who it is for
+
+zine-mcp is the first product wedge for teams whose agents create durable
+files such as reports, research, policies, or editorial work. It gives the
+person responsible for those agents an artifact-level record that ordinary
+model-call logs and file history do not provide on their own: which agent key
+changed the file, which version was sent, and which exact version was later
+endorsed.
+
+The open protocol remains broader than this wedge. See the
+[documentation hub](../../docs/README.md), [product framing](../../docs/PRODUCT.md),
+[protocol tour](../../docs/PROTOCOL.md), [evidence ledger](../../docs/EVIDENCE.md),
+and [roadmap](../../docs/ROADMAP.md).
+
 ## What it does
 
 An LLM connected through zine-mcp becomes a distinct, attributable **author**:
@@ -157,3 +171,5 @@ agent key; the home relay is pinned via `ZINE_RELAY_URL`
 - It does **not** spawn the relay. Relay-running is the desktop app's job (or a standalone relay, or a hosted one).
 - It is **not** a filesystem MCP server. The tools are trace gestures.
 - It does **not** import your key. It mints its own agent voice.
+- It is **not** a no-install audit portal. Public proof reports and browser-only
+  verification are roadmap items, not current capabilities.

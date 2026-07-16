@@ -827,8 +827,9 @@ html[data-theme="light"] .rail-brand-wordmark {
   opacity: 0.4;
 }
 
-/* About view — the docs-backed seven-page tour. Its workspace shell is shared
- * with Network below; these rules cover only the reading content. */
+/* About view — five reader-facing source documents, each split into sections.
+ * Its workspace shell is shared with Network below; these rules cover only the
+ * reading content. */
 
 .about-title {
   margin: 0;
@@ -844,7 +845,70 @@ html[data-theme="light"] .rail-brand-wordmark {
 .about-telling {
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 1.15rem;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.about-document-header {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.about-section-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.about-section {
+  display: inline-block;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.about-section:hover,
+.about-section:focus-visible {
+  color: var(--ink);
+  border-color: var(--rule-strong);
+}
+
+.about-section:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.about-document-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 2.5rem;
+}
+
+.about-document-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  scroll-margin-top: 1rem;
+}
+
+.about-section-title {
+  margin: 0.25rem 0 0;
+  font-family: var(--font-display);
+  font-size: 1.3rem;
+  font-weight: 300;
+  line-height: 1.25;
+  color: var(--ink);
 }
 
 /* Manifesto / plain-terms prose: flowing paragraphs, no per-beat counter. */
@@ -863,7 +927,17 @@ html[data-theme="light"] .rail-brand-wordmark {
   color: var(--ink);
 }
 
-/* Inline and block code emitted by the Director's Cut Markdown renderer. */
+.about-prose a {
+  color: var(--accent);
+  text-decoration-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  text-underline-offset: 0.16em;
+}
+
+.about-prose a:hover {
+  text-decoration-color: var(--accent);
+}
+
+/* Inline and block code emitted by the About Markdown renderer. */
 .about-prose code {
   font-family: var(--font-mono);
   font-size: 0.9em;
@@ -886,9 +960,8 @@ html[data-theme="light"] .rail-brand-wordmark {
   color: var(--ink);
 }
 
-/* Director's cut — reference tables, lists, and pull-quotes used across the
- * 7-page tour. Max-width on the column keeps the prose readable; tables and
- * lists sit inside that column. */
+/* Reference tables, lists, and pull-quotes used across the five documents.
+ * Max-width on the column keeps the prose readable. */
 .about-prose table {
   width: 100%;
   max-width: 42rem;
@@ -1367,8 +1440,9 @@ html[data-theme="light"] .rail-brand-wordmark {
   color: var(--ink);
 }
 
-/* Per-voice style customization. Unfolded by the Palette toggle in each card's
-   actions, this reveals a font picker + hue/sat sliders. The card's preview
+/* Per-voice customization. Unfolded by the Palette toggle in each card's
+   actions, this reveals a font picker, hue/sat sliders, and the local LLM
+   voice preference. The card's preview
    swatch already renders from the same identity, so it updates live as the
    sliders move — what you see there is exactly how the voice renders in the
    editor. Mirrors the .key-value-row / .icon-btn tokens. */
@@ -1436,6 +1510,46 @@ html[data-theme="light"] .rail-brand-wordmark {
   color: var(--ink-dim);
   width: 2.4rem;
   text-align: right;
+}
+
+.key-voice-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding-top: 0.45rem;
+  margin-top: 0.1rem;
+  border-top: 1px solid var(--rule);
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.key-voice-prompt textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 0.35rem 0.45rem;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  font-family: var(--font-body);
+  font-size: 0.74rem;
+  line-height: 1.4;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.key-voice-prompt textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.key-voice-prompt small {
+  font-family: var(--font-body);
+  font-size: 0.68rem;
+  line-height: 1.35;
+  letter-spacing: normal;
+  text-transform: none;
 }
 
 /* Range sliders. A slim track with an accent-colored thumb; the hue track
@@ -1823,27 +1937,10 @@ html[data-theme="light"] .rail-brand-wordmark {
 }
 
 .networking-category-list,
-.about-category-list,
-.about-category-pages {
+.about-category-list {
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
-}
-
-.about-category-group + .about-category-group {
-  margin-top: 1rem;
-}
-
-.about-category-group-label {
-  display: block;
-  margin: 0 0 0.25rem;
-  padding: 0 0.75rem;
-  font-family: var(--font-body);
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--accent);
 }
 
 .networking-category,
@@ -1908,6 +2005,13 @@ html[data-theme="light"] .rail-brand-wordmark {
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.about-category .about-category-description {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .networking-detail,
@@ -2194,23 +2298,10 @@ html[data-theme="light"] .rail-brand-wordmark {
 
   .about-category-list {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 0.2rem;
     overflow-x: visible;
     padding: 0 1rem 0.75rem;
-  }
-
-  .about-category-group,
-  .about-category-pages {
-    display: contents;
-  }
-
-  .about-category-group + .about-category-group {
-    margin-top: 0;
-  }
-
-  .about-category-group-label {
-    display: none;
   }
 
   .networking-category,
@@ -2247,7 +2338,7 @@ html[data-theme="light"] .rail-brand-wordmark {
   .networking-category-list,
   .about-category-list {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 0;
     overflow: visible;
     padding: 0;
@@ -2269,6 +2360,21 @@ html[data-theme="light"] .rail-brand-wordmark {
     min-width: 0;
     justify-content: center;
     align-items: center;
+  }
+
+  .about-category-label {
+    font-size: 0.61rem;
+    letter-spacing: 0.02em;
+  }
+
+  .about-section-list {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 0.25rem;
+  }
+
+  .about-section {
+    flex: 0 0 auto;
   }
 }
 
@@ -3908,22 +4014,29 @@ body.panel-resizing {
   color: var(--accent);
 }
 
-/* A replay-mounted tab belongs to the temporary animated playback surface.
-   The paired dashed rings keep it visually separate from the user's live tabs:
-   gold outside, pale/white inside. No layout shift because both use outlines. */
-.tab.tab-replay-mounted {
-  outline: 1px dashed var(--accent);
-  outline-offset: -1px;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, #fff 72%, transparent);
+/* Replay state is explicit text, not an edge marker. That matters because the
+   tab list is vertically flipped to put its native scrollbar above the tabs:
+   a top/bottom border changes apparent meaning after the counter-transform. */
+.tab-replay-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 0.95rem;
+  padding: 0 0.28rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--rule-strong));
+  border-radius: 2px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface-raised));
+  font-family: var(--font-mono);
+  font-size: 0.54rem;
+  font-weight: 650;
+  letter-spacing: 0.065em;
+  line-height: 1;
 }
 
-/* A replay-frozen tab: the doc is a historical step from the timeline, not the
-   live head — provisional/out-of-date, read-only except via fork. A dashed
-   amber underline marks it distinctly from the active trace's solid gold one
-   and the pending-Step badge. */
-.tab.tab-replay-frozen {
-  box-shadow: inset 0 -2px 0 var(--accent);
-  border-bottom-style: dashed;
+.tab.trace-active .tab-replay-badge {
+  border-color: var(--accent);
 }
 
 .tab-label {
@@ -5183,27 +5296,35 @@ html[data-theme="light"] .editor-host {
   animation: panel-flash 1.4s ease-out;
 }
 
-/* A replay-frozen panel: its active doc is a historical timeline step, not the
-   live head — provisional, out-of-date, read-only except via fork (the AUTHOR
-   row's Fork action). A dashed amber inset border wraps the whole pane so the
-   provisional state is unmissable, mirroring the per-tab dashed underline. */
-.panel.panel-replay-frozen {
-  outline: 1px dashed var(--accent);
-  outline-offset: -2px;
-  border-radius: 2px;
+/* A stable, readable replay annunciator. It names the mode, the lock, and the
+   escape path without competing with the active trace's gold selection line. */
+.panel-replay-notice {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 1.65rem;
+  padding: 0.25rem 0.65rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 38%, var(--rule));
+  color: var(--ink-dim);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-sunken));
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  line-height: 1.2;
 }
 
-/* A replay-mounted panel: spawned by folder-wide kedit playback to show a file
-   being typed out alongside others. Distinct from panel-replay-frozen (which
-   marks a parked historical step) — these panels exist only for the playback
-   session and collapse when play stops. A soft accent tint + dashed gold/white
-   border makes ownership explicit without hiding or restyling live columns. */
-.panel.panel-replay-mounted {
-  outline: 1px dashed color-mix(in srgb, var(--accent) 72%, #fff);
-  outline-offset: -2px;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, #fff 55%, transparent);
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--accent) 4%, var(--surface-raised));
+.panel-replay-notice-label {
+  flex: none;
+  color: var(--accent);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.panel-replay-notice-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Rejected edit while replay is read-only — a red inset pulse so the refusal
@@ -5354,6 +5475,51 @@ html[data-theme="light"] .editor-host {
 .confirm-cancel:hover {
   background: var(--surface-sunken);
   color: var(--ink);
+}
+
+/* Send failures need to survive the action palette's compact mode, where its
+ * inline status column is intentionally hidden. Keep the explanation plain,
+ * with the transport error available on demand rather than leading the copy. */
+.send-failure-dialog {
+  width: min(28rem, calc(100vw - 2rem));
+  max-width: 28rem;
+  box-sizing: border-box;
+}
+
+.send-failure-title {
+  margin: 0 0 0.65rem;
+  color: var(--danger, #c0392b);
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+}
+
+.send-failure-summary {
+  margin-bottom: 0.8rem;
+}
+
+.send-failure-detail {
+  margin: 0 0 1rem;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.send-failure-detail summary {
+  cursor: pointer;
+}
+
+.send-failure-detail pre {
+  max-height: 9rem;
+  margin: 0.55rem 0 0;
+  padding: 0.55rem;
+  overflow: auto;
+  border-radius: 4px;
+  background: var(--surface-sunken);
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* --- reify picker modal --------------------------------------------------
@@ -5915,9 +6081,9 @@ html[data-theme="light"] .editor-host {
 }
 
 /* Folder-wide replay transport — always-visible block pinned at the bottom of
-   the sidebar. Two stacked rows: a centered stepper + counter on top, and a
-   transport row (play · pace · slider) below. The slider fills the transport
-   row's remaining width and scrubs the whole timeline.
+   the sidebar. Three stacked rows: the exact mounted scope, a stepper + counter,
+   and a transport row (play · pace · slider). The slider fills the transport
+   row's remaining width and scrubs the mounted timeline.
    `last` is sticky: a new step while parked at the right end grows the slider's
    max and ticks the counter up. */
 .sidebar-replay {
@@ -5937,6 +6103,37 @@ html[data-theme="light"] .editor-host {
   align-items: center;
   gap: 0.3rem;
   width: 100%;
+}
+
+/* The timeline's identity. Scope and tab focus are intentionally independent,
+   so naming the mount here prevents a Step in another tab from looking like a
+   broken counter. Long multi-mount unions stay one line; the full value remains
+   available through the row's title. */
+.sidebar-replay-scope {
+  min-width: 0;
+  gap: 0.45rem;
+  padding-bottom: 0.1rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--rule) 70%, transparent);
+}
+
+.sidebar-replay-scope-key {
+  flex: 0 0 auto;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sidebar-replay-scope-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 0.72rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Top row: the stepper + counter, left-aligned to match the transport row
@@ -6265,11 +6462,11 @@ html[data-theme="light"] .editor-host {
      label/model | key | a1 a2 a3 a4 a5 | (slot) | tokens | error | (slot)
    Row 1: AUTHOR:    | pen | Stp Snd Aff · ·   |  — |  —  | err |  —
    Row 2: model▾     | inj | Rec Rep Ext Set Sti |  — | 1.2k | err |  —
-   Row 3: FILESYSTEM | ·   | Scn Ref · · · ·     |  — |  —  |  —  |  —
+   Row 3: FILESYSTEM | ·   | File Folder Ref · · · |  — |  —  |  —  |  —
    The MODEL row's leftmost cell IS the model selector (no "MODEL:" text — the
    chosen model name reads as the label). The SUBSTRATE row mirrors the AUTHOR
    row but cycles the external party a scan reads from / a reify writes to.
-   Five equal action tracks. An in-flight op re-renders its own button as the
+   Six equal action tracks. An in-flight op re-renders its own button as the
    stop control (.action-palette-action.running) rather than a separate Stop button.
    Model options use the provider card label. */
 .action-palette {
@@ -6282,7 +6479,7 @@ html[data-theme="light"] .editor-host {
   grid-template-columns:
     minmax(5.5rem, 10rem)
     minmax(5rem, 8rem)
-    repeat(6, minmax(4.5rem, 5.75rem))
+    repeat(6, minmax(5.75rem, 6.5rem))
     max-content
     max-content
     minmax(0, 10rem)
@@ -6391,7 +6588,7 @@ html[data-theme="light"] .editor-host {
   line-height: 1;
   flex: 0 0 auto;
 }
-/* Base action button: fills its grid track (one of five equal columns). */
+/* Base action button: fills its grid track (one of six equal columns). */
 .action-palette-action {
   min-width: 0;
   width: 100%;
@@ -6406,6 +6603,11 @@ html[data-theme="light"] .editor-host {
   cursor: pointer;
   white-space: nowrap;
   text-align: center;
+}
+/* Scan labels stay on one line. The shared action tracks are wide enough for
+   the longest label, so every action still occupies exactly one column. */
+.action-palette-action.op-scan {
+  white-space: nowrap;
 }
 .action-palette-action:hover:not(:disabled) {
   background: var(--surface-raised);
@@ -6435,13 +6637,26 @@ html[data-theme="light"] .editor-host {
 /* Gold belongs to trace creation, not merely to "something is selected."
  * Step continues the focused trace and therefore gets the quiet gold outline.
  * Mint replaces Step for a mintable passage and receives the stronger fill.
- * A resolved Coin occupies the same slot as muted, disabled status. Send gets
- * the outline only when its delivery plan will create a Step first; sending an
- * already-current trace and Attest remain neutral. */
+ * A resolved Coin occupies the same slot as muted, disabled status. Gold stays
+ * exact: it appears only when the click creates a Step, whether the visible
+ * gesture is Step, Send, or Attest. */
 .action-palette-action.action-palette-primary--step:not(:disabled),
 .action-palette-action.action-palette-action--auto-step:not(:disabled) {
   color: var(--accent);
   border-color: var(--accent);
+}
+/* Send changes reachability, so it carries a small outward arrow independent
+ * of Step's gold border. Attest receives the same arrow only while it must Send
+ * its exact target first; an auto-Step-and-Send Attest therefore shows both. */
+.action-palette-action.action-palette-action--sends::after {
+  content: "↗";
+  display: inline-block;
+  margin-left: 0.22rem;
+  font-size: 0.72em;
+  font-weight: 650;
+  line-height: 1;
+  opacity: 0.78;
+  transform: translateY(-0.04em);
 }
 .action-palette-action.action-palette-primary--mint:not(:disabled):not(.running) {
   color: #17120a;
@@ -6480,7 +6695,7 @@ html[data-theme="light"] .editor-host {
  * column so the goal textarea reads as the focal element. */
 .run-overlay { z-index: 50; }
 .run-dialog {
-  max-width: 40rem;
+  max-width: 46rem;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
@@ -6521,6 +6736,77 @@ html[data-theme="light"] .editor-host {
   outline: none;
   border-color: var(--accent);
 }
+.run-recipe-row,
+.run-schedule-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+}
+.run-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.25rem;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.run-label-field {
+  flex: 1;
+}
+.run-recipe-select,
+.run-label-input,
+.run-schedule-select {
+  min-width: 10rem;
+  box-sizing: border-box;
+  padding: 0.35rem 0.45rem;
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  text-transform: none;
+}
+.run-label-input {
+  width: 100%;
+}
+.run-recipe-select:focus,
+.run-label-input:focus,
+.run-schedule-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.run-enabled-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 1.8rem;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+.run-schedule-note {
+  min-width: 0;
+  flex: 1;
+  padding-bottom: 0.35rem;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-align: right;
+}
+.run-binding-note {
+  margin: -0.15rem 0 0;
+  padding: 0.4rem 0.5rem;
+  color: var(--ink-dim);
+  border-left: 2px solid var(--rule-strong);
+  background: color-mix(in srgb, var(--surface-sunken) 70%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
 .run-foot {
   display: flex;
   align-items: center;
@@ -6528,6 +6814,7 @@ html[data-theme="light"] .editor-host {
   gap: 0.6rem;
 }
 .run-model-select {
+  min-width: 10rem;
   font-family: var(--font-mono);
   font-size: 0.78rem;
   padding: 0.3rem 0.4rem;
@@ -6535,6 +6822,35 @@ html[data-theme="light"] .editor-host {
   color: var(--ink);
   border: 1px solid var(--rule);
   border-radius: 4px;
+}
+.run-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+.run-save,
+.run-delete {
+  padding: 0.38rem 0.65rem;
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--surface);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+.run-delete {
+  color: var(--ink-dim);
+}
+.run-save:hover:not(:disabled),
+.run-delete:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.run-save:disabled,
+.run-delete:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .run-start {
   font-family: var(--font-mono);
@@ -6557,6 +6873,26 @@ html[data-theme="light"] .editor-host {
   color: var(--ink-dim);
   font-family: var(--font-mono);
   font-size: 0.68rem;
+}
+@media (max-width: 640px) {
+  .run-recipe-row,
+  .run-schedule-row,
+  .run-foot {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .run-recipe-select,
+  .run-schedule-select,
+  .run-model-select {
+    width: 100%;
+  }
+  .run-schedule-note {
+    padding-bottom: 0;
+    text-align: left;
+  }
+  .run-actions {
+    flex-wrap: wrap;
+  }
 }
 
 /* Prompt inspector — wider than compose-dialog because prompt text is wide. */
@@ -6588,6 +6924,48 @@ html[data-theme="light"] .editor-host {
   color: var(--ink);
   border-color: var(--accent, #2d7d46);
   background: color-mix(in srgb, var(--accent, #2d7d46) 10%, transparent);
+}
+.prompt-inspector-lens {
+  display: grid;
+  grid-template-columns: auto minmax(10rem, 15rem) minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: center;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+.prompt-inspector-lens > span {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.prompt-inspector-lens select {
+  min-width: 0;
+  padding: 0.28rem 0.4rem;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+.prompt-inspector-lens select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.prompt-inspector-lens small {
+  min-width: 0;
+  font-family: var(--font-body);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+@media (max-width: 640px) {
+  .prompt-inspector-lens {
+    grid-template-columns: 1fr;
+    gap: 0.25rem;
+  }
+  .prompt-inspector-lens select {
+    width: 100%;
+  }
 }
 .prompt-inspector-meta {
   display: flex;

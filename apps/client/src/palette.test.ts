@@ -8,6 +8,7 @@ import {
 } from "./palette.js";
 
 const appSource = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+const cssSource = readFileSync(new URL("./App.css", import.meta.url), "utf8");
 
 test("the persistent control is named ActionPalette, not TopBar or CommandPalette", () => {
   assert.match(appSource, /function ActionPalette/);
@@ -15,6 +16,29 @@ test("the persistent control is named ActionPalette, not TopBar or CommandPalett
   assert.doesNotMatch(appSource, /function CommandPalette/);
   assert.doesNotMatch(appSource, /paletteOpen|setPaletteOpen/);
   assert.doesNotMatch(appSource, /e\.key === "k"/);
+});
+
+test("file and folder scans open directly from separate palette actions", () => {
+  assert.match(appSource, />\s*Scan File\s*<\/button>/);
+  assert.match(appSource, />\s*Scan Folder\s*<\/button>/);
+  assert.match(appSource, /onClick=\{\(\) => onScan\("file"\)\}/);
+  assert.match(appSource, /onClick=\{\(\) => onScan\("folder"\)\}/);
+  assert.doesNotMatch(appSource, /scanOpen|setScanOpen/);
+});
+
+test("scan labels stay on one line in one widened action track each", () => {
+  assert.match(
+    cssSource,
+    /repeat\(6,\s*minmax\(5\.75rem,\s*6\.5rem\)\)/,
+  );
+  assert.match(
+    cssSource,
+    /\.action-palette-action\.op-scan\s*\{[^}]*white-space:\s*nowrap;[^}]*\}/s,
+  );
+  assert.doesNotMatch(
+    cssSource,
+    /\.action-palette-action\.op-scan\s*\{[^}]*grid-column:/s,
+  );
 });
 
 test("palette selection states distinguish Mint, Coin, and invalid structure", () => {
@@ -78,6 +102,16 @@ test("Send receives the palette's auto-Step cue from the delivery policy", () =>
   assert.match(appSource, /sendAutoSteps=\{paletteSendAutoSteps\(\)\}/);
   assert.match(appSource, /planDelivery\("send", unsteppedPathSet\.has\(path\), file\.nodeId\)/);
   assert.match(appSource, /action-palette-action--auto-step/);
+});
+
+test("Attest composes missing delivery prerequisites with independent Step and Send cues", () => {
+  assert.match(appSource, /attestPlan=\{paletteAttestationPlan\(\)\}/);
+  assert.match(appSource, /await isTraceNodeSent\(citedId\)/);
+  assert.match(appSource, /v\.op === "attest" && attestCreatesStep/);
+  assert.match(appSource, /v\.op === "attest" && attestAutoSends/);
+  assert.match(appSource, /action-palette-action--sends/);
+  assert.match(cssSource, /\.action-palette-action--sends::after/);
+  assert.doesNotMatch(cssSource, /action-palette-action--auto-deliver/);
 });
 
 test("the palette disables Step when the focused trace is current", () => {

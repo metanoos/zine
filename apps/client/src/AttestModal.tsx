@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { decodeGeohash, encodeGeohash, geohashLengthForZoom } from "./geohash.js";
 
 /**
- * Attest — endorse one already-published node, with an optional note/location.
+ * Attest — endorse one exact node, with an optional note/location.
  *
  * The modal the AUTHOR row's Attest button opens (protocol §5A/§8). The
  * geohash is optional discovery metadata; the signed event's `created_at` is a
@@ -96,10 +96,12 @@ function precisionLabel(length: number): string {
 
 export function AttestModal({
   path,
+  prerequisite,
   onClose,
   onConfirm,
 }: {
   path: string;
+  prerequisite: "step-and-send" | "send" | null;
   onClose: () => void;
   onConfirm: (geohash: string | undefined, message: string) => void;
 }) {
@@ -222,7 +224,13 @@ export function AttestModal({
           <button type="button" className="attest-close" aria-label="Close" onClick={onClose}>×</button>
         </div>
         <p className="attest-blurb">
-          Mark the selected version of <strong>{fileName}</strong> as a position you stand behind.
+          {prerequisite === "step-and-send" ? (
+            <>Step and Send the current draft of <strong>{fileName}</strong>, then mark that exact version as a position you stand behind.</>
+          ) : prerequisite === "send" ? (
+            <>Ensure this exact Step of <strong>{fileName}</strong> is Sent, then mark it as a position you stand behind.</>
+          ) : (
+            <>Mark the selected version of <strong>{fileName}</strong> as a position you stand behind.</>
+          )}{" "}
           A note and a Spaces location are optional.
         </p>
 

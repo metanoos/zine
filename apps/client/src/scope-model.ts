@@ -137,6 +137,20 @@ export function scopeKey(scopes: readonly ScopeRef[]): string {
   return scopes.map((scope) => `${scope.kind}:${scope.path}`).join("\u001f");
 }
 
+/** Human-readable identity for the exact mount union driving replay/context. */
+export function mountedScopeLabel(
+  scopes: readonly ScopeRef[],
+  rootLabel = "Root",
+): string {
+  if (scopes.length === 0) return "Nothing mounted";
+  return scopes
+    .map((scope) => {
+      const label = scope.path === "" ? rootLabel : scope.path;
+      return scope.kind === "folder" ? `${label}/` : label;
+    })
+    .join(" + ");
+}
+
 function mergeScopes(left: readonly ScopeRef[], right: readonly ScopeRef[]): ScopeRef[] {
   const next = [...left];
   const seen = new Set(left.map((scope) => scope.path));

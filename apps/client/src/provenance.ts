@@ -1147,6 +1147,11 @@ async function fetchSentTraceNode(nodeId: string): Promise<Event | null> {
   return null;
 }
 
+/** Whether a node satisfies Attest's prior-Send requirement right now. */
+export async function isTraceNodeSent(nodeId: string): Promise<boolean> {
+  return !!(await fetchSentTraceNode(nodeId));
+}
+
 /** Pure wire builder for a TraceAttestation (protocol §5A). Exported so the
  *  provisional event shape is directly testable without relay I/O. */
 export function buildAttestationTemplate(

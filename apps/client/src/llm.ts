@@ -46,6 +46,20 @@ export interface CompleteOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Apply provider-card system text exactly once. Exported so the Prompt
+ * Inspector can render the same final message stack that the transport sends.
+ */
+export function prepareChatMessages(
+  cfg: ProviderConfig,
+  messages: ChatMessage[],
+): ChatMessage[] {
+  const instruction = modelSystemInstruction(cfg);
+  return instruction
+    ? [{ role: "system", content: instruction }, ...messages]
+    : messages;
+}
+
 /** Dispatch by protocol. Returns the full assembled text (for non-streaming)
  *  or the concatenated deltas (for streaming). Throws on HTTP/network error
  *  with a message that surfaces cleanly in the sampler-status convention. */
@@ -56,10 +70,7 @@ export async function complete(
 ): Promise<string> {
   if (!cfg.baseUrl) throw new Error(`provider "${cfg.label}" has no base URL`);
   if (!cfg.modelId) throw new Error(`provider "${cfg.label}" has no model id`);
-  const instruction = modelSystemInstruction(cfg);
-  const configuredMessages: ChatMessage[] = instruction
-    ? [{ role: "system", content: instruction }, ...messages]
-    : messages;
+  const configuredMessages = prepareChatMessages(cfg, messages);
   return cfg.protocol === "anthropic"
     ? callAnthropic(cfg, configuredMessages, opts)
     : callOpenAI(cfg, configuredMessages, opts);

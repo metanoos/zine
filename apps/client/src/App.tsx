@@ -73,6 +73,7 @@ import {
   revokeTrace,
   attestNode,
   fetchAttestationCounts,
+  isTraceNodeSent,
   type TraceInbound,
 } from "./provenance.js";
 import { MergePanel } from "./MergePanel.js";
@@ -81,7 +82,25 @@ import { threeWayMerge, autoMergedText } from "./three-way-merge.js";
 import { AttestModal } from "./AttestModal.js";
 import { RunModal } from "./RunModal.js";
 import { PromptInspectorModal } from "./PromptInspectorModal.js";
+import { SendFailureModal } from "./SendFailureModal.js";
+import { describeSendFailure, type SendFailureView } from "./send-failure.js";
 import { runAgentLoop, type AgentCtx } from "./agent-loop.js";
+import {
+  AUTOMATION_STORAGE_KEY,
+  dueAutomationRecipesForWorkspace,
+  finishAgentRunManifest,
+  loadAutomationRecipes,
+  markAutomationRecipeStarted,
+  removeAutomationRecipe,
+  serializeAgentRunManifest,
+  upsertAutomationRecipe,
+  withAutomationSchedulerLock,
+  type AgentRunManifest,
+  type AgentRunTrigger,
+  type AutomationRecipeDraft,
+  type AutomationScope,
+} from "./automation-store.js";
+import { ensureModelVoice } from "./model-voice.js";
 import { ownerFolderOf, activeMounted } from "./focus-routing.js";
 import { activateTreeItem, type ActivatableTreeItem } from "./tree-routing.js";
 import type { Event } from "nostr-tools";
@@ -122,6 +141,7 @@ import {
 
 import { DownloadView } from "./Download.js";
 import { AboutView } from "./About.js";
+import { aboutHashTarget } from "./about-documents.js";
 import { NetworkingView } from "./Networking.js";
 import { ModelsView } from "./ModelsView.js";
 import { KeysView } from "./KeysView.js";
@@ -162,7 +182,7 @@ import {
 import { getVoiceProvider, setVoiceProvider } from "./voice-provider-store.js";
 import { getVoicePrompt } from "./voice-prompt-store.js";
 import { loadProviders, type ProviderConfig } from "./models-store.js";
-import { complete, type ChatMessage } from "./llm.js";
+import { complete, prepareChatMessages } from "./llm.js";
 import { captureKEditTransaction, groupKEditsByTransaction } from "./kedit-capture.js";
 import {
   captureStreamingScrollAnchor,
@@ -220,6 +240,7 @@ import { gatherContextBlock, clearChainMemo, renderLimelightLog, isShielded } fr
 import {
   applyScopeClick,
   mountsForGroupAction,
+  mountedScopeLabel,
   pathIsMounted,
   pathInEffectiveScopes,
   rebaseMountsAfterMove,
@@ -227,23 +248,33 @@ import {
   topLevelMountedPaths,
   type ScopeRef,
 } from "./scope-model.js";
-import { SYSTEM_PREAMBLE } from "./system-preamble.js";
-import { planDelivery } from "./step-policy.js";
+import {
+  appendReplayStepsAtLiveEnd,
+  freshMountedReplayHeads,
+  replayHeadSignature,
+} from "./replay-live-sync.js";
+import {
+  planAttestation,
+  planDelivery,
+  type AttestationPlan,
+} from "./step-policy.js";
 import { occupancyTransitions, type OccupancyEntry } from "./panel-occupancy.js";
 import {
   createReplayPanels,
   removeReplayPanels,
 } from "./replay-panel-layout.js";
 import {
-  extendMessages,
-  settleMessages,
   settleDedupeMessages,
-  stirMessages,
-  replyMessages,
-  receiveMessages,
+  applyOpPromptLayers,
+  assembleOpMessages,
   type OpKind as PromptOpKind,
   type OpInputs,
 } from "./op-prompts.js";
+import {
+  loadOpLensSelections,
+  saveOpLensSelection,
+  type OpLensId,
+} from "./op-lenses.js";
 import {
   BarChart3,
   BookOpen,
@@ -331,6 +362,13 @@ interface SelectionRef {
   path?: string;
   nodeId?: string;
   phrase?: string;
+}
+
+interface AttestTarget {
+  path: string;
+  kind: "file" | "folder" | "coin";
+  nodeId?: string;
+  plan: Exclude<AttestationPlan, "unavailable">;
 }
 
 interface CoinClipboardCitation {
@@ -1507,6 +1545,10 @@ function Sidebar({
   // panels and tabs cannot mutate them by changing focus.
   const [anchorPath, setAnchorPath] = useState<string | null>(null);
   const mountedPaths = useMemo(() => new Set(scopes.map((scope) => scope.path)), [scopes]);
+  const replayMountedLabel = useMemo(
+    () => mountedScopeLabel(scopes, tree.find((node) => node.path === ROOT)?.name ?? "Root"),
+    [scopes, tree],
+  );
 
   // drag state lives here — the set of source paths being dragged (one or
   // many) and the currently-hovered drop target (a folder path, or "" for root).
@@ -2107,6 +2149,7 @@ function Sidebar({
         </SampleModal>
       )}
       <ReplayTransport
+        mountedLabel={replayMountedLabel}
         index={replayIndex}
         count={replayCount}
         playing={playing}
@@ -2491,10 +2534,11 @@ function OperatorSetupModal({
 
 // --- folder-wide replay transport --------------------------------------
 //
-// Always-visible transport pinned at the bottom of the sidebar. Two rows,
+// Always-visible transport pinned at the bottom of the sidebar. Three rows,
 // shown directly (no "Replay folder" gate):
-//   row 1 — stepper + counter:  ⏮ ◀ [n / total] ▶ ⏭   (left-aligned)
-//   row 2 — transport:          ▶/⏸  ·  N×  ·  [===== slider =====]
+//   row 1 — mounted scope:      MOUNTED drafts/ + final.md
+//   row 2 — stepper + counter:  ⏮ ◀ [n / total] ▶ ⏭   (left-aligned)
+//   row 3 — transport:          ▶/⏸  ·  N×  ·  [===== slider =====]
 // The stepper + slider jump save-point to save-point. Play animates per
 // character (typewriter). `last` is sticky (resting = live document): a new
 // step while parked at the right end appends a step, the counter ticks up, and
@@ -2608,6 +2652,7 @@ function stepPlayFraction(timeline: PlayFrame[] | null, cursor: number): number 
 }
 
 function ReplayTransport({
+  mountedLabel,
   index,
   count,
   playing,
@@ -2621,6 +2666,8 @@ function ReplayTransport({
   stepTimes,
   playFraction,
 }: {
+  /** Exact explicit mount union whose effective scope supplies this timeline. */
+  mountedLabel: string;
   index: number;
   count: number;
   /** Whether the auto-play timer is advancing. */
@@ -2674,9 +2721,16 @@ function ReplayTransport({
     <div
       className={"sidebar-replay" + (playing ? " is-playing" : "")}
       role="group"
-      aria-label="Folder replay"
+      aria-label={`Replay timeline mounted on ${mountedLabel}`}
       title={containerTitle}
     >
+      <div
+        className="sidebar-replay-row sidebar-replay-scope"
+        title={`Mounted timeline: ${mountedLabel}`}
+      >
+        <span className="sidebar-replay-scope-key">Mounted</span>
+        <span className="sidebar-replay-scope-value">{mountedLabel}</span>
+      </div>
       <div className="sidebar-replay-row sidebar-replay-stepper">
         <button
           type="button"
@@ -4545,8 +4599,8 @@ const VOICE_OPS: { op: OpKind; label: string; title: string; cls: string }[] = [
 // discussion stance ("I want to talk about this" — Steps pending changes, then
 // fans out; otherwise sends the latest Step); Attest is the commitment stance ("I stand behind this"
 // — a rare, deliberate act marking a sent node as published position, opens a
-// modal for geohash + timestamp acknowledgment). Per spec, Attest requires
-// prior Send — gated here on a stepped nodeId existing.
+// modal for geohash + timestamp acknowledgment). Per spec, Attest still targets
+// a Sent node; the confirmation gesture composes Step and Send when required.
 const PALETTE_DELIVER: { op: "send" | "attest"; label: string; title: string; cls: string }[] = [
   { op: "send", label: "Send", title: "Open this trace for discussion — Step pending changes, otherwise send the latest Step", cls: "op-send" },
   { op: "attest", label: "Attest", title: "Mark this sent node as your published position — pin a geohash + acknowledge the timestamp", cls: "op-attest" },
@@ -4615,7 +4669,7 @@ function ActionPalette({
   tokenEstimate,
   /** Open the prompt inspector (click on the token-count indicator). */
   onInspect,
-  canAttest,
+  attestPlan,
   targetInScope,
   /** Semantic state of the focused editor passage. Mutates the AUTHOR primary
    *  slot between Step, Mint, disabled Coin, and disabled invalid Mint. */
@@ -4668,15 +4722,15 @@ function ActionPalette({
   tokenEstimate: number | null;
   /** Open the prompt inspector modal (fired by clicking the token count). */
   onInspect: () => void;
-  /** Whether the target has a concrete node to attest. Prior Send is verified
-   *  against an external relay when the gesture is confirmed. */
-  canAttest: boolean;
+  /** Prerequisites the Attest gesture will compose before endorsement. */
+  attestPlan: AttestationPlan;
   /** Whether the focused/target file is inside the scope subtree. When false,
    *  write ops (Step/Send/Extend/Stir/Settle/Reply) disable — content must not
    *  travel without its orchestration — and the palette surfaces a "scope to this
    *  file's folder" affordance via `onScopeToTarget`. Read actions are
-   *  unaffected. Attest stays live if canAttest (it appends an endorsement,
-   *  not a write into the target content). */
+   *  unaffected. Attest only requires scope when it must create a new Step;
+   *  endorsing or ensuring reachability of an existing exact node does not
+   *  write into the target content. */
   targetInScope: boolean;
   /** Semantic state of the focused editor passage presented by the palette. */
   authorSelectionState: PaletteSelectionState;
@@ -4700,8 +4754,8 @@ function ActionPalette({
   substrateKeyId: string | null;
   /** Pin which keychain key signs scans for the current substrate. */
   onChooseSubstrateKey: (id: string) => void;
-  /** Open the scan picker (acquire a foreign snapshot from the substrate). */
-  onScan: () => void;
+  /** Open the matching native picker and acquire a foreign snapshot. */
+  onScan: (kind: "file" | "folder") => void;
   /** Reify: flush a trace out to a picked destination folder. */
   onReifyOp: () => void;
   /** True when the op-target panel is parked on a replay-frozen historical
@@ -4737,6 +4791,9 @@ function ActionPalette({
   const secondaryActions = paletteSecondaryActions(authorSelectionState);
   const hasMintablePassage =
     authorSelectionState === "loose" || authorSelectionState === "pending";
+  const attestCreatesStep = attestPlan === "append-send-attest";
+  const attestAutoSends =
+    attestPlan === "append-send-attest" || attestPlan === "send-attest";
 
   // Key <select> for a row, styled in the chosen voice's font/color.
   function KeySelect({
@@ -4874,29 +4931,37 @@ function ActionPalette({
           }
           // This op is the one in flight: the button becomes the stop control.
           const isRunning = runningOp === v.op;
-          // Attest additionally requires a stepped node to attest; Send only
-          // needs a deliverable target in scope. Any other op running disables
-          // the rest until it settles.
+          // Attest can compose its own Step/Send prerequisites. A composed Step
+          // still obeys the same scope and replay gates as the explicit action.
           const deliverGate =
             v.op === "attest"
-              ? allowDeliver || authorSelectionState === "coin"
+              ? (allowDeliver || authorSelectionState === "coin") &&
+                (!attestCreatesStep || (scopedDeliver && !immutableMint && !replayFrozen))
               : v.op === "send" && immutableMint
                 ? true
                 : scopedDeliver && !immutableMint;
           const enabled =
             isRunning ||
-            (!runningOp && deliverGate && (v.op !== "attest" || canAttest));
+            (!runningOp && deliverGate && (v.op !== "attest" || attestPlan !== "unavailable"));
+          const createsStep =
+            (v.op === "send" && sendAutoSteps) ||
+            (v.op === "attest" && attestCreatesStep);
+          const sends = v.op === "send" || (v.op === "attest" && attestAutoSends);
           return (
             <button
               key={v.op}
               type="button"
-              className={`action-palette-action ${v.cls}${isRunning ? " running" : ""}${v.op === "send" && sendAutoSteps ? " action-palette-action--auto-step" : ""}`}
+              className={`action-palette-action ${v.cls}${isRunning ? " running" : ""}${createsStep ? " action-palette-action--auto-step" : ""}${sends ? " action-palette-action--sends" : ""}`}
               disabled={!enabled}
               title={
                 isRunning
                   ? `${v.label} — running, click to stop`
                   : v.op === "send" && sendAutoSteps
                     ? "Step the pending trace, then Send it for discussion"
+                    : v.op === "attest" && attestPlan === "append-send-attest"
+                      ? "Step and Send this draft, then Attest that exact version"
+                      : v.op === "attest" && attestPlan === "send-attest"
+                        ? "Send this Step, then Attest that exact version"
                     : v.title
               }
               onClick={() => (isRunning ? onStop() : onOp(v.op))}
@@ -5049,10 +5114,19 @@ function ActionPalette({
           type="button"
           className="action-palette-action op-scan"
           disabled={!isTauri()}
-          title={isTauri() ? "Scan: acquire a file or folder from the substrate as new traces under the scope" : "Scanning is desktop-only (the substrate is the local disk)"}
-          onClick={onScan}
+          title={isTauri() ? "Scan File: acquire one file as a new trace under the scope; repeated scans add copies" : "Scanning is desktop-only (the substrate is the local disk)"}
+          onClick={() => onScan("file")}
         >
-          Scan
+          Scan File
+        </button>
+        <button
+          type="button"
+          className="action-palette-action op-scan"
+          disabled={!isTauri()}
+          title={isTauri() ? "Scan Folder: recursively acquire a folder as new traces under the scope; repeated scans add copies" : "Scanning is desktop-only (the substrate is the local disk)"}
+          onClick={() => onScan("folder")}
+        >
+          Scan Folder
         </button>
         <button
           type="button"
@@ -5470,6 +5544,14 @@ function Panel({
     />
   ) : null;
 
+  // Replay is a mode, not a selection edge. Name the state directly in stable
+  // chrome so the top-scrollbar transform cannot invert or obscure it.
+  const replayNotice = replayFrozen
+    ? "Historical snapshot · Read-only · Fork to edit"
+    : replayMounted
+      ? "Playback in progress · Read-only"
+      : null;
+
   return (
     <section
       className={
@@ -5533,6 +5615,11 @@ function Panel({
             const unsteppedEdits = unsteppedEditCounts.get(p) ?? 0;
             const hasUnsteppedChanges = unsteppedPathSet.has(p);
             const pendingLabel = unsteppedEdits > 999 ? "999+" : String(unsteppedEdits);
+            const replayTabDetail = replayFrozen && isActive
+              ? "Historical snapshot · Read-only · Fork to edit"
+              : replayMounted
+                ? "Playback in progress · Read-only"
+                : null;
             return (
               <div
                 key={p}
@@ -5543,11 +5630,7 @@ function Panel({
                   (isInScope ? " tab-in-scope" : " tab-out-of-scope") +
                   (isDragging ? " tab-dragging" : "") +
                   (isBeforeTarget ? " tab-drop-before" : "") +
-                  (hasUnsteppedChanges ? " tab-unstepped" : "") +
-                  (replayMounted ? " tab-replay-mounted" : "") +
-                  // The replay-frozen path's tab gets a provisional marker so
-                  // it's clear at a glance which open doc is a historical view.
-                  (replayFrozen && isActive ? " tab-replay-frozen" : "")
+                  (hasUnsteppedChanges ? " tab-unstepped" : "")
                 }
                 role="tab"
                 aria-selected={isActive}
@@ -5602,6 +5685,15 @@ function Panel({
                 }}
               >
                 <span className="tab-label">
+                  {replayTabDetail ? (
+                    <span
+                      className="tab-replay-badge"
+                      aria-label={`Replay: ${replayTabDetail}`}
+                      title={`Replay · ${replayTabDetail}`}
+                    >
+                      REPLAY
+                    </span>
+                  ) : null}
                   {hasUnsteppedChanges && !isFolderTab(p) ? (
                     <span
                       className="tab-unstepped-count"
@@ -5681,6 +5773,15 @@ function Panel({
         )}
       </div>
       )}
+      {replayNotice ? (
+        <div
+          className="panel-replay-notice"
+          aria-label={`Replay: ${replayNotice}`}
+        >
+          <span className="panel-replay-notice-label">REPLAY</span>
+          <span className="panel-replay-notice-detail">{replayNotice}</span>
+        </div>
+      ) : null}
       {/* Branch detection banner for this trace: incoming forks / sibling
           heads of the active file. Incorporate is offered on noConflict forks
           (you haven't edited past the fork point) — unilateral accept of their
@@ -6607,6 +6708,10 @@ function App() {
   // map deliberately includes zeroes once loaded so every stepped trace gets a
   // stable badge; the badge says "reachable", never "global".
   const [attestationCounts, setAttestationCounts] = useState<Record<string, number>>({});
+  // Reachability of nodes considered by the Attest palette action. Missing
+  // means unknown and is conservatively planned as requiring Send; a focused
+  // node is checked against configured external write relays below.
+  const [sentNodeStatus, setSentNodeStatus] = useState<Record<string, boolean>>({});
   const attestationNodeSig = useMemo(
     () => [...new Set(Object.values(files).map((file) => file.nodeId).filter(Boolean))].sort().join("\n"),
     [files],
@@ -6748,15 +6853,36 @@ function App() {
   // pins the exact node-version). null = modal dismissed.
   const [forkPrompt, setForkPrompt] = useState<{ stepIndex: number } | null>(null);
   // The trace target the Attest modal is endorsing. Null when the modal is
-  // closed; set by the AUTHOR row's Attest button (gated on a node id).
-  const [attestTarget, setAttestTarget] = useState<{
-    path: string;
-    kind: "file" | "folder" | "coin";
-    nodeId: string;
-  } | null>(null);
+  // closed. A file target may not have a node id yet: confirmation composes
+  // the first Step and Send before it appends the Attestation.
+  const [attestTarget, setAttestTarget] = useState<AttestTarget | null>(null);
   // Run-modal open state. Opens from the MODEL row's Run button; onStart kicks
   // off startAgentRun with the composed goal + chosen root provider.
   const [runOpen, setRunOpen] = useState(false);
+  // Browser-local run recipes. A small scheduler below checks these while the
+  // app is open and re-enters the same draft-only startAgentRun path used by
+  // the modal. The busy ref makes claiming single-flight across effect ticks.
+  const [automationRecipes, setAutomationRecipes] = useState(() => loadAutomationRecipes());
+  const automationSchedulerBusyRef = useRef(false);
+  const activeAgentRunsRef = useRef<Map<
+    AbortController,
+    { workspaceId: string; stop: () => void }
+  >>(new Map());
+  useEffect(() => {
+    const sync = (event: StorageEvent) => {
+      if (event.key === null || event.key === AUTOMATION_STORAGE_KEY) {
+        setAutomationRecipes(loadAutomationRecipes());
+      }
+    };
+    window.addEventListener("storage", sync);
+    return () => window.removeEventListener("storage", sync);
+  }, []);
+  useEffect(() => {
+    const workspaceId = folder?.id ?? "";
+    for (const run of activeAgentRunsRef.current.values()) {
+      if (run.workspaceId !== workspaceId) run.stop();
+    }
+  }, [folder?.id]);
   // Per-tab view mode, keyed by file path. Each open file remembers which
   // surface (preview vs markdown) it was last shown on, so switching tabs
   // restores the surface you left it in rather than a single panel-wide mode.
@@ -6912,14 +7038,15 @@ function App() {
     const last = replay.steps.length - 1;
     if (replay.index !== last) return;
     const knownIds = new Set(replay.steps.map((s) => s.event.id));
-    // Collect (path, nodeId) pairs that aren't already steps and have a real id.
-    const fresh: Array<{ path: string; nodeId: string }> = [];
-    for (const [path, state] of Object.entries(files)) {
-      const nodeId = state.nodeId;
-      if (nodeId && !knownIds.has(nodeId)) {
-        fresh.push({ path, nodeId });
-      }
-    }
+    // Discover only heads inside the mounted effective scope. A background tab
+    // can Step while replay is mounted elsewhere; that unrelated head must not
+    // move this counter or slider.
+    const fresh = freshMountedReplayHeads(
+      files,
+      knownIds,
+      scopeRef.current,
+      shieldedRef.current,
+    );
     if (fresh.length === 0) return;
     let cancelled = false;
     void (async () => {
@@ -6952,14 +7079,13 @@ function App() {
       if (cancelled || appended.length === 0) return;
       setReplay((prev) => {
         if (!prev) return prev;
-        // Re-check we're still on last and these ids are still novel — the
-        // async fetch could have raced a manual step or another append.
-        const stillLast = prev.index === prev.steps.length - 1;
-        if (!stillLast) return prev;
-        const known = new Set(prev.steps.map((s) => s.event.id));
-        const merged = [...prev.steps, ...appended.filter((s) => !known.has(s.event.id))];
-        merged.sort((a, b) => a.meta.steppedAtMs - b.meta.steppedAtMs);
-        const next = { ...prev, steps: merged, index: merged.length - 1 };
+        const next = appendReplayStepsAtLiveEnd(
+          prev,
+          appended,
+          (step) => step.event.id,
+          (step) => step.meta.steppedAtMs,
+        );
+        if (next === prev) return prev;
         replayRef.current = next;
         return next;
       });
@@ -6975,20 +7101,27 @@ function App() {
   // writeFile` resolves, so the refetch this triggers never races the publish.
   // Focus deltas (panel mount/unmount) drain onto the *next* folder-node step,
   // which always accompanies a membership change, so they're covered too. We
-  // only bump on growth, never on shrink, so closing a file's last bracket or
-  // a transient editor tick doesn't thrash the panel with refetches. (This is
-  // a sibling of the replay-follow effect above; both watch `files`.)
-  const prevFolderSigRef = useRef<string>("");
+  // compare only path + head identity, so editor content ticks do not refetch.
+  // Unlike the old growth heuristic, head replacement, rename, and removal all
+  // count: each can correspond to a newly-durable folder-chain Step.
+  const prevFolderSigRef = useRef<string | null>(null);
   useEffect(() => {
-    const paths = Object.keys(files).sort();
-    const ids = paths.map((p) => files[p]?.nodeId ?? "");
-    const sig = paths.join("\n") + "\n|\n" + ids.join("\n");
+    const sig = replayHeadSignature(files);
     if (sig === prevFolderSigRef.current) return;
-    const grew =
-      sig.length > prevFolderSigRef.current.length ||
-      !prevFolderSigRef.current.startsWith(paths.join("\n"));
+    const initialized = prevFolderSigRef.current !== null;
     prevFolderSigRef.current = sig;
-    if (!grew) return;
+    if (!initialized) return;
+    // A scope with no prior activity has no replay object yet. Its first
+    // durable Step must bootstrap the timeline, not wait for a follow effect
+    // that necessarily starts with `if (!replay) return`.
+    if (!replayRef.current) {
+      if (bootState === "ready" && folder) {
+        void beginReplay().catch((error) => {
+          console.warn("[replay] first live step bootstrap failed:", error);
+        });
+      }
+      return;
+    }
     setFolderReplayRefreshKey((k) => k + 1);
   }, [files]);
   // LLM ops suppress steps while streaming and release on finish; indirection
@@ -7131,9 +7264,6 @@ function App() {
     localStorage.setItem(SUBSTRATE_LABEL_KEY, s);
     setSubstrate(s);
   }
-  // The scan picker modal. Open by the Scan button; the user picks a file or
-  // folder to acquire as new traces under the scope-folder.
-  const [scanOpen, setScanOpen] = useState(false);
   // Re-bootstrap the timeline when scope/shielded membership changes so its
   // selected union is recomputed. Skip the initial mount (handled by the
   // auto-bootstrap above) and only fire when
@@ -7351,7 +7481,20 @@ function App() {
   // Validation message for the create-row input (e.g. an invalid folder name).
   // Set when createCommit rejects; cleared on a fresh create attempt or cancel.
   const [createError, setCreateError] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<View>("editor");
+  const [activeView, setActiveView] = useState<View>(() =>
+    typeof window !== "undefined" && aboutHashTarget(window.location.hash)
+      ? "about"
+      : "editor",
+  );
+  function selectView(view: View) {
+    if (view !== "about" && aboutHashTarget(window.location.hash)) {
+      const url = new URL(window.location.href);
+      url.hash = "";
+      window.history.replaceState(null, "", url);
+    }
+    setActiveView(view);
+  }
+  const [sendFailure, setSendFailure] = useState<ReturnType<typeof describeSendFailure> | null>(null);
   const [socialQuery, setSocialQuery] = useState<SocialQuery>(() => loadSocialQuery());
   useEffect(() => {
     saveSocialQuery(socialQuery);
@@ -7530,27 +7673,15 @@ function App() {
       if (cancelled || appended.length === 0) return;
       setReplay((prev) => {
         if (!prev) return prev;
-        const stillLast = prev.index === prev.steps.length - 1;
-        if (!stillLast) return prev;
-        const known = new Set(prev.steps.map((s) => s.event.id));
-        // Dedup by event id + membership type+path (a node may carry several
-        // deltas; the same node shouldn't append its deltas twice).
-        const seen = new Set(
-          prev.steps
-            .filter((s) => s.membership)
-            .map((s) => `${s.event.id}:${s.membership!.type}:${s.membership!.path}`),
+        const next = appendReplayStepsAtLiveEnd(
+          prev,
+          appended,
+          (step) => step.membership
+            ? `${step.event.id}:${step.membership.type}:${step.membership.path}`
+            : step.event.id,
+          (step) => step.meta.steppedAtMs,
         );
-        const fresh = appended.filter((s) => {
-          if (known.has(s.event.id)) return false;
-          const k = `${s.event.id}:${s.membership!.type}:${s.membership!.path}`;
-          if (seen.has(k)) return false;
-          seen.add(k);
-          return true;
-        });
-        if (fresh.length === 0) return prev;
-        const merged = [...prev.steps, ...fresh];
-        merged.sort((a, b) => a.meta.steppedAtMs - b.meta.steppedAtMs);
-        const next = { ...prev, steps: merged, index: merged.length - 1 };
+        if (next === prev) return prev;
         replayRef.current = next;
         return next;
       });
@@ -7996,9 +8127,97 @@ function App() {
   // renames. Re-read when entering Press in case storage changed elsewhere.
   // Which one ops use is chosen under Press model select (voice-provider-store).
   const [providers, setProviders] = useState<ProviderConfig[]>(() => loadProviders());
+  const [opLenses, setOpLenses] = useState(() => loadOpLensSelections());
   useEffect(() => {
     if (activeView === "editor") setProviders(loadProviders());
   }, [activeView]);
+
+  function chooseOpLens(op: PromptOpKind, lensId: OpLensId) {
+    const next = saveOpLensSelection(op, lensId);
+    setOpLenses(next);
+  }
+
+  function saveAgentRecipe(input: AutomationRecipeDraft) {
+    if (!folder) throw new Error("open a workspace before saving an automation recipe");
+    const saved = upsertAutomationRecipe({
+      ...input,
+      workspaceId: folder.id,
+      ...(folder.label ? { workspaceLabel: folder.label } : {}),
+      scopes: scopeRef.current.map((item) => ({ kind: item.kind, path: item.path })),
+    });
+    setAutomationRecipes(loadAutomationRecipes());
+    return saved;
+  }
+
+  function deleteAgentRecipe(id: string) {
+    setAutomationRecipes(removeAutomationRecipe(id));
+  }
+
+  function automationScopesAvailable(scopes: readonly AutomationScope[]): boolean {
+    const current = filesRef.current;
+    const paths = Object.keys(current);
+    return scopes.length > 0 && scopes.every((item) => {
+      if (item.kind === "file") return !!current[item.path] && current[item.path]?.kind !== "folder";
+      return item.path === ROOT || current[item.path]?.kind === "folder" ||
+        paths.some((path) => path.startsWith(`${item.path}/`));
+    });
+  }
+
+  // App-open scheduler: claim at most one overdue recipe per tick, and wait
+  // while the user has the composer open or any foreground model operation is
+  // active. Scheduled work uses startAgentRun, so its capabilities remain
+  // read + sandboxed draft writes; this timer cannot Step, Send, or Attest.
+  useEffect(() => {
+    let disposed = false;
+    const tick = () => {
+      if (
+        disposed ||
+        bootState !== "ready" ||
+        !folder ||
+        runOpen ||
+        automationSchedulerBusyRef.current ||
+        summonAbort.current.some(Boolean)
+      ) return;
+      automationSchedulerBusyRef.current = true;
+      void withAutomationSchedulerLock(async () => {
+        if (
+          disposed ||
+          !folder ||
+          folderIdRef.current !== folder.id ||
+          summonAbort.current.some(Boolean)
+        ) return;
+        const availableProviderIds = new Set(providers.map((provider) => provider.id));
+        const recipe = dueAutomationRecipesForWorkspace(
+          loadAutomationRecipes(),
+          folder.id,
+        ).find((item) =>
+          availableProviderIds.has(item.providerId) && automationScopesAvailable(item.scopes),
+        );
+        if (!recipe) return;
+        await startAgentRun(recipe.goal, recipe.providerId, {
+          trigger: "schedule",
+          recipeId: recipe.id,
+          recipeLabel: recipe.label,
+          workspaceId: recipe.workspaceId,
+          scopes: recipe.scopes,
+        });
+      })
+        .catch((error) => {
+          console.warn("[automation] scheduled run failed before completion:", error);
+        })
+        .finally(() => {
+          setAutomationRecipes(loadAutomationRecipes());
+          automationSchedulerBusyRef.current = false;
+        });
+    };
+    tick();
+    const timer = window.setInterval(tick, 30_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [automationRecipes, providers, runOpen, bootState, folder?.id]);
+
   // MODEL voice's pinned provider, derived here so ActionPalette's model select takes
   // it as a prop (same shape as substrateKeyId above) instead of re-reading the
   // store mid-render. Falls back to the first provider so the dropdown matches
@@ -8083,28 +8302,13 @@ function App() {
     return provider;
   }
 
-  /** Apply a voice's custom prompt (voice-prompt-store) to a message list: if
-   *  the voice has a prompt, splice it in as the leading system message so the
-   *  op's own system prompt follows it. No-op when the voice has no prompt. */
-  function withVoicePrompt(pubkey: string, messages: ChatMessage[]): ChatMessage[] {
-    const prompt = getVoicePrompt(pubkey);
-    if (!prompt.trim()) return messages;
-    return [{ role: "system", content: prompt.trim() }, ...messages];
-  }
-
-  /** Prepend the canonical context block (folder tree + sibling text + the
-   *  active file's delta log) to the first user message in an op's message
-   *  list. Gathered once per op invocation, shared across any inner steps.
-   *  Call as `withContext(ctx, withVoicePrompt(pubkey, builderMessages))` —
-   *  context lands inside the op's user message, voice prompt stays the
-   *  leading system message, op-specific system prompt stays as-is. */
-  function withContext(ctx: string, messages: ChatMessage[]): ChatMessage[] {
-    if (!ctx) return messages;
-    const idx = messages.findIndex((m) => m.role === "user");
-    if (idx < 0) return [{ role: "user", content: ctx }, ...messages];
-    const updated = [...messages];
-    updated[idx] = { role: "user", content: `${ctx}\n\n${messages[idx].content}` };
-    return updated;
+  /** The browser-local layers shared by the live op and Prompt Inspector. */
+  function opPromptLayers(op: PromptOpKind, contextBlock: string, pubkey = modelPubkey) {
+    return {
+      lensId: opLenses[op],
+      voicePrompt: getVoicePrompt(pubkey),
+      contextBlock,
+    };
   }
 
   /** Gather the canonical context block for the active doc in panel `idx`.
@@ -8125,10 +8329,9 @@ function App() {
   // Approximate prompt-size estimate for the token indicator beside the LLM
   // buttons. The number reflects the payload an op would send against the
   // op-target panel's active file (the same target Extend/Settle/Stir/Reply
-  // run against): the canonical context block (which dominates), the shared
-  // system preamble, the MODEL voice's voice prompt, and a small allowance for
-  // the op-specific instruction + seed. Debounced so typing doesn't thrash the
-  // async gather; the delta-log fetch inside is memoized (context-gather.ts).
+  // run against). The estimate uses the same assembler and provider-system
+  // preparation as a live Extend call, with an empty seed; the context block
+  // still dominates. Debounced so typing doesn't thrash the async gather.
   const [tokenEstimate, setTokenEstimate] = useState<number | null>(null);
   useEffect(() => {
     if (!folder) {
@@ -8149,10 +8352,14 @@ function App() {
       void (async () => {
         try {
           const block = await gatherContextBlock(folder, files, scope, path, shielded);
-          const voicePrompt = getVoicePrompt(modelPubkey) ?? "";
-          // The op-specific overhead (op system instruction + seed/source) is
-          // small vs. the context block; a flat allowance keeps this honest.
-          const chars = block.length + SYSTEM_PREAMBLE.length + voicePrompt.length + 1500;
+          const messages = assembleOpMessages(
+            "extend",
+            { seed: "", hasSelection: false },
+            opPromptLayers("extend", block),
+          );
+          const provider = resolveVoiceProvider(modelPubkey);
+          const prepared = provider ? prepareChatMessages(provider, messages) : messages;
+          const chars = prepared.reduce((total, message) => total + message.content.length, 0);
           if (!cancelled) setTokenEstimate(estimateTokens(chars));
         } catch {
           if (!cancelled) setTokenEstimate(null);
@@ -8164,7 +8371,7 @@ function App() {
       clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [folder, files, panels, activePanel, selection?.path, modelPubkey, scope, shielded]);
+  }, [folder, files, panels, activePanel, selection?.path, modelPubkey, scope, shielded, providers, opLenses]);
 
   // ─── Prompt inspector ──────────────────────────────────────────────────────
   // Clicking the token-count indicator opens a modal showing exactly what a
@@ -8176,12 +8383,13 @@ function App() {
   const [inspectOp, setInspectOp] = useState<PromptOpKind | null>(null);
   const [inspectContext, setInspectContext] = useState("");
   const [inspectInputs, setInspectInputs] = useState<Partial<Record<PromptOpKind, OpInputs>>>({});
+  const [inspectNotes, setInspectNotes] = useState<Partial<Record<PromptOpKind, string>>>({});
 
   /** Derive the per-op `OpInputs` from the op-target panel's live editor state,
    *  the same way the ops themselves do. Extend seeds from the selection or doc
    *  tail; Settle/Stir use partitionDoc + findCommands + iterBrackets. Reply's
-   *  coins and Receive's limelight log need relay fetches the inspector
-   *  doesn't make, so those ops carry a note instead of fetched content. */
+   *  coins and Receive's limelight log are filled by openInspector's relay
+   *  fetches so the captured preview matches a call made at the same moment. */
   function deriveInspectInputs(): Partial<Record<PromptOpKind, OpInputs>> {
     const idx = opTargetPanel();
     const path = panels[idx]?.active;
@@ -8201,13 +8409,13 @@ function App() {
     const anchorCount = [...iterBrackets(stirText)].length;
     // Settle condenses each loose segment independently; the preview shows the
     // first non-empty one as a representative body.
-    const settleLoose = partitionDoc(doc).find((p) => p.kind === "loose" && p.text.trim().length > 0)?.text ?? "";
+    const settleLoose = partitionDoc(stirText).find((p) => p.kind === "loose" && p.text.trim().length > 0)?.text ?? "";
     return {
       extend: { seed, hasSelection: hasSel },
       settle: { loose: settleLoose },
       stir: { loose, anchorCount, commands: cmds.map((c) => c.command) },
-      // Reply/Receive bodies are relay-fetched at call time — see inputNotes.
-      reply: { source: doc },
+      // Reply/Receive relay-backed bodies are filled by openInspector.
+      reply: { source: stirText },
       receive: {},
     };
   }
@@ -8216,21 +8424,47 @@ function App() {
    *  op-target panel, then show the modal. Async because the context block's
    *  directory-log fetch is async (memoized). */
   async function openInspector() {
-    setInspectInputs(deriveInspectInputs());
-    setInspectContext(await gatherContextForPanel(opTargetPanel()));
+    const inputs = deriveInspectInputs();
+    const notes: Partial<Record<PromptOpKind, string>> = {
+      settle: "Settle sends one call per loose segment; this tab shows the first non-empty segment from the current selection or document.",
+    };
+    const [contextResult, paletteResult, focusResult] = await Promise.allSettled([
+      gatherContextForPanel(opTargetPanel()),
+      fetchPalette(),
+      folder ? focusTimeline(folder.id) : Promise.resolve([] as FocusEntry[]),
+    ]);
+    const context = contextResult.status === "fulfilled" ? contextResult.value : "";
+    if (contextResult.status === "rejected") {
+      for (const op of ["extend", "settle", "stir", "reply", "receive"] as PromptOpKind[]) {
+        notes[op] = "The context gather failed; the preview shows the context-free fallback a call would use.";
+      }
+    }
+    if (paletteResult.status === "fulfilled") {
+      inputs.reply = {
+        ...inputs.reply,
+        traces: paletteResult.value
+          .slice(0, 20)
+          .map((item) => `- "${item.text}" (nodeId ${item.nodeId})`)
+          .join("\n"),
+      };
+    } else {
+      notes.reply = "The relay palette fetch failed; Reply would continue without citable traces.";
+    }
+    if (focusResult.status === "fulfilled" && folder) {
+      inputs.receive = {
+        limelightLog: renderLimelightLog(
+          focusResult.value,
+          folder.label ?? DEFAULT_ROOT_LABEL,
+        ),
+      };
+    } else if (focusResult.status === "rejected") {
+      notes.receive = "The limelight fetch failed; Receive would continue with the delta log and file contents only.";
+    }
+    setInspectInputs(inputs);
+    setInspectContext(context);
+    setInspectNotes(notes);
     setInspectOp("extend");
   }
-
-  /** Per-op notes for inputs the inspector can't derive without a relay fetch.
-   *  Shown inline so the user sees what's missing and why, not an empty box. */
-  const inspectNotes: Partial<Record<PromptOpKind, string>> = {
-    reply:
-      "Coins (citable passages) are fetched from the relay at call time and aren't shown here. " +
-      "The source document above is the focused file's current content.",
-    receive:
-      "The limelight log (panel-occupancy history) is fetched at call time when the folder has one and isn't shown here. " +
-      "The delta log and file contents arrive in the shared context block.",
-  };
 
   /** Begin an op: mark running and arm an AbortController. The op voice is
    *  NOT adopted on the editor facet here — each streamed change instead
@@ -8330,7 +8564,13 @@ function App() {
     try {
       const manifest = {
         algorithm: "ctx-block-v1",
-        params: { op, folderLabel: folder.label ?? DEFAULT_ROOT_LABEL, activePath },
+        params: {
+          op,
+          folderLabel: folder.label ?? DEFAULT_ROOT_LABEL,
+          activePath,
+          promptProfile: "op-contract-v2",
+          lens: opLenses[op],
+        },
       };
       const injectRule = await getOrCreateRuleTrace(folder.id, manifest);
       const members = await fetchManifest(folder.id);
@@ -8397,9 +8637,10 @@ function App() {
     const seed = hasSel
       ? view.state.sliceDoc(sel.from, sel.to)
       : view.state.doc.toString().slice(-4000);
-    const messages: ChatMessage[] = withContext(
-      await gatherContextForPanel(idx),
-      withVoicePrompt(pubkey, extendMessages(seed, hasSel)),
+    const messages = assembleOpMessages(
+      "extend",
+      { seed, hasSelection: hasSel },
+      opPromptLayers("extend", await gatherContextForPanel(idx), pubkey),
     );
     llmMeta = await prepareLlmMeta(idx, "extend", provider, seed, 4096);
     const anchor = hasSel ? sel.to : view.state.doc.length;
@@ -8509,7 +8750,11 @@ function App() {
         if (controller.signal.aborted) break;
         const merged = await complete(
           provider,
-          settleDedupeMessages(group),
+          applyOpPromptLayers(
+            "settle",
+            settleDedupeMessages(group),
+            opPromptLayers("settle", "", pubkey),
+          ),
           { maxTokens: 2048, signal: controller.signal },
         );
         // Keeper = first file; overwrite it with the merge. The rest are deleted.
@@ -8588,7 +8833,11 @@ function App() {
           rebuilt.push(part.text);
           continue;
         }
-        const condensed = await complete(provider, withContext(ctx, withVoicePrompt(pubkey, settleMessages(part.text))), {
+        const condensed = await complete(provider, assembleOpMessages(
+          "settle",
+          { loose: part.text },
+          opPromptLayers("settle", ctx, pubkey),
+        ), {
           maxTokens: 512,
           signal: controller.signal,
         });
@@ -8661,7 +8910,11 @@ function App() {
       const ctx = await gatherContextForPanel(idx);
       const reinvented = await complete(
         provider,
-        withContext(ctx, withVoicePrompt(pubkey, stirMessages(loose, anchorCount, cmds.map((c) => c.command)))),
+        assembleOpMessages(
+          "stir",
+          { loose, anchorCount, commands: cmds.map((c) => c.command) },
+          opPromptLayers("stir", ctx, pubkey),
+        ),
         { maxTokens: 1024, signal: controller.signal },
       );
       // Rebuild: reinvented loose prose, with the verbatim bracket anchors
@@ -8746,7 +8999,11 @@ function App() {
       }
       const traces = palette.slice(0, 20).map((p) => `- "${p.text}" (nodeId ${p.nodeId})`).join("\n");
       const ctx = await gatherContextForPanel(idx);
-      const messages = withContext(ctx, withVoicePrompt(modelVoice, replyMessages(sourceText, traces)));
+      const messages = assembleOpMessages(
+        "reply",
+        { source: sourceText, traces },
+        opPromptLayers("reply", ctx, modelVoice),
+      );
       // Open under a temporary sibling name; rebase to the LLM TITLE once the
       // first line arrives. Keep the source's directory so the response lands
       // next to its origin (e.g. notes/essay.md -> notes/<title>.md).
@@ -8919,7 +9176,11 @@ function App() {
       }
       llmMeta = await prepareLlmMeta(idx, "receive", provider, limelightLog, 2048);
       const ctx = await gatherContextForPanel(idx);
-      const messages = withContext(ctx, withVoicePrompt(modelVoice, receiveMessages(limelightLog)));
+      const messages = assembleOpMessages(
+        "receive",
+        { limelightLog },
+        opPromptLayers("receive", ctx, modelVoice),
+      );
       const sourceName = srcRel || "doc.md";
       const slash = sourceName.lastIndexOf("/");
       const srcDir = slash >= 0 ? sourceName.slice(0, slash + 1) : "";
@@ -9103,22 +9364,13 @@ function App() {
     else if (op === "receive") void receiveLLM(idx);
     else if (op === "step" || op === "send") void deliverAsVoice(idx, op);
     else if (op === "attest") {
-      // Attest opens the optional note/location modal, then appends a dedicated
-      // endorsement event targeting the selected node. It never steps or
-      // mutates the target's revision chain.
-      const coin = paletteSelectedCoin();
-      if (coin) {
-        const label = coin.phrase ? `Coin: ${coin.phrase}` : `Coin ${coin.nodeId.slice(0, 8)}`;
-        setAttestTarget({ path: label, kind: "coin", nodeId: coin.nodeId });
-      } else if (selection?.kind === "folder") {
-        const fp = selection.path ?? ROOT;
-        const nodeId = selection.nodeId ?? files[fp]?.nodeId;
-        if (nodeId) setAttestTarget({ path: fp, kind: "folder", nodeId });
-      } else {
-        const path = panels[idx]?.active;
-        if (path && files[path]?.nodeId) {
-          setAttestTarget({ path, kind: "file", nodeId: files[path]!.nodeId });
-        }
+      // Attest opens the optional note/location modal before any prerequisite
+      // runs. Confirmation may Step and/or Send, then targets that exact node
+      // with the separate append-only endorsement event.
+      const candidate = paletteAttestCandidate();
+      const plan = paletteAttestationPlan(candidate);
+      if (candidate && plan !== "unavailable") {
+        setAttestTarget({ ...candidate, plan });
       }
     }
     else if (op === "run") {
@@ -9140,14 +9392,41 @@ function App() {
    * Stop reuses the existing per-panel AbortController / op-status surface, so
    * the Run button re-renders as a stop control while the loop is in flight.
    */
-  async function startAgentRun(goal: string, providerId: string) {
+  async function startAgentRun(
+    goal: string,
+    providerId: string,
+    launch: {
+      trigger: AgentRunTrigger;
+      recipeId?: string;
+      recipeLabel?: string;
+      workspaceId?: string;
+      scopes?: readonly AutomationScope[];
+    } = { trigger: "manual" },
+  ) {
     const idx = opTargetPanel();
+    const runWorkspaceId = launch.workspaceId ?? folderIdRef.current;
+    if (!folder || !runWorkspaceId || folder.id !== runWorkspaceId) {
+      setOpStatus(idx, "error", "open the recipe's bound workspace before running it", "run");
+      return;
+    }
+    const runScopes: AutomationScope[] = (launch.scopes?.length
+      ? launch.scopes
+      : scopeRef.current
+    ).map((item) => ({ kind: item.kind, path: item.path }));
+    if (!automationScopesAvailable(runScopes)) {
+      setOpStatus(idx, "error", "the recipe's bound scope no longer exists — update the recipe", "run");
+      return;
+    }
     const provider = providers.find((p) => p.id === providerId) ?? null;
     if (!provider) {
       setOpStatus(idx, "error", "no provider — add one in Models");
       return;
     }
-    setRunOpen(false);
+    const startedAtMs = Date.now();
+    if (launch.recipeId) {
+      setAutomationRecipes(markAutomationRecipeStarted(launch.recipeId, startedAtMs));
+    }
+    if (launch.trigger === "manual") setRunOpen(false);
     setOpStatus(idx, "running", undefined, "run");
     const controller = new AbortController();
     summonAbort.current[idx] = controller;
@@ -9155,7 +9434,7 @@ function App() {
     // Sandbox path: a subfolder under the current scope. If the scope is a
     // file, place it as a sibling in the file's parent. Leading underscore so
     // run folders sort away from the manuscript.
-    const scopeSel = scopeRef.current[0];
+    const scopeSel = runScopes[0];
     const scopePath = scopeSel?.path ?? "";
     const parent =
       scopeSel?.kind === "file" && scopePath.includes("/")
@@ -9166,24 +9445,55 @@ function App() {
     const slug = goal.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "run";
     const short = Math.random().toString(16).slice(2, 8);
     const runPath = `${parent ? parent + "/" : ""}_${slug}-${short}`;
+    const runId = `run-${startedAtMs.toString(36)}-${short}`;
+    const identity = loadOrCreateVoice();
+    const modelVoice = ensureModelVoice(identity.secretKey, provider.modelId, provider.label);
+    const runWorkspace = folder;
+    const runShielded = new Set(shieldedRef.current);
+    const isRunPath = (path: string) => path === runPath || path.startsWith(`${runPath}/`);
+    const stillInWorkspace = () => folderIdRef.current === runWorkspaceId;
+    const scopedRead = (path: string) =>
+      isRunPath(path) || pathInEffectiveScopes(runScopes, runShielded, path);
 
     const ctx: AgentCtx = {
-      nostrSecret: loadOrCreateVoice().secretKey,
+      nostrSecret: identity.secretKey,
       resolveModel: (ref) =>
         providers.find((p) => p.id === ref || p.label === ref || p.modelId === ref) ?? provider,
       readFile: (p) => {
+        if (!stillInWorkspace()) {
+          controller.abort();
+          return null;
+        }
+        if (!scopedRead(p)) return null;
         const f = filesRef.current[p];
         return f ? flatten(f.runs ?? []) : null;
       },
-      listFiles: (prefix) =>
-        Object.keys(filesRef.current).filter((p) => !prefix || p.startsWith(prefix)),
+      listFiles: (prefix) => {
+        if (!stillInWorkspace()) {
+          controller.abort();
+          return [];
+        }
+        return Object.keys(filesRef.current).filter((p) =>
+          scopedRead(p) && (!prefix || p.startsWith(prefix)),
+        );
+      },
       writeDraft: (path, runs) =>
-        setFilesRef.current((prev) => ({
-          ...prev,
-          [path]: { runs, nodeId: prev[path]?.nodeId ?? "", tags: prev[path]?.tags ?? [] },
-        })),
+        setFilesRef.current((prev) => {
+          if (!stillInWorkspace() || !isRunPath(path)) {
+            if (!stillInWorkspace()) controller.abort();
+            return prev;
+          }
+          return {
+            ...prev,
+            [path]: { runs, nodeId: prev[path]?.nodeId ?? "", tags: prev[path]?.tags ?? [] },
+          };
+        }),
       appendDraft: (path, voice, text) =>
         setFilesRef.current((prev) => {
+          if (!stillInWorkspace() || !isRunPath(path)) {
+            if (!stillInWorkspace()) controller.abort();
+            return prev;
+          }
           const existing = prev[path];
           const runs = existing?.runs ?? [];
           return {
@@ -9196,20 +9506,118 @@ function App() {
           };
         }),
       runPath,
-      seedContext: await gatherContextForPanel(idx).catch(() => ""),
+      seedContext: "",
     };
+
+    const recipeLabel = launch.recipeLabel ?? automationRecipes.find((recipe) =>
+      recipe.id === launch.recipeId,
+    )?.label;
+    let manifest: AgentRunManifest = {
+      version: 1,
+      runId,
+      runPath,
+      trigger: launch.trigger,
+      ...(launch.recipeId
+        ? { recipe: { id: launch.recipeId, label: recipeLabel ?? "Saved recipe" } }
+        : {}),
+      goal,
+      workspace: {
+        id: runWorkspaceId,
+        ...(runWorkspace.label ? { label: runWorkspace.label } : {}),
+      },
+      scopes: runScopes,
+      model: {
+        providerId: provider.id,
+        label: provider.label || provider.modelId || provider.id,
+        modelId: provider.modelId,
+        protocol: provider.protocol,
+      },
+      scope: scopeSel ? { kind: scopeSel.kind, path: scopeSel.path } : null,
+      status: "running",
+      startedAt: new Date(startedAtMs).toISOString(),
+      outputPath: `${runPath}/output.md`,
+    };
+    const writeManifest = () => {
+      const path = `${runPath}/run.json`;
+      const text = serializeAgentRunManifest(manifest);
+      const runs = [{ voice: modelVoice.pubkey, text }];
+      if (stillInWorkspace()) {
+        ctx.writeDraft(path, runs);
+      } else {
+        // The old workspace is no longer in React state. Persist the terminal
+        // manifest directly to its crash pad so reopening it shows "stopped"
+        // instead of a stale forever-running record.
+        mirrorPad(runWorkspaceId, path, {
+          content: text,
+          tags: [],
+          nodeId: "",
+          runs,
+          voicePubkey: modelVoice.pubkey,
+        });
+      }
+    };
+    writeManifest();
+    const stopForWorkspaceChange = () => {
+      controller.abort();
+      if (manifest.status === "running") {
+        manifest = finishAgentRunManifest(manifest, "stopped");
+      }
+      writeManifest();
+    };
+    activeAgentRunsRef.current.set(controller, {
+      workspaceId: runWorkspaceId,
+      stop: stopForWorkspaceChange,
+    });
+
+    // Gather the bound scope, not whatever the user happens to select while a
+    // scheduled recipe is starting. Pick a scoped file as the ACTIVE anchor.
+    const panelPath = panels[idx]?.active;
+    const contextPath = panelPath &&
+      !isFolderTab(panelPath) &&
+      filesRef.current[panelPath]?.kind !== "folder" &&
+      pathInEffectiveScopes(runScopes, runShielded, panelPath)
+      ? panelPath
+      : Object.keys(filesRef.current).find((path) =>
+        filesRef.current[path]?.kind !== "folder" &&
+        pathInEffectiveScopes(runScopes, runShielded, path),
+      );
+    if (contextPath && stillInWorkspace()) {
+      ctx.seedContext = await gatherContextBlock(
+        runWorkspace,
+        filesRef.current,
+        runScopes,
+        contextPath,
+        runShielded,
+      ).catch(() => "");
+    }
+    if (!stillInWorkspace()) stopForWorkspaceChange();
 
     try {
       await runAgentLoop(ctx, { goal, model: provider, signal: controller.signal });
-      if (controller.signal.aborted) setOpStatus(idx, "idle");
-      else setOpStatus(idx, "done", undefined, "run");
-    } catch (e) {
       if (controller.signal.aborted) {
-        setOpStatus(idx, "idle");
+        if (manifest.status === "running") {
+          manifest = finishAgentRunManifest(manifest, "stopped");
+        }
+        if (stillInWorkspace()) setOpStatus(idx, "idle");
       } else {
-        setOpStatus(idx, "error", e instanceof Error ? e.message : String(e), "run");
+        manifest = finishAgentRunManifest(manifest, "completed");
+        if (stillInWorkspace()) setOpStatus(idx, "done", undefined, "run");
       }
+      writeManifest();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (controller.signal.aborted) {
+        if (manifest.status === "running") {
+          manifest = finishAgentRunManifest(manifest, "stopped");
+        }
+        if (stillInWorkspace()) setOpStatus(idx, "idle");
+      } else {
+        manifest = finishAgentRunManifest(manifest, "failed", undefined, message);
+        if (stillInWorkspace()) setOpStatus(idx, "error", message, "run");
+      }
+      writeManifest();
     } finally {
+      activeAgentRunsRef.current.delete(controller);
       if (summonAbort.current[idx] === controller) summonAbort.current[idx] = null;
     }
   }
@@ -9287,6 +9695,64 @@ function App() {
     };
   }
 
+  /** Resolve the exact trace the palette would Attest. Unlike the old gate, a
+   *  writable file may have no node yet: confirmation can create its first
+   *  Step before Send and endorsement. Coins and folders still need an exact
+   *  existing target. */
+  function paletteAttestCandidate(): Omit<AttestTarget, "plan"> | null {
+    const coin = paletteSelectedCoin();
+    if (coin) {
+      const label = coin.phrase ? `Coin: ${coin.phrase}` : `Coin ${coin.nodeId.slice(0, 8)}`;
+      return { path: label, kind: "coin", nodeId: coin.nodeId };
+    }
+    if (selection?.kind === "folder") {
+      const path = selection.path ?? ROOT;
+      const nodeId = selection.nodeId ?? files[path]?.nodeId;
+      return nodeId ? { path, kind: "folder", nodeId } : null;
+    }
+    const path = panels[opTargetPanel()]?.active;
+    const file = path ? files[path] : undefined;
+    if (!path || !file || file.kind === "folder") return null;
+    if (isMint(path)) {
+      return file.nodeId ? { path, kind: "coin", nodeId: file.nodeId } : null;
+    }
+    return { path, kind: "file", ...(file.nodeId ? { nodeId: file.nodeId } : {}) };
+  }
+
+  function paletteAttestationPlan(
+    candidate = paletteAttestCandidate(),
+  ): AttestationPlan {
+    if (!candidate) return "unavailable";
+    const pending =
+      candidate.kind === "file" && unsteppedPathSet.has(candidate.path);
+    const nodeId = candidate.nodeId ?? "";
+    return planAttestation(pending, nodeId, !!nodeId && sentNodeStatus[nodeId] === true);
+  }
+
+  // Resolve the gold prerequisite cue from real external reachability rather
+  // than assuming every local head was Sent. Unknown is intentionally shown as
+  // auto-delivery until the check settles; confirmation verifies again.
+  const paletteAttestNodeId = paletteAttestCandidate()?.nodeId ?? "";
+  const paletteAttestNodeIsSent = sentNodeStatus[paletteAttestNodeId];
+  useEffect(() => {
+    if (!paletteAttestNodeId || paletteAttestNodeIsSent !== undefined) return;
+    let cancelled = false;
+    void isTraceNodeSent(paletteAttestNodeId)
+      .then((sent) => {
+        if (!cancelled) {
+          setSentNodeStatus((prev) => ({ ...prev, [paletteAttestNodeId]: sent }));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSentNodeStatus((prev) => ({ ...prev, [paletteAttestNodeId]: false }));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [paletteAttestNodeId, paletteAttestNodeIsSent]);
+
   /** Apply the palette's Preserve action only to loose prose. The editor command
    *  leaves the phrase selected, so the palette immediately advances to the
    *  pending-bracket state with Mint as its sole passage action. */
@@ -9321,6 +9787,18 @@ function App() {
     return planDelivery("step", unsteppedPathSet.has(path), file.nodeId) !== "unavailable";
   }
 
+  /** Queue the optional anteriority overlay for any newly-created Step. */
+  function queueStepAnchor(steppedId: string, signer: Uint8Array): void {
+    void import("./anchor.js")
+      .then(({ submitAnchor }) =>
+        submitAnchor(steppedId, signer, resolveRelayUrl()),
+      )
+      .catch(() => {
+        // Best-effort: the node is stepped regardless. Calendar/transport
+        // failures log inside submitAnchor.
+      });
+  }
+
   /** Deliver the panel's active file under the selected stance.
    *
    *  Step appends when the trace has pending changes or needs its first node;
@@ -9332,9 +9810,12 @@ function App() {
     const pubkey = authorPubkey;
     const path = panels[idx]?.active;
     if (!path || !files[path]) return;
+    if (op === "send") setSendFailure(null);
     const signer = secretKeyForVoice(pubkey);
     if (!signer) {
-      setOpStatus(idx, "error", `no key for voice ${pubkey.slice(0, 8)}…`);
+      const error = new Error(`no key for voice ${pubkey.slice(0, 8)}…`);
+      setOpStatus(idx, "error", error.message);
+      if (op === "send") setSendFailure(describeSendFailure(error));
       return;
     }
     if (op === "step" && !isMint(path) && !isOblivion(path)) {
@@ -9406,13 +9887,15 @@ function App() {
       // Strictly additive: the kind-1040 overlay never blocks the gesture.
       // Fire-and-forget; dynamic import avoids a circular module dep.
       if (steppedId && createsStep) {
-        void import("./anchor.js")
-          .then(({ submitAnchor }) =>
-            submitAnchor(steppedId, signer, resolveRelayUrl()),
-          )
+        queueStepAnchor(steppedId, signer);
+      }
+      if (steppedId && op === "send") {
+        void isTraceNodeSent(steppedId)
+          .then((sent) => {
+            setSentNodeStatus((prev) => ({ ...prev, [steppedId]: sent }));
+          })
           .catch(() => {
-            // Best-effort: the node is stepped regardless. Calendar/transport
-            // failures log inside submitAnchor.
+            // The next palette focus or Attest confirmation re-checks.
           });
       }
       setOpStatus(idx, "done", undefined, op);
@@ -9420,12 +9903,14 @@ function App() {
     } catch (e) {
       console.warn(`[deliver] step failed for ${path} as ${pubkey.slice(0, 8)}…:`, e);
       setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
+      if (op === "send") setSendFailure(describeSendFailure(e));
     }
   }
 
-  /** Append an immutable endorsement of the selected, already-published node.
-   *  This never Steps pending changes: doing so would silently change the target and could
-   *  attest a fresh local-only checkpoint rather than the node the user read. */
+  /** Compose Attest's reachability prerequisites, then append the immutable
+   *  endorsement. A writable file with pending changes gets one exact Step;
+   *  an existing local-only node is Sent without manufacturing a revision.
+   *  The final Attestation remains a separate event targeting that exact id. */
   async function attestAsVoice(
     path: string,
     geohash?: string,
@@ -9433,9 +9918,6 @@ function App() {
     opts?: { kind?: "file" | "folder" | "coin"; nodeId?: string },
   ) {
     const pubkey = authorPubkey;
-    const file = files[path];
-    const citedId = opts?.nodeId ?? file?.nodeId;
-    if (!citedId) return;
     // Op-status panel: the panel whose active tab is the attested path, else the
     // focused panel (a folder selection may have no tab).
     const idx = panels.findIndex((p) => p.active === path);
@@ -9447,8 +9929,37 @@ function App() {
     }
     setOpStatus(statusIdx, "running", undefined, "attest");
     try {
+      let citedId = opts?.nodeId;
+      let createsStep = false;
+      if ((opts?.kind ?? "file") === "file") {
+        const file = files[path];
+        if (!file) throw new Error("Attest target is no longer available");
+        const delivery = planDelivery(
+          "send",
+          unsteppedPathSet.has(path),
+          file.nodeId,
+        );
+        if (delivery === "append-and-send") {
+          citedId = await stepFile(path, signer, false, false);
+          createsStep = true;
+        } else {
+          citedId = file.nodeId;
+        }
+      }
+      if (!citedId) throw new Error("Attest needs a trace version to endorse");
+
+      // Re-check at confirmation time: the palette's reachability result is a
+      // visual hint and may be stale. Sending an unchanged event is idempotent.
+      if (!(await isTraceNodeSent(citedId))) {
+        const event = await fetchEventById(citedId);
+        if (!event) throw new Error("Attest target is unavailable on the home relay");
+        await sendStep(event, signer);
+      }
+      if (createsStep) queueStepAnchor(citedId, signer);
+
       // attestNode verifies the target is present on a configured non-loopback
-      // relay, so a home-relay-only Step cannot masquerade as prior Send.
+      // relay after the composed Send, so a failed distribution cannot
+      // masquerade as the required prior Send.
       await attestNode(citedId, undefined, {
         signer,
         ...(message ? { message } : {}),
@@ -9458,6 +9969,7 @@ function App() {
         ...prev,
         [citedId]: (prev[citedId] ?? 0) + 1,
       }));
+      setSentNodeStatus((prev) => ({ ...prev, [citedId]: true }));
       setOpStatus(statusIdx, "done");
     } catch (e) {
       console.warn(`[attest] failed for ${path} as ${pubkey.slice(0, 8)}…:`, e);
@@ -10834,6 +11346,19 @@ function App() {
     }
   }
 
+  /** Re-read the mounted timeline after a structural gesture becomes durable.
+   *  Structural backends update paths optimistically, before their file/folder
+   *  nodes exist on the relay, so the ordinary state signature can fire too
+   *  early. The completion callback closes that race without disturbing a user
+   *  who is deliberately parked on a historical step. */
+  function refreshMountedReplay() {
+    const current = replayRef.current;
+    if (current && current.index !== current.steps.length - 1) return;
+    void beginReplay().catch((error) => {
+      console.warn("[replay] live structural refresh failed:", error);
+    });
+  }
+
   /** Advance/seek replay to step `n`. The step's file is shown when `n` points
    *  at a historical step: its reconstructed content overrides `file.runs`
    *  (frozen, read-only-ish — the sync effect writes it as a setRunsEffect run
@@ -11962,9 +12487,11 @@ function App() {
           userTagsByPath[p] = st.tags;
         }
       }
-      void backendRef.current.movePath(src, destFolder, isFolderMove, userTagsByPath).catch((e) =>
-        console.warn(`[workspace] movePath failed for ${src}:`, e),
-      );
+      void backendRef.current.movePath(src, destFolder, isFolderMove, userTagsByPath)
+        .then(refreshMountedReplay)
+        .catch((e) =>
+          console.warn(`[workspace] movePath failed for ${src}:`, e),
+        );
     }
   }
 
@@ -12098,9 +12625,11 @@ function App() {
     // independent backend delete, so partial failures don't block the rest.
     for (const path of tops) {
       const isFolderDelete = folderSet.has(path) || hasChild(fileSet, folderSet, path);
-      void backendRef.current.deletePath(path, isFolderDelete).catch((e) =>
-        console.warn(`[workspace] deletePath failed for ${path}:`, e),
-      );
+      void backendRef.current.deletePath(path, isFolderDelete)
+        .then(refreshMountedReplay)
+        .catch((e) =>
+          console.warn(`[workspace] deletePath failed for ${path}:`, e),
+        );
     }
   }
 
@@ -12225,9 +12754,11 @@ function App() {
         userTagsByPath[p] = st.tags;
       }
     }
-    void backendRef.current.renamePath(path, cleanName, isFolderRename, userTagsByPath).catch((e) =>
-      console.warn(`[workspace] renamePath failed for ${path}:`, e),
-    );
+    void backendRef.current.renamePath(path, cleanName, isFolderRename, userTagsByPath)
+      .then(refreshMountedReplay)
+      .catch((e) =>
+        console.warn(`[workspace] renamePath failed for ${path}:`, e),
+      );
     return null;
   }
 
@@ -12315,7 +12846,7 @@ function App() {
       <div className="body" style={{ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}>
         <NavRail
           activeView={activeView}
-          onSelect={setActiveView}
+          onSelect={selectView}
           expanded={railExpanded}
           onToggleExpanded={() => setRailExpanded((v) => !v)}
           theme={theme}
@@ -13115,18 +13646,7 @@ function App() {
                 opStatus={summonStatus[opTargetPanel()] ?? { state: "idle" }}
                 tokenEstimate={tokenEstimate}
                 onInspect={() => void openInspector()}
-                canAttest={(() => {
-                  if (paletteSelectedCoin()) return true;
-                  // A folder selection is attestable if it has a nodeId (its
-                  // genesis/chain head); a file selection needs its FileState
-                  // nodeId. Foreign folders are attestable too (cite-and-attest).
-                  if (selection?.kind === "folder") {
-                    const fp = selection.path ?? ROOT;
-                    return !!(selection.nodeId ?? files[fp]?.nodeId);
-                  }
-                  const p = panels[opTargetPanel()]?.active;
-                  return !!(p && files[p]?.nodeId);
-                })()}
+                attestPlan={paletteAttestationPlan()}
                 targetInScope={(() => {
                   const p = panels[opTargetPanel()]?.active;
                   return !!p && isInScope(scope, shielded, p);
@@ -13149,7 +13669,7 @@ function App() {
                 onChooseSubstrate={chooseSubstrate}
                 substrateKeyId={substrateKeyId}
                 onChooseSubstrateKey={chooseSubstrateKey}
-                onScan={() => setScanOpen(true)}
+                onScan={(kind) => void onScan(kind)}
                 onReifyOp={() => void onReifyOp()}
                 // The AUTHOR row's Fork action is live only when the op-target
                 // panel is parked on a replay-frozen historical step — the one
@@ -13169,6 +13689,13 @@ function App() {
               {attestTarget && (
                 <AttestModal
                   path={attestTarget.path}
+                  prerequisite={
+                    attestTarget.plan === "append-send-attest"
+                      ? "step-and-send"
+                      : attestTarget.plan === "send-attest"
+                        ? "send"
+                        : null
+                  }
                   onClose={() => setAttestTarget(null)}
                   onConfirm={(geohash, message) => {
                     const t = attestTarget;
@@ -13183,11 +13710,27 @@ function App() {
               {runOpen && (
                 <RunModal
                   providers={providers}
+                  recipes={automationRecipes}
+                  currentWorkspace={folder ? { id: folder.id, ...(folder.label ? { label: folder.label } : {}) } : null}
+                  currentScopes={scope.map((item) => ({ kind: item.kind, path: item.path }))}
                   defaultProviderId={
                     getVoiceProvider(modelPubkey) ?? providers[0]?.id ?? null
                   }
                   onClose={() => setRunOpen(false)}
-                  onStart={(goal, providerId) => void startAgentRun(goal, providerId)}
+                  onSaveRecipe={saveAgentRecipe}
+                  onDeleteRecipe={deleteAgentRecipe}
+                  onStart={(goal, providerId, recipeId) => {
+                    const recipe = automationRecipes.find((item) => item.id === recipeId);
+                    void startAgentRun(goal, providerId, {
+                      trigger: "manual",
+                      ...(recipe ? {
+                        recipeId: recipe.id,
+                        recipeLabel: recipe.label,
+                        workspaceId: recipe.workspaceId,
+                        scopes: recipe.scopes,
+                      } : {}),
+                    });
+                  }}
                 />
               )}
               {inspectOp && (
@@ -13201,59 +13744,12 @@ function App() {
                     return !!(p && files[p]?.nodeId);
                   })()}
                   voicePrompt={getVoicePrompt(modelPubkey) ?? ""}
-                  modelLabel={(() => {
-                    const p = resolveVoiceProvider(modelPubkey);
-                    return p ? `${p.label || p.protocol} · ${p.modelId}` : null;
-                  })()}
+                  provider={resolveVoiceProvider(modelPubkey)}
+                  lensSelections={opLenses}
+                  onLensChange={chooseOpLens}
                   estimateTokens={estimateTokens}
                   onClose={() => setInspectOp(null)}
                 />
-              )}
-              {scanOpen && (
-                <div className="confirm-overlay" onClick={() => setScanOpen(false)}>
-                  <div
-                    className="confirm-dialog"
-                    onClick={(e) => e.stopPropagation()}
-                    role="dialog"
-                    aria-modal="true"
-                    aria-label="Scan from substrate"
-                  >
-                    <p className="confirm-message">
-                      Scan acquires a file or folder from {substrate} as new traces
-                      under the scope-folder. Each scan is additive — scanning the
-                      same path twice yields two copies, never an overwrite.
-                    </p>
-                    <div className="confirm-actions">
-                      <button
-                        type="button"
-                        className="confirm-cancel"
-                        onClick={() => setScanOpen(false)}
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        type="button"
-                        className="confirm-delete"
-                        onClick={() => {
-                          setScanOpen(false);
-                          void onScan("file");
-                        }}
-                      >
-                        Scan a file…
-                      </button>
-                      <button
-                        type="button"
-                        className="confirm-delete"
-                        onClick={() => {
-                          setScanOpen(false);
-                          void onScan("folder");
-                        }}
-                      >
-                        Scan a folder…
-                      </button>
-                    </div>
-                  </div>
-                </div>
               )}
             </div>
           ) : folder && bootState === "scanning" ? (
@@ -13317,6 +13813,16 @@ function App() {
         </div>
       </div>
       <PinPanel />
+      {sendFailure && (
+        <SendFailureModal
+          failure={sendFailure}
+          onClose={() => setSendFailure(null)}
+          onNavigate={(view: SendFailureView) => {
+            setSendFailure(null);
+            setActiveView(view);
+          }}
+        />
+      )}
       {settingsOpen && (
         <div
           className="confirm-overlay"

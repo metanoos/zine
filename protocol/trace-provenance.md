@@ -87,7 +87,7 @@ One stepped checkpoint of one trace. Every node is self-sufficient: it MUST carr
 | `["q", nucleusId, relayHint, ownerPubkey]` | Out-edges: the traces this node composes. NIP-18 quote-tag shape. The list is the full **current** set of active out-edges — cumulative, not incremental. On folder nodes, one per member; **`q`-tag order MUST equal `snapshot.members` order** — member ordering is stated once, in two places that MUST agree. |
 | `["t", label]` | Lexical mirror, emitted only alongside a `role: "tag"` cite (§3.3): the tagged zine's name, giving generic Nostr clients zero-resolution `#t` discoverability. |
 | `["action", actionType]` | Advisory summary; see §3.4. |
-| `["g", geohash]` | OPTIONAL, folder nodes only. A base-32 geohash the zine is pinned to for spatial browsing (Spaces view). **Arbitrary length** — length encodes precision (a length-2 cell is ~continental, length-8 is ~street-level); cells are prefix-hierarchical, so a coarser pin's cell contains every finer pin that shares its prefix. A node MAY carry several `g` tags. The current set is republished on the folder node; `g` does NOT enter the canonical body hash (curation surface, not content). `#g` gives relay-side cell filtering. |
+| `["g", geohash]` | OPTIONAL, folder nodes only. A base-32 geohash the zine is pinned to for spatial browsing (Spaces view). **Arbitrary length** — length encodes precision (a length-2 cell is ~continental, length-8 is ~street-level); cells are prefix-hierarchical, so a coarser pin's cell contains every finer pin that shares its prefix. A node MAY carry several `g` tags. The current set is republished on the folder node; `g` does NOT enter the canonical body hash (curation surface, not content). `#g` gives relay-side cell filtering. Precision is disclosure: a fine-grained pin, republished on every folder step of a Sent trace, is a durable location record — presses SHOULD treat pin precision as a deliberate choice and surface it as such, never as a default. |
 
 ### 3.2 Content
 
@@ -137,6 +137,12 @@ For folder nodes, `snapshot` is instead:
   SHOULD reproduce `snapshot`; on mismatch, readers discard the advisory log
   rather than the node. KEdits expose timing and intermediate states, including
   work later undone. Step keeps them local; Send publishes them with the node.
+  Published timing is also a **behavioral biometric**: inter-edit rhythm
+  (keystroke dynamics) can fingerprint an author and link pseudonymous keys
+  across traces, defeating the transport layer's metadata privacy
+  (`transport.md` §4) from the content layer. Publishing `kedits` is an
+  identity-relevant disclosure, not merely a content one, and presses SHOULD
+  present it that way.
 - `prompt` / `injectRule` / `llm` — `action: llm` only; see §3.7. `llm` records the call params (`model`, `temperature`, `maxTokens`, `provider`) so a reader knows not just what was asked and what was in scope, but which model configuration answered. `temperature` is `number | null`: the actual value sent, or `null` when the caller sent none (the provider applied its own default) — never a placeholder `0`, which would falsely claim deterministic decoding.
 - `contributors` — OPTIONAL roster of participants in this checkpoint, each `{ type, pubkey }`. This is the single carrier for "a non-signer contributed here" (an earlier `actor` tag is retired — see §R11).
 
@@ -197,7 +203,7 @@ Citation type (both reifications) — **one delta type, four roles**:
 - `role: "reply"` — this whole document replies to another stepped trace: no `position`, no `newValue`; body untouched.
 - `op` defaults to `"add"` and MAY be omitted.
 - Every `cite` with `op: "add"` MUST have a matching top-level `q` tag pinning `sourceEventId`; `op: "remove"` removes the corresponding `q` from the current set. `sourceEventId` is pinned to the source's nucleus **at the moment of citing**, even if the source's chain moves on. This lowercase `q` edge is the only social citation primitive. Text cannot be cited until it is a trace: `[[text]]` is draft syntax; Mint first strikes a coin, after which an inline bracket or bodyless tag may cite its node id.
-- `sourceContentHash`, if present, is the hash of the cited span/body as it appears in the source — lets a verifier catch a fabricated citation without reconstructing the source (§3.9).
+- `sourceContentHash`, if present, is the hash of the cited span/body as it appears in the source — lets a verifier catch a fabricated citation without reconstructing the source (§3.9). The hash is SHA-256 of the exact UTF-8 bytes of the span, per §2 — **no normalization**. It is NOT the rendezvous coordinate `H`, which NFC-normalizes and collapses whitespace (`rendezvous.md` §1.2); the two induce different equivalence classes on the same text.
 
 Only `insert`, `delete`, and `replace` participate in `applyDeltas`. Citation and observation deltas describe why or how a body/relationship changed; readers MUST NOT splice their `position`/`newValue` into the snapshot a second time.
 
@@ -498,7 +504,7 @@ In the common case the loop never runs.
 
 Any NIP-01 relay that also implements parameterized-replaceable handling (NIP-33, for `TraceHead`/`TraceOpinion`) suffices. The protocol depends on no tag-ordering guarantees and defines no special relay class. In the citation-verification path, folder placement is display metadata only — integrity rests on pubkey + contentHash + snapshot, never on folder.
 
-**Removal request (NIP-09).** An author MAY request removal of their published events by publishing a standard NIP-09 kind-5 event under the same key: `["e", eventId]` for each regular `TraceNode` (kind 4290) or `TraceAttestation` (kind 4294), `["a", "34290:<pubkey>:<d>"]` for the `TraceHead`, and `["a", "34291:<pubkey>:<d>"]` for each owned `TraceOpinion`. NIP-09 says compatible relays SHOULD delete or stop publishing matching events whose author matches the request. It does not guarantee deletion, require a tombstone, or require permanent refusal of the same event id. Advertising NIP-9 describes relay capability, not a universal retention outcome. A relay that never received or chose not to act on the kind-5 MAY retain the event, and a reader that cached it keeps a cryptographically intact copy. The request does not touch the trace chain; it asks relays to change *retention*, which §10 keeps non-normative. Only the event author can make an effective request for that event, so third-party opinions and attestations persist unless their respective authors request removal too.
+**Removal request (NIP-09).** An author MAY request removal of their published events by publishing a standard NIP-09 kind-5 event under the same key: `["e", eventId]` for each regular `TraceNode` (kind 4290) or `TraceAttestation` (kind 4294), `["a", "34290:<pubkey>:<d>"]` for the `TraceHead`, and `["a", "34291:<pubkey>:<d>"]` for each owned `TraceOpinion`. NIP-09 says compatible relays SHOULD delete or stop publishing matching events whose author matches the request. It does not guarantee deletion, require a tombstone, or require permanent refusal of the same event id. Advertising NIP-09 describes relay capability, not a universal retention outcome. A relay that never received or chose not to act on the kind-5 MAY retain the event, and a reader that cached it keeps a cryptographically intact copy. The request does not touch the trace chain; it asks relays to change *retention*, which §10 keeps non-normative. Only the event author can make an effective request for that event, so third-party opinions and attestations persist unless their respective authors request removal too.
 
 Non-normative, reserved for later: relay-side validation policy (rejection rules for malformed content, missing required tags, unresolvable `q`), retention, operator/staff admin layer.
 
@@ -631,6 +637,8 @@ clusters. Those remain reader-side reductions over fetched, verified events.
 ## R10. Known costs, accepted
 
 - **Folder snapshots grow with membership.** A 1,000-member folder carries 1,000 entries per node. Acceptable for the same reason file snapshots are — membership changes are bounded-frequency — but noted, and a whole-folder injection rule compounds it by expanding member *content* into a prompt. Sharding or incremental snapshots may be needed at scale. Under nesting, per-node snapshot size stays bounded (immediate members only), but **transitive node count is multiplicative** — a 50-member folder where 10 members are 50-member folders is 550 transitive nodes. Any "walk the whole tree" reader (injection rules, sample queries) pays the full depth. The shallow-local `contentHash` (§2) keeps *hashing* O(immediate members); the cost moves to *traversal*, which is bounded fan-out per level.
+- **Cumulative `q` sets grow with citation count.** The `q` list is the full current out-edge set (§3.1), so a heavily-citing trace — a 500-quote anthology — re-carries all 500 `q` tags on every step. Same class of cost as folder snapshots, accepted for the same bounded-frequency reason, and the same sharding caveat applies at scale.
+- **UTF-16 offsets bind the wire to JavaScript string semantics.** Every offset and length (§2) counts UTF-16 code units, so a non-JS implementation (the Go relay, the Rust shell, any future reader) must do UTF-16 offset math over text it likely holds as UTF-8. Accepted deliberately — the Nostr ecosystem and both reference presses are JS, and a mixed-unit wire would be worse — but it is a permanent interop tax on second implementations, recorded here as a decision rather than an accident.
 - **Verification is bounded, not trustless.** A determined liar can cite a real hash for text not really at that position; full verification reads the citing document too. The protocol optimizes the honest path and makes the dishonest one cheap to expose, not impossible.
 - **`z`/`F`/`f` are provisional single-letter choices**, like the kind numbers; collision review against NIP tag conventions belongs to registration.
 
@@ -648,13 +656,17 @@ was composed.
 **The `(+N/−M)` character delta suppresses bulk-insert fabrication.** On a trace
 containing three single-span inserts of +1222, +958, and +836 characters, an A/B/C
 dose-response (5 draws per condition, glm-5.2) showed: with labels + span content
-present, 5/5 narrations characterized the inserts as large replacements or
-compressions; with labels stripped (span content still visible), 2/5 drifted into
-"gradual composition" language; with both stripped, 0/5 — the model narrated the
-+1222 insert as "small final adjustments" and "administrative." The summary
-magnitude is the anchor that prevents a bulk paste from being dressed up as
-deliberate composition — exactly the paste-tell the system preamble
-(`system-preamble.ts`) warns against.
+present, 5/5 narrations stayed bound, characterizing the inserts as large
+replacements or compressions; with labels stripped (span content still visible),
+3/5 drifted into "gradual composition" language (2/5 bound); with both stripped,
+0/5 stayed bound — the model narrated the +1222 insert as "small final
+adjustments" and "administrative." The summary magnitude is the anchor that
+prevents a bulk paste from being dressed up as deliberate composition — exactly
+the paste-tell the system preamble (`system-preamble.ts`) warns against. At this
+N the contrasts differ sharply in strength: labels+spans vs bare log (5/5 vs
+0/5, Fisher exact p ≈ 0.004 one-tailed) is solid, while the marginal value of
+the summary label over span content alone (5/5 vs 2/5, p ≈ 0.08) is directional
+but not statistically separable at five draws.
 
 **The per-span content payloads suppress content fabrication.** With span
 content stripped (condition C), every draw hallucinated entirely new content:
@@ -664,11 +676,16 @@ citations) where the file actually contained nonsense vocalizations ("wooooo,"
 instead of inventing — the same role `snapshot` plays for content resolution
 (§R1), but at the per-edit granularity narration needs.
 
-**The two signals contribute independently.** The summary gives magnitude at a
-glance; the span content gives the model something to anchor on. Removing either
-degrades fidelity; removing both produces outright fabrication. Retention that
-sheds `deltas` loses both — the node's content is still resolvable, but the
-material from which honest narration is derived is gone.
+**The two signals appear to contribute independently** — but this is the
+study's weakest cell. The summary gives magnitude at a glance; the span content
+gives the model something to anchor on. Removing either degraded fidelity;
+removing both produced outright fabrication. The independence claim rests on
+the middle (B) condition, the one contrast that is not statistically separable
+at N=5, so read it as suggestive, not settled. What retention needs to know is
+carried by the strong contrast: shedding `deltas` loses both signals at once —
+the node's content is still resolvable, but the material from which honest
+narration is derived is gone, and that shed state is exactly the study's
+condition C.
 
 **The `ΔNm/Nh/Nd` interval label is inert for this model.** Across two traces
 (one with a self-evident Δ6h gap, one with ambiguous Δ32m/Δ1h gaps), no
@@ -682,11 +699,23 @@ model-dependent, not because it was observed.
 This is the empirical case for treating `deltas` as more than an integrity
 fallback: they are the substrate from which derived observations prevent a
 specific, measurable narration failure. Shedding them under retention is safe
-for verification and fatal for honest narration.
+for verification and — for the one model tested — fatal for honest narration.
+The evidence limits cut both ways: every finding here is single-model
+(glm-5.2), 5 draws per condition, hand-scored by one scorer who was not blind
+to condition (the pre-registered binary criteria bound but do not remove that
+risk). The model-dependence caveat below applies to the positive char-delta
+finding no less than to the inert interval label; a model-swap replication
+would strengthen both.
 
-## R11. Design history (reversals, most recent first)
+## R11. Design history (reversals)
 
-27. **High-resolution KEdit logs adopted as optional Step metadata; undo/redo intent made explicit.** The earlier telemetry boundary correctly rejected a signed event per keystroke, but stated the privacy consequence too broadly: it also ruled out batching editor actions inside a checkpoint the author deliberately chose. `kedits` now carry that optional, retention-sheddable process evidence on one Step without changing event cadence (§3.2, §8). This is a real disclosure trade: Send publishes intermediate states and timing along with the node, including work later undone; `snapshot` remains authoritative and operators may shed the log.
+Entry numbers are **stable and never renumbered** — normative sections and
+`rendezvous.md` cite entries as §R11.N. Entries 27 down to 15 carry stable
+numbers and are listed newest first; the block numbered 1–14 below them is the
+original list, retained with its original numbers rather than reordered into
+the newer scheme.
+
+27. **High-resolution KEdit logs adopted as optional Step metadata; undo/redo intent made explicit.** The earlier telemetry boundary correctly rejected a signed event per keystroke, but stated the privacy consequence too broadly: it also ruled out batching editor actions inside a checkpoint the author deliberately chose. `kedits` now carry that optional, retention-sheddable process evidence on one Step without changing event cadence (§3.2, §8). This is a real disclosure trade: Send publishes intermediate states and timing along with the node, including work later undone; `snapshot` remains authoritative and operators may shed the log. The timing half of the trade is biometric, not just informational — see §3.2's keystroke-dynamics warning.
 
   History actions need semantic identity as well as their concrete inverse mutations. Without `intent`, Cmd/Ctrl+Z is indistinguishable from manually deleting the same range, and redo is indistinguishable from retyping it. Writers therefore preserve the editor's direct `undo`/`redo` transaction annotation. A node-local `tx` groups every range in one editor transaction because multi-cursor and grouped history changes share one pre-state coordinate space; replay applies the group atomically. Legacy KEdits without `tx` or `intent` remain valid and degrade to independent, unlabeled edits. This supersedes only the blanket rejection of batched keystroke metadata in §R5/§R11.21; per-keystroke events remain rejected.
 
@@ -790,7 +819,7 @@ A request to "take down my published zine" concerns relay retention, not chain i
 
 - **Same-author authority matches the model.** A trace has exactly one signing owner (§3.8). NIP-09 relays act only when the deletion request and target share that author. No delegation, multi-signature rule, or new authority primitive is needed.
 - **The chain is untouched.** A kind-5 request does not mint a trace node, mutate a `prev` pointer, or move a `TraceHead`. Readers who cached the target keep a cryptographically intact copy. A failed fetch means "unavailable from this relay," not proof of universal deletion.
-- **Retention remains relay policy.** NIP-09 says relays SHOULD delete or stop publishing; it does not mandate a tombstone or permanent rejection of re-publication. Advertising NIP-9 signals support for the mechanism, not a guaranteed outcome on every relay.
+- **Retention remains relay policy.** NIP-09 says relays SHOULD delete or stop publishing; it does not mandate a tombstone or permanent rejection of re-publication. Advertising NIP-09 signals support for the mechanism, not a guaranteed outcome on every relay.
 
 The rejected alternative, a custom replaceable `revoke` marker, would add a second protocol representation for the same removal request without gaining erasure power. It could not compel other relays or remove cached copies. Zine therefore uses NIP-09 for advisory relay removal and makes no stronger cross-relay promise. See §R11.18 for the decision record.
 

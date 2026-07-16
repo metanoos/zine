@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   applyScopeClick,
   mountsForGroupAction,
+  mountedScopeLabel,
   pathIsMounted,
   pathInEffectiveScopes,
   pathInScopes,
@@ -90,6 +91,21 @@ test("multiple mounts derive a scope union and a root mount includes everything"
   assert.equal(pathInScopes(scopes, "final.md"), true);
   assert.equal(pathInScopes(scopes, "archive/old.md"), false);
   assert.equal(pathInScopes([{ kind: "folder", path: "" }], "anything/here.md"), true);
+});
+
+test("mounted scope labels name the exact replay union", () => {
+  assert.equal(
+    mountedScopeLabel([{ kind: "folder", path: "" }], "My Zine"),
+    "My Zine/",
+  );
+  assert.equal(
+    mountedScopeLabel([
+      { kind: "folder", path: "drafts" },
+      { kind: "file", path: "final.md" },
+    ]),
+    "drafts/ + final.md",
+  );
+  assert.equal(mountedScopeLabel([]), "Nothing mounted");
 });
 
 test("mounted rows are exact while a mounted folder derives descendant scope", () => {
