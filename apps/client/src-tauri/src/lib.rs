@@ -847,6 +847,86 @@ fn legacy_friends_json_path() -> Result<PathBuf, String> {
     Ok(home.join(".tracer").join("friends.json"))
 }
 
+const PEERS_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const PEERS_STALE_LOCK_AGE: Duration = Duration::from_secs(30);
+
+/// Cross-process lock shared with zine-mcp. Both processes update peers.json,
+/// so an unlocked read-modify-write can otherwise discard the other's change.
+/// The lock is a sibling created atomically with create_new; stale files are
+/// recovered after 30 seconds so a crashed process cannot block ACL edits.
+struct PeersFileLock {
+    path: PathBuf,
+    _file: fs::File,
+}
+
+impl PeersFileLock {
+    fn acquire(path: &Path, timeout: Duration) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(file) => {
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                        _file: file,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = fs::metadata(path)
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| modified.elapsed().ok())
+                        .is_some_and(|age| age > PEERS_STALE_LOCK_AGE);
+                    if stale {
+                        let _ = fs::remove_file(path);
+                        continue;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "timed out waiting for access-policy lock {}",
+                            path.display()
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "create access-policy lock {}: {}",
+                        path.display(),
+                        error
+                    ));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for PeersFileLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn peers_lock_path() -> Result<PathBuf, String> {
+    let peers_path = peers_json_path()?;
+    let file_name = peers_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("could not resolve peers.json filename")?;
+    Ok(peers_path.with_file_name(format!("{file_name}.lock")))
+}
+
+fn acquire_peers_file_lock() -> Result<PeersFileLock, String> {
+    PeersFileLock::acquire(&peers_lock_path()?, PEERS_LOCK_TIMEOUT)
+}
+
 /// One-shot migration: if peers.json is absent but the legacy friends.json
 /// exists, rename it into place. The relay and the MCP server each run the
 /// same check, so whichever process reads first performs the rename and the
@@ -895,7 +975,7 @@ fn migrate_legacy_friends_file() {
 /// legacy `friends` key (written before the rename), so a partial/failed
 /// migration never locks the owner out. Returns a default (empty owner, no
 /// peers) if the file doesn't exist yet — that's the local-mode state.
-fn read_peers_file() -> Result<PeersFile, String> {
+fn read_peers_file_unlocked() -> Result<PeersFile, String> {
     migrate_legacy_friends_file();
     let path = peers_json_path()?;
     if !path.exists() {
@@ -923,10 +1003,15 @@ fn read_peers_file() -> Result<PeersFile, String> {
     }
 }
 
+fn read_peers_file() -> Result<PeersFile, String> {
+    let _lock = acquire_peers_file_lock()?;
+    read_peers_file_unlocked()
+}
+
 /// Write peers.json atomically (temp + rename), mirroring operator.go's
 /// persistence pattern. Writes to a sibling temp file then renames, so a crash
 /// mid-write never leaves a corrupt file.
-fn write_peers_file(data: &PeersFile) -> Result<(), String> {
+fn write_peers_file_unlocked(data: &PeersFile) -> Result<(), String> {
     let path = peers_json_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -960,17 +1045,20 @@ struct PeersState {
     networked_mode: bool,
 }
 
-/// Read the current access policy. networked_mode is true when an owner is set
-/// — that's what activates the relay's NIP-42 AUTH requirement.
-#[tauri::command]
-fn list_peers() -> Result<PeersState, String> {
-    let pf = read_peers_file()?;
-    Ok(PeersState {
+fn peers_state(pf: PeersFile) -> PeersState {
+    PeersState {
         networked_mode: is_valid_pubkey(&pf.owner),
         owner: pf.owner,
         peers: pf.peers,
         writers: pf.writers,
-    })
+    }
+}
+
+/// Read the current access policy. networked_mode is true when an owner is set
+/// — that's what activates the relay's NIP-42 AUTH requirement.
+#[tauri::command]
+fn list_peers() -> Result<PeersState, String> {
+    Ok(peers_state(read_peers_file()?))
 }
 
 /// Set the owner pubkey. This is what activates networked mode — until an owner
@@ -983,10 +1071,11 @@ fn set_owner(pubkey: String) -> Result<PeersState, String> {
             pubkey
         ));
     }
-    let mut pf = read_peers_file()?;
+    let _lock = acquire_peers_file_lock()?;
+    let mut pf = read_peers_file_unlocked()?;
     pf.owner = pubkey;
-    write_peers_file(&pf)?;
-    list_peers()
+    write_peers_file_unlocked(&pf)?;
+    Ok(peers_state(pf))
 }
 
 /// Add a peer pubkey (read-only access). Dedupes — adding the same key twice
@@ -1000,24 +1089,26 @@ fn add_peer(pubkey: String) -> Result<PeersState, String> {
             pubkey
         ));
     }
-    let mut pf = read_peers_file()?;
+    let _lock = acquire_peers_file_lock()?;
+    let mut pf = read_peers_file_unlocked()?;
     if pf.owner == pubkey {
         return Err("that pubkey is the owner (owners have write access, not peer access)".into());
     }
     if !pf.peers.contains(&pubkey) {
         pf.peers.push(pubkey);
-        write_peers_file(&pf)?;
+        write_peers_file_unlocked(&pf)?;
     }
-    list_peers()
+    Ok(peers_state(pf))
 }
 
 /// Remove a peer pubkey.
 #[tauri::command]
 fn remove_peer(pubkey: String) -> Result<PeersState, String> {
-    let mut pf = read_peers_file()?;
+    let _lock = acquire_peers_file_lock()?;
+    let mut pf = read_peers_file_unlocked()?;
     pf.peers.retain(|p| p != &pubkey);
-    write_peers_file(&pf)?;
-    list_peers()
+    write_peers_file_unlocked(&pf)?;
+    Ok(peers_state(pf))
 }
 
 /// Add a writer pubkey (read+write access, own events only). Dedupes. Refuses
@@ -1032,7 +1123,8 @@ fn add_writer(pubkey: String) -> Result<PeersState, String> {
             pubkey
         ));
     }
-    let mut pf = read_peers_file()?;
+    let _lock = acquire_peers_file_lock()?;
+    let mut pf = read_peers_file_unlocked()?;
     if pf.owner == pubkey {
         return Err("that pubkey is the owner (owners have full write access)".into());
     }
@@ -1041,18 +1133,19 @@ fn add_writer(pubkey: String) -> Result<PeersState, String> {
     }
     if !pf.writers.contains(&pubkey) {
         pf.writers.push(pubkey);
-        write_peers_file(&pf)?;
+        write_peers_file_unlocked(&pf)?;
     }
-    list_peers()
+    Ok(peers_state(pf))
 }
 
 /// Remove a writer pubkey.
 #[tauri::command]
 fn remove_writer(pubkey: String) -> Result<PeersState, String> {
-    let mut pf = read_peers_file()?;
+    let _lock = acquire_peers_file_lock()?;
+    let mut pf = read_peers_file_unlocked()?;
     pf.writers.retain(|p| p != &pubkey);
-    write_peers_file(&pf)?;
-    list_peers()
+    write_peers_file_unlocked(&pf)?;
+    Ok(peers_state(pf))
 }
 
 // --- Tor sidecar: inbound reachability via onion service -----------------
@@ -1293,6 +1386,41 @@ async fn derive_onion_address() -> Result<String, String> {
          never enters Rust. Call setup_onion(seedBase64) with the derived seed."
             .into(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn peers_file_lock_excludes_second_writer_and_cleans_up() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("zine-peers-lock-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create lock test directory");
+        let lock_path = dir.join("peers.json.lock");
+
+        {
+            let _first = PeersFileLock::acquire(&lock_path, Duration::from_millis(50))
+                .expect("first writer should acquire lock");
+            assert!(lock_path.exists());
+            let second = PeersFileLock::acquire(&lock_path, Duration::from_millis(20));
+            assert!(second.is_err(), "second writer must not enter concurrently");
+        }
+
+        assert!(
+            !lock_path.exists(),
+            "dropping the owner must remove the lock"
+        );
+        let second = PeersFileLock::acquire(&lock_path, Duration::from_millis(50))
+            .expect("lock should be reusable after release");
+        drop(second);
+        fs::remove_dir_all(dir).expect("remove lock test directory");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
