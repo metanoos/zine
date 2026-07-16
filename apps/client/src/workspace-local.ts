@@ -7,7 +7,7 @@
  * content, pushes propagate local edits out for cross-device sync. Neither
  * direction blocks the editor.
  *
- * Why not relay-primary (the old workspace-relay.ts)? A relay round-trip on
+ * A relay-primary backend would require a round-trip on
  * every boot means the editor can't render until the network resolves —
  * "Connecting…" forever if the relay is slow or unreachable (e.g. the :1420
  * dev server, which has no relay endpoint). Local-primary makes the webapp
@@ -18,7 +18,7 @@
  *   - noop       — ours and theirs identical (or remote didn't move off base).
  *   - fastforward— local still at the ancestor; theirs overwrites silently.
  *   - clean      — both sides changed, diff3 resolves; STAGED for review (not
- *                  auto-sealed): the caller surfaces a badge, the user accepts.
+ *                  stepped automatically): the caller surfaces a badge, the user accepts.
  *   - conflict   — overlapping edits; local untouched, surfaced in the banner.
  * Local stays primary on every path that isn't a clean fast-forward, so an
  * unsaved draft is never clobbered by remote activity.
@@ -30,19 +30,20 @@ import {
   fetchManifest,
   fetchNodeOwner,
   eventMeta,
-  forkFile,
   headUserTags,
   headTaggedTraces,
   publishEdit,
+  resolveTraceChain,
+  resolveTraceIdentity,
   reconstructFromChain,
   reconstructRunsFromChain,
   removeManifestEntry,
   renameManifestEntry,
   upsertManifestEntry,
-  createEmptyFolder,
+  type KEdit,
   type ManifestFileEntry,
 } from "./provenance.js";
-import { findResolvedBrackets } from "./brackets.js";
+import { findAddedInlineCitations, findResolvedBrackets } from "./brackets.js";
 import { decidePullMerge } from "./three-way-merge.js";
 import { authorVoice, secretKeyForVoice } from "./keys-store.js";
 import { getPublicKey } from "nostr-tools/pure";
@@ -53,27 +54,46 @@ import type {
   Run,
   Workspace,
 } from "./workspace-core.js";
-import { flattenRuns } from "./workspace-core.js";
+import { ensureMdExt, flattenRuns } from "./workspace-core.js";
 import {
   deleteLocalFile,
-  forgetLocalFolder,
   loadLocalFolder,
   loadLocalFolderTags,
   moveLocalFile,
   rememberLocalFolder,
   saveLocalFile,
   saveLocalFolderTags,
+  type LocalFile,
 } from "./local-store.js";
+import { isOblivionPath } from "./generated-paths.js";
 
 function runsFromText(text: string): FileState["runs"] {
-  // Resolves to the AUTHOR key's pubkey (not the old "alice" label) so the run
-  // renders under that key's identity.
+  // Resolves to the AUTHOR key's pubkey (not the old "author-1" label) so the
+  // run renders under that key's identity.
   return text.length === 0 ? [] : [{ voice: authorVoice(), text }];
 }
 
 function basename(path: string): string {
   const i = path.lastIndexOf("/");
   return i === -1 ? path : path.slice(i + 1);
+}
+
+/** Classify a local path move while retaining the original relay coordinate
+ * across rapid/multi-hop gestures. Pure so Oblivion/restore interruption cases
+ * are regression-testable without a relay. */
+export function pendingMoveForPath(
+  oldPath: string,
+  newPath: string,
+  current?: LocalFile["pendingMove"],
+): NonNullable<LocalFile["pendingMove"]> {
+  const inheritedFrom = current?.fromPath ?? oldPath;
+  if (isOblivionPath(newPath)) return { kind: "to-oblivion", fromPath: inheritedFrom };
+  if (isOblivionPath(oldPath)) {
+    return current?.kind === "to-oblivion"
+      ? { kind: "move", fromPath: current.fromPath }
+      : { kind: "restore", fromPath: oldPath };
+  }
+  return { kind: "move", fromPath: inheritedFrom };
 }
 
 async function sha256Hex(text: string): Promise<string> {
@@ -97,6 +117,7 @@ function localToFiles(
       content: string;
       tags: string[];
       nodeId: string;
+      traceId?: string;
       runs?: Run[];
       taggedTraces?: string[];
     }>;
@@ -113,6 +134,7 @@ function localToFiles(
     out[path] = {
       runs,
       nodeId: f.nodeId,
+      ...(f.traceId ? { traceId: f.traceId } : {}),
       tags: f.tags,
       ...(f.taggedTraces && f.taggedTraces.length > 0 ? { taggedTraces: f.taggedTraces } : {}),
     };
@@ -129,7 +151,7 @@ export function createLocalWorkspace(): Workspace {
   }
 
   // Per-file debounce timers for relay pushes. Local writes are instant; the
-  // relay push is coalesced so a burst of typing produces one seal, not N.
+  // relay push is coalesced so a burst of typing produces one step, not N.
   const pushTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const PUSH_DEBOUNCE_MS = 1200;
 
@@ -143,54 +165,121 @@ export function createLocalWorkspace(): Workspace {
       relativePath,
       setTimeout(() => {
         pushTimers.delete(relativePath);
-        void pushToRelay(id, relativePath).catch((e) =>
-          console.warn(`[local] relay push failed for ${relativePath}:`, e),
-        );
+        void pushToRelay(id, relativePath).catch((e) => {
+          console.warn(`[local] relay push failed for ${relativePath}:`, e);
+          // Movement has a durable journal and must converge without requiring
+          // another edit or app restart. Retry while this folder remains
+          // attached; switching away leaves attach() to resume the journal.
+          const pendingMove = loadLocalFolder(id)?.files[relativePath]?.pendingMove;
+          if (pendingMove && ref?.id === id) {
+            setTimeout(() => {
+              if (ref?.id === id) schedulePush(relativePath);
+            }, 5_000);
+          }
+        });
       }, PUSH_DEBOUNCE_MS),
     );
   }
 
-  async function pushToRelay(folderId: string, relativePath: string): Promise<void> {
+  async function pushToRelay(folderId: string, relativePath: string): Promise<string> {
     const local = loadLocalFolder(folderId);
-    if (!local) return;
+    if (!local) return "";
     const file = local.files[relativePath];
-    if (!file) return; // was deleted locally — deletePath handles its own push
+    if (!file) return ""; // was deleted locally — deletePath handles its own push
+    if (file.kind === "folder") return file.nodeId;
     const content = file.content;
     const contentHash = await sha256Hex(content);
 
-    // prevEventId from the last sealed node (relay chain head). Reading the
-    // relay here keeps the chain linear across authors/devices.
-    const manifest = await fetchManifest(folderId);
-    let entry = manifest.find((m) => m.relativePath === relativePath);
-
-    // Fork-on-write (spec §Forking): if this folder is a fork and the member
-    // being edited is still a citation to a foreign-owned node, seed the user's
-    // own copy first. The edit then chains off the fork's genesis instead of
-    // the foreign node. Untouched members stay cited to the source owner until
-    // the user edits them — the shallow-fork property.
-    let prevId: string | null = entry?.latestNodeId ?? (file.nodeId || null);
-    if (entry && ref?.forkedFrom && prevId) {
-      const owner = await fetchNodeOwner(prevId);
-      const mine = owner === authorVoice();
-      if (!mine) {
-        const forkEvent = await forkFile(ref.forkedFrom, relativePath, folderId);
-        // The fork's genesis is now this file's head under the user's key.
-        // Repoint the folder membership at it, then chain the edit off it.
-        await upsertManifestEntry(folderId, {
-          relativePath,
-          latestNodeId: forkEvent.id,
-          contentHash,
+    if (file.pendingMove?.kind === "to-oblivion") {
+      const fromPath = file.pendingMove.fromPath;
+      const manifest = await fetchManifest(folderId);
+      const entry = manifest.find((candidate) => candidate.relativePath === fromPath);
+      // A missing membership can mean either "the prior move to Oblivion already
+      // landed" or merely "the relay observation is empty/offline". Clear the
+      // durable journal only after the signed trace head proves action:delete;
+      // otherwise throw so attach/debounce retries instead of silently leaving
+      // the source socially active.
+      if (!entry) {
+        const traceId =
+          file.traceId ?? (file.nodeId ? await resolveTraceIdentity(file.nodeId) : null);
+        const resolution = traceId ? await resolveTraceChain(traceId) : null;
+        const head = resolution?.status === "resolved"
+          ? resolution.chain[resolution.chain.length - 1]
+          : undefined;
+        if (!head || eventMeta(head).action !== "delete") {
+          throw new Error(`move to Oblivion from ${fromPath} is not yet verifiable`);
+        }
+        saveLocalFile(folderId, relativePath, {
+          content,
+          tags: file.tags,
+          nodeId: head.id,
+          traceId: traceId ?? head.id,
+          voicePubkey: file.voicePubkey,
+          taggedTraces: file.taggedTraces,
+          ...(file.runs && file.runs.length > 0 ? { runs: file.runs } : {}),
         });
-        prevId = forkEvent.id;
-        // Re-read entry so the diff/action below sees the forked head.
-        const refreshed = await fetchManifest(folderId);
-        entry = refreshed.find((m) => m.relativePath === relativePath);
+        return file.nodeId;
       }
+      const traceId =
+        file.traceId ??
+        (file.nodeId ? await resolveTraceIdentity(file.nodeId) : null) ??
+        (await resolveTraceIdentity(entry.latestNodeId));
+      const signer = file.voicePubkey
+        ? secretKeyForVoice(file.voicePubkey) ?? undefined
+        : undefined;
+      const event = await publishEdit({
+        prevEventId: entry.latestNodeId,
+        ...(traceId ? { traceId } : {}),
+        relativePath: fromPath,
+        folderId,
+        deltas: [],
+        snapshot: "",
+        contentHash: await sha256Hex(""),
+        action: "delete",
+        signer,
+      });
+      await removeManifestEntry(folderId, fromPath, signer);
+      saveLocalFile(folderId, relativePath, {
+        content,
+        tags: file.tags,
+        nodeId: event.id,
+        traceId: traceId ?? event.id,
+        voicePubkey: file.voicePubkey,
+        taggedTraces: file.taggedTraces,
+        ...(file.runs && file.runs.length > 0 ? { runs: file.runs } : {}),
+      });
+      return event.id;
     }
 
+    // prevEventId from the last stepped node (relay chain head). Reading the
+    // relay here keeps the chain linear across authors/devices.
+    const manifest = await fetchManifest(folderId);
+    const entry = manifest.find((m) => m.relativePath === relativePath);
+    const fromEntry = file.pendingMove
+      ? manifest.find((candidate) => candidate.relativePath === file.pendingMove!.fromPath)
+      : undefined;
+    const prevId: string | null = entry?.latestNodeId ?? (file.nodeId || fromEntry?.latestNodeId || null);
+
+    const traceId =
+      file.traceId ??
+      (prevId ? await resolveTraceIdentity(prevId) : null);
+
     // Diff against relay's last-known content so the node carries a real delta.
-    const chain = entry ? await fetchChain(folderId, relativePath) : [];
-    const prevContent = entry ? reconstructFromChain(chain) : "";
+    let chain = [] as Awaited<ReturnType<typeof fetchChain>>;
+    if (traceId) {
+      const resolved = await resolveTraceChain(traceId, {
+        folderId,
+        relativePath: entry?.relativePath ?? fromEntry?.relativePath ?? relativePath,
+      });
+      if (resolved.status === "conflict") {
+        throw new Error(`trace ${traceId} has multiple current heads`);
+      }
+      if (resolved.status === "resolved") chain = resolved.chain;
+    }
+    if (chain.length === 0 && (entry || fromEntry)) {
+      chain = await fetchChain(folderId, entry?.relativePath ?? fromEntry!.relativePath);
+    }
+    const prevContent = prevId && chain.length > 0 ? reconstructFromChain(chain) : "";
 
     // Skip if nothing changed since the last push. The no-op test covers
     // content hash, topical tags, AND the citation set (body brackets + reply
@@ -209,10 +298,12 @@ export function createLocalWorkspace(): Workspace {
     const citationsUnchanged =
       prevCitations.length === nextCitations.length &&
       prevCitations.every((c, i) => c === nextCitations[i]);
-    // A forced checkpoint (Step/Send gesture) mints a node even when nothing
-    // changed — the deliberate-gesture path (§8). The non-forced path keeps the
+    // A forced checkpoint (explicit Step gesture) appends a node even when
+    // nothing changed — the deliberate rhythm path (§8). The non-forced path keeps the
     // no-op collapse so the trailing debounce after an edit doesn't re-publish.
-    if (entry && entry.contentHash === contentHash && tagsUnchanged && citationsUnchanged && !file.pendingForce) return;
+    if (entry && !file.pendingMove && entry.contentHash === contentHash && tagsUnchanged && citationsUnchanged && !file.pendingForce) {
+      return entry.latestNodeId;
+    }
 
     const deltas = diffToDeltas(prevContent, content);
     // Resolve the voice that authored this edit to its secret key, so the push
@@ -222,6 +313,7 @@ export function createLocalWorkspace(): Workspace {
     const signer = file.voicePubkey ? secretKeyForVoice(file.voicePubkey) ?? undefined : undefined;
     const event = await publishEdit({
       prevEventId: prevId,
+      ...(traceId ? { traceId } : {}),
       relativePath,
       folderId,
       // A forced checkpoint with no content change mints a clean `deltas: []`
@@ -235,7 +327,7 @@ export function createLocalWorkspace(): Workspace {
           : [{ type: "insert", positionStart: 0, positionEnd: 0, newValue: content, timestamp: Date.now() }],
       snapshot: content,
       contentHash,
-      action: entry ? "edit" : "import",
+      action: prevId ? "edit" : "import",
       tags: file.tags,
       // Per-character attribution: carry the live run list into the node's
       // `authors` field so it survives reload from the chain (the durable,
@@ -245,32 +337,46 @@ export function createLocalWorkspace(): Workspace {
       // Cite every minted span this doc contains (spec:189). `content` is the
       // localStorage string; resolved `[[ phrase | nodeId ]]` live in it.
       citations: findResolvedBrackets(content).map((b) => b.nodeId),
+      inlineCitations: findAddedInlineCitations(prevContent, content),
       ...(file.pendingReplyingTo ? { replyingTo: file.pendingReplyingTo } : {}),
       ...(taggedTraces.length > 0 ? { taggedTraces } : {}),
+      ...(file.pendingKedits && file.pendingKedits.length > 0 ? { kedits: file.pendingKedits } : {}),
       ...(file.pendingLocalOnly ? { localOnly: true } : {}),
       signer,
     });
-    await upsertManifestEntry(folderId, {
-      relativePath,
-      latestNodeId: event.id,
-      isDeleted: false,
-      contentHash,
-    }, signer);
-    // Reflect the sealed node id back into local state so the next push's
+    if (file.pendingMove?.kind === "move" && fromEntry) {
+      await renameManifestEntry(
+        folderId,
+        file.pendingMove.fromPath,
+        relativePath,
+        event.id,
+        signer,
+      );
+    } else {
+      await upsertManifestEntry(folderId, {
+        kind: "file",
+        relativePath,
+        latestNodeId: event.id,
+        contentHash,
+      }, signer, { localOnly: file.pendingLocalOnly });
+    }
+    // Reflect the stepped node id back into local state so the next push's
     // prevId is correct. Preserve voicePubkey so re-pushes stay correctly signed,
-    // and runs so the local record keeps the per-char attribution it just sealed
+    // and runs so the local record keeps the per-char attribution it just stepped
     // (avoids a needless reload-from-chain on next open). `pendingReplyingTo`,
-    // `pendingLocalOnly`, and `pendingForce` are deliberately NOT carried: all
-    // three are one-shot, consumed by this push. `taggedTraces` IS carried —
-    // tags are persistent across seals.
+    // `pendingKedits`, `pendingLocalOnly`, and `pendingForce` are deliberately
+    // NOT carried: all four are one-shot, consumed by this push.
+    // `taggedTraces` IS carried — tags are persistent across steps.
     saveLocalFile(folderId, relativePath, {
       content,
       tags: file.tags,
       nodeId: event.id,
+      traceId: traceId ?? event.id,
       voicePubkey: file.voicePubkey,
       taggedTraces: file.taggedTraces,
       ...(file.runs && file.runs.length > 0 ? { runs: file.runs } : {}),
     });
+    return event.id;
   }
 
   return {
@@ -291,6 +397,14 @@ export function createLocalWorkspace(): Workspace {
       rememberLocalFolder(ref);
       const local = loadLocalFolder(ref.id);
       const files = local ? localToFiles(local) : {};
+      for (const [path, file] of Object.entries(local?.files ?? {})) {
+        // Resume interrupted structural moves and first-time files that were
+        // stored locally before their genesis reached the relay (including the
+        // starter document installed with a factory-fresh Root).
+        if (file.pendingMove || (file.kind !== "folder" && !file.nodeId)) {
+          schedulePush(path);
+        }
+      }
       // Kick off the background sync — don't await. The editor is already
       // usable from `files`.
       void pullFromRelay(ref.id);
@@ -311,29 +425,35 @@ export function createLocalWorkspace(): Workspace {
       runs?: Run[],
       replyingTo?: string,
       taggedTraces?: string[],
+      kedits?: KEdit[],
       localOnly?: boolean,
       force?: boolean,
     ): Promise<string> {
+      relativePath = ensureMdExt(relativePath);
       // Capture the voice (by pubkey) that authored this edit, so the debounced
       // relay push signs with the correct key — not just the AUTHOR default.
       // This closes the per-voice signer gap that previously affected Send/zine
       // and that fork-on-write needs. The pubkey is persisted (never the
       // secret); pushToRelay resolves it to bytes via keys-store at push time.
       // A missing signer (the legacy/defensive path) falls back to the AUTHOR
-      // voice; primary seal paths now always thread an explicit signer.
+      // voice; primary step paths now always thread an explicit signer.
       const voicePubkey = signer ? getPublicKey(signer) : authorVoice();
       const id = requireId();
       // 1. Local write — synchronous, instant, survives reload/offline.
       const local = loadLocalFolder(id);
-      const prevNodeId = local?.files[relativePath]?.nodeId ?? "";
+      const existing = local?.files[relativePath];
+      const prevNodeId = existing?.nodeId ?? "";
       saveLocalFile(id, relativePath, {
         content,
         tags,
         nodeId: prevNodeId,
+        traceId: existing?.traceId,
+        pendingMove: existing?.pendingMove,
         runs,
         voicePubkey,
         pendingReplyingTo: replyingTo,
         taggedTraces: taggedTraces,
+        pendingKedits: kedits,
         pendingLocalOnly: localOnly || undefined,
         pendingForce: force || undefined,
       });
@@ -342,7 +462,25 @@ export function createLocalWorkspace(): Workspace {
       return prevNodeId;
     },
 
+    async flushFile(relativePath: string): Promise<string> {
+      const timer = pushTimers.get(relativePath);
+      if (timer) {
+        clearTimeout(timer);
+        pushTimers.delete(relativePath);
+      }
+      try {
+        return await pushToRelay(requireId(), relativePath);
+      } catch (error) {
+        // Preserve local-first durability: a synchronous mint barrier may fail
+        // while the home relay restarts, but the staged write must still retry
+        // through the ordinary debounce instead of becoming a silent orphan.
+        schedulePush(relativePath);
+        throw error;
+      }
+    },
+
     async createFile(relativePath: string): Promise<string> {
+      relativePath = ensureMdExt(relativePath);
       const id = requireId();
       const local = loadLocalFolder(id);
       if (local?.files[relativePath]) return local.files[relativePath].nodeId;
@@ -384,9 +522,11 @@ export function createLocalWorkspace(): Workspace {
         else if (p.startsWith(src + "/")) moves.push({ oldRel: p, newRel: destPath + p.slice(src.length) });
       }
       for (const { oldRel, newRel } of moves) {
-        moveLocalFile(id, oldRel, newRel);
+        const file = loadLocalFolder(id)?.files[oldRel];
+        if (!file || file.kind === "folder") continue;
+        const pendingMove = pendingMoveForPath(oldRel, newRel, file.pendingMove);
+        moveLocalFile(id, oldRel, newRel, pendingMove);
         schedulePush(newRel);
-        void tombstoneOnRelay(id, oldRel).catch(() => {});
       }
     },
 
@@ -403,11 +543,13 @@ export function createLocalWorkspace(): Workspace {
         else if (p.startsWith(src + "/")) moves.push({ oldRel: p, newRel: destPath + p.slice(src.length) });
       }
       for (const { oldRel, newRel } of moves) {
-        moveLocalFile(id, oldRel, newRel);
+        const file = loadLocalFolder(id)?.files[oldRel];
+        if (!file || file.kind === "folder") continue;
+        moveLocalFile(id, oldRel, newRel, {
+          kind: "move",
+          fromPath: file.pendingMove?.fromPath ?? oldRel,
+        });
         schedulePush(newRel);
-        // Emit a `rename` folder delta (fromPath → toPath) instead of tombstoning
-        // the old path — one replayable event per member, history preserved.
-        void renameOnRelay(id, oldRel, newRel).catch(() => {});
       }
     },
 
@@ -426,7 +568,7 @@ export function createLocalWorkspace(): Workspace {
 /**
  * A clean auto-merge from background pull — held for user review, not applied.
  * Local storage is NOT modified while a merge is staged: applying it is what
- * writes the merged snapshot and seals the merge node, so an edit between
+ * writes the merged snapshot and steps the merge node, so an edit between
  * stage and review can't silently lose provenance or clobber the draft.
  */
 export interface StagedMerge {
@@ -435,7 +577,7 @@ export interface StagedMerge {
   base: string;
   /** Local head body — what's in the editor right now. */
   ours: string;
-  /** Remote head body — what the peer sealed. */
+  /** Remote head body — what the peer stepped. */
   theirs: string;
   /** Reconciled body produced by a clean diff3 (outcome === "clean"). */
   merged: string;
@@ -443,7 +585,7 @@ export interface StagedMerge {
   localNodeId: string;
   /** Remote head event id; the merge node's `merge-parent`. */
   remoteHeadId: string;
-  /** Pubkey of the remote head's signer, for attribution on seal. */
+  /** Pubkey of the remote head's signer, for attribution on step. */
   remoteOwnerPubkey: string;
 }
 
@@ -482,14 +624,6 @@ export async function pullFromRelay(folderId: string): Promise<PullResult> {
   }
   const local = loadLocalFolder(folderId);
   for (const entry of manifest) {
-    if (entry.isDeleted) {
-      // Remote deleted it — reflect locally if we don't have a newer draft.
-      if (local?.files[entry.relativePath] && !isLocalNewer(local, entry)) {
-        deleteLocalFile(folderId, entry.relativePath);
-        result.updated.add(entry.relativePath);
-      }
-      continue;
-    }
     if (!isLocalNewer(local, entry)) {
       if (entry.kind === "folder") {
         // Folder-member placeholder (spec §3.2 nesting): store it locally so
@@ -604,6 +738,7 @@ function applyFastForward(
     content,
     tags,
     nodeId: head?.id ?? remoteHeadId,
+    ...(chain[0]?.id ? { traceId: chain[0].id } : {}),
     ...(runs.length > 0 ? { runs } : {}),
     ...(taggedTraces.length > 0 ? { taggedTraces } : {}),
   });
@@ -624,44 +759,18 @@ async function tombstoneOnRelay(folderId: string, relativePath: string): Promise
   const manifest = await fetchManifest(folderId);
   const entry = manifest.find((m) => m.relativePath === relativePath);
   if (!entry) return; // already absent from the snapshot — nothing to tombstone
+  const traceId = await resolveTraceIdentity(entry.latestNodeId);
   await publishEdit({
     prevEventId: entry.latestNodeId,
+    ...(traceId ? { traceId } : {}),
     relativePath,
     folderId,
     deltas: [],
     snapshot: "",
-    contentHash: entry.contentHash,
+    contentHash: await sha256Hex(""),
     action: "delete",
   });
   // Spec-clean tombstone: drop the member from the folder snapshot (remove
   // delta), not an isDeleted entry. The file's 4290 chain retains history.
   await removeManifestEntry(folderId, relativePath);
 }
-
-/** Relay-side companion to a local rename: seal the file node at its new path
- *  (the file's 4290 chain lives under its `F` tag, so a rename needs a fresh
- *  node at the new path), then emit one `rename` folder delta (fromPath →
- *  toPath) pointing at it. Mirrors tombstoneOnRelay's "do the relay half of a
- *  local mutation" posture — the local file move already happened in memory. */
-async function renameOnRelay(folderId: string, oldRel: string, newRel: string): Promise<void> {
-  const manifest = await fetchManifest(folderId);
-  const entry = manifest.find((m) => m.relativePath === oldRel);
-  if (!entry) return; // already absent — nothing to rename on the relay
-  const chain = await fetchChain(folderId, oldRel);
-  const content = chain.length > 0 ? reconstructFromChain(chain) : "";
-  const event = await publishEdit({
-    prevEventId: null,
-    relativePath: newRel,
-    folderId,
-    deltas: content.length > 0
-      ? [{ type: "insert", positionStart: 0, positionEnd: 0, newValue: content, timestamp: Date.now() }]
-      : [],
-    snapshot: content,
-    contentHash: entry.contentHash,
-    action: "import",
-  });
-  await renameManifestEntry(folderId, oldRel, newRel, event.id);
-}
-
-// Re-export for App.tsx's create-folder path.
-export { createEmptyFolder, forgetLocalFolder };

@@ -1,4 +1,4 @@
-import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
+import { finalizeEvent, getPublicKey, verifyEvent } from "nostr-tools/pure";
 import type { Event, EventTemplate } from "nostr-tools";
 import type { Filter } from "nostr-tools";
 import { Relay } from "nostr-tools/relay";
@@ -12,7 +12,7 @@ import { nodeSecretKey } from "./keys-store.js";
 /**
  * Bridge between the editor and the local relay. Publishes and fetches the
  * wire shapes defined by the protocol (trace-provenance.md) — a kind-4290
- * sealed here is readable by any spec-compliant reader (other presses, the
+ * stepped here is readable by any spec-compliant reader (other presses, the
  * MCP headless press, the hosted relay).
  *
  * `oldValue` is intentionally OMITTED on delta serialization: the spec marks
@@ -25,26 +25,22 @@ const FILE_TRACE_NODE_KIND = 4290;
  *  4290, discriminated by the `z` tag. Alias kept for readability at sites
  *  that mean "the trace-node kind" without caring about file vs folder. */
 const TRACE_NODE_KIND = 4290;
-const TRACE_NAME_KIND = 4291;
-/** Legacy: folder-trace nodes minted before kind consolidation. Readers
- *  accept these (querying both 4290 + 4292 and merging); no new writes. */
-const FOLDER_TRACE_NODE_KIND = 4292;
-const FOLDER_MANIFEST_KIND = 34290;
-/** Spec §4: TraceHead — parameterized replaceable head-pointer cache. Same
- *  number as the legacy folder manifest (34290); new writes use the spec's
- *  `{ head }` content shape, `d` = trace identity. The legacy read path
- *  distinguishes the two by content shape (`content.files` vs `content.head`). */
+/** Spec §5A: append-only endorsement of one published TraceNode. This is a
+ *  separate regular kind because an endorsement is not a body revision and
+ *  therefore cannot truthfully carry TraceNode snapshot/delta/prev fields. */
+const TRACE_ATTESTATION_KIND = 4294;
+/** Spec §4: TraceHead — parameterized replaceable head-pointer cache. `d` =
+ *  trace identity, content `{ head }`, written on every step. */
 const TRACE_HEAD_KIND = 34290;
 
 /** The trace-provenance kinds. Used to decide whether a sampled event is
  *  zine/trace-compatible (renders as a body) or foreign (renders with a "not a
  *  zine trace" badge). Per spec §1 the canonical set is {4290, 34290, 34291};
- *  4291/4292 are retained here only so legacy sampled events keep rendering.
- *  See protocol/trace-provenance.md §Event kinds. */
+ *  only the body-carrying kind 4290 renders as a trace here (the replaceable
+ *  kinds are current-state caches, not bodies). See protocol/trace-provenance.md
+ *  §Event kinds. */
 const TRACE_KINDS = new Set<number>([
   FILE_TRACE_NODE_KIND, // 4290 — file AND folder nodes (z tag discriminates)
-  TRACE_NAME_KIND, // 4291 — legacy, retired in favor of TraceOpinion (34291)
-  FOLDER_TRACE_NODE_KIND, // 4292 — legacy folder nodes pre-consolidation
 ]);
 
 /** Provenance for a sampled event, surfaced as an in-memory metadata strip in
@@ -59,29 +55,23 @@ export interface SampleEventMeta {
   /** Nostr wall-clock seconds (not ms). */
   createdAt: number;
   relays: string[];
-  /** True for 4290/4291/4292 — drives the kind badge. */
+  /** True for kind 4290 — drives the kind badge. */
   compatible: boolean;
 }
 
-/** One file's entry in its folder's membership (kind-4292 `snapshot.members`).
- *  Shape is fixed by the protocol so a folder-trace node written here is
- *  readable by any spec-compliant reader. Under spec-clean tombstones
- *  (protocol §FolderTraceNode), a deleted file leaves the snapshot via a
- *  `remove` delta rather than staying as an `isDeleted` entry — so this type
- *  has no tombstone field. `isDeleted` is kept optional purely so the three
- *  workspace backends' `markDeleted` callers compile unchanged while
- *  tombstone semantics finish migrating; the 4292 path always omits it. */
+/** One file's entry in its folder's membership (`snapshot.members` on a
+ *  folder-reified 4290 node). Shape is fixed by the protocol so a folder node
+ *  written here is readable by any spec-compliant reader. Under spec-clean
+ *  tombstones (protocol §FolderTraceNode), a deleted file leaves the snapshot
+ *  via a `remove` delta rather than staying as a tombstoned entry — so this
+ *  type carries no tombstone field. */
 export interface ManifestFileEntry {
-  /** "file" or "folder". Absent on legacy entries (pre-nesting) — readers
-   *  default "file", the only member kind before this revision (spec §3.2). */
-  kind?: "file" | "folder";
+  /** "file" or "folder". Mirrors the member entry (spec §3.2): a folder member
+   *  is itself a folder trace. */
+  kind: "file" | "folder";
   relativePath: string;
   latestNodeId: string;
   contentHash: string;
-  /** Always absent from the 4292 path. Optional only so legacy 34290 fallback
-   *  reads and the workspace `markDeleted` helpers still type-check during the
-   *  migration; treat as false if present. */
-  isDeleted?: boolean;
 }
 
 export interface EditorDelta {
@@ -92,6 +82,46 @@ export interface EditorDelta {
   timestamp: number;
 }
 
+/** Semantic editor history action attached to the transaction's concrete text
+ *  edits. Ordinary typing/deletion has no intent marker. */
+export type KEditIntent = "undo" | "redo";
+
+/** A single discrete edit captured from the editor's transaction stream —
+ *  one per `iterChanges` entry inside one CodeMirror transaction. Coarser than
+ *  a DOM keystroke (a multi-char IME commit or a paste is one KEdit) but
+ *  finer than a stepped `EditorDelta` (every backspace, highlight-delete, and
+ *  type-over between two steps survives as its own entry, with timing). The
+ *  full chain of KEdits since the previous step is the *keystroke log*.
+ *
+ *  Offsets are UTF-16 code units into the PRE-edit document state, matching
+ *  the protocol's `EditorDelta.position` convention (§3.3) and how CM's
+ *  `iterChanges` reports `fromA`/`toA`. `text` is a clean JS string, so
+ *  astral-plane characters (emoji, rare CJK) round-trip correctly even when
+ *  `to - from` exceeds the visible glyph count. */
+export interface KEdit {
+  /** `ins` = pure insertion (from === to); `del` = pure deletion (text === "");
+   *  `repl` = replace-over-range (both non-empty). */
+  op: "ins" | "del" | "repl";
+  from: number;
+  to: number;
+  text: string;
+  /** Resolved pen for this edit: op-tagged voice (LLM stream) > facet AUTHOR
+   *  voice > `authorVoice()` fallback. Same resolution as `voiceField`. */
+  voice: string;
+  /** `Date.now()` at the transaction that carried this change. Inter-edit
+   *  spacing is free signal for revision-entropy analysis (vet.ts timing). */
+  t: number;
+  /** Non-negative transaction id scoped to this node's `kedits` array. Every
+   *  range changed by one editor transaction shares the same id and must be
+   *  applied atomically against the same pre-transaction document. Optional
+   *  only for backward compatibility with pre-grouping nodes. */
+  tx?: number;
+  /** Present when CodeMirror identifies the transaction as a history action.
+   *  This distinguishes Cmd/Ctrl+Z and redo from a manual inverse edit while
+   *  `op`/`from`/`to`/`text` still carry the replayable document mutation. */
+  intent?: KEditIntent;
+}
+
 /**
  * Minimal common-prefix/suffix diff. Returns the deltas that turn `oldText`
  * into `newText`. For the debounce-level publish path this is enough: a run
@@ -99,7 +129,7 @@ export interface EditorDelta {
  * captures exactly. Finer granularity (merging adjacent delete+insert into
  * replace) isn't needed here because the editor's own transactions are
  * already the per-op granularity — this diff is only to summarize the
- * accumulated change since last seal.
+ * accumulated change since last step.
  */
 export function diffToDeltas(oldText: string, newText: string): EditorDelta[] {
   if (oldText === newText) return [];
@@ -135,7 +165,7 @@ export function diffToDeltas(oldText: string, newText: string): EditorDelta[] {
  *  - identical → `null` (nothing to scroll to)
  *
  * Used by folder replay: each step's `contentUpToHere` vs the previous step's
- * gives the footprint of *this seal's* deltas without re-parsing event JSON.
+ * gives the footprint of *this step's* deltas without re-parsing event JSON.
  */
 export function stepDeltaRange(
   oldText: string,
@@ -160,7 +190,7 @@ export function stepDeltaRange(
 // --- per-character authorship (the `authors` content field) --------------
 //
 // The protocol's only structural author signal is `event.pubkey` — one signer
-// per node. That's enough to say *who sealed* a checkpoint, but it collapses
+// per node. That's enough to say *who stepped* a checkpoint, but it collapses
 // every multi-author document to a single run on reload: a node signed by B
 // that edits text authored by A reads back as if B wrote the whole thing.
 //
@@ -313,12 +343,17 @@ export function attributeDeltas(
 
 export interface PublishEditInput {
   prevEventId: string | null;
+  /** Stable identity of the file trace being extended. Genesis callers may
+   * omit it: the signed genesis event id becomes the identity. Existing-chain
+   * callers SHOULD pass it so a file TraceHead can be refreshed without a
+   * path-keyed chain scan. */
+  traceId?: string;
   relativePath: string;
   folderId: string;
   deltas: EditorDelta[];
   snapshot: string;
   contentHash: string;
-  /** When true, seal to the home relay only — don't fan out to external write
+  /** When true, step to the home relay only — don't fan out to external write
    *  relays. This is the Step gesture (protocol §8): a local checkpoint that
    *  doesn't leave the machine. The user later Sends (pushToExternalRelays)
    *  if they want the node reachable by others. Default false (backward-compat:
@@ -328,7 +363,7 @@ export interface PublishEditInput {
    *  `authors` field (protocol §FileTraceNode Content). Concatenating the runs'
    *  text in order MUST reproduce `snapshot` exactly; readers validate this and
    *  fall back to per-node-signer attribution on mismatch. Absent → the node is
-   *  sealed with signer-only attribution (the legacy behavior; old chains still
+   *  stepped with signer-only attribution (the legacy behavior; old chains still
    *  read correctly). This is the durable, reconstructable-from-chain carrier
    *  for "authorship provenance lives on that edge, not the signer field"
    *  (spec:236) — without it, every reload collapses a multi-author document to
@@ -342,14 +377,26 @@ export interface PublishEditInput {
   tags?: string[];
   /** Hardened-span node ids this trace cites — emitted as one `q` tag each
    *  (NIP-18 quote shape). The container cites every resolved `[[ phrase |
-   *  nodeId ]]` it contains on each seal (spec:189). The read side
+   *  nodeId ]]` it contains on each step (spec:189). The read side
    *  (`eventMeta.citationCount`) and the Times view already count `q` tags; this
    *  is the emission half that was missing. Absent on minted-span genesis
    *  (those nodes are the *cited* thing) and on delete tombstones (empty
    *  snapshot, nothing to cite). */
   citations?: string[];
+  /** Inline coin occurrences newly installed by this Step. Unlike `citations`
+   * (the cumulative current q-set), these are gesture-local and become
+   * `cite role:inline` deltas with the quote bytes, range, pinned coin id, and
+   * quote hash. Existing producers may omit this and remain readable through
+   * their body brackets + q tags. */
+  inlineCitations?: {
+    sourceEventId: string;
+    newValue: string;
+    positionStart: number;
+    positionEnd: number;
+    sourceContentHash?: string;
+  }[];
   /** Optional override signer (secret key bytes). Defaults to the keychain's
-   *  manual (pen) key via loadOrCreateVoice() — the posture every existing seal
+   *  manual (pen) key via loadOrCreateVoice() — the posture every existing step
    *  uses. The per-voice Send/zine affordance passes the clicked voice's key so
    *  the trace is signed as that voice rather than the manual default. */
   signer?: Uint8Array;
@@ -377,7 +424,7 @@ export interface PublishEditInput {
    *  hash. Named files leave this unset (opting out of cross-folder copy
    *  detection per the spec's open question). */
   bodyHashTag?: string;
-  /** The sealed node id this whole document is replying to (the Reply
+  /** The stepped node id this whole document is replying to (the Reply
    *  action's source, at the moment the reply was written). Emits a `q` tag
    *  (folded into the same dedup as `citations`) plus a `reply-to` delta
    *  entry carrying `sourceEventId` — "cites, doesn't inline, is this
@@ -392,19 +439,17 @@ export interface PublishEditInput {
    *  `snapshot`/`contentHash` are untouched — a tag never alters the body, the
    *  same stance `reply-to` already takes. Absent on every non-tagging write. */
   taggedTraces?: string[];
-  /** `role: "content"` cites (protocol/rendezvous.md §1): quotes of **orphan
-   *  text** with no origin node in the system (print, oral, sourceless). Each
-   *  entry carries the verbatim bytes (`quote`) and an OPTIONAL `source`
-   *  (work/edition/locator — distinguishes readers from scrapers, §R4). Unlike
-   *  every other cite role, this produces a `Q` tag (not `q`) keyed on the
-   *  quote's content hash `H`, because there is no node id to dereference. The
-   *  quote is **verification metadata, not body content** — it does not splice
-   *  into the snapshot (no `position`), so `snapshot`/`contentHash` are
-   *  untouched. Absent on every non-quoting write. */
-  contentCites?: { quote: string; source?: { work?: string; edition?: string; locator?: string } }[];
+  /** The keystroke log since the previous step: one `KEdit` per discrete
+   *  editor transaction change (every backspace, highlight-delete, type-over,
+   *  undo, redo, IME commit, streamed LLM token). Like `deltas`, this is advisory
+   *  metadata layered on top of the authoritative `snapshot` — readers can
+   *  ignore it and reconstruct content from `snapshot` alone. Serialized as a
+   *  top-level `kedits` field in the node content. Absent on nodes stepped
+   *  with an empty buffer (e.g. a forced no-op Step). */
+  kedits?: KEdit[];
   /** `action: llm` only — the event id of the minted rule-manifest trace
    *  whose body names the expansion algorithm + params (protocol §3.7). Each
-   *  LLM seal cites its rule so a reader can reconstruct the submitted prompt.
+   *  LLM step cites its rule so a reader can reconstruct the submitted prompt.
    *  Absent on every non-LLM write. Emitted as a `q` tag (folded into the same
    *  dedup as citations) and recorded in the node content's `injectRule` field.
    *  See `getOrCreateRuleTrace`. */
@@ -421,6 +466,36 @@ export interface PublishEditInput {
    *  configuration produced the response. Serialized as a top-level `llm` field
    *  in the node content. Absent on every non-LLM write. */
   llm?: { model: string; temperature: number | null; maxTokens: number; provider: string };
+}
+
+export interface ResolvedInlineCitation {
+  sourceEventId: string;
+  newValue: string;
+  positionStart: number;
+  positionEnd: number;
+  sourceContentHash: string;
+}
+
+/** Build the gesture-local wire deltas paired with cumulative q tags for newly
+ * installed coin citations. Kept pure so the provenance contract is directly
+ * regression-testable without a relay. */
+export function inlineCitationDeltas(
+  citations: ResolvedInlineCitation[],
+  timestamp: number,
+): Record<string, unknown>[] {
+  return citations.map((citation) => ({
+    type: "cite",
+    role: "inline",
+    op: "add",
+    position: {
+      start: citation.positionStart,
+      end: citation.positionEnd,
+    },
+    newValue: citation.newValue,
+    sourceEventId: citation.sourceEventId,
+    sourceContentHash: citation.sourceContentHash,
+    timestamp,
+  }));
 }
 
 /** From a file's prev-chain, the user-authored `t` tags carried by the chain
@@ -446,7 +521,7 @@ export function headTaggedTraces(chain: Event[], bracketNodeIds: string[]): stri
   const targets = eventMeta(chain[chain.length - 1]).citationTargets;
   const bracket = new Set(bracketNodeIds);
   // Preserve head order; drop only ids the body already cites (those are
-  // recovered from the body on every seal, not stored as tagged traces).
+  // recovered from the body on every step, not stored as tagged traces).
   return targets.filter((id) => !bracket.has(id));
 }
 
@@ -478,8 +553,8 @@ function delay(ms: number): Promise<void> {
  *  connecting is the race-free order nostr-tools' own pool uses (nostr.bundle.
  *  js:3620-3634). In networked mode (transport.md §5) the sidecar challenges
  *  every connection; this handler signs the kind-22242 AUTH event with the
- *  manual (pen) key so the relay recognizes us as owner or peer. In local mode
- *  the relay never challenges, so this is dead code that costs nothing. */
+ *  NODE key so the relay recognizes the press as owner. In local mode the
+ *  relay never challenges, so this is dead code that costs nothing. */
 function getRelay(url: string): Promise<Relay> {
   let p = relayCache.get(url);
   if (!p) {
@@ -545,7 +620,7 @@ async function connectWithAuth(url: string): Promise<Relay> {
 }
 
 // One in-flight retry loop per URL, so concurrent callers share it instead of
-// each spawning their own. Without this, N seal/fetch sites calling
+// each spawning their own. Without this, N step/fetch sites calling
 // getWriteRelays/getReadRelays at slightly offset times run N overlapping retry
 // loops; with a flat delay those rounds interleave into a reconnect burst that
 // a rate-limiting proxy (or a freshly-booting sidecar) sees as one big spike —
@@ -620,8 +695,8 @@ export async function getReadRelays(): Promise<Relay[]> {
  * with "auth-required:". nostr-tools' individual Relay.publish() does NOT
  * retry after auth (only the SimpleRelayPool does); we replicate the pool's
  * retry pattern here so networked-mode relays accept our writes. The relay's
- * onauth handler (set in connectWithAuth) signs the AUTH event with the
- * manual key.
+ * onauth handler (set in connectWithAuth) signs the AUTH event with the NODE
+ * owner key.
  */
 async function publishWithAuth(relay: Relay, event: Event): Promise<string> {
   try {
@@ -742,13 +817,13 @@ function buildTTags(userTags: string[]): string[] {
   return out;
 }
 
-/** §3.7 pending LLM metadata. The client's op path seals LLM write-back
+/** §3.7 pending LLM metadata. The client's op path steps LLM write-back
  *  through the generic `writeFile` → backend → publishEdit chain, which spans
  *  3 backends + an interface — threading `injectRule`/`scopeCitations`/`llm`
  *  through every signature is high-risk churn. Instead, an LLM op stashes its
- *  metadata here just before its write-back seal; publishEdit reads and clears
- *  it. This is a single-slot stash (one pending LLM seal at a time) — the ops
- *  are synchronous from seal-trigger to publishEdit, so there's no concurrency.
+ *  metadata here just before its write-back step; publishEdit reads and clears
+ *  it. This is a single-slot stash (one pending LLM step at a time) — the ops
+ *  are synchronous from step-trigger to publishEdit, so there's no concurrency.
  *  If the stash is set but the next publishEdit turns out NOT to be the LLM op
  *  (e.g. an intervening file save), the metadata is consumed anyway and lost —
  *  acceptable, since the op will set it again on retry, and an LLM op losing
@@ -760,10 +835,10 @@ let pendingLlmMeta: {
 } | null = null;
 
 /** Set the pending LLM metadata consumed by the next publishEdit call. Called
- *  by LLM ops just before their write-back seal. The action marker (`"llm"`)
+ *  by LLM ops just before their write-back step. The action marker (`"llm"`)
  *  must be set on that publishEdit for the metadata to attach — a non-LLM
  *  publishEdit clears the stash without consuming it, so a stray save between
- *  set and seal doesn't mislabel a non-LLM node. */
+ *  set and step doesn't mislabel a non-LLM node. */
 export function setPendingLlmMeta(meta: {
   injectRule: string;
   scopeCitations: string[];
@@ -777,11 +852,11 @@ export function setPendingLlmMeta(meta: {
 export async function publishEdit(input: PublishEditInput): Promise<Event> {
   // §3.7: consume pending LLM metadata. The stash is single-use — clear it
   // regardless of whether this publishEdit is the LLM op, so a stale stash
-  // never leaks onto a later unrelated seal. The stash is set by prepareLlmMeta
-  // (App.tsx) just before the op's write-back seal; when present, this IS the
-  // LLM seal, so mark the action and attach the metadata. The client's write-
+  // never leaks onto a later unrelated step. The stash is set by prepareLlmMeta
+  // (App.tsx) just before the op's write-back step; when present, this IS the
+  // LLM step, so mark the action and attach the metadata. The client's write-
   // back path defaults action to "edit"; the stash is the signal that this
-  // particular seal is an LLM op, so we override action to "llm" here.
+  // particular step is an LLM op, so we override action to "llm" here.
   if (pendingLlmMeta) {
     input.action = "llm";
     input.injectRule = pendingLlmMeta.injectRule;
@@ -792,11 +867,24 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
     if (!input.llm) input.llm = pendingLlmMeta.llm;
     pendingLlmMeta = null;
   }
+  const inlineCitations = await Promise.all(
+    (input.inlineCitations ?? []).map(async (citation) => ({
+      ...citation,
+      sourceContentHash:
+        citation.sourceContentHash ?? await sha256HexLocal(citation.newValue),
+    })),
+  );
+  // Advisory action follows the protocol precedence: a Step whose ordinary
+  // body edit installs a coin is primarily a citation. Higher-order callers
+  // (LLM, merge, fork, …) retain their explicit action.
+  if (inlineCitations.length > 0 && (!input.action || input.action === "edit")) {
+    input.action = "cite";
+  }
   const relays = await getWriteRelays();
   // Sign as the override signer when provided (per-voice Send/zine), else the
-  // keychain's manual (pen) key — the posture every auto-seal uses.
+  // keychain's manual (pen) key — the posture used by background Steps.
   const signer = input.signer ?? loadOrCreateVoice().secretKey;
-  const sealedAt = Date.now();
+  const steppedAt = Date.now();
 
   const tags: string[][] = [
     // Reification discriminator (protocol §3.1: REQUIRED on every node). `z`
@@ -833,7 +921,7 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   }
   // Extraction lineage (spec §3.8: REQUIRED on minted-span nodes): the exact
   // origin node-version the span was pulled out of. The origin doc's own cite
-  // (the `q` tag on its next seal) flows the other direction; this records the
+  // (the `q` tag on its next step) flows the other direction; this records the
   // extraction fan-out so a reader can find every span minted from one source.
   if (input.extractedFrom) tags.push(["e", input.extractedFrom, "", "extracted-from"]);
   // Body hash (spec §3.1: REQUIRED on minted-span nodes). Enables `#x`
@@ -846,7 +934,7 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
     tags.push(["t", tag]);
   }
 
-  // q-tags: one per minted span this trace cites (spec:189 — the origin doc's
+  // q-tags: one per coin this trace cites (spec:189 — the origin doc's
   // cite of each minted node, mirrored at top level), the Reply source
   // (replyingTo), and the tagged zines (taggedTraces) — all the same
   // "composition" edge, folded into one dedup so a trace cited more than one way
@@ -876,33 +964,6 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
       tags.push(["q", nodeId, ""]);
     }
   }
-  // Q-tags (rendezvous.md §1.2): one per orphan-text quote, keyed on the quote's
-  // content hash H (NOT a node id — there is no node to dereference). This is the
-  // first cite-delta→top-level-tag derivation in the codebase: unlike every other
-  // cite role, `role:"content"` emits a `Q` (not `q`) because its coordinate is
-  // the *text*, shared by everyone who quoted the same passage. The 4th slot is
-  // the trust-radius marker: `"implicit"` (carried because quoted; reachable only
-  // within the peer graph) vs `"attested"` (published to the DHT — not yet wired).
-  // Dedup by H so re-quoting the same passage in one seal emits one Q-tag.
-  const contentCiteDeltas: object[] = [];
-  if ((input.contentCites ?? []).length > 0) {
-    const seenH = new Set<string>();
-    for (const cite of input.contentCites ?? []) {
-      const hash = await quoteHash(cite.quote);
-      if (seenH.has(hash)) continue; // dedup by H within this seal
-      seenH.add(hash);
-      tags.push(["Q", hash, "", "implicit"]);
-      contentCiteDeltas.push({
-        type: "cite",
-        role: "content",
-        op: "add",
-        hash,
-        quote: cite.quote,
-        ...(cite.source ? { source: cite.source } : {}),
-        timestamp: sealedAt,
-      });
-    }
-  }
   // §3.7 advisory marker: this node carries LLM scope citations + a rule, so
   // readers reconstructing an LLM call can find these nodes by tag rather than
   // by content-shape sniffing. Non-normative — `q` semantics are unchanged.
@@ -918,27 +979,38 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
     input.authors && flattenRuns(input.authors) === input.snapshot
       ? buildAuthors(input.authors)
       : undefined;
+  const attributed: {
+    deltas: (EditorDelta & { authorIndex?: number })[];
+    voices: string[];
+  } = input.authors && authors
+    ? attributeDeltas(input.deltas, input.authors, getPublicKey(signer))
+    : { deltas: input.deltas, voices: [] };
 
   const template: EventTemplate = {
     kind: FILE_TRACE_NODE_KIND,
-    created_at: Math.floor(sealedAt / 1000),
+    created_at: Math.floor(steppedAt / 1000),
     tags,
     content: JSON.stringify({
-      sealedAt,
+      steppedAt,
       // Spec-compliant: no `oldValue` (recoverable from prev.snapshot).
       deltas: [
-        ...input.deltas.map((d) => ({
+        ...attributed.deltas.map((d) => ({
           type: d.type,
           position: { start: d.positionStart, end: d.positionEnd },
           newValue: d.newValue,
           timestamp: d.timestamp,
+          ...(d.authorIndex !== undefined ? { author: d.authorIndex } : {}),
         })),
-        // Citation deltas (spec §3.3: one `cite` delta type, four roles).
-        // `role: "reply"` — this document replies to another sealed trace: no
+        // Gesture-local inline coin citations. The body-edit delta still
+        // carries the literal bracket insertion for replay/integrity; this
+        // companion delta says where those bytes came from.
+        ...inlineCitationDeltas(inlineCitations, steppedAt),
+        // Citation deltas (spec §3.3: one `cite` delta type, five roles).
+        // `role: "reply"` — this document replies to another stepped trace: no
         // position/newValue; body untouched. The pinned source is the paired
         // `q` tag above; this marks *which* q-tag is "this doc's subject".
         ...(input.replyingTo
-          ? [{ type: "cite", role: "reply", op: "add", sourceEventId: input.replyingTo, timestamp: sealedAt }]
+          ? [{ type: "cite", role: "reply", op: "add", sourceEventId: input.replyingTo, timestamp: steppedAt }]
           : []),
         // `role: "tag"` — a zine tagged onto this trace: no position/newValue;
         // body untouched. One entry per tagged zine; the pinned source is the
@@ -949,16 +1021,8 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
           role: "tag",
           op: "add",
           sourceEventId: nodeId,
-          timestamp: sealedAt,
+          timestamp: steppedAt,
         })),
-        // `role: "content"` — a quote of orphan text (no origin node). Keyed on
-        // `hash` (H = sha256(canonical(quote))), not sourceEventId — there is no
-        // node to dereference. The quote is verification metadata: it carries
-        // the verbatim bytes for co-citation verification + an optional source
-        // (work/edition/locator), but does NOT splice into the body (no
-        // `position`), so `snapshot`/`contentHash` are untouched. The paired
-        // top-level tag is `Q` (derived above), not `q`. See rendezvous.md §1.
-        ...contentCiteDeltas,
       ],
       snapshot: input.snapshot,
       contentHash: input.contentHash,
@@ -966,6 +1030,11 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
       // nodes whose caller had no run list (genesis from plain text, deletes,
       // or the legacy signer-only path) — readers fall back to per-node-signer.
       ...(authors && authors.length > 0 ? { authors } : {}),
+      ...(attributed.voices.length > 0 ? { voices: attributed.voices } : {}),
+      // Keystroke log since the previous step. Advisory, like `deltas`: the
+      // snapshot stays authoritative, so a reader can shed `kedits` and still
+      // reconstruct content. Absent on forced no-op Steps (empty buffer).
+      ...(input.kedits && input.kedits.length > 0 ? { kedits: input.kedits } : {}),
       ...(input.summary ? { summary: input.summary } : {}),
       // §3.7: action:llm nodes name their expansion rule + call configuration.
       // `injectRule` is the event id of the minted rule-manifest trace; `llm`
@@ -977,88 +1046,202 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   };
 
   const signed = finalizeEvent(template, signer);
-  // Step (localOnly): publish to the home relay only — the node is sealed and
-  // safe, but hasn't left the machine. Send (the default, for backward-compat)
-  // fans out to all write-enabled relays. The distinction is the sovereignty
-  // filter: not every Step is Sent (protocol §8).
+  // Step (localOnly): publish to the home relay only — the node is recorded but
+  // hasn't left the machine. A newly-created Step under Send fans out to all
+  // write-enabled relays. Sending unchanged state uses sendStep on the existing
+  // node instead of creating another checkpoint.
+  let publishedRelays: Relay[];
   if (input.localOnly) {
     const homeUrl = resolveRelayUrl();
     const homeRelay = await getRelayRetrying(homeUrl);
     if (homeRelay) {
       await publishWithAuth(homeRelay, signed);
+      publishedRelays = [homeRelay];
+    } else {
+      publishedRelays = [];
     }
   } else {
     await publishToMany(relays, signed);
+    publishedRelays = relays;
+  }
+
+  // File traces use the same TraceHead cache as folder traces (§4). The
+  // genesis event id is the identity; later callers pass it explicitly. A
+  // cache publish failure must not turn an already-durable Step into a retry
+  // that creates a sibling branch, so this remains best-effort and the signed
+  // prev-chain stays authoritative.
+  const traceIdentity = input.traceId ?? (input.prevEventId ? null : signed.id);
+  // Coins are immutable one-node traces; §4 needs no mutable head cache for
+  // them. A fork promoted from a coin has `forkedFrom` (not `extractedFrom`)
+  // and is mutable, so it still receives TraceHead normally.
+  if (traceIdentity && !input.extractedFrom && publishedRelays.length > 0) {
+    try {
+      await publishTraceHead(traceIdentity, signed.id, signer, publishedRelays);
+    } catch (error) {
+      console.warn(`[provenance] TraceHead publish failed for ${traceIdentity}:`, error);
+    }
   }
   return signed;
 }
 
-/** Send: push an already-sealed node to all write-enabled external relays.
+/** Send: push an already-stepped node to all write-enabled external relays.
  *  This is the deliberate "let this leave my machine" gesture (protocol §8) —
- *  the node was sealed locally (by a Step), and now the author chooses to make
+ *  the node was stepped locally (by a Step), and now the author chooses to make
  *  it reachable by others. Idempotent: re-sending a node that's already on a
  *  relay is a no-op (the relay dedupes by event id). */
-export async function sendSealed(event: Event): Promise<void> {
+export async function sendStep(event: Event, signer?: Uint8Array): Promise<void> {
   const relays = await getWriteRelays();
   await publishToMany(relays, event);
+  const isCoin = event.tags.some((tag) => tag[0] === "e" && tag[3] === "extracted-from");
+  if (isCoin || relays.length === 0) return;
+  try {
+    const traceId = await resolveTraceIdentity(event.id);
+    if (traceId) {
+      await publishTraceHead(
+        traceId,
+        event.id,
+        signer ?? loadOrCreateVoice().secretKey,
+        relays,
+      );
+    }
+  } catch (error) {
+    // The immutable Step has already been sent. As in publishEdit, a head-cache
+    // failure must not turn successful distribution into a duplicate Step.
+    console.warn(`[provenance] sent Step ${event.id} without TraceHead:`, error);
+  }
 }
 
-/** Affirm: mark a sealed node as the author's published position (protocol §8).
- *  Seals a new kind-4290 node with `action: "affirm"` citing the target node via
- *  a `q` tag. Available to ALL: on your own zine you seal-first then attest; on
- *  a foreign zine you cite-and-attest (prevEventId null — you have no prior seal
- *  on someone else's chain).
- *
- *  `z` ("file" | "folder") tags the affirm so it's queryable by what it attests
- *  — a folder-affirm carries z=folder, keeping it out of file-only queries. The
- *  optional `message` lets the author attach a brief curatorial note (content-
- *  only; the OTS stamp covers it automatically via the event id). `geohash` pins
- *  the affirm to a location (§3.1 `g` tag). The OTS attestation (kind-1040) is
- *  fired fire-and-forget after publish — the affirm node stands on its own. */
-export async function affirmNode(
+export function isLoopbackRelayUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return (
+      host === "localhost" ||
+      host === "0.0.0.0" ||
+      host.startsWith("127.") ||
+      host === "::1" ||
+      host === "[::1]"
+    );
+  } catch {
+    // An invalid relay URL cannot establish public fetchability.
+    return true;
+  }
+}
+
+/** Fetch a target from a configured, write-enabled non-loopback relay. Attest
+ *  uses this rather than the ordinary read set so a local home-relay hit cannot
+ *  masquerade as the protocol's required prior Send. */
+async function fetchSentTraceNode(nodeId: string): Promise<Event | null> {
+  const urls = writeRelays()
+    .map((entry) => entry.url)
+    .filter((url) => !isLoopbackRelayUrl(url));
+  for (const url of urls) {
+    const relay = await getRelayRetrying(url);
+    if (!relay) continue;
+    try {
+      const [event] = await queryOnce(relay, { ids: [nodeId], kinds: [TRACE_NODE_KIND] });
+      if (event) return event;
+    } catch {
+      // Best effort per relay; another configured destination may have it.
+    }
+  }
+  return null;
+}
+
+/** Pure wire builder for a TraceAttestation (protocol §5A). Exported so the
+ *  provisional event shape is directly testable without relay I/O. */
+export function buildAttestationTemplate(
   citedNodeId: string,
-  citedOwnerPubkey: string,
+  citedOwnerPubkey: string | undefined,
+  input: { createdAtSec: number; message?: string; geohash?: string },
+): EventTemplate {
+  return {
+    kind: TRACE_ATTESTATION_KIND,
+    created_at: input.createdAtSec,
+    tags: [
+      ["e", citedNodeId, "", "target"],
+      ["k", String(TRACE_NODE_KIND)],
+      ...(citedOwnerPubkey ? [["p", citedOwnerPubkey] as string[]] : []),
+      ...(input.geohash ? [["g", input.geohash] as string[]] : []),
+    ],
+    content: JSON.stringify(input.message ? { message: input.message } : {}),
+  };
+}
+
+/** Roll up reachable TraceAttestation events by their exact target node. The
+ *  count is event-count, not unique-author count: attestations are append-only
+ *  statements, and one author may deliberately make more than one over time. */
+export function attestationCountsFromEvents(
+  events: Event[],
+  targetNodeIds?: Iterable<string>,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  if (targetNodeIds) {
+    for (const nodeId of targetNodeIds) counts.set(nodeId, 0);
+  }
+  for (const event of events) {
+    if (event.kind !== TRACE_ATTESTATION_KIND) continue;
+    const target = event.tags.find(
+      (tag) => tag[0] === "e" && tag[1] && tag[3] === "target",
+    )?.[1];
+    if (!target || (targetNodeIds && !counts.has(target))) continue;
+    counts.set(target, (counts.get(target) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** Count attestations visible from the configured read relays. These are
+ *  intentionally reachable/partial counts, never claims about the whole
+ *  network: Kademlia routes event pointers but does not maintain aggregates. */
+export async function fetchAttestationCounts(
+  targetNodeIds: string[],
+): Promise<Map<string, number>> {
+  const targets = [...new Set(targetNodeIds.filter(Boolean))];
+  if (targets.length === 0) return new Map();
+  const relays = await getReadRelays();
+  const events = await queryMany(relays, {
+    kinds: [TRACE_ATTESTATION_KIND],
+    "#e": targets,
+    limit: Math.max(500, targets.length * 50),
+  });
+  return attestationCountsFromEvents(events, targets);
+}
+
+/** Attest: append an immutable endorsement of a published TraceNode
+ *  (protocol §5A/§8). An attestation is deliberately not a kind-4290 revision:
+ *  it has no snapshot, deltas, trace identity, or `prev` edge to fabricate. */
+export async function attestNode(
+  citedNodeId: string,
+  citedOwnerPubkey: string | undefined,
   input: {
-    prevEventId: string | null;
-    relativePath: string;
-    folderId: string;
-    snapshot: string;
-    contentHash: string;
     signer?: Uint8Array;
-    z?: "file" | "folder";
     message?: string;
     geohash?: string;
   },
 ): Promise<Event> {
+  const target = await fetchSentTraceNode(citedNodeId);
+  if (!target) {
+    throw new Error(
+      `cannot attest ${citedNodeId}: it is not fetchable from a configured external relay; Send it first`,
+    );
+  }
+  if (citedOwnerPubkey && citedOwnerPubkey !== target.pubkey) {
+    throw new Error(
+      `cannot attest ${citedNodeId}: target signer does not match the supplied pubkey`,
+    );
+  }
   const signer = input.signer ?? loadOrCreateVoice().secretKey;
-  const template = {
-    kind: 4290,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [
-      ["z", input.z ?? "file"],
-      ["f", input.folderId],
-      ["action", "affirm"],
-      // Cite the node being affirmed (NIP-18 quote shape, §3.1).
-      ["q", citedNodeId, "", citedOwnerPubkey],
-      ...(input.prevEventId
-        ? [["e", input.prevEventId, "", "prev"] as string[]]
-        : []),
-      ...(input.geohash ? [["g", input.geohash] as string[]] : []),
-    ],
-    content: JSON.stringify({
-      snapshot: input.snapshot,
-      deltas: [],
-      contentHash: input.contentHash,
-      ...(input.message ? { message: input.message } : {}),
-    }),
-  };
+  const template = buildAttestationTemplate(citedNodeId, target.pubkey, {
+    createdAtSec: Math.floor(Date.now() / 1000),
+    ...(input.message ? { message: input.message } : {}),
+    ...(input.geohash ? { geohash: input.geohash } : {}),
+  });
   const signed = finalizeEvent(template, signer);
   await publishToMany(await getWriteRelays(), signed);
-  // §R11.22: Affirm no longer stamps on its own behalf. The load-bearing
+  // §R11.22: Attest no longer stamps on its own behalf. The load-bearing
   // anteriority has moved to Step (the frequent gesture builds distributed
-  // anteriority — see protocol/rendezvous.md §3); the affirm node's
+  // anteriority — see protocol/rendezvous.md §3); the attest node's
   // anteriority is inherited transitively from the cited node, which was
-  // sealed by a Step that stamps. Affirm MAY carry its own stamp later for a
+  // stepped by a Step that stamps. Attest MAY carry its own stamp later for a
   // distinct "when endorsed" claim, but that is not wired here.
   return signed;
 }
@@ -1067,12 +1250,12 @@ export async function affirmNode(
  *  node (protocol §3.8). The span's text becomes an immutable, citable
  *  snapshot:
  *
- *  - `action: "import"` (spec §3.4 — "a span just minted").
- *  - `snapshot` = the phrase text; `deltas: []` (no prev — genesis for this
- *    synthetic path); `contentHash` = sha256(phrase).
- *  - Synthetic relative path `<originDoc>#<shortId>` in the same folder
- *    (spec §3.8), so the minted span is discoverable via a normal `#D` scan
- *    rather than needing an orphan-node category.
+ *  - `action: "import"` (spec §3.4 — "a coin just struck").
+ *  - `snapshot` = the phrase text; `deltas: []` (no prev — immutable genesis);
+ *    `contentHash` = sha256(phrase).
+ *  - A caller-supplied, timestamp-prefixed single-segment name in the
+ *    dedicated Mint folder, so it is a named first-class member instead of a
+ *    hidden synthetic path.
  *  - `["x", contentHash]` (spec §3.1: REQUIRED) — enables `#x` content-
  *    identity clustering so independent mints of the same words find
  *    each other.
@@ -1082,40 +1265,40 @@ export async function affirmNode(
  *
  *  The caller rewrites the bracket `[[ phrase ]]` → `[[ phrase | newNodeId ]]`
  *  in the origin document; that rewrite is itself an ordinary cite delta on
- *  the origin doc's next seal (role: "inline", q-tagged at newNodeId) —
- *  produced by the normal seal path, not here.
+ *  the origin doc's next step (role: "inline", q-tagged at newNodeId) —
+ *  produced by the normal step path, not here.
  *
  *  Returns the signed event; `event.id` is the citable, immutable node id. */
 export async function publishHardenedSpan(input: {
   folderId: string;
-  originPath: string;
+  relativePath: string;
   phrase: string;
   /** REQUIRED: the origin document's current nucleus (node-version the span was
    *  pulled out of). Emitted as the `extracted-from` edge. */
   originNodeId: string;
+  signer?: Uint8Array;
+  /** Mint is local speech until Send. Defaults true for the authoring gesture. */
+  localOnly?: boolean;
 }): Promise<Event> {
   const contentHash = await sha256HexLocal(input.phrase);
-  // Short, stable suffix from the phrase hash so the synthetic path is
-  // deterministic for an identical span (two mints of the same text
-  // co-locate on disk; they're distinct nodes, distinguished by event id).
-  const shortId = contentHash.slice(0, 8);
-  const syntheticPath = `${input.originPath}#${shortId}`;
 
   return publishEdit({
     prevEventId: null,
-    relativePath: syntheticPath,
+    relativePath: input.relativePath,
     folderId: input.folderId,
     deltas: [],
     snapshot: input.phrase,
     contentHash,
     action: "import",
-    summary: "minted span",
+    summary: "coin",
+    signer: input.signer,
+    localOnly: input.localOnly ?? true,
     // Spec §3.1: the body hash is REQUIRED on minted-span nodes — `#x`
     // content-identity queries depend on it (spec §6, §R3).
     bodyHashTag: contentHash,
     // Spec §3.8: the origin node-version this span was extracted from, REQUIRED
     // on minted-span nodes. The origin doc's own cite (the `q` tag on its
-    // next seal) flows the other direction; this records extraction fan-out.
+    // next step) flows the other direction; this records extraction fan-out.
     extractedFrom: input.originNodeId,
   });
 }
@@ -1161,7 +1344,7 @@ export async function quoteHash(quoteText: string): Promise<string> {
 // construction (genesis, no prev chain).
 
 /** Per-press cache: (algorithm + paramsHash) → rule trace event id. Avoids
- *  minting a new rule trace on every LLM seal when the config hasn't changed.
+ *  minting a new rule trace on every LLM step when the config hasn't changed.
  *  Keyed by `${algorithm}:${paramsHash}` where paramsHash is sha256 of the
  *  canonical JSON of params (stable key ordering). */
 const ruleTraceCache = new Map<string, string>();
@@ -1177,7 +1360,7 @@ function canonicalParamsHash(params: Record<string, unknown>): Promise<string> {
 /** Mint (or reuse) a minted rule-manifest trace for `manifest`. Returns the
  *  rule trace's event id, caching it per (algorithm, paramsHash) so identical
  *  call configurations share one rule trace. The rule trace lives under the
- *  press folder at a synthetic path (`<press>#rule-<shortHash>`), is sealed as
+ *  press folder at a synthetic path (`<press>#rule-<shortHash>`), is stepped as
  *  an immutable genesis (`action: import`, no prev), and carries the manifest
  *  JSON as its `snapshot` body — so a reader fetching the cited rule trace gets
  *  the manifest in one bounded fetch, exactly like any cited nucleus. */
@@ -1238,6 +1421,213 @@ export async function fetchChain(folderId: string, relativePath: string): Promis
     cursor = event.tags.find((t) => t[0] === "e" && t[3] === "prev")?.[1];
   }
   return chain.reverse();
+}
+
+/** Result of resolving a mutable file trace by its stable genesis identity.
+ * TraceHead is only a cache: every candidate is accepted only when its signed
+ * `prev` walk reaches `traceId`. Two incomparable maximal candidates are a
+ * real branch and are never collapsed by relay order. */
+export type TraceChainResolution =
+  | { status: "resolved"; traceId: string; chain: Event[]; source: "trace-head" | "legacy-coordinate" }
+  | { status: "missing" | "broken"; traceId: string; chain: []; candidateHeadIds: string[] }
+  | { status: "conflict"; traceId: string; chain: []; candidateHeadIds: string[] };
+
+export type TraceEventBatchLoader = (ids: readonly string[]) => Promise<Event[]>;
+
+async function loadTraceEventsByIds(ids: readonly string[]): Promise<Event[]> {
+  if (ids.length === 0) return [];
+  const relays = await getReadRelays();
+  const out = await queryMany(relays, {
+    kinds: [FILE_TRACE_NODE_KIND],
+    ids: [...new Set(ids)],
+  });
+  return out.filter(isFileNode);
+}
+
+/** Pure-with-injected-loader resolver used by the relay path and unit tests.
+ * It walks all candidates one frontier at a time, batching same-depth event-id
+ * reads and sharing immutable events across candidates. */
+export async function resolveTraceChainCandidates(
+  traceId: string,
+  candidateHeadIds: readonly string[],
+  loadEvents: TraceEventBatchLoader,
+): Promise<TraceChainResolution> {
+  const heads = [...new Set(candidateHeadIds.filter(Boolean))];
+  if (heads.length === 0) {
+    return { status: "missing", traceId, chain: [], candidateHeadIds: [] };
+  }
+
+  type Walk = {
+    headId: string;
+    cursor: string | null;
+    newestFirst: Event[];
+    seen: Set<string>;
+    complete: boolean;
+    broken: boolean;
+  };
+  const walks: Walk[] = heads.map((headId) => ({
+    headId,
+    cursor: headId,
+    newestFirst: [],
+    seen: new Set(),
+    complete: false,
+    broken: false,
+  }));
+  const byId = new Map<string, Event>();
+
+  for (let depth = 0; depth < 10_000; depth++) {
+    const active = walks.filter((walk) => !walk.complete && !walk.broken && walk.cursor);
+    if (active.length === 0) break;
+    const needed = [...new Set(active.map((walk) => walk.cursor!).filter((id) => !byId.has(id)))];
+    if (needed.length > 0) {
+      for (const event of await loadEvents(needed)) byId.set(event.id, event);
+    }
+
+    for (const walk of active) {
+      const cursor = walk.cursor!;
+      if (walk.seen.has(cursor)) {
+        walk.broken = true;
+        continue;
+      }
+      walk.seen.add(cursor);
+      const event = byId.get(cursor);
+      if (!event || !isFileNode(event)) {
+        walk.broken = true;
+        continue;
+      }
+      walk.newestFirst.push(event);
+      if (event.id === traceId) {
+        // A stable identity is a genesis. Accepting a non-genesis as identity
+        // would let a malformed TraceHead silently truncate history.
+        const prev = event.tags.find((tag) => tag[0] === "e" && tag[3] === "prev")?.[1];
+        if (prev) walk.broken = true;
+        else walk.complete = true;
+        walk.cursor = null;
+        continue;
+      }
+      const prev = event.tags.find((tag) => tag[0] === "e" && tag[3] === "prev")?.[1];
+      if (!prev) {
+        walk.broken = true;
+        walk.cursor = null;
+      } else {
+        walk.cursor = prev;
+      }
+    }
+  }
+
+  const valid = walks
+    .filter((walk) => walk.complete && !walk.broken)
+    .map((walk) => ({ headId: walk.headId, chain: [...walk.newestFirst].reverse() }));
+  if (valid.length === 0) {
+    return { status: "broken", traceId, chain: [], candidateHeadIds: heads };
+  }
+
+  // A stale TraceHead from another signer/relay is harmless when its head is
+  // an ancestor of another valid candidate. Only incomparable maxima conflict.
+  const maximal = valid.filter(
+    (candidate) =>
+      !valid.some(
+        (other) =>
+          other.headId !== candidate.headId &&
+          other.chain.some((event) => event.id === candidate.headId),
+      ),
+  );
+  if (maximal.length !== 1) {
+    return {
+      status: "conflict",
+      traceId,
+      chain: [],
+      candidateHeadIds: maximal.map((candidate) => candidate.headId),
+    };
+  }
+  return { status: "resolved", traceId, chain: maximal[0].chain, source: "trace-head" };
+}
+
+const traceIdentityByNode = new Map<string, string>();
+
+/** Resolve any immutable node id back to its genesis trace identity. */
+export async function resolveTraceIdentity(
+  nodeId: string,
+  loadEvents: TraceEventBatchLoader = loadTraceEventsByIds,
+): Promise<string | null> {
+  if (loadEvents === loadTraceEventsByIds) {
+    const cached = traceIdentityByNode.get(nodeId);
+    if (cached) return cached;
+  }
+  const newestFirst: Event[] = [];
+  const seen = new Set<string>();
+  let cursor: string | null = nodeId;
+  for (let depth = 0; cursor && depth < 10_000; depth++) {
+    if (seen.has(cursor)) return null;
+    seen.add(cursor);
+    const loaded: Event[] = await loadEvents([cursor]);
+    const event: Event | undefined = loaded.find((candidate: Event) => candidate.id === cursor);
+    if (!event || !isFileNode(event)) return null;
+    newestFirst.push(event);
+    const prev: string | null =
+      event.tags.find((tag: string[]) => tag[0] === "e" && tag[3] === "prev")?.[1] ?? null;
+    if (!prev) {
+      const traceId = event.id;
+      if (loadEvents === loadTraceEventsByIds) {
+        for (const member of newestFirst) traceIdentityByNode.set(member.id, traceId);
+      }
+      return traceId;
+    }
+    cursor = prev;
+  }
+  return null;
+}
+
+async function traceHeadCandidateIds(traceId: string): Promise<string[]> {
+  const relays = await getReadRelays();
+  const heads = await queryMany(relays, {
+    kinds: [TRACE_HEAD_KIND],
+    "#d": [traceId],
+  });
+  const ids = new Set<string>();
+  for (const event of heads) {
+    try {
+      const parsed = JSON.parse(event.content) as { head?: unknown };
+      if (typeof parsed.head === "string" && parsed.head) ids.add(parsed.head);
+    } catch {
+      // Malformed caches are ignored. The chain remains authoritative.
+    }
+  }
+  return [...ids];
+}
+
+/** Resolve a file chain by stable identity, optionally falling back to its
+ * legacy folder/path coordinate when no usable file TraceHead exists yet. */
+export async function resolveTraceChain(
+  traceId: string,
+  fallback?: { folderId: string; relativePath: string },
+): Promise<TraceChainResolution> {
+  let candidates: string[] = [];
+  try {
+    candidates = await traceHeadCandidateIds(traceId);
+    if (candidates.length > 0) {
+      const resolved = await resolveTraceChainCandidates(traceId, candidates, loadTraceEventsByIds);
+      if (resolved.status === "resolved" || resolved.status === "conflict") return resolved;
+    }
+  } catch {
+    // The legacy coordinate fallback below preserves offline/back-compat reads.
+  }
+  if (fallback) {
+    try {
+      const chain = await fetchChain(fallback.folderId, fallback.relativePath);
+      if (chain.length > 0 && chain[0].id === traceId) {
+        return { status: "resolved", traceId, chain, source: "legacy-coordinate" };
+      }
+    } catch {
+      // Fall through to a typed missing/broken result.
+    }
+  }
+  return {
+    status: candidates.length > 0 ? "broken" : "missing",
+    traceId,
+    chain: [],
+    candidateHeadIds: candidates,
+  };
 }
 
 /** Returns the latest event id for a file, or null if none published yet. */
@@ -1305,30 +1695,95 @@ export async function revokeZine(
   return signed;
 }
 
-/** Revoke a single file's published chain within a folder. Same NIP-09 posture
- *  as `revokeZine` but scoped to one member: gathers the file's chain via
- *  `fetchChain` (the prev-walk, not the whole-folder `#f` sweep) and emits one
- *  `e` tag per node. No `a` tag — a file trace has no replaceable head of its
- *  own (TraceHead is per-folder). */
+export interface TraceRevocationPlan {
+  traceId: string;
+  totalNodeCount: number;
+  requestedNodeIds: string[];
+  skippedNodeIds: string[];
+  tags: string[][];
+}
+
+/** Build the honest portion of a NIP-09 request for one trace. A deletion
+ * request can only affect events signed by the same key as the request; foreign
+ * voice/model Steps are reported as skipped instead of being presented as
+ * revoked. The signer's replaceable file TraceHead is addressed separately. */
+export function planTraceRevocation(
+  traceId: string,
+  chain: readonly Event[],
+  signerPubkey: string,
+): TraceRevocationPlan {
+  const requestedNodeIds = [
+    ...new Set(chain.filter((event) => event.pubkey === signerPubkey).map((event) => event.id)),
+  ];
+  const requested = new Set(requestedNodeIds);
+  const skippedNodeIds = [...new Set(chain.map((event) => event.id).filter((id) => !requested.has(id)))];
+  return {
+    traceId,
+    totalNodeCount: new Set(chain.map((event) => event.id)).size,
+    requestedNodeIds,
+    skippedNodeIds,
+    tags: [
+      ...requestedNodeIds.map((id) => ["e", id, ""]),
+      ["a", `${TRACE_HEAD_KIND}:${signerPubkey}:${traceId}`],
+    ],
+  };
+}
+
+export interface TraceRevocationResult extends TraceRevocationPlan {
+  request: Event;
+}
+
+/** Publish a relay revocation request without deleting the local workspace
+ * copy. This is deliberately separate from Oblivion/local deletion. Stable
+ * identity keeps the operation valid after rename, move into Oblivion, or
+ * restore. */
+export async function revokeTrace(
+  traceId: string,
+  reason: string,
+  opts?: {
+    signer?: Uint8Array;
+    fallback?: { folderId: string; relativePath: string };
+  },
+): Promise<TraceRevocationResult> {
+  const signer = opts?.signer ?? loadOrCreateVoice().secretKey;
+  const signerPubkey = getPublicKey(signer);
+  const resolution = await resolveTraceChain(traceId, opts?.fallback);
+  if (resolution.status !== "resolved") {
+    throw new Error(
+      resolution.status === "conflict"
+        ? "Cannot revoke a conflicted trace until its current head is reconciled."
+        : "Cannot revoke this trace because its signed chain is unavailable.",
+    );
+  }
+  const plan = planTraceRevocation(traceId, resolution.chain, signerPubkey);
+  const template: EventTemplate = {
+    kind: 5,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: plan.tags,
+    content: reason,
+  };
+  const request = finalizeEvent(template, signer);
+  await publishToMany(await getWriteRelays(), request);
+  return { ...plan, request };
+}
+
+/** Compatibility path-based wrapper. New callers should retain traceId and
+ * use revokeTrace so moves do not change the revocation target. */
 export async function revokeFile(
   folderId: string,
   relativePath: string,
   reason: string,
   opts?: { signer?: Uint8Array },
 ): Promise<Event> {
-  const signer = opts?.signer ?? loadOrCreateVoice().secretKey;
   const chain = await fetchChain(folderId, relativePath);
-  const eTags: string[][] = chain.map((n) => ["e", n.id, ""]);
-
-  const template: EventTemplate = {
-    kind: 5,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: eTags,
-    content: reason,
-  };
-  const signed = finalizeEvent(template, signer);
-  await publishToMany(await getWriteRelays(), signed);
-  return signed;
+  const traceId = chain[0]?.id;
+  if (!traceId) throw new Error("Cannot revoke an unavailable trace.");
+  return (
+    await revokeTrace(traceId, reason, {
+      signer: opts?.signer,
+      fallback: { folderId, relativePath },
+    })
+  ).request;
 }
 
 // --- folder activity (Times view) ---------------------------------------
@@ -1337,7 +1792,7 @@ export async function revokeFile(
 // within an optional time window, then let the caller bucket/count tags
 // client-side. Like fetchChain this fans out to every read relay and merges by
 // event id, but it does NOT walk the prev-chain — every node counts as its own
-// activity sample, which is what the Times graph wants (seal events over time,
+// activity sample, which is what the Times graph wants (step events over time,
 // not just current heads).
 
 /** Fetch every FileTraceNode in a folder, optionally bounded to a time window.
@@ -1369,11 +1824,13 @@ export async function fetchFolderActivity(
  *  folder attached. Each event's folder id is recoverable from its `#D` tag
  *  (see `eventMeta().folderId`). */
 export async function fetchRelayActivity(
-  opts: { since?: number; until?: number; limit?: number } = {},
+  opts: { since?: number; until?: number; limit?: number; authors?: string[] } = {},
 ): Promise<Event[]> {
+  if (opts.authors && opts.authors.length === 0) return [];
   const relays = await getReadRelays();
   const filter: Filter = {
     kinds: [FILE_TRACE_NODE_KIND],
+    ...(opts.authors ? { authors: opts.authors } : {}),
     ...(opts.since != null ? { since: opts.since } : {}),
     ...(opts.until != null ? { until: opts.until } : {}),
     limit: opts.limit ?? 2000,
@@ -1393,13 +1850,13 @@ export async function fetchRelayActivity(
 /** One folder's rolled-up activity, the unit of the Listings inbox. Built by
  *  `fetchFolderIndex` from a relay-wide scan; never stored, always recomputed.
  *  `topTags` is the most frequent author tags (capped), for display + doctrine
- *  alignment; `authorPubkeys` is the set of distinct seal signers (a liveness
+ *  alignment; `authorPubkeys` is the set of distinct step signers (a liveness
  *  signal — a project worked on by many voices is usually worth keeping). */
 export interface FolderIndexEntry {
   folderId: string;
   eventCount: number;
   citationTotal: number;
-  /** ms — the most recent seal's sealedAt (falls back to created_at*1000). */
+  /** ms — the most recent step's steppedAt (falls back to created_at*1000). */
   lastSeenMs: number;
   /** Top author tags by occurrence, capped at 8, most frequent first. */
   topTags: string[];
@@ -1412,7 +1869,7 @@ export interface FolderIndexEntry {
  *  the inbox reads one source of truth. Folders with no `#D` tag (foreign or
  *  malformed events) are skipped, not counted under a synthetic bucket. */
 export async function fetchFolderIndex(
-  opts: { since?: number; until?: number; limit?: number } = {},
+  opts: { since?: number; until?: number; limit?: number; authors?: string[] } = {},
 ): Promise<Map<string, FolderIndexEntry>> {
   const events = await fetchRelayActivity(opts);
   const byFolder = new Map<string, FolderIndexEntry>();
@@ -1435,7 +1892,7 @@ export async function fetchFolderIndex(
     }
     entry.eventCount++;
     entry.citationTotal += meta.citationCount;
-    if (meta.sealedAtMs > entry.lastSeenMs) entry.lastSeenMs = meta.sealedAtMs;
+    if (meta.steppedAtMs > entry.lastSeenMs) entry.lastSeenMs = meta.steppedAtMs;
     entry.authorPubkeys.add(event.pubkey);
     const counts = tagCounts.get(meta.folderId)!;
     for (const tag of meta.userTags) counts.set(tag, (counts.get(tag) ?? 0) + 1);
@@ -1453,7 +1910,7 @@ export async function fetchFolderIndex(
 
 /** The parsed, Times-relevant fields of a kind-4290 event. Centralizes event-
  *  shape knowledge so the view never touches tag arrays or content JSON
- *  directly. `sealedAtMs` falls back to `created_at*1000` when the content
+ *  directly. `steppedAtMs` falls back to `created_at*1000` when the content
  *  lacks the ms-resolution field (older nodes). `userTags` is every `t` tag —
  *  all topical labels now, since containment is no longer expressed as a `t`.
  *  `citationTargets` is the raw node-id list of every `q` tag, in tag order —
@@ -1480,12 +1937,11 @@ export interface EventMeta {
    *  citation-chip list reads body-quotes first, then Reply source, then
    *  tagged zines. Empty for a leaf. */
   citationTargets: string[];
-  /** Every `Q` tag's content hash (rendezvous.md §1.2: orphan-text cites keyed
-   *  on `H = sha256(canonical(quote))`). Distinct from `citationTargets` (which
-   *  are lowercase-`q` node ids) — a `Q` cites the *text*, not a node. Empty on
-   *  every node that doesn't carry a `role: "content"` cite. */
+  /** Legacy-only uppercase-`Q` values retained so old events remain
+   *  inspectable. Current writers emit only lowercase-`q` trace targets and
+   *  current co-citation ignores this list (protocol §R11.26). */
   contentCiteHashes: string[];
-  sealedAtMs: number;
+  steppedAtMs: number;
   createdAtSec: number;
 }
 
@@ -1520,18 +1976,17 @@ export function eventMeta(event: Event): EventMeta {
         if (typeof tag[1] === "string") citationTargets.push(tag[1]);
         break;
       case "Q":
-        // Rendezvous content-hash cite (rendezvous.md §1.2): the tag value is
-        // H = sha256(canonical(quote)), not a node id. Parallels the lowercase
-        // `q` arm above but populates a separate list — a `Q` cites text.
+        // Legacy read compatibility only. Current writers never emit Q and
+        // social discovery intersects ordinary trace-targeting q edges.
         if (typeof tag[1] === "string") contentCiteHashes.push(tag[1]);
         break;
     }
   }
 
-  let sealedAtMs = (event.created_at ?? 0) * 1000;
+  let steppedAtMs = (event.created_at ?? 0) * 1000;
   try {
-    const parsed = JSON.parse(event.content) as { sealedAt?: number };
-    if (typeof parsed.sealedAt === "number") sealedAtMs = parsed.sealedAt;
+    const parsed = JSON.parse(event.content) as { steppedAt?: number };
+    if (typeof parsed.steppedAt === "number") steppedAtMs = parsed.steppedAt;
   } catch {
     // non-JSON or absent content — fall back to created_at resolution
   }
@@ -1544,13 +1999,13 @@ export function eventMeta(event: Event): EventMeta {
     citationCount,
     citationTargets,
     contentCiteHashes,
-    sealedAtMs,
+    steppedAtMs,
     createdAtSec: event.created_at ?? 0,
   };
 }
 
 /** Reads a kind-4290 event's reply citation, if any (spec §3.3: a `cite` delta
- *  with `role: "reply"`) — the sealed node id this document is a reply to,
+ *  with `role: "reply"`) — the stepped node id this document is a reply to,
  *  pinned at the moment the reply was written. Also tolerates the legacy
  *  `type: "reply-to"` shape from events minted before the cite unification.
  *  Returns null for an ordinary edit/import node, a malformed/absent content
@@ -1573,19 +2028,32 @@ export function respondsTo(event: Event): string | null {
 // --- cited-trace name resolution (for the citation-chip row) -------------
 //
 // A `q` edge points at another trace's nucleus by event id. To render it as a
-// chip in the tag row we need that trace's *name*: a named trace (a file) shows
-// its relative path's basename; a nameless trace (a minted span) has a
-// synthetic `<origin>#<shortId>` path and no real name — its body (the span's
-// own text) is its "name" for display (see spec §Named vs nameless traces). The
+// chip in the tag row we need that trace's *name*: a named trace shows its
+// structural basename. Current coins are named members of Mint and are
+// recognized by their `extracted-from` edge; legacy spans use a synthetic
+// `<origin>#<shortId>` path and fall back to their body as the display name. The
 // same cited trace can appear from many documents, so the resolution is cached
 // per node id for the session (mirroring `displayNameCache`).
 
-/** One resolved cited-trace chip. `kind` distinguishes the two reifications so
- *  CSS can render a file name and a span phrase with distinct affordances. */
+/** One resolved cited-trace chip. `kind` distinguishes editable files from
+ *  immutable file-reified coins so CSS can give each a distinct affordance. */
 export interface CitationChip {
   nodeId: string;
+  /** Stable genesis identity of the cited trace, when resolvable. Lets a
+   * retained local Oblivion copy open without re-fetching the pinned
+   * historical node. */
+  traceId?: string;
   name: string;
-  kind: "file" | "span";
+  kind: "file" | "coin";
+  /** How many later Steps exist on this trace's currently resolved chain.
+   *  Zero means the citation already pins the current head. Undefined means
+   *  the target chain could not be resolved (legacy/offline/foreign event). */
+  stepsBehind?: number;
+  /** Reachability/lifecycle of the pinned target. `in-oblivion` is added only
+   * when this press has the local retained copy; a signed deletion observed
+   * remotely is `deleted`. `revoked` requires a valid kind-5 request signed by
+   * the target event's author; absence alone is only `unavailable`. */
+  availability?: "available" | "in-oblivion" | "deleted" | "unavailable" | "revoked";
   /** The pubkey of the event that minted this node — the minter's identity,
    *  used by TimesView's voice mode to resolve each minter's published color.
    *  Optional: absent when the node couldn't be fetched (null chip) or on
@@ -1603,15 +2071,17 @@ function truncatePhrase(text: string, max = 32): string {
 }
 
 const nodeNameCache = new Map<string, CitationChip | null>();
+// The cited event itself is immutable and supplies the target chain coordinate
+// needed by `resolveCitationChip`; retain it with the cached name so progress
+// refreshes only refetch the moving chain, not the pinned event.
+const citedEventCache = new Map<string, Event>();
 
 /** Resolve a cited node id to a display name + kind, caching for the session.
  *  Fetches the node (once, then cached), reads its `file` tag (`relativePath`)
  *  and its `snapshot` body, and picks the name:
- *    - a file path with no `#` → `{ kind: "file", name: basename }`
- *    - a synthetic span path (`origin#shortId`) or no `file` tag at all →
- *      `{ kind: "span", name: truncated snapshot }` (the phrase itself, per
- *      spec §Named vs nameless traces — for a nameless trace, body-hash is the
- *      addressing scheme and the body is what a reader sees).
+ *    - an `extracted-from` edge → `{ kind: "coin" }`, named from `F` when
+ *      present (current Mint) or its truncated snapshot (legacy nameless Mint)
+ *    - every other named path → `{ kind: "file", name: basename }`.
  *  Returns null when the node can't be fetched from any read relay (a citation
  *  the source has since deleted, or an offline relay) — the caller renders a
  *  fallback id-abbrev chip rather than blocking the row. */
@@ -1620,9 +2090,11 @@ export async function resolveNodeName(nodeId: string): Promise<CitationChip | nu
   if (cached !== undefined) return cached;
   const event = await fetchEventById(nodeId);
   if (!event) {
-    nodeNameCache.set(nodeId, null);
+    // Unavailability is not immutable. Do not cache a miss: the relay may be
+    // offline now and reachable on the next citation refresh.
     return null;
   }
+  citedEventCache.set(nodeId, event);
   const meta = eventMeta(event);
   let snapshot = "";
   try {
@@ -1632,15 +2104,121 @@ export async function resolveNodeName(nodeId: string): Promise<CitationChip | nu
     // non-JSON content — snapshot stays ""
   }
   const path = meta.relativePath;
-  // A synthetic minted-span path is `<originDoc>#<shortId>` (spec §3.8 Minting);
-  // a real file path never contains `#` (paths are filesystem-shaped). No `file`
-  // tag at all is also a nameless trace (e.g. an older node, or a foreign kind).
-  const isNameless = !path || path.includes("#");
-  const chip: CitationChip | null = isNameless
-    ? { nodeId, name: truncatePhrase(snapshot) || nodeId.slice(0, 8), kind: "span", pubkey: event.pubkey }
+  const extracted = event.tags.some((tag) => tag[0] === "e" && tag[3] === "extracted-from");
+  // Synthetic paths and absent F tags are legacy span evidence. Current Mint
+  // spans are named, so their extracted-from edge is the durable discriminator.
+  const legacySpan = !path || path.includes("#");
+  const spanName = path && !path.includes("#")
+    ? path.split("/").pop() || path
+    : truncatePhrase(snapshot) || nodeId.slice(0, 8);
+  const chip: CitationChip | null = extracted || legacySpan
+    ? { nodeId, name: spanName, kind: "coin", pubkey: event.pubkey }
     : { nodeId, name: path.split("/").pop() || path, kind: "file", pubkey: event.pubkey };
   nodeNameCache.set(nodeId, chip);
   return chip;
+}
+
+/** Count the Steps after `citedNodeId` in a resolved genesis→head chain.
+ *  Citation edges pin an immutable event id, so this is display metadata only:
+ *  advancing the cited trace never retargets the citation itself. Returns null
+ *  when the cited event is not on the selected head chain (for example, a
+ *  sibling branch) rather than presenting a misleading distance. */
+export function citationStepsBehind(
+  chain: readonly { id: string }[],
+  citedNodeId: string,
+): number | null {
+  const citedIndex = chain.findIndex((event) => event.id === citedNodeId);
+  return citedIndex < 0 ? null : chain.length - citedIndex - 1;
+}
+
+/** True only for a cryptographically valid NIP-09 request signed by the cited
+ * event's own author. A missing cited event without this evidence remains
+ * merely unavailable; an unrelated signer cannot label it revoked. */
+export function hasVerifiedRevocationRequest(
+  nodeId: string,
+  ownerPubkey: string,
+  requests: readonly Event[],
+): boolean {
+  return requests.some(
+    (request) =>
+      request.kind === 5 &&
+      request.pubkey === ownerPubkey &&
+      request.tags.some((tag) => tag[0] === "e" && tag[1] === nodeId) &&
+      verifyEvent(request),
+  );
+}
+
+const verifiedRevokedNodes = new Set<string>();
+
+async function citationRevoked(nodeId: string, ownerPubkey?: string): Promise<boolean> {
+  if (verifiedRevokedNodes.has(nodeId)) return true;
+  if (!ownerPubkey) return false;
+  try {
+    const requests = await queryMany(await getReadRelays(), {
+      kinds: [5],
+      "#e": [nodeId],
+    });
+    if (hasVerifiedRevocationRequest(nodeId, ownerPubkey, requests)) {
+      verifiedRevokedNodes.add(nodeId);
+      return true;
+    }
+  } catch {
+    // Relay failure is not revocation evidence.
+  }
+  return false;
+}
+
+/** Resolve a citation-row chip, including its distance from the cited trace's
+ *  current head. Unlike `resolveNodeName`, the progress value is deliberately
+ *  not cached: a citation stays pinned while the target trace can keep taking
+ *  Steps. Name resolution remains cached independently. */
+export async function resolveCitationChip(nodeId: string): Promise<CitationChip | null> {
+  const chip = await resolveNodeName(nodeId);
+  // Fetch on every refresh even when the immutable name is cached: reachability
+  // can change after a NIP-09 request or a transient relay outage.
+  const liveEvent = await fetchEventById(nodeId);
+  const knownEvent = liveEvent ?? citedEventCache.get(nodeId);
+  if (liveEvent) citedEventCache.set(nodeId, liveEvent);
+  const revoked = await citationRevoked(nodeId, knownEvent?.pubkey ?? chip?.pubkey);
+  let traceId: string | null = null;
+  try {
+    traceId = await resolveTraceIdentity(nodeId);
+  } catch {
+    // Availability is reported below; a missing identity must not drop the
+    // pinned citation chip.
+  }
+  const base: CitationChip = {
+    ...(chip ?? {
+    nodeId,
+    name: `${nodeId.slice(0, 8)}…`,
+    kind: "file",
+    }),
+    ...(traceId ? { traceId } : {}),
+  };
+  if (revoked) return { ...base, availability: "revoked" };
+  if (!liveEvent) return { ...base, availability: "unavailable" };
+
+  const citedEvent = liveEvent;
+  const { folderId, relativePath } = eventMeta(citedEvent);
+  if (!folderId || !relativePath) return { ...base, availability: "available" };
+
+  try {
+    const resolution = traceId
+      ? await resolveTraceChain(traceId, { folderId, relativePath })
+      : null;
+    const chain = resolution?.status === "resolved"
+      ? resolution.chain
+      : await fetchChain(folderId, relativePath);
+    const stepsBehind = citationStepsBehind(chain, nodeId);
+    const head = chain[chain.length - 1];
+    const availability = head && eventMeta(head).action === "delete" ? "deleted" : "available";
+    return stepsBehind == null
+      ? { ...base, availability }
+      : { ...base, stepsBehind, availability };
+  } catch {
+    // Citation identity/name still render when its live chain is unavailable.
+    return { ...base, availability: "unavailable" };
+  }
 }
 
 // --- folder trace nodes (kind 4290, z:folder) ----------------------------
@@ -1653,8 +2231,8 @@ export async function resolveNodeName(nodeId: string): Promise<CitationChip | nu
 // property SEND, ZINE, and forking lean on: a cited folder must be
 // self-contained. See protocol/trace-provenance.md §FolderTraceNode.
 //
-// The public API keeps the `*Manifest*` names so the three workspace backends
-// (workspace.ts, workspace-relay.ts, workspace-local.ts) compile unchanged.
+// The public API keeps the `*Manifest*` names shared by the disk and
+// local-primary workspace backends.
 
 /** The membership body of a folder-trace node — `snapshot.members` on the wire. */
 interface FolderSnapshot {
@@ -1663,10 +2241,11 @@ interface FolderSnapshot {
 
 /** The selection recorded by a `focus` folder delta (protocol §FolderTraceNode
  *  Content — focus selection payload). Mirrors the protocol's three reifications:
- *  a file, a folder, or a minted span (a quotation living inside a file). */
+ *  a file, a folder, or a coin (an immutable quotation trace). */
 export type FocusSelection =
   | { kind: "file"; path: string; nodeId?: string }
   | { kind: "folder"; path: string; nodeId?: string }
+  // Legacy wire token: this focus target is the product-level coin category.
   | { kind: "span"; nodeId: string; phrase: string; originPath: string };
 
 /** A single change since `prev.snapshot` on a FolderTraceNode (protocol §3.3).
@@ -1694,47 +2273,39 @@ export type FolderDelta =
 
 /** Fetches every folder-reified trace node for `folderId` across all read
  *  relays, merged by event id. Queries both the new kind-4290-with-`z:folder`
- *  form and the legacy kind-4292 form (spec §R11.3), post-filtering 4290
+ *  form and the legacy folder-reified form (spec §R11.3), post-filtering 4290
  *  results to folder-discriminated nodes so file nodes for the same folder
  *  aren't mistaken for folder nodes. Does not resolve the chain — returns the
  *  raw node set for `fetchLatestFolderNode` to head-resolve, and for the
  *  context-block directory log to read every membership event (add/remove). */
 export async function fetchFolderNodes(folderId: string): Promise<Event[]> {
   const relays = await getReadRelays();
-  // Query by both `#f` (spec §3.1 folder-id mirror) and `#D` (legacy mirror)
-  // so nodes keyed either way resolve. Also fetch the genesis node by id
-  // directly (Phase 5: it carries no f/D since an event can't know its own id).
-  const [byF, byD, byDlegacy, genesis] = await Promise.all([
+  // Query by both `#f` and `#D` (spec §3.1 folder-id mirrors — both emitted on
+  // every write) so nodes resolve whichever a relay indexes by. Also fetch the
+  // genesis node by id directly: it carries no f/D since an event can't know
+  // its own id before signing.
+  const [byF, byD, genesis] = await Promise.all([
     queryMany(relays, { kinds: [TRACE_NODE_KIND], "#f": [folderId] }),
     queryMany(relays, { kinds: [TRACE_NODE_KIND], "#D": [folderId] }),
-    queryMany(relays, { kinds: [FOLDER_TRACE_NODE_KIND], "#D": [folderId] }),
     queryMany(relays, { ids: [folderId] }),
   ]);
+  const isFolderNode = (e: Event) => e.tags.some((t) => t[0] === "z" && t[1] === "folder");
   const byIdMap = new Map<string, Event>();
-  for (const e of byF) {
-    if (e.tags.some((t) => t[0] === "z" && t[1] === "folder")) byIdMap.set(e.id, e);
-  }
-  for (const e of byD) {
-    if (e.tags.some((t) => t[0] === "z" && t[1] === "folder")) byIdMap.set(e.id, e);
-  }
-  for (const e of byDlegacy) byIdMap.set(e.id, e);
-  for (const e of genesis) {
-    if (e.tags.some((t) => t[0] === "z" && t[1] === "folder") || e.kind === FOLDER_TRACE_NODE_KIND) {
-      byIdMap.set(e.id, e);
-    }
-  }
+  for (const e of byF) if (isFolderNode(e)) byIdMap.set(e.id, e);
+  for (const e of byD) if (isFolderNode(e)) byIdMap.set(e.id, e);
+  for (const e of genesis) if (isFolderNode(e)) byIdMap.set(e.id, e);
   return [...byIdMap.values()];
 }
 
 /** Resolves the latest (uncited-as-prev) folder-trace node for `folderId`, or
- *  null if the folder has no 4292 chain yet. Same head-finding rule as file
+ *  null if the folder has no folder chain yet. Same head-finding rule as file
  *  chains (`resolveHead`): a node nobody else cites as `prev` is the head. */
 export async function fetchLatestFolderNode(folderId: string): Promise<Event | null> {
   const all = await fetchFolderNodes(folderId);
   return resolveHead(all);
 }
 
-/** Parses `snapshot.members` out of a kind-4292 event's content. Returns [] on
+/** Parses `snapshot.members` out of a folder-reified 4290 node's content. Returns [] on
  *  malformed/empty content. */
 export function membersFromNode(event: Event): ManifestFileEntry[] {
   try {
@@ -1745,28 +2316,11 @@ export function membersFromNode(event: Event): ManifestFileEntry[] {
   }
 }
 
-/** Lazy-migration fallback: read the latest legacy kind-34290 manifest and
- *  reconstruct the member list from its `content.files`. Used only when no 4292
- *  head exists for the folder. Returns [] if no legacy manifest either. */
-async function fetchLegacyManifestMembers(folderId: string): Promise<ManifestFileEntry[]> {
-  const relays = await getReadRelays();
-  const event = await queryLatestMany(relays, { kinds: [FOLDER_MANIFEST_KIND], "#d": [folderId] });
-  if (!event) return [];
-  try {
-    const parsed = JSON.parse(event.content) as { files: ManifestFileEntry[] };
-    return parsed.files ?? [];
-  } catch {
-    return [];
-  }
-}
-
-/** Reads the current file set for a folder from its latest 4292 node's
- *  `snapshot.members`. Falls back to the legacy 34290 manifest when no 4292
- *  chain exists yet (lazy migration). Empty array for a fresh folder. */
+/** Reads the current file set for a folder from its latest 4290-z:folder node's
+ *  `snapshot.members`. Empty array for a fresh folder. */
 export async function fetchManifest(folderId: string): Promise<ManifestFileEntry[]> {
   const head = await fetchLatestFolderNode(folderId);
-  if (head) return membersFromNode(head);
-  return fetchLegacyManifestMembers(folderId);
+  return head ? membersFromNode(head) : [];
 }
 
 // --- folder display name ------------------------------------------------
@@ -1811,10 +2365,10 @@ export async function fetchFolderDisplayName(
   return resolved;
 }
 
-/** Builds and signs (does not publish) a kind-4292 folder-trace node. Mirrors
+/** Builds and signs (does not publish) a folder-reified 4290 node. Mirrors
  *  the FileTraceNode shape: positional `tags[0]` = `["folder", folderId]`,
  *  `D` mirror, one `q` tag per active member in order, `e…prev` to the prior
- *  head (absent on genesis). No `d` tag — 4292 is NOT replaceable; ordering
+ *  head (absent on genesis). No `d` tag — folder-reified 4290 is NOT replaceable; ordering
  *  comes from the chain, so there is no forced-forward `created_at` rule.
  *
  *  Member `q` tags are emitted in the spec's full 4-element form
@@ -1826,7 +2380,7 @@ export async function fetchFolderDisplayName(
  *  `deltas` carries the per-node change set (protocol §3.3): one or more
  *  FolderDelta entries. A node MAY carry several — a structural change (add/
  *  remove/rename) plus N focus observations drained from the buffer on the same
- *  seal (§8). Empty array on genesis/import nodes, in which case the field is
+ *  step (§8). Empty array on genesis/import nodes, in which case the field is
  *  omitted from the content entirely. */
 function buildFolderNodeTemplate(
   folderId: string | null,
@@ -1834,7 +2388,7 @@ function buildFolderNodeTemplate(
   prevEventId: string | null,
   action: string,
   deltas: FolderDelta[],
-  sealedAt: number,
+  steppedAt: number,
   opts?: { forkedFrom?: string | null; memberOwners?: string[]; geohashes?: string[] },
 ): EventTemplate {
   const ownerByPath = opts?.memberOwners;
@@ -1861,7 +2415,7 @@ function buildFolderNodeTemplate(
   if (opts?.forkedFrom) tags.push(["e", opts.forkedFrom, "", "forked-from"]);
   // Spec §3.1 `g`: an arbitrary-length base-32 geohash the zine is pinned to
   // for Spaces. Length encodes precision; a node MAY carry several pins. The
-  // current set is republished on the folder node — re-sealing supersedes
+  // current set is republished on the folder node — re-stepping supersedes
   // (the snapshot rehashes, as any structural change does). Geohashes do NOT
   // enter the canonical body hash (they're curation surface, not content).
   if (opts?.geohashes) {
@@ -1875,10 +2429,10 @@ function buildFolderNodeTemplate(
     // Spec §1/§R11.3: one TraceNode kind. The `z:folder` tag (emitted above)
     // discriminates folder-reified from file-reified nodes.
     kind: TRACE_NODE_KIND,
-    created_at: Math.floor(sealedAt / 1000),
+    created_at: Math.floor(steppedAt / 1000),
     tags,
     content: JSON.stringify({
-      sealedAt,
+      steppedAt,
       snapshot,
       ...(deltas.length > 0 ? { deltas } : {}),
       contentHash: "", // filled by caller after hashing the snapshot
@@ -1887,7 +2441,7 @@ function buildFolderNodeTemplate(
 }
 
 /** Hashes a folder snapshot to its contentHash. Body-only — same addressing
- *  axis as a file. Used as the integrity anchor on every 4292 node.
+ *  axis as a file. Used as the integrity anchor on every folder node.
  *
  *  Canonical projection per protocol §2: `[[relativePath, memberContentHash], …]`
  *  in member order, JSON with no insignificant whitespace, `latestNodeId`
@@ -1907,7 +2461,7 @@ async function hashFolderSnapshot(members: ManifestFileEntry[]): Promise<string>
  *  canonical-body hash, never recomputed here (no chain walk, no recursion,
  *  cycle-safe by construction). Widening the projection from two-tuple to
  *  three-tuple is a breaking change to contentHash/#x clustering — legacy
- *  folders rehash on their next seal; no integrity property is affected. */
+ *  folders rehash on their next step; no integrity property is affected. */
 function canonicalFolderBody(members: ManifestFileEntry[]): string {
   return JSON.stringify(members.map((m) => [m.relativePath, m.kind ?? "file", m.contentHash]));
 }
@@ -1915,67 +2469,89 @@ function canonicalFolderBody(members: ManifestFileEntry[]): string {
 // --- focus buffer (§R7) -------------------------------------------------
 //
 // Focus observations never mint their own nodes — they accumulate in this
-// per-folder buffer and ride along on the NEXT folder-chain seal (any add/
-// remove/rename) as additional `deltas` entries, or on an explicit session-
-// close checkpoint (flushFocusCheckpoint). This is the load-bearing §R7
+// per-folder buffer and ride along on the NEXT folder-chain step (any add/
+// remove/rename) as additional `deltas` entries. The buffer is mirrored to
+// localStorage so closing the press never needs to manufacture a focus-only
+// Step and observations survive until a real folder Step drains them. This is
+// the load-bearing §R7
 // mechanism: focus fires per click, and a focus node would re-serialize the
 // full membership snapshot every time — the exact per-keystroke collapse §R1
 // warns makes unconditional snapshots unaffordable. Buffering turns O(clicks)
-// nodes into O(seals) deltas. Coalescing per panelIndex (the App.tsx writer
+// nodes into O(steps) deltas. Coalescing per panelIndex (the App.tsx writer
 // dedupes against the last published key) keeps the buffer from growing
 // unbounded under a flurry of selections.
 
 const focusBuffer = new Map<string, FolderDelta[]>();
+const FOCUS_BUFFER_PREFIX = "zine.pending-folder-focus.";
+
+function storedFocus(folderId: string): FolderDelta[] {
+  const cached = focusBuffer.get(folderId);
+  if (cached) return cached;
+  let loaded: FolderDelta[] = [];
+  try {
+    if (typeof localStorage !== "undefined") {
+      const raw = localStorage.getItem(FOCUS_BUFFER_PREFIX + folderId);
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(parsed)) loaded = parsed as FolderDelta[];
+    }
+  } catch {
+    // Focus is observational; an unavailable/corrupt local buffer must not
+    // block authoring or a structural folder Step.
+  }
+  focusBuffer.set(folderId, loaded);
+  return loaded;
+}
+
+function persistFocus(folderId: string, entries: FolderDelta[]): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    if (entries.length === 0) localStorage.removeItem(FOCUS_BUFFER_PREFIX + folderId);
+    else localStorage.setItem(FOCUS_BUFFER_PREFIX + folderId, JSON.stringify(entries));
+  } catch {
+    // Best-effort observation buffer; the in-memory copy remains authoritative
+    // for the current session when storage is unavailable.
+  }
+}
 
 /** Append a focus observation to `folderId`'s pending buffer. Called from the
  *  press on selection/panel-mount (mount) and tab/panel close (unmount). Does
- *  not seal — the observation becomes durable when the next folder seal drains
- *  the buffer, or when session close flushes it explicitly. Safe to call before
- *  the folder has any chain; the buffer simply holds until the first seal. */
+ *  not step — the observation becomes durable when the next folder Step drains
+ *  the persisted buffer. Safe to call before the folder has any chain; the
+ *  buffer simply holds until the first Step. */
 export function bufferFocus(folderId: string, delta: FolderDelta): void {
-  const arr = focusBuffer.get(folderId);
-  if (arr) arr.push(delta);
-  else focusBuffer.set(folderId, [delta]);
+  const arr = storedFocus(folderId);
+  arr.push(delta);
+  persistFocus(folderId, arr);
 }
 
 /** Take and clear `folderId`'s pending focus buffer. Called by publishFolderNode
- *  so every folder-chain seal flushes whatever focus accumulated since the last
- *  one — the §7/§8 drain-on-seal rule. Returns the deltas in arrival order;
+ *  so every folder-chain step flushes whatever focus accumulated since the last
+ *  one — the §7/§8 drain-on-step rule. Returns the deltas in arrival order;
  *  empty array if nothing pending. */
 function drainFocusBuffer(folderId: string): FolderDelta[] {
-  const arr = focusBuffer.get(folderId);
-  if (!arr || arr.length === 0) return [];
+  const arr = storedFocus(folderId);
+  if (arr.length === 0) return [];
   const out = arr.splice(0, arr.length);
+  persistFocus(folderId, arr);
   return out;
 }
 
-/** Mint an `action: "focus"` node carrying any pending focus deltas for
- *  `folderId`, the §8 session-close checkpoint. No-op when the buffer is empty.
- *  Best-effort: callers (e.g. beforeunload) fire and forget; a relay failure
- *  just means those observations were never recorded — focus is telemetry, not
- *  provenance that gates integrity. Re-emits the current membership verbatim so
- *  `contentHash` is unaffected (same posture as a tag-change node). */
-export async function flushFocusCheckpoint(folderId: string): Promise<void> {
-  const pending = drainFocusBuffer(folderId);
-  if (pending.length === 0) return;
-  const previous = await fetchLatestFolderNode(folderId);
-  const members = previous ? membersFromNode(previous) : await fetchLegacyManifestMembers(folderId);
-  await publishFolderNode(folderId, members, {
-    prevEventId: previous?.id ?? null,
-    action: "focus",
-    deltas: pending,
-  });
+function restoreFocusBuffer(folderId: string, entries: FolderDelta[]): void {
+  if (entries.length === 0) return;
+  const current = storedFocus(folderId);
+  current.unshift(...entries);
+  persistFocus(folderId, current);
 }
 
-/** Publishes a kind-4292 folder-trace node sealing `members` as the current
+/** Publishes a folder-reified 4290 node stepping `members` as the current
  *  snapshot. `prevEventId` null = genesis; otherwise the node chains off the
  *  prior head. `action`/`deltas` describe the change set (or `import` for
  *  genesis). Signs with `signer` or the active voice. Returns the signed event.
  *
  *  **Drains the focus buffer** (§8): any focus observations accumulated since
- *  the last folder seal are appended to `deltas`, so they ride along on a node
- *  that was sealing anyway rather than minting their own. This is the §R7
- *  mechanism — callers never need to flush focus explicitly on the seal path.
+ *  the last folder step are appended to `deltas`, so they ride along on a node
+ *  that was stepping anyway rather than minting their own. This is the §R7
+ *  mechanism — callers never need to flush focus explicitly on the step path.
  *
  *  `forkedFrom` emits a `forked-from` lineage edge at genesis (see Forking);
  *  `memberOwners` (aligned to `members`) emits 4-element `q` tags carrying each
@@ -1991,24 +2567,33 @@ async function publishFolderNode(
     forkedFrom?: string | null;
     memberOwners?: string[];
     geohashes?: string[];
+    /** Step the folder manifest only to the home relay. Used when a local
+     *  file Step changes membership but has not been Sent. */
+    localOnly?: boolean;
   },
 ): Promise<Event> {
-  const relays = await getWriteRelays();
+  const relays = opts.localOnly
+    ? await (async () => {
+        const home = await getRelayRetrying(resolveRelayUrl());
+        return home ? [home] : [];
+      })()
+    : await getWriteRelays();
   const key = opts.signer ?? loadOrCreateVoice().secretKey;
-  const sealedAt = Date.now();
-  // §8: drain any focus observations buffered since the last folder seal and
+  const steppedAt = Date.now();
+  // §8: drain any focus observations buffered since the last folder step and
   // append them to this node's deltas. The structural delta (if any) stays
   // first so directory-log readers that take deltas[0] still see it.
   // Genesis (folderId null) has no focus buffer — it's the identity-minting
   // node, nothing to drain.
-  const allDeltas = [...(opts.deltas ?? []), ...(folderId ? drainFocusBuffer(folderId) : [])];
+  const drainedFocus = folderId ? drainFocusBuffer(folderId) : [];
+  const allDeltas = [...(opts.deltas ?? []), ...drainedFocus];
   const template = buildFolderNodeTemplate(
     folderId,
     members,
     opts.prevEventId,
     opts.action,
     allDeltas,
-    sealedAt,
+    steppedAt,
     {
       forkedFrom: opts.forkedFrom ?? null,
       memberOwners: opts.memberOwners,
@@ -2019,49 +2604,101 @@ async function publishFolderNode(
   // `x` tag (spec §3.1: REQUIRED on folder nodes). `#x` content-identity
   // queries then cluster byte-identical folders across authors — the property
   // the canonical projection (no latestNodeId) was designed to enable (§R3).
-  const parsed = JSON.parse(template.content) as { contentHash?: string };
-  parsed.contentHash = await hashFolderSnapshot(members);
-  template.content = JSON.stringify(parsed);
-  template.tags.push(["x", parsed.contentHash!]);
+  let nodePublished = false;
+  try {
+    const parsed = JSON.parse(template.content) as { contentHash?: string };
+    parsed.contentHash = await hashFolderSnapshot(members);
+    template.content = JSON.stringify(parsed);
+    template.tags.push(["x", parsed.contentHash!]);
 
-  const signed = finalizeEvent(template, key);
-  await publishToMany(relays, signed);
-  // Spec §4: also publish a TraceHead (kind 34290) head-pointer cache so the
-  // folder's head resolves as one bounded fetch for O(1) consumers. `d` = trace
-  // identity. Genesis (folderId null) IS the identity — nothing to point at yet,
-  // so no TraceHead. The first non-genesis seal caches it.
-  if (folderId) {
-    await publishTraceHead(folderId, signed.id, key, relays);
+    const signed = finalizeEvent(template, key);
+    await publishToMany(relays, signed);
+    nodePublished = true;
+    // Spec §4: also publish a TraceHead (kind 34290) head-pointer cache so the
+    // folder's head resolves as one bounded fetch for O(1) consumers. `d` = trace
+    // identity. Genesis (folderId null) IS the identity — nothing to point at yet,
+    // so no TraceHead. The first non-genesis step caches it.
+    if (folderId) {
+      await publishTraceHead(folderId, signed.id, key, relays);
+    }
+    return signed;
+  } catch (error) {
+    // If the node itself never landed, put its observations back at the front so
+    // the next real folder Step can carry them. A TraceHead-cache failure happens
+    // after the node is durable and must not duplicate the deltas.
+    if (folderId && !nodePublished) restoreFocusBuffer(folderId, drainedFocus);
+    throw error;
   }
-  return signed;
 }
 
 /** Publishes a kind-34290 TraceHead pointing at a trace's current nucleus.
- *  Spec §4: `d` = trace identity, content `{ head }`, written on every seal.
+ *  Spec §4: `d` = trace identity, content `{ head }`, written on every step.
  *  Reuses the already-connected write relays and the same signer key as the
- *  triggering seal. The legacy manifest read path tolerates these (it checks
+ *  triggering step. The legacy manifest read path tolerates these (it checks
  *  for `content.files` and falls through when absent). */
+export function nextReplaceableCreatedAt(
+  nowSec: number,
+  priorCreatedAt?: number,
+): number {
+  return priorCreatedAt == null ? nowSec : Math.max(nowSec, priorCreatedAt + 1);
+}
+
+const traceHeadCreatedAt = new Map<string, number>();
+const traceHeadPublishQueue = new Map<string, Promise<void>>();
+
 async function publishTraceHead(
   traceIdentity: string,
   headEventId: string,
   signer: Uint8Array,
   relays: Relay[],
 ): Promise<void> {
-  const template: EventTemplate = {
-    kind: TRACE_HEAD_KIND,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [["d", traceIdentity]],
-    content: JSON.stringify({ head: headEventId }),
-  };
-  const signed = finalizeEvent(template, signer);
-  await publishToMany(relays, signed);
+  const signerPubkey = getPublicKey(signer);
+  const key = `${signerPubkey}:${traceIdentity}`;
+  const previous = traceHeadPublishQueue.get(key) ?? Promise.resolve();
+  const pending = previous.catch(() => {}).then(async () => {
+    let priorCreatedAt = traceHeadCreatedAt.get(key);
+    if (priorCreatedAt == null) {
+      try {
+        const existing = await queryMany(relays, {
+          kinds: [TRACE_HEAD_KIND],
+          authors: [signerPubkey],
+          "#d": [traceIdentity],
+        });
+        for (const event of existing) {
+          priorCreatedAt = Math.max(priorCreatedAt ?? -1, event.created_at);
+        }
+      } catch {
+        // Best effort. The in-process clock still prevents the common rapid
+        // Step/Oblivion/restore collision when a relay read is unavailable.
+      }
+    }
+    const createdAt = nextReplaceableCreatedAt(
+      Math.floor(Date.now() / 1000),
+      priorCreatedAt,
+    );
+    traceHeadCreatedAt.set(key, createdAt);
+    const template: EventTemplate = {
+      kind: TRACE_HEAD_KIND,
+      created_at: createdAt,
+      tags: [["d", traceIdentity]],
+      content: JSON.stringify({ head: headEventId }),
+    };
+    const signed = finalizeEvent(template, signer);
+    await publishToMany(relays, signed);
+  });
+  traceHeadPublishQueue.set(key, pending);
+  try {
+    await pending;
+  } finally {
+    if (traceHeadPublishQueue.get(key) === pending) traceHeadPublishQueue.delete(key);
+  }
 }
 
 /** Publishes a folder-trace node with the given full membership. Genesis if no
  *  prior head exists, else chained off it with `action: "edit"`. The membership
  *  is taken verbatim — the delta is the caller's responsibility to compute; this
  *  path is used by callers that already have the full next member list (the
- *  three backends' seal/import/delete paths). Kept under the old `publishManifest`
+ *  three backends' step/import/delete paths). Kept under the old `publishManifest`
  *  name so those backends compile unchanged. */
 export async function publishManifest(
   folderId: string,
@@ -2069,16 +2706,12 @@ export async function publishManifest(
   signer?: Uint8Array,
 ): Promise<Event> {
   const previous = await fetchLatestFolderNode(folderId);
-  // If no 4292 chain exists but a legacy 34290 manifest does, seed the genesis
-  // snapshot from it so the chain doesn't lose history on first write.
-  const seed = previous ? null : await fetchLegacyManifestMembers(folderId);
-  const members = entries.length > 0 || !seed ? entries : seed;
-  return publishFolderNode(folderId, members, {
+  return publishFolderNode(folderId, entries, {
     prevEventId: previous?.id ?? null,
     action: previous ? "edit" : "import",
     signer,
     // Carry the folder's existing geohash pins forward so a routine membership
-    // seal (edit/delete/LLM) doesn't silently wipe a prior Spaces pin. Pin
+    // step (edit/delete/LLM) doesn't silently wipe a prior Spaces pin. Pin
     // updates go through `setFolderGeohashes`, which passes the new set
     // explicitly and overrides this carry-forward.
     geohashes: previous ? geohashesFromNode(previous) : undefined,
@@ -2091,7 +2724,7 @@ function geohashesFromNode(event: Event): string[] {
   return event.tags.filter((t) => t[0] === "g" && typeof t[1] === "string").map((t) => t[1] as string);
 }
 
-/** Read the folder's current geohash pins from its latest 4292 node. Empty array
+/** Read the folder's current geohash pins from its latest folder node. Empty array
  *  if the folder has no chain or no pins. One bounded `#f` fetch — the same
  *  shape `fetchManifest` uses. Spaces reads pins lazily per visible cell rather
  *  than folding this into `fetchFolderIndex` (which scans file nodes only). */
@@ -2105,9 +2738,7 @@ export async function fetchFolderGeohashes(folderId: string): Promise<string[]> 
  *  "pin to map" affordance calls this. A no-op when the set is unchanged. */
 export async function setFolderGeohashes(folderId: string, geohashes: string[]): Promise<Event | null> {
   const previous = await fetchLatestFolderNode(folderId);
-  const members = previous
-    ? membersFromNode(previous)
-    : await fetchLegacyManifestMembers(folderId);
+  const members = previous ? membersFromNode(previous) : [];
   const current = previous ? geohashesFromNode(previous) : [];
   const next = Array.from(new Set(geohashes.filter((h) => typeof h === "string" && h.length > 0)));
   // Equal (order-insensitive) → no node needed.
@@ -2178,6 +2809,8 @@ export async function createFolderGenesis(opts?: {
   members?: ManifestFileEntry[];
   memberOwners?: string[];
   action?: string;
+  /** Keep the new folder identity on the home relay until an explicit Send. */
+  localOnly?: boolean;
 }): Promise<string> {
   const event = await publishFolderNode(null, opts?.members ?? [], {
     prevEventId: null,
@@ -2185,50 +2818,26 @@ export async function createFolderGenesis(opts?: {
     signer: opts?.signer,
     forkedFrom: opts?.forkedFrom ?? null,
     memberOwners: opts?.memberOwners,
+    localOnly: opts?.localOnly,
   });
   return event.id;
 }
 
-/** Publish an empty folder-trace genesis for a fresh folderId. Used by the
- *  webapp's "create new folder" path: there's no disk to make a directory on,
- *  so the folder is born as an empty kind-4292 node on the relay. Returns true
- *  if the folder was created, false if a folder-trace node (or legacy manifest)
- *  already exists for this id (caller should attach to the existing one).
- *
- *  Legacy: this is the pre-Phase-5 path — it stamps `folderId` (a UUID) onto
- *  the genesis node's `f`/`D`/`folder` tags, so the folder's identity is the
- *  UUID, not the genesis event id. New callers should use `createFolderGenesis`
- *  instead, which publishes genesis with no identity tags and adopts the event
- *  id as the identity. Kept for backward compatibility with existing UUID-keyed
- *  folders. */
-export async function createEmptyFolder(folderId: string): Promise<boolean> {
-  const existing = await fetchLatestFolderNode(folderId);
-  if (existing) return false;
-  // A legacy 34290 manifest also counts as "exists" — don't clobber it with a
-  // competing empty genesis.
-  const legacy = await fetchLegacyManifestMembers(folderId);
-  if (legacy.length > 0) return false;
-  await publishFolderNode(folderId, [], {
-    prevEventId: null,
-    action: "import",
-  });
-  return true;
-}
-
 /** Reads the current membership, replaces the single entry for
- *  `entry.relativePath` (or appends it), and publishes the next 4292 node.
- *  Called from every seal/import path so the folder chain never drifts from
+ *  `entry.relativePath` (or appends it), and publishes the next folder node.
+ *  Called from every step/import path so the folder chain never drifts from
  *  the actual file-chain heads. For deletes, use `removeManifestEntry` —
  *  spec-clean tombstones drop the member rather than tombstoning it. */
 export async function upsertManifestEntry(
   folderId: string,
   entry: ManifestFileEntry,
   signer?: Uint8Array,
+  opts?: { localOnly?: boolean },
 ): Promise<void> {
   const previous = await fetchLatestFolderNode(folderId);
-  // Current membership: from the 4292 head if one exists, else from the legacy
-  // 34290 manifest (lazy migration seeds the first 4292 node from it).
-  const current = previous ? membersFromNode(previous) : await fetchLegacyManifestMembers(folderId);
+  // Current membership: from the folder head if one exists, else from the legacy
+  // 34290 manifest (lazy migration seeds the first folder node from it).
+  const current = previous ? membersFromNode(previous) : [];
   const next = current.filter((f) => f.relativePath !== entry.relativePath);
   next.push(entry);
   await publishFolderNode(folderId, next, {
@@ -2236,11 +2845,12 @@ export async function upsertManifestEntry(
     action: previous ? "edit" : "import",
     deltas: [{ type: "add", relativePath: entry.relativePath, nodeId: entry.latestNodeId, timestamp: Date.now() }],
     signer,
+    localOnly: opts?.localOnly,
   });
 }
 
 /** Removes the member for `relativePath` from the folder snapshot and publishes
- *  the next 4292 node with a `remove` delta. This is the spec-clean tombstone:
+ *  the next folder node with a `remove` delta. This is the spec-clean tombstone:
  *  the file's own 4290 chain (whose head is now the delete node) retains
  *  history; the folder snapshot just reflects "no longer a member." Used by the
  *  three backends' `markDeleted` helpers. */
@@ -2250,7 +2860,7 @@ export async function removeManifestEntry(
   signer?: Uint8Array,
 ): Promise<void> {
   const previous = await fetchLatestFolderNode(folderId);
-  const current = previous ? membersFromNode(previous) : await fetchLegacyManifestMembers(folderId);
+  const current = previous ? membersFromNode(previous) : [];
   const next = current.filter((f) => f.relativePath !== relativePath);
   await publishFolderNode(folderId, next, {
     prevEventId: previous?.id ?? null,
@@ -2261,12 +2871,12 @@ export async function removeManifestEntry(
 }
 
 /** Renames a member's `relativePath` from `fromPath` to `toPath` and publishes
- *  the next 4292 node with a single `rename` delta — one replayable event for
+ *  the next folder node with a single `rename` delta — one replayable event for
  *  one user gesture, instead of the pre-rename decomposition into add+remove
  *  (which orphaned the file's history from its new path). The member's
  *  `latestNodeId` and `contentHash` are carried over unchanged: the file's own
  *  4290 chain is untouched, only the folder's addressing of it moves. The new
- *  file node at `toPath` (sealed by the caller before this) is the `nodeId`.
+ *  file node at `toPath` (stepped by the caller before this) is the `nodeId`.
  *  The folder's `contentHash`/`x` DOES change — correct, since the §2 canonical
  *  projection is the ordered `(relativePath, memberContentHash)` list and a path
  *  moved is a different projection. */
@@ -2278,7 +2888,7 @@ export async function renameManifestEntry(
   signer?: Uint8Array,
 ): Promise<void> {
   const previous = await fetchLatestFolderNode(folderId);
-  const current = previous ? membersFromNode(previous) : await fetchLegacyManifestMembers(folderId);
+  const current = previous ? membersFromNode(previous) : [];
   // Repoint the renamed member's path; carry over latestNodeId/contentHash.
   // If the member isn't found (e.g. the rename raced with a concurrent remove),
   // fall back to upserting the entry at toPath so the chain stays consistent.
@@ -2286,7 +2896,7 @@ export async function renameManifestEntry(
   let next: ManifestFileEntry[];
   if (existing) {
     // Repoint fromPath → toPath, carrying latestNodeId/contentHash; the caller
-    // already sealed the new file node at toPath, so latestNodeId becomes that.
+    // already stepped the new file node at toPath, so latestNodeId becomes that.
     const renamed: ManifestFileEntry = { ...existing, relativePath: toPath, latestNodeId: nodeId };
     next = current
       .filter((f) => f.relativePath !== fromPath && f.relativePath !== toPath)
@@ -2296,7 +2906,7 @@ export async function renameManifestEntry(
     // the chain stays consistent rather than dropping the rename entirely.
     next = current
       .filter((f) => f.relativePath !== toPath)
-      .concat({ relativePath: toPath, latestNodeId: nodeId, contentHash: "" });
+      .concat({ kind: "file", relativePath: toPath, latestNodeId: nodeId, contentHash: "" });
   }
   await publishFolderNode(folderId, next, {
     prevEventId: previous?.id ?? null,
@@ -2308,37 +2918,33 @@ export async function renameManifestEntry(
   });
 }
 
-// --- focus deltas (action: focus) ---------------------------------------
+// --- buffered focus deltas ----------------------------------------------
 //
 // Focus is panel-occupancy telemetry (§3.3): it records what trace was in which
 // panel, so a reading session can be replayed in the press editor. The WRITE
 // path never mints its own node — focus observations go through bufferFocus
-// (above) and ride along on the next folder-chain seal as additional `deltas`
-// entries, or on an explicit session-close checkpoint (flushFocusCheckpoint).
-// This is §R7: focus fires per click, and a per-click focus node would
+// (above) and ride along on the next folder-chain step as additional `deltas`
+// entries. The local buffer persists across press sessions until a structural
+// folder Step drains it. This is §R7: focus fires per click, and a per-click node would
 // re-serialize the full membership snapshot every time — the exact per-keystroke
 // collapse §R1 warns against.
 //
-// A focus node therefore exists on the chain only as the session-close flush
-// (when nothing else sealed while focus was pending), OR carrying it as extra
-// deltas on a real seal. Either way it re-emits `snapshot.members` verbatim —
-// `contentHash` and `q` edges are byte-identical to the prior head. A
-// genesis-with-focus (a brand-new folder opened before any file is added) is
-// allowed: members = [], action stays "focus". Rare, but valid.
+// Focus therefore exists on the chain only as extra deltas carried by a real
+// folder Step. It never changes `snapshot.members`, `contentHash`, or `q` edges.
 
-/** One replayable focus event on the folder's 4292 chain. `sealedAt` is the
+/** One replayable focus event on the folder's folder chain. `steppedAt` is the
  *  node's content-level ms timestamp (chain order, never `created_at`); the
  *  op/selection/panelIndex fields come straight off the focus delta. `op` is
  *  `"mount"` when present, `"unmount"` for the panel-empties case, and undefined
  *  for older focus deltas written before `op` existed (treat as mount). */
 export interface FocusEntry {
-  sealedAt: number;
+  steppedAt: number;
   op?: "mount" | "unmount";
   selection: FocusSelection;
   panelIndex: number;
 }
 
-/** The folder's kind-4292 focus chain, oldest-first — every `focus` delta the
+/** The folder's folder focus chain, oldest-first — every `focus` delta the
  *  folder has emitted, in chain order. This is the replay script: walking it
  *  reconstructs what trace was mounted into which panel over the folder's
  *  lifetime. Non-focus nodes (membership changes, genesis) are skipped, but a
@@ -2348,7 +2954,7 @@ export interface FocusEntry {
 export async function focusTimeline(folderId: string): Promise<FocusEntry[]> {
   const all = await fetchFolderNodes(folderId);
   // Walk the `e...prev` chain oldest-first — same rule as fetchChain (never
-  // trust created_at; order comes from the chain). A folder with no 4292
+  // trust created_at; order comes from the chain). A folder with no
   // chain yet yields [].
   const byId = new Map(all.map((e) => [e.id, e]));
   const head = resolveHead(all);
@@ -2369,7 +2975,7 @@ export async function focusTimeline(folderId: string): Promise<FocusEntry[]> {
   for (const event of chain) {
     try {
       const content = JSON.parse(event.content) as {
-        sealedAt: number;
+        steppedAt: number;
         deltas?: FolderDelta[];
       };
       // §8: a node MAY carry several deltas (one structural + N flushed focus).
@@ -2378,7 +2984,7 @@ export async function focusTimeline(folderId: string): Promise<FocusEntry[]> {
       for (const delta of content.deltas) {
         if (delta.type !== "focus") continue;
         out.push({
-          sealedAt: content.sealedAt,
+          steppedAt: content.steppedAt,
           op: delta.op,
           selection: delta.selection,
           panelIndex: delta.panelIndex,
@@ -2401,12 +3007,12 @@ export async function focusTimeline(folderId: string): Promise<FocusEntry[]> {
 // chain as focusTimeline/folderTimeline but emitting one entry PER DELTA rather
 // than per node (a node may carry one structural + N flushed focus deltas).
 
-/** One folder-chain delta as an orchestration event. `sealedAt` is the node's
+/** One folder-chain delta as an orchestration event. `steppedAt` is the node's
  *  content-level ms timestamp; `action` is the node-level advisory action
- *  (always `"focus"` for a focus-only node, `"edit"`/`"import"` otherwise); the
+ *  (`"edit"`/`"import"` for structural folder Steps); the
  *  `delta` payload is the individual FolderDelta this entry represents. */
 export interface FolderTimelineEntry {
-  sealedAt: number;
+  steppedAt: number;
   action: string;
   delta: FolderDelta;
 }
@@ -2436,11 +3042,11 @@ export async function folderTimelineWithDeltas(folderId: string): Promise<Folder
   const out: FolderTimelineEntry[] = [];
   for (const event of chain) {
     try {
-      const content = JSON.parse(event.content) as { sealedAt: number; deltas?: FolderDelta[] };
+      const content = JSON.parse(event.content) as { steppedAt: number; deltas?: FolderDelta[] };
       const action = event.tags.find((t) => t[0] === "action")?.[1] ?? "import";
       if (!content.deltas) continue;
       for (const delta of content.deltas) {
-        out.push({ sealedAt: content.sealedAt, action, delta });
+        out.push({ steppedAt: content.steppedAt, action, delta });
       }
     } catch {
       continue;
@@ -2453,7 +3059,7 @@ export async function folderTimelineWithDeltas(folderId: string): Promise<Folder
  *  nothing else (focus deltas are already in the chain's `deltas` arrays, so
  *  this is just folderTimelineWithDeltas — kept as a named entry point so the
  *  replay UI has a single fetch call that reads as "the orchestration stream").
- *  Stable order by sealedAt then array position; ties keep chain order. */
+ *  Stable order by steppedAt then array position; ties keep chain order. */
 export async function fetchOrchestrationTimeline(folderId: string): Promise<FolderTimelineEntry[]> {
   return folderTimelineWithDeltas(folderId);
 }
@@ -2480,7 +3086,7 @@ export async function fetchEventById(nodeId: string): Promise<Event | null> {
   const filter: Filter = { ids: [nodeId] };
   for (const relay of relays) {
     try {
-      const events = await withTimeout(queryOnce(relay, filter), 4000, `fetchById ${nodeId}`);
+      const events = await queryOnce(relay, filter);
       if (events.length > 0) return events[0];
     } catch {
       // best-effort — try the next relay
@@ -2498,17 +3104,17 @@ export async function fetchNodeOwner(nodeId: string): Promise<string | null> {
 }
 
 /** Returns the owner (signer pubkey) of a folder — the signer of its latest
- *  4292 head. This is the folder-level ownership test: a folder is "foreign"
+ *  folder head. This is the folder-level ownership test: a folder is "foreign"
  *  iff its head's signer isn't the active voice. Returns null if the folder
- *  has no 4292 chain (a fresh/local-only folder — not foreign). */
+ *  has no folder chain (a fresh/local-only folder — not foreign). */
 export async function fetchFolderOwner(folderId: string): Promise<string | null> {
   const head = await fetchLatestFolderNode(folderId);
   return head?.pubkey ?? null;
 }
 
 /** Seeds a shallow folder fork under the user's key. Reads the source folder's
- *  latest 4292 node (or legacy 34290 manifest as a fallback), mints a new
- *  `destFolderId`, and publishes a 4292 genesis: `action: "fork"`,
+ *  latest folder node (or legacy 34290 manifest as a fallback), mints a new
+ *  `destFolderId`, and publishes a folder genesis: `action: "fork"`,
  *  `forked-from` the source node, `snapshot.members` copied verbatim from the
  *  source (each member still points at the source owner's node — a citation,
  *  not a copy), member `q` tags carrying the source owner's pubkey so ownership
@@ -2522,29 +3128,12 @@ export async function forkFolder(
   opts?: { signer?: Uint8Array },
 ): Promise<Event> {
   const sourceNode = await fetchLatestFolderNode(sourceFolderId);
-  let members: ManifestFileEntry[];
-  let forkedFrom: string;
-  let sourceOwner: string | null;
-
-  if (sourceNode) {
-    members = membersFromNode(sourceNode);
-    forkedFrom = sourceNode.id;
-    sourceOwner = sourceNode.pubkey;
-  } else {
-    // Legacy 34290 fallback: reconstruct members from the replaceable manifest.
-    // The forked-from points at the 34290 event id (best available lineage).
-    const relays = await getReadRelays();
-    const legacy = await queryLatestMany(relays, { kinds: [FOLDER_MANIFEST_KIND], "#d": [sourceFolderId] });
-    if (!legacy) {
-      throw new Error(
-        `Cannot fork folder ${sourceFolderId}: no 4292 chain or 34290 manifest found on any read relay.`,
-      );
-    }
-    const parsed = JSON.parse(legacy.content) as { files: ManifestFileEntry[] };
-    members = parsed.files ?? [];
-    forkedFrom = legacy.id;
-    sourceOwner = legacy.pubkey;
+  if (!sourceNode) {
+    throw new Error(`Cannot fork folder ${sourceFolderId}: no folder chain found on any read relay.`);
   }
+  const members = membersFromNode(sourceNode);
+  const forkedFrom = sourceNode.id;
+  const sourceOwner = sourceNode.pubkey;
 
   // One owner for all initially-cited members (the source folder's signer).
   // A forked folder's membership may later mix owners (after fork-on-write),
@@ -2616,7 +3205,7 @@ export async function forkFileFromNode(
   sourceNodeId: string,
   destFolderId: string,
   destRelativePath: string,
-  opts?: { signer?: Uint8Array },
+  opts?: { signer?: Uint8Array; localOnly?: boolean },
 ): Promise<Event> {
   const sourceEvent = await fetchEventById(sourceNodeId);
   if (!sourceEvent) {
@@ -2639,6 +3228,7 @@ export async function forkFileFromNode(
     action: "fork",
     summary: `forked from ${sourceNodeId.slice(0, 8)}`,
     signer: opts?.signer,
+    localOnly: opts?.localOnly,
     forkedFrom: sourceNodeId,
   });
 }
@@ -2744,7 +3334,7 @@ export async function mergeFile(input: {
 
 // --- palette (kind 34291 = TraceOpinion) ---------------------------------
 //
-// The palette is the user's curated set of minted spans — the "module of
+// The palette is the user's curated set of coins — the "module of
 // trace-nodes" the protocol flags as an open question (spec §OQ). Each item
 // points at a minted kind-4290 node by id and caches its text for display;
 // the node itself (with its own snapshot) is the source of truth.
@@ -2758,7 +3348,7 @@ export async function mergeFile(input: {
 
 const TRACE_OPINION_KIND = 34291;
 
-/** One entry in a voice's palette. `text` is a cache of the minted span's
+/** One entry in a voice's palette. `text` is a cache of the coin's
  *  inner content for display; the authoritative content is the referenced
  *  node's snapshot. `label` is an optional user-authored display name set by
  *  "rename tag" in the panel — it lives only on the palette index, never on
@@ -2926,7 +3516,7 @@ async function queryReferencing(nodeIds: string[]): Promise<Event[]> {
   for (let i = 0; i < nodeIds.length; i += chunkSize) {
     const chunk = nodeIds.slice(i, i + chunkSize);
     const hits = await queryMany(relays, {
-      kinds: [FILE_TRACE_NODE_KIND, FOLDER_TRACE_NODE_KIND],
+      kinds: [FILE_TRACE_NODE_KIND],
       "#e": chunk,
     });
     for (const e of hits) byId.set(e.id, e);
@@ -3042,7 +3632,7 @@ async function queryReferencingByQ(nodeIds: string[]): Promise<Event[]> {
   for (let i = 0; i < nodeIds.length; i += chunkSize) {
     const chunk = nodeIds.slice(i, i + chunkSize);
     const hits = await queryMany(relays, {
-      kinds: [FILE_TRACE_NODE_KIND, FOLDER_TRACE_NODE_KIND],
+      kinds: [FILE_TRACE_NODE_KIND],
       "#q": chunk,
     });
     for (const e of hits) byId.set(e.id, e);
@@ -3056,14 +3646,35 @@ async function queryReferencingByQ(nodeIds: string[]): Promise<Event[]> {
  *  pointed at (the pinned version); `name` is resolved lazily by the press. */
 export interface TraceInbound {
   kind: "fork" | "tag" | "cite";
+  /** Stable genesis identity of the inbound trace. Unlike sourceEventId, this
+   * survives edits, moves into Oblivion, and restore. */
+  sourceTraceId?: string;
   /** The inbound trace's node (its genesis for a fork, or the citing node). */
   sourceEventId: string;
+  /** Current path advertised by the verified source head, when present. */
+  sourcePath?: string;
   /** Our node the inbound trace points at (forked-from / cited source). */
   fromNodeId: string;
   /** Signer of the inbound trace — for display when no name resolves. */
   ownerPubkey: string;
   /** Resolved later by the press via `resolveNodeName`; undefined until then. */
   name?: string;
+}
+
+/** Remove inbound entries whose current source node is locally hidden. The
+ *  press uses this while a move into Oblivion is still being published: the
+ *  in-memory file has already moved, but the relay may still report its old
+ *  head for a moment. Returning the original array when nothing is removed
+ *  avoids needless React churn. */
+export function excludeInboundSources(
+  inbound: TraceInbound[],
+  hiddenSourceIds: ReadonlySet<string>,
+): TraceInbound[] {
+  if (hiddenSourceIds.size === 0) return inbound;
+  const visible = inbound.filter(
+    (entry) => !hiddenSourceIds.has(entry.sourceTraceId ?? entry.sourceEventId),
+  );
+  return visible.length === inbound.length ? inbound : visible;
 }
 
 /** A raw delta parsed out of an event's content for inbound scanning. The cite
@@ -3101,6 +3712,193 @@ export function classifyCite(role: string | undefined): TraceInbound["kind"] | n
   return null;
 }
 
+type SourceChainLoader = (folderId: string, relativePath: string) => Promise<Event[]>;
+
+/** Resolve historical `#q` hits to one current head per citing trace. A relay
+ *  reverse lookup necessarily finds old nodes whose q-set used to include the
+ *  target; only the source trace's current head says whether that citation is
+ *  still live. Coordinate-less legacy nodes fall back to the hit itself. */
+export async function resolveInboundSourceHeads(
+  refs: readonly Event[],
+  loadChain: SourceChainLoader = fetchChain,
+): Promise<Event[]> {
+  const coordinateRefs = new Map<
+    string,
+    { folderId: string; relativePath: string; fallback: Event }
+  >();
+  const coordinateLess = new Map<string, Event>();
+
+  for (const ref of refs) {
+    const folderId =
+      fileTag(ref, "D") ?? fileTag(ref, "f") ?? fileTag(ref, "folder");
+    const relativePath = fileTag(ref, "F") ?? fileTag(ref, "file");
+    if (!folderId || !relativePath) {
+      coordinateLess.set(ref.id, ref);
+      continue;
+    }
+    const key = `${folderId}\u0000${relativePath}`;
+    if (!coordinateRefs.has(key)) {
+      coordinateRefs.set(key, { folderId, relativePath, fallback: ref });
+    }
+  }
+
+  const resolved = await Promise.all(
+    [...coordinateRefs.values()].map(async ({ folderId, relativePath }) => {
+      try {
+        const chain = await loadChain(folderId, relativePath);
+        return chain[chain.length - 1] ?? null;
+      } catch {
+        // A historical q-hit is not evidence that the citation is still live.
+        // Callers that need stale UI retain their last verified snapshot.
+        return null;
+      }
+    }),
+  );
+  for (const head of resolved) {
+    if (head) coordinateLess.set(head.id, head);
+  }
+  return [...coordinateLess.values()];
+}
+
+export interface ResolvedInboundHead {
+  traceId: string;
+  head: Event;
+}
+
+export interface InboundHeadSnapshot {
+  heads: ResolvedInboundHead[];
+  /** False means at least one historical source could not be resolved to a
+   * verified current head. Consumers must retain their last verified row. */
+  complete: boolean;
+}
+
+type TraceIdentityResolver = (nodeId: string) => Promise<string | null>;
+type StableTraceResolver = (
+  traceId: string,
+  fallback?: { folderId: string; relativePath: string },
+) => Promise<TraceChainResolution>;
+
+/** Resolve historical inbound hits through stable trace identity. No failed
+ * lookup falls back to a historical event: that would resurrect citations
+ * removed by a later edit/delete. */
+export async function resolveInboundHeadSnapshot(
+  refs: readonly Event[],
+  identityResolver: TraceIdentityResolver = resolveTraceIdentity,
+  traceResolver: StableTraceResolver = resolveTraceChain,
+): Promise<InboundHeadSnapshot> {
+  const grouped = new Map<
+    string,
+    { folderId?: string; relativePath?: string }
+  >();
+  let complete = true;
+
+  for (const ref of refs) {
+    let traceId: string | null = null;
+    try {
+      traceId = await identityResolver(ref.id);
+    } catch {
+      // Treat relay failures as an incomplete observation, never as proof that
+      // the historical hit is still current.
+    }
+    if (!traceId) {
+      complete = false;
+      continue;
+    }
+    if (!grouped.has(traceId)) {
+      grouped.set(traceId, {
+        folderId: fileTag(ref, "D") ?? fileTag(ref, "f") ?? fileTag(ref, "folder"),
+        relativePath: fileTag(ref, "F") ?? fileTag(ref, "file"),
+      });
+    }
+  }
+
+  const heads: ResolvedInboundHead[] = [];
+  for (const [traceId, coordinate] of grouped) {
+    const fallback =
+      coordinate.folderId && coordinate.relativePath
+        ? { folderId: coordinate.folderId, relativePath: coordinate.relativePath }
+        : undefined;
+    try {
+      const resolution = await traceResolver(traceId, fallback);
+      if (resolution.status !== "resolved" || resolution.chain.length === 0) {
+        complete = false;
+        continue;
+      }
+      heads.push({ traceId, head: resolution.chain[resolution.chain.length - 1] });
+    } catch {
+      complete = false;
+    }
+  }
+  return { heads, complete };
+}
+
+/** Classify verified current heads of citing traces. `action:delete` is the
+ * relay-visible lifecycle signal; a path that happens to contain "oblivion"
+ * is not, because Oblivion is a local workspace convention. */
+export function inboundCitationsFromResolvedHeads(
+  sources: readonly ResolvedInboundHead[],
+  targetIds: ReadonlySet<string>,
+): TraceInbound[] {
+  const out: TraceInbound[] = [];
+  const seen = new Set<string>();
+  for (const { traceId, head } of sources) {
+    if (fileTag(head, "action") === "delete") continue;
+    const sourcePath = fileTag(head, "F") ?? fileTag(head, "file");
+    for (const targetId of targetIds) {
+      const kind = classifyQEdge(head, targetId);
+      if (!kind) continue;
+      const key = `${kind}:${traceId}:${targetId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        kind,
+        sourceTraceId: traceId,
+        sourceEventId: head.id,
+        ...(sourcePath ? { sourcePath } : {}),
+        fromNodeId: targetId,
+        ownerPubkey: head.pubkey,
+      });
+    }
+  }
+  return out;
+}
+
+/** Compatibility pure helper for callers/tests that already hold heads but do
+ * not have their stable identities. Production inbound lookup uses
+ * `inboundCitationsFromResolvedHeads`. */
+export function inboundCitationsFromHeads(
+  heads: readonly Event[],
+  targetIds: ReadonlySet<string>,
+): TraceInbound[] {
+  return inboundCitationsFromResolvedHeads(
+    heads.map((head) => ({ traceId: head.id, head })),
+    targetIds,
+  );
+}
+
+export interface InboundSnapshot {
+  entries: TraceInbound[];
+  /** True only when the target and every discovered source resolved to a
+   * current, signed head. False is an offline/conflict/stale observation. */
+  complete: boolean;
+}
+
+/** Keep only historical `q` hits that could represent an inbound citation.
+ * Structural folder-membership and LLM-scope edges are deliberately removed
+ * before current-head resolution so they cannot make an otherwise complete
+ * zero-citation observation look unavailable. */
+export function filterInboundCitationRefs(
+  refs: readonly Event[],
+  targetIds: ReadonlySet<string>,
+): Event[] {
+  return refs.filter((ref) => {
+    for (const targetId of targetIds) {
+      if (classifyQEdge(ref, targetId)) return true;
+    }
+    return false;
+  });
+}
+
 /**
  * The inbound tracker for one file: every other trace that forks it, tags it,
  * or cites it (spec §3.8 forks via `forked-from`; §6 tags and §3.3 cites via
@@ -3120,22 +3918,31 @@ export function classifyCite(role: string | undefined): TraceInbound["kind"] | n
  * citing node has an active `cite role:"tag"` delta for our node, else "cite"
  * — which covers inline bracket quotes (emitted as `q` + body insert, with no
  * cite delta) and replies. Relying on the cite delta to *detect* the edge would
- * silently miss every minted span quoted in a body, since the write path only
+ * silently miss every coin quoted in a body, since the write path only
  * emits cite deltas for `tag` and `reply`, not `inline`.
  */
-export async function findInbound(
+export async function findInboundSnapshot(
   folderId: string,
   relativePath: string,
-): Promise<TraceInbound[]> {
-  const relays = await getReadRelays();
-  const oursRaw = await queryMany(relays, {
-    kinds: [FILE_TRACE_NODE_KIND],
-    "#F": [relativePath],
-    "#D": [folderId],
-  });
-  const ours = oursRaw.filter(isFileNode);
+  targetTraceId?: string,
+): Promise<InboundSnapshot> {
+  let complete = true;
+  let ours: Event[] = [];
+  try {
+    if (targetTraceId) {
+      const resolution = await resolveTraceChain(targetTraceId, { folderId, relativePath });
+      if (resolution.status !== "resolved") {
+        return { entries: [], complete: false };
+      }
+      ours = resolution.chain;
+    } else {
+      ours = await fetchChain(folderId, relativePath);
+    }
+  } catch {
+    return { entries: [], complete: false };
+  }
   const ourIds = new Set(ours.map((e) => e.id));
-  if (ourIds.size === 0) return [];
+  if (ourIds.size === 0) return { entries: [], complete: false };
 
   const out: TraceInbound[] = [];
   const seen = new Set<string>();
@@ -3143,29 +3950,43 @@ export async function findInbound(
   // Forks: geneses (no prev) with `forked-from` → our chain. Same post-filter
   // as findMergeCandidates (provenance.ts ~2501) but WITHOUT the self-fork skip
   // — the tracker shows all forks; the merge-banner keeps its own skip.
-  const forkRefs = await queryReferencing([...ourIds]);
-  for (const e of forkRefs) {
-    if (!isFileNode(e)) continue;
-    const hasPrev = e.tags.some((t) => t[0] === "e" && t[3] === "prev");
+  let forkRefs: Event[] = [];
+  try {
+    forkRefs = await queryReferencing([...ourIds]);
+  } catch {
+    complete = false;
+  }
+  const forkGenesisByTrace = new Map<string, { genesis: Event; fromNodeId: string }>();
+  for (const event of forkRefs) {
+    if (!isFileNode(event)) continue;
+    const hasPrev = event.tags.some((tag) => tag[0] === "e" && tag[3] === "prev");
     if (hasPrev) continue;
-    const ff = e.tags.find((t) => t[0] === "e" && t[3] === "forked-from");
-    if (!ff || !ourIds.has(ff[1])) continue;
-    // Walk the fork's own chain to its tip for a stable id (a fork's genesis
-    // is rarely its head — the fork has likely advanced since seeding).
-    const theirFolder = fileTag(e, "D") ?? fileTag(e, "f") ?? fileTag(e, "folder");
-    const theirPath = fileTag(e, "F") ?? fileTag(e, "file") ?? relativePath;
-    let tipId = e.id;
-    if (theirFolder) {
-      try {
-        const theirChain = await fetchChain(theirFolder, theirPath);
-        if (theirChain.length > 0) tipId = theirChain[theirChain.length - 1].id;
-      } catch {
-        // Fall back to the genesis id if the fork's chain is unreadable.
-      }
-    }
-    if (seen.has(tipId)) continue;
-    seen.add(tipId);
-    out.push({ kind: "fork", sourceEventId: tipId, fromNodeId: ff[1], ownerPubkey: e.pubkey });
+    const forkedFrom = event.tags.find(
+      (tag) => tag[0] === "e" && tag[3] === "forked-from",
+    )?.[1];
+    if (!forkedFrom || !ourIds.has(forkedFrom)) continue;
+    forkGenesisByTrace.set(event.id, { genesis: event, fromNodeId: forkedFrom });
+  }
+  const forkSnapshot = await resolveInboundHeadSnapshot(
+    [...forkGenesisByTrace.values()].map((entry) => entry.genesis),
+    async (nodeId) => nodeId,
+  );
+  complete = complete && forkSnapshot.complete;
+  for (const { traceId, head } of forkSnapshot.heads) {
+    const origin = forkGenesisByTrace.get(traceId);
+    if (!origin || fileTag(head, "action") === "delete") continue;
+    const key = `fork:${traceId}:${origin.fromNodeId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const sourcePath = fileTag(head, "F") ?? fileTag(head, "file");
+    out.push({
+      kind: "fork",
+      sourceTraceId: traceId,
+      sourceEventId: head.id,
+      ...(sourcePath ? { sourcePath } : {}),
+      fromNodeId: origin.fromNodeId,
+      ownerPubkey: head.pubkey,
+    });
   }
 
   // Tags + cites: events with a `q` edge pinning one of our nodes. The `q` tag
@@ -3174,23 +3995,40 @@ export async function findInbound(
   // reads off every `q`. We do NOT rely on the cite delta to *detect* the edge:
   // the write path only emits `cite` deltas for `tag` and `reply`, NOT for
   // `inline` bracket quotes (which emit a `q` + a body insert, no cite delta).
-  // So a cite-delta-only approach would silently miss every minted span
+  // So a cite-delta-only approach would silently miss every coin
   // quoted in someone's body — the common case. Instead: exclude the two
   // non-citation `q` sources (folder membership, LLM scope), then classify each
   // remaining edge by whether it carries a `role:"tag"` cite delta.
-  const qRefs = await queryReferencingByQ([...ourIds]);
-  for (const e of qRefs) {
-    for (const targetId of ourIds) {
-      const kind = classifyQEdge(e, targetId);
-      if (!kind) continue;
-      const key = `${kind}:${e.id}:${targetId}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ kind, sourceEventId: e.id, fromNodeId: targetId, ownerPubkey: e.pubkey });
-    }
+  let qRefs: Event[] = [];
+  try {
+    qRefs = await queryReferencingByQ([...ourIds]);
+  } catch {
+    complete = false;
+  }
+  // Resolve only citation-shaped historical hits. Folder membership and LLM
+  // scope use the same `q` wire edge but are not citation sources, and their
+  // inability to resolve as file traces must not poison snapshot freshness.
+  const sourceSnapshot = await resolveInboundHeadSnapshot(
+    filterInboundCitationRefs(qRefs, ourIds),
+  );
+  complete = complete && sourceSnapshot.complete;
+  for (const entry of inboundCitationsFromResolvedHeads(sourceSnapshot.heads, ourIds)) {
+    const key = `${entry.kind}:${entry.sourceTraceId ?? entry.sourceEventId}:${entry.fromNodeId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(entry);
   }
 
-  return out;
+  return { entries: out, complete };
+}
+
+/** Compatibility array-only surface. New UI should use findInboundSnapshot so
+ * it can retain verified rows when a relay observation is incomplete. */
+export async function findInbound(
+  folderId: string,
+  relativePath: string,
+): Promise<TraceInbound[]> {
+  return (await findInboundSnapshot(folderId, relativePath)).entries;
 }
 
 /** Classify one `q` edge from event `e` into our node `targetId` as an inbound
@@ -3286,10 +4124,10 @@ export async function incorporateMergeCandidate(
   await upsertManifestEntry(
     folderId,
     {
+      kind: "file",
       relativePath,
       latestNodeId: event.id,
       contentHash: await sha256HexLocal(snapshot),
-      isDeleted: false,
     },
     opts?.signer,
   );
@@ -3341,7 +4179,7 @@ export async function loadMergeSides(
 //   sd:<pubkey>           — an author's stack DEFINITIONS (one replaceable
 //                           event holding `{ defs: [{id, title, order}] }`).
 //   sa:<stackId>:<folder> — an author's ASSIGNMENT of one zine to one stack,
-//                           content `{ rank, sealedAt }` (lower = earlier in
+//                           content `{ rank, steppedAt }` (lower = earlier in
 //                           the section, same convention as `r:`).
 //
 // Aggregation is non-normative, like alpha: the team's definitions merge with
@@ -3365,14 +4203,14 @@ export interface StackDef {
 export async function publishStackDefs(defs: StackDef[]): Promise<Event> {
   const relays = await getWriteRelays();
   const signer = loadOrCreateVoice();
-  const sealedAt = Date.now();
+  const steppedAt = Date.now();
   const template: EventTemplate = {
     kind: TRACE_OPINION_KIND,
-    created_at: Math.floor(sealedAt / 1000),
+    created_at: Math.floor(steppedAt / 1000),
     tags: [["d", `sd:${signer.publicKey}`]],
     content: JSON.stringify({
       defs: defs.map((d, i) => ({ id: d.id, title: d.title, order: typeof d.order === "number" ? d.order : i })),
-      sealedAt,
+      steppedAt,
     }),
   };
   const signed = finalizeEvent(template, signer.secretKey);
@@ -3438,7 +4276,7 @@ export async function fetchStackDefs(teamPubkeys: string[]): Promise<StackDef[]>
 /** Build, sign, and publish a stack ASSIGNMENT: "zine `folderId` belongs in
  *  stack `stackId` at position `rank`." One replaceable kind-34291 event per
  *  `(pubkey, stackId, folderId)`, `d = "sa:" + stackId + ":" + folderId`,
- *  content `{ rank, sealedAt }`. Mirrors `publishTraceRank`'s shape on a
+ *  content `{ rank, steppedAt }`. Mirrors `publishTraceRank`'s shape on a
  *  different subject namespace. */
 export async function publishStackAssignment(input: {
   stackId: string;
@@ -3448,12 +4286,12 @@ export async function publishStackAssignment(input: {
 }): Promise<Event> {
   const relays = await getWriteRelays();
   const signer = input.signer ?? loadOrCreateVoice().secretKey;
-  const sealedAt = Date.now();
+  const steppedAt = Date.now();
   const template: EventTemplate = {
     kind: TRACE_OPINION_KIND,
-    created_at: Math.floor(sealedAt / 1000),
+    created_at: Math.floor(steppedAt / 1000),
     tags: [["d", `sa:${input.stackId}:${input.folderId}`]],
-    content: JSON.stringify({ rank: input.rank, sealedAt }),
+    content: JSON.stringify({ rank: input.rank, steppedAt }),
   };
   const signed = finalizeEvent(template, signer);
   await publishToMany(relays, signed);
@@ -3547,7 +4385,7 @@ export function effectiveStackRank(
   return heads.reduce((sum, h) => sum + h.rank, 0) / heads.length;
 }
 
-/** Reorder sample hits by citation count (which folds in affirms — an affirm
+/** Reorder sample hits by citation count (which folds in attests — an attest
  *  is a `q`-tag citation). Deterministic: same query → same order. Stable sort
  *  preserves the sampler's first-seen insertion order as the tiebreak, so
  *  equal-rank hits keep sampleRelays' output order rather than reshuffling on
@@ -3563,9 +4401,9 @@ export async function rankSampleHits(hits: SampleHit[]): Promise<SampleHit[]> {
   return scored.map((s) => s.hit);
 }
 
-/** Reconstructs file content as of a single seal, by replaying the chain
+/** Reconstructs file content as of a single step, by replaying the chain
  *  from genesis through `throughIndex` (inclusive). Used by folder-wide
- *  replay, which steps seal-by-seal rather than always landing on the head.
+ *  replay, which steps step-by-step rather than always landing on the head.
  *  Equivalent to `reconstructFromChain(chain.slice(0, throughIndex + 1))`;
  *  exposed so callers don't reach past `reconstructFromChain` to fold deltas
  *  themselves. Out-of-range indices clamp to the chain ends. */
@@ -3585,6 +4423,7 @@ export function reconstructFromChain(chain: Event[]): string {
     }
     if (parsed.deltas) {
       for (const d of parsed.deltas) {
+        if (d.type !== "insert" && d.type !== "delete" && d.type !== "replace") continue;
         content =
           content.slice(0, d.position.start) + (d.newValue ?? "") + content.slice(d.position.end);
       }
@@ -3593,21 +4432,35 @@ export function reconstructFromChain(chain: Event[]): string {
   return content;
 }
 
+/** Reads the keystroke log from a single node's content JSON. Returns `[]`
+ *  when the node carries no kedits (pre-kedits nodes, forced no-op Steps,
+ *  or nodes stepped with an empty buffer). Unlike `reconstructRunsFromChain`
+ *  there is no chain walk or fallback synthesis: kedits is either present
+ *  on the node or it isn't. */
+export function keditsFromEvent(event: Event): KEdit[] {
+  try {
+    const parsed = JSON.parse(event.content) as { kedits?: KEdit[] };
+    return Array.isArray(parsed.kedits) ? parsed.kedits : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Reconstruct per-author runs by replaying the chain. Attribution is sourced
- *  in three tiers, per node in order — the first tier that fires wins:
+ *  in four tiers, per node in order — the first tier that fires wins:
  *
- *  1. **`authors` field present and valid** (concatenates to this node's
- *     `snapshot`) → adopt the run list directly. This is the authoritative
- *     per-character truth a live editor sealed; it never collapses surrounding
- *     attribution to one voice. A multi-author document edited by B keeps
- *     A's spans attributed to A on reload, instead of the whole block snapping
- *     to B (the bug `authors` exists to fix).
+ *  1. **Legacy `authors` map** → when a valid map accompanies body deltas but
+ *     none carries an `author` field, adopt the complete map. Those nodes
+ *     predate per-delta attribution; defaulting their unannotated deltas to the
+ *     signer would overwrite the only carrier that distinguishes MODEL text.
  *  2. **Position-bearing content deltas** → splice each delta's insert into the
- *     running run-list, attributed to this node's signer (`event.pubkey`). This
- *     is the legacy path for nodes sealed without an `authors` map: it
- *     preserves per-char attribution of the unchanged regions and only
- *     reattributes the edited span.
- *  3. **Snapshot with no deltas and no `authors`** → the signer authored the
+ *     running run-list, resolving its optional `author` index through the
+ *     node-local `voices` table and defaulting to the signer. Once any body
+ *     delta carries `author`, this is the primary carrier for the whole step.
+ *  3. **`authors` field present and valid** (concatenates to this node's
+ *     `snapshot`) → adopt the run list when no body delta describes the change.
+ *     This is the secondary carrier for bare snapshots.
+ *  4. **Snapshot with no deltas and no `authors`** → the signer authored the
  *     whole snapshot (a wholesale reset — genesis/import on older data, or a
  *     node that shed its deltas). This is the only honest attribution when no
  *     delta or map describes the change. A tag/reply-only node (snapshot
@@ -3631,26 +4484,14 @@ export function reconstructRunsFromChain(chain: Event[]): Run[] {
     const parsed = JSON.parse(event.content) as {
       snapshot?: string;
       authors?: unknown;
+      voices?: unknown;
       deltas?: Array<{
         type?: string;
         position?: { start: number; end: number };
         newValue?: string | null;
+        author?: unknown;
       }>;
     };
-    // Tier 1: an `authors` map that aligns with this node's snapshot is the
-    // authoritative per-char truth — adopt it verbatim. parseAuthors returns
-    // null on absence/malformation/mismatch, so a forged or stale map degrades
-    // cleanly to the tiers below. This is the fix: a node written with live
-    // editor attribution carries the exact run list forward through reload,
-    // instead of collapsing to the signer.
-    if (typeof parsed.snapshot === "string") {
-      const fromAuthors = parseAuthors(parsed.authors, parsed.snapshot);
-      if (fromAuthors) {
-        chars = runsToChars(fromAuthors);
-        if (dbg) dbg.tiers[0]++;
-        continue;
-      }
-    }
     // Position-bearing content deltas only (spec §3.3: a delta changes the
     // body iff it carries a `position`). Citation deltas with role tag/reply
     // have no position and never touch text — skip them so they don't trip
@@ -3659,8 +4500,34 @@ export function reconstructRunsFromChain(chain: Event[]): Run[] {
     const contentDeltas = (parsed.deltas ?? []).filter(
       (d) => d.position && (d.type === "insert" || d.type === "delete" || d.type === "replace"),
     );
+    const fromAuthors =
+      typeof parsed.snapshot === "string"
+        ? parseAuthors(parsed.authors, parsed.snapshot)
+        : null;
+    // Backward compatibility for nodes written before delta-level `author`:
+    // they often carry both an accurate full-snapshot authors map and ordinary
+    // unannotated body deltas. The missing field did not mean "the signer wrote
+    // this span" at that time; it meant per-delta attribution did not exist.
+    // Presence (even malformed presence) on any body delta marks the new wire
+    // shape, where per-delta attribution is primary and invalid/missing indexes
+    // deliberately degrade to the signer.
+    const hasDeltaAttribution = contentDeltas.some((d) =>
+      Object.prototype.hasOwnProperty.call(d, "author"),
+    );
+    if (contentDeltas.length > 0 && fromAuthors && !hasDeltaAttribution) {
+      chars = runsToChars(fromAuthors);
+      if (dbg) dbg.tiers[0]++;
+      continue;
+    }
     if (contentDeltas.length === 0) {
-      // No content deltas on this seal. Two sub-cases:
+      // Secondary carrier: a valid authors map describes the complete
+      // snapshot when no more precise body delta is present.
+      if (fromAuthors) {
+        chars = runsToChars(fromAuthors);
+        if (dbg) dbg.tiers[0]++;
+        continue;
+      }
+      // No content deltas on this step. Two sub-cases:
       //  (a) a bare snapshot that differs from the running content — a
       //      wholesale reset with no delta info (genesis, or legacy output
       //      that shed deltas). The only honest attribution is the whole
@@ -3681,13 +4548,22 @@ export function reconstructRunsFromChain(chain: Event[]): Run[] {
       continue;
     }
     // Apply deltas last-to-first so earlier positions stay valid within one
-    // seal (a seal's deltas share one signer, so order only affects position
+    // step (a step's deltas share one signer, so order only affects position
     // math, not attribution).
     for (let i = contentDeltas.length - 1; i >= 0; i--) {
       const d = contentDeltas[i];
       const start = Math.max(0, Math.min(d.position!.start, chars.length));
       const end = Math.max(start, Math.min(d.position!.end, chars.length));
-      const insertChars = [...(d.newValue ?? "")].map((ch) => ({ ch, voice: signer }));
+      const voices = Array.isArray(parsed.voices)
+        ? parsed.voices.filter((voice): voice is string => typeof voice === "string")
+        : [];
+      const author =
+        Number.isInteger(d.author) &&
+        (d.author as number) >= 0 &&
+        (d.author as number) < voices.length
+          ? voices[d.author as number]
+          : signer;
+      const insertChars = [...(d.newValue ?? "")].map((ch) => ({ ch, voice: author }));
       chars = [...chars.slice(0, start), ...insertChars, ...chars.slice(end)];
       if (dbg) {
         dbg.tiers[2]++;
@@ -3765,25 +4641,39 @@ export function auditAttribution(): AttributionAudit | null {
   return snapshot;
 }
 
-/** Per-author runs as of a single seal — the run-replay counterpart of
+/** Per-author runs as of a single step — the run-replay counterpart of
  *  reconstructUpTo. Out-of-range indices clamp to the chain ends. */
 export function reconstructRunsUpTo(chain: Event[], throughIndex: number): Run[] {
   const end = Math.max(0, Math.min(throughIndex + 1, chain.length));
   return reconstructRunsFromChain(chain.slice(0, end));
 }
 
-function queryOnce(relay: Relay, filter: Filter): Promise<Event[]> {
+function queryOnce(relay: Relay, filter: Filter, perRelayMs = 4000): Promise<Event[]> {
   return new Promise((resolve) => {
     const found: Event[] = [];
+    // Always settle: on EOSE we close + resolve immediately, and a safety
+    // timer closes + resolves with whatever landed. The timer is the whole
+    // point — without it a half-open WS (sub accepted, EOSE never arrives)
+    // left the subscription open forever on the session-cached relay. Each
+    // leaked sub piles onto the one persistent WebSocket per URL, and after a
+    // few such leaks the UI freezes; closing here bounds it to one sub in
+    // flight per query no matter what the relay does.
     const sub = relay.subscribe([filter], {
       onevent(evt: Event) {
         found.push(evt);
       },
       oneose() {
         sub.close();
-        resolve(found);
       },
     });
+    const timer = setTimeout(() => sub.close("timeout"), perRelayMs);
+    // onclose fires exactly once for either close() path (EOSE or timeout);
+    // clean the timer up and resolve with what we have so the queryMany/
+    // fetchEventById callers never wait past perRelayMs for any relay.
+    sub.onclose = () => {
+      clearTimeout(timer);
+      resolve(found);
+    };
   });
 }
 
@@ -3796,21 +4686,21 @@ function queryOnce(relay: Relay, filter: Filter): Promise<Event[]> {
  */
 export async function queryMany(relays: Relay[], filter: Filter, perRelayMs = 4000): Promise<Event[]> {
   if (relays.length === 0) return [];
-  // Every relay gets its own timeout so a half-open WS (sub accepted, EOSE
-  // never arrives) can't hang forever — without that, baselineScan → doAttach
-  // leaves the folder picker stuck loading. Timeouts/failures are best-effort:
-  // a down relay contributes nothing. Single-relay (desktop default = home
-  // sidecar) MUST share this posture — previously it rethrew the timeout,
-  // which surfaced as Unhandled Promise Rejection from auto-beginReplay on
-  // folder load when the sidecar was slow/unreachable.
+  // Each relay gets its own perRelayMs timeout inside queryOnce, and the
+  // subscription is always closed (on EOSE or on timeout) so no sub leaks onto
+  // the session-cached WebSocket. Timeouts/failures are best-effort: a down
+  // relay contributes nothing. Single-relay (desktop default = home sidecar)
+  // MUST share this posture — previously it rethrew the timeout, which
+  // surfaced as Unhandled Promise Rejection from auto-beginReplay on folder
+  // load when the sidecar was slow/unreachable.
   const byId = new Map<string, Event>();
   await Promise.all(
     relays.map(async (relay) => {
       try {
-        const events = await withTimeout(queryOnce(relay, filter), perRelayMs, "query");
+        const events = await queryOnce(relay, filter, perRelayMs);
         for (const e of events) byId.set(e.id, e);
       } catch {
-        // best-effort: a down/slow relay just contributes no events
+        // best-effort: a down relay just contributes no events
       }
     }),
   );
@@ -3852,7 +4742,7 @@ export async function sampleRelays(
       let relay: Relay | null = null;
       try {
         relay = await withTimeout(Relay.connect(url), perRelayMs, `connect ${url}`);
-        const events = await withTimeout(queryOnce(relay, filter), perRelayMs, `query ${url}`);
+        const events = await queryOnce(relay, filter, perRelayMs);
         for (const event of events) {
           const existing = byId.get(event.id);
           if (existing) {
@@ -3900,7 +4790,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
  *    fallback for legacy output that shed the snapshot.
  *  - 4291 TraceName — the name chain carries a `name` field; rendered as a
  *    heading so the body reads as the trace's current name.
- *  - 4292 FolderTraceNode — `snapshot.members` rendered as an unordered list.
+ *  - folder-reified 4290 node — `snapshot.members` rendered as an unordered list.
  *  - anything else — a foreign event. If its content parses as JSON, show it
  *    pretty-printed in a fenced block (legible, clearly delimited); otherwise
  *    take the content as plain prose (the kind-1 text-note case).
@@ -3937,12 +4827,9 @@ export function hitToDocument(hit: SampleHit): {
  *  event metadata — only the text the user should see in the editor. */
 function extractBody(event: Event): string {
   // Spec §R11.3: file and folder share kind 4290, discriminated by `z`. A
-  // 4290 with z:folder renders its membership list; a 4290 with z:file (or a
-  // legacy 4290 with no z) renders its snapshot text. Legacy 4292 also renders
-  // as a folder membership list.
-  const isFolder =
-    event.tags.some((t) => t[0] === "z" && t[1] === "folder") ||
-    event.kind === FOLDER_TRACE_NODE_KIND;
+  // 4290 with z:folder renders its membership list; a 4290 with z:file (or no
+  // z) renders its snapshot text.
+  const isFolder = event.tags.some((t) => t[0] === "z" && t[1] === "folder");
   if (isFolder) {
     const parsed = safeParse(event.content);
     const snapshot = isObject(parsed) ? parsed.snapshot : undefined;
@@ -3969,14 +4856,6 @@ function extractBody(event: Event): string {
       // A 4290 with neither snapshot nor usable deltas — the protocol says
       // snapshot is unconditional, so this shouldn't happen, but don't dump
       // raw JSON if it does.
-      return "";
-    }
-    case TRACE_NAME_KIND: {
-      const parsed = safeParse(event.content);
-      if (isObject(parsed) && typeof parsed.name === "string") {
-        // A name event's body is the name; keep it minimal and scannable.
-        return `# ${parsed.name}\n`;
-      }
       return "";
     }
     default: {
@@ -4014,6 +4893,7 @@ function replayDeltas(
 ): string {
   let content = "";
   for (const d of deltas) {
+    if (d.type !== "insert" && d.type !== "delete" && d.type !== "replace") continue;
     content =
       content.slice(0, d.position.start) + (d.newValue ?? "") + content.slice(d.position.end);
   }
@@ -4044,22 +4924,18 @@ export interface TagCandidate {
 
 /** Resolve every current folder-trace head across `urls` whose folderId is
  *  `name` — one candidate per distinct owner, head-resolved the same way
- *  `fetchLatestFolderNode` does for a single known folder. Queries both the
- *  new kind-4290-with-`z:folder` form and legacy kind-4292 (spec §R11.3).
- *  Returns [] for a blank name or no matches. */
+ *  `fetchLatestFolderNode` does for a single known folder. Queries kind 4290
+ *  and post-filters to folder-discriminated nodes (`z:folder`). Returns [] for
+ *  a blank name or no matches. */
 export async function resolveTagCandidates(name: string, urls: string[]): Promise<TagCandidate[]> {
   const trimmed = name.trim();
   if (!trimmed) return [];
-  const [modern, legacy] = await Promise.all([
-    sampleRelays(urls, { kinds: [TRACE_NODE_KIND], "#D": [trimmed] }),
-    sampleRelays(urls, { kinds: [FOLDER_TRACE_NODE_KIND], "#D": [trimmed] }),
-  ]);
-  // Merge by event id; post-filter modern (4290) to folder-discriminated nodes.
+  const modern = await sampleRelays(urls, { kinds: [TRACE_NODE_KIND], "#D": [trimmed] });
+  // Merge by event id; post-filter to folder-discriminated nodes.
   const byId = new Map<string, Event>();
   for (const hit of modern.hits) {
     if (hit.event.tags.some((t) => t[0] === "z" && t[1] === "folder")) byId.set(hit.event.id, hit.event);
   }
-  for (const hit of legacy.hits) byId.set(hit.event.id, hit.event);
   const hits = [...byId.values()];
   const byOwner = new Map<string, Event[]>();
   for (const event of hits) {
@@ -4209,7 +5085,7 @@ export async function reconstructLlmCall(node: Event): Promise<ReconstructedCall
     return { reconstructable: false, prompt, llm: parsed.llm, reason: "rule-unresolvable", scope };
   }
   // The manifest lives in the rule trace's `snapshot` body (the rule trace is
-  // a minted span whose body IS the manifest JSON). Unwrap: parse the event
+  // an immutable rule trace whose body IS the manifest JSON). Unwrap: parse the event
   // content, read `snapshot`, parse THAT as the manifest.
   let manifest: { algorithm: string; params: Record<string, unknown> };
   try {
@@ -4246,7 +5122,4 @@ export async function reconstructLlmCall(node: Event): Promise<ReconstructedCall
 
 export {
   FILE_TRACE_NODE_KIND,
-  TRACE_NAME_KIND,
-  FOLDER_TRACE_NODE_KIND,
-  FOLDER_MANIFEST_KIND,
 };

@@ -1,0 +1,25 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import { planDelivery } from "./step-policy.js";
+
+test("Step is unavailable when the trace is current", () => {
+  assert.equal(planDelivery("step", false, "head"), "unavailable");
+});
+
+test("Step records pending work and can create the first node", () => {
+  assert.equal(planDelivery("step", true, "head"), "append-local-step");
+  assert.equal(planDelivery("step", false, ""), "append-local-step");
+});
+
+test("Send appends and distributes pending changes", () => {
+  assert.equal(planDelivery("send", true, "head"), "append-and-send");
+});
+
+test("Send creates the first Step when the trace has no head", () => {
+  assert.equal(planDelivery("send", false, ""), "append-and-send");
+});
+
+test("Send reuses the latest Step when nothing changed", () => {
+  assert.equal(planDelivery("send", false, "head"), "send-latest");
+});

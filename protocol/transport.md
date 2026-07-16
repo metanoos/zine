@@ -1,105 +1,100 @@
 # Transport & Reachability (draft)
 
-Status: draft. Companion to `trace-provenance.md`. This document specifies how
-traces are *reached* across the network — identity, access, and reachability —
-not the trace data model itself (which lives in the provenance protocol).
+Status: draft. This document is authoritative for network identity, access,
+and reachability. `trace-provenance.md` owns the trace data model.
 
-## 1. The single credential
+## 1. Key roles
 
-Every cryptographic fact about a press derives from one secret: the owner's
-**Nostr secp256k1 private key**. Three roles, one key:
+The press has one local keychain and assigns keys to explicit roles. A fresh
+install SHOULD use distinct keys so rotating an author or model voice cannot
+silently change the relay's owner or network address. A migrated installation
+MAY assign one key to several roles to preserve continuity.
 
-| Role | What it is | How it's derived |
+| Role | Responsibility | Rotation posture |
 |---|---|---|
-| **Identity** | The npub (Nostr public key) | secp256k1 — already shipped |
-| **Relay access** | NIP-42 AUTH challenge response | the same secp256k1 key signs kind-22242 |
-| **Reachability** | The .onion address (Tor v3) | HKDF-SHA256 → ed25519 seed (§3) |
+| **NODE** | Relay owner, NIP-42 AUTH signer, source of the primary onion key (§3) | Stable per machine; rotation changes address and ACL owner |
+| **AUTHOR** | Signs trace nodes and publication gestures | May switch between author voices |
+| **MODEL** | Identifies model-produced edits | May switch independently |
+| **DOOR** | Optional additional onion into the same relay | Add before rotating NODE so peers can migrate |
 
-There is no second credential. Lose the Nostr secret, lose the onion. Have the
-Nostr secret, reproduce both identity and reachability on any machine. This
-property — *the onion address is derived from the Nostr key, not an independent
-credential* — is load-bearing: it is what makes identity stable across networks,
-and it is what makes the medium honestly describe itself (your sovereignty is one
-key, not three).
+Each onion is still derived deterministically from its assigned NODE or DOOR
+Nostr key; there is no separately persisted Tor credential. The load-bearing
+invariant is narrower and clearer: **NODE determines relay ownership and the
+primary address; AUTHOR determines who signed a trace.** Implementations MUST
+NOT infer one role from the other.
 
 ## 2. Architecture: access-policy mesh
 
-Each press's relay serves **only that press owner's authored traces**. This is
-not gossip (SSB-style epidemic replication), and not a shared data plane. It is
-an **access-policy mesh**: peers are who may *connect and read*, never what you
-*cache or forward*. You host your words; your peers host theirs; nobody carries
-speech they did not sign.
+Each relay serves **only events authorized by its NODE owner**. The
+NODE-authenticated owner may submit valid events for the press's AUTHOR and
+MODEL keys. An authorized writer may submit only events signed by that writer.
+Peers are read-only. Nothing arrives through gossip or transitive forwarding;
+storing a writer's events is an explicit delegation by the NODE owner.
 
-This is the design the trace protocol was built for. The load-bearing claim of
-`trace-provenance.md` §R1 is that "a cited node must resolve as one fetch against
-a self-contained object" — node self-sufficiency means you never need to cache a
-peer's trace, because any cited node resolves in one bounded fetch from its
-author. Gossip exists to solve a problem this protocol already solved. Adopting
-it would re-import the transitive-replication cost (anti-entropy, dedup,
-backfill, unbounded storage of others' words) that self-sufficiency was designed
-to eliminate, and would re-introduce an attribution-verification seam (§3.6:
-attribution verifies via "a node signed by P reachable from this node via the
-seam edges" — a gossip relay's cached copy is an intermediary that seam has no
-concept of). The access-policy mesh keeps the chain verifiable end-to-end.
+This follows from the trace protocol's self-sufficiency rule: a cited node
+resolves in one bounded fetch from its author. Relays therefore need not cache
+peer traces. Gossip would add anti-entropy, deduplication, backfill, and
+unbounded storage without improving correctness. It would also introduce an
+intermediary that attribution seams do not model. The access-policy mesh keeps
+verification end to end.
 
-**Amplification is citation, not replication.** When you want to amplify a
-peer's work, you publish a `TraceOpinion` (provenance §5) with a high `alpha`
-— a signed, per-author visibility weight — or you cite it in a composite trace
-(§7) or tag it (§6). You do not re-broadcast their content. The relay stays a
-dumb pipe (§5: "the relay stays a dumb pipe — operator-as-chief-curator means an
-operator signing opinions under a known pubkey, never relay-side ranking"), and
-your storage stays your own words only.
+**Amplification is citation, not replication.** To amplify a peer, publish a
+`TraceOpinion` with a high `alpha`, cite the work in a composite trace, or tag
+it. Do not rebroadcast their content. The relay remains a dumb pipe, and local
+storage stays limited to events the NODE policy authorized.
 
 ### Roles
 
 | Pubkey | Connect | Read | Write |
 |---|---|---|---|
-| **Owner** (the manual/pen key) | always | ✅ own authored traces | ✅ |
+| **Owner** (the NODE key) | always | ✅ | ✅ valid events accepted by relay policy |
+| **Writer** (in the ACL) | allowed | ✅ | ✅ only events signed by that writer key |
 | **Peer** (in the ACL) | allowed | ✅ read-only | ❌ |
 | **Unknown** | challenged (NIP-42) | ❌ until authed | ❌ |
 
-Peers are stored in a **private local ACL** (`~/.tracer/peers.json`), never
-published as a Nostr event. The peer list is a security boundary, and a
-security boundary must not be a public artifact. A public kind-3 contact list is
-deferred as a *reader-side discovery feature* that never touches access control —
-it answers "whose recent work do I want to see," a different question from "who
-may connect to my relay."
+The owner, writers, and peers live in a **private local ACL**
+(`~/.tracer/peers.json`), never a public Nostr event. A future kind-3 contact
+list may support reader-side discovery, but it MUST NOT control relay access.
+"Whose work do I follow?" and "who may read my relay?" are different questions.
+
+**Following is local reader preference.** It filters Stacks, Times, and Spaces,
+but grants no access, implies no reciprocity, and is not an attestation. The
+current client stores follows locally. If kind-3 publication is added later, it
+MUST remain separate from `peers.json`: Follows control what I read; Peers
+control who can read me; Writers control who may publish under their own key.
 
 ### Super-peers
 
-A **super-peer** is a durable, always-online relay that holds a replica of *your*
-archive — your second copy for offline readability. It is not a discovery
-platform and not a place you go to read the network. When a peer's desktop is
-offline (laptop closed), their cited traces are still reachable from their
-super-peer. Any NIP-01+NIP-33 relay suffices (provenance §10), including the
-hosted docker-compose relay. Designating one as *your* super-peer is a config
-choice (add it to your relay set with `write: true`); the existing `publishToMany`
-fan-out already replicates every sealed trace there in parallel.
+A **super-peer** is an always-online relay holding a replica of *your published corpus*.
+It keeps cited traces reachable while a desktop is offline; it is not a
+discovery platform or a network reader. Any NIP-01+NIP-33 relay suffices. Add
+one to the relay set with `write: true`; `publishToMany` already fans each
+stepped trace to it.
 
-The super-peer also serves two roles for the rendezvous layer (`rendezvous.md`):
+Two super-peer extensions are planned for the rendezvous layer
+(`rendezvous.md`); neither is implemented by the current prototype:
 
-- **OTS calendar host.** Step's distributed anteriority (provenance §8,
-  `rendezvous.md` §3) stamps every save against Bitcoin via OpenTimestamps.
-  The calendar that aggregates digests and lands them in Bitcoin txs is
-  self-hosted on the super-peer, so save hashes never leave the author's own
-  infra — preserving Step's sovereignty semantics. An OTS calendar is a small
-  service (aggregate digests, batch into one tx, serve proofs); this is a
-  modest addition to the super-peer role, not a new trust boundary.
-- **DHT bootstrap.** The Kademlia DHT (`rendezvous.md` §2.3) needs seed nodes
+- **OTS calendar host.** The prototype currently submits Step ids to a public
+  OpenTimestamps calendar. A configurable self-hosted calendar on the
+  super-peer is the intended sovereignty-preserving deployment, but the
+  protocol must not claim hashes remain on author-owned infrastructure until
+  that configuration exists.
+- **DHT bootstrap.** The planned Kademlia DHT (`rendezvous.md` §2.3) needs seed nodes
   to join. The author's own super-peer(s) serve as bootstrap, keeping the
   network's trust character coherent: you join through the same infra that
-  already holds a replica of your archive.
+  already holds a replica of your published corpus.
 
-The `q`-tag relay hint (provenance §3.1, 3rd slot of the `e` tag) is the network
-primitive: it carries the author's address. It can name the author's `.onion`
-(direct, when their desktop is up) or their super-peer URL (durable). The reader
-tries the onion, falls back to the super-peer. The degradation ladder is
-expressible in a field that ships today.
+The third slot of a `q` or `e` tag carries a relay hint. It can name the
+author's `.onion` while the desktop is online or a durable super-peer URL. A
+reader tries the onion, then the super-peer. The existing field already
+expresses the degradation ladder.
 
-## 3. Onion derivation scheme (normative)
+## 3. NODE/DOOR onion derivation scheme (normative)
 
-The Tor v3 onion address is a deterministic, one-way function of the Nostr
-secp256k1 secret. The seed holder reproduces the onion; an npub-holder cannot.
+A Tor v3 onion address is a deterministic, one-way function of the assigned
+NODE or DOOR secp256k1 secret. The secret holder reproduces the onion; an
+npub-holder cannot. AUTHOR and MODEL keys do not affect reachability unless
+the user explicitly assigns one of those same key records to NODE/DOOR too.
 
 ### 3.1 Derive the ed25519 seed
 
@@ -112,8 +107,9 @@ onionSeed = HKDF-SHA256(
 )
 ```
 
-Per RFC 5869: PRK = HMAC-SHA256(salt, ikm); OKM = HMAC-SHA256(PRK, info || 0x01),
-truncated to 32 bytes. `@noble/hashes/hkdf` implements this directly.
+Per RFC 5869: PRK = HMAC-SHA256(salt, ikm); OKM =
+HMAC-SHA256(PRK, info || 0x01), truncated to 32 bytes.
+`@noble/hashes/hkdf` implements this directly.
 
 The domain-separation strings (`"zine-onion-v1"`, `"tor-ed25519-seed"`) are
 versioned and named so two implementations agree, and so a future scheme change
@@ -130,7 +126,7 @@ clamping step is needed from the caller; `getPublicKey` handles it internally.
 
 ### 3.3 Construct the .onion address (Tor v3)
 
-Per the [Tor v3 onion-service spec](https://gitweb.torproject.org/torspec.git/tree/rend-spec-v3.txt),
+Per the [Tor onion-address encoding specification](https://spec.torproject.org/rend-spec/encoding-onion-addresses.html),
 an onion address is the base32 encoding of a 35-byte payload:
 
 ```
@@ -143,9 +139,8 @@ where the checksum is:
 checksum = SHA3-256(".onion checksum" || pubkey || version)[:2]
 ```
 
-(`".onion checksum"` is the 15-byte ASCII literal, including the leading space
-*after* "checksum"? No — it is the exact bytes `".onion checksum"` with a space
-between "onion" and "checksum".)
+`".onion checksum"` is the exact 15-byte ASCII literal, with one space between
+`onion` and `checksum`.
 
 The 35-byte payload is base32-encoded (RFC 4648, no padding), lowercase, and
 the suffix `.onion` is appended, yielding a 56-character address + `.onion` =
@@ -166,24 +161,24 @@ cleared), the second half unmodified (the prefix/PRF nonce). This is the same
 format libsodium's `crypto_sign_seed_keypair` produces internally. Passing only
 the 32-byte seed fails with "Failed to decode ED25519-V3 key."
 
-The flow: the press derives the seed (§3.1) → expands it to the 64-byte form →
-passes it to the Tor sidecar via the control port → Tor creates the onion
-service in memory → on next launch, re-derived and re-registered. There is no
-`~/.tracer/onion-key` file. The Nostr secret in the keychain is the single
-source; the onion is a projection of it, not a sibling credential.
+The press derives the seed, expands it to 64 bytes, passes it through Tor's
+control port, and receives an in-memory onion service. On the next launch it
+derives and registers the same service again. There is no
+`~/.tracer/onion-key`; the assigned NODE or DOOR secret is the source.
 
-This is the property that makes identity portable across networks: the same
-secret, on a new machine, reproduces the same identity *and* the same reachability.
+This makes a door portable across networks: the same assigned secret, on a new
+machine, reproduces the same address. It does not collapse author identity,
+relay ownership, and reachability into one protocol role.
 
 ## 4. The degradation ladder
 
-| Rung | Transport | Identity | Reachability | Privacy |
+| Rung | Transport | NODE identity | Reachability | Privacy |
 |---|---|---|---|---|
 | 1 (default) | Clearnet relay | npub (invariant) | requires IP/URL known | none |
 | 2 | Tor onion service | npub (invariant) | stable .onion, inbound | metadata privacy |
 | 3 | Super-peer replica | npub (invariant) | durable, always online | none (clearnet) |
 
-Identity (the npub) is **invariant across all rungs** — the load-bearing fact.
+The NODE npub is **invariant across all rungs** — the load-bearing fact.
 If a corporate firewall drops Tor handshakes, the press falls back to rung 1 or
 3 and *keeps its identity*; it loses metadata privacy (rung 1) or durability
 (rung 3 vs. 2), not sovereignty. The trade is always reachability/privacy, never
@@ -200,20 +195,23 @@ is the listener. Everyone authenticates — including the owner.
 
 ## 5. Access control mechanics (NIP-42)
 
-khatru cannot reject a WebSocket *connection* by pubkey — at connection-acceptance
-time, the client's pubkey is unknown (it arrives later, via the NIP-42 AUTH
-challenge/response). So the allowlist gates at the event/filter level, not the
-connection level:
+khatru cannot reject a WebSocket connection by pubkey because NIP-42 reveals
+the key only after connection. The allowlist therefore gates events and
+filters:
 
-- **`RejectEvent`**: if `GetAuthed(ctx)` is not the owner → reject with
-  `"auth-required: peers-only"` (the `"auth-required:"` prefix triggers khatru
-  to send the AUTH challenge). Peers are read-only, so an authed peer's
-  write attempt is rejected without the challenge prefix.
+- **`RejectEvent`**: an unauthenticated caller receives an `"auth-required:"`
+  challenge. The NODE owner may write under relay policy. A listed writer may
+  write only when the event's `pubkey` matches the authenticated writer key.
+  Peers are read-only, so an authenticated peer's write is rejected without a
+  second challenge.
 - **`RejectFilter` / `RejectCountFilter`**: if `GetAuthed(ctx)` is empty → reject
-  with `"auth-required:"`. If authed as owner or peer → allow reads.
+  with `"auth-required:"`. If authenticated as owner, writer, or peer → allow
+  reads.
 
-The owner is the manual (pen) key. `peers.json`'s `owner` field must match the
-manual key's pubkey, or the owner cannot write to their own relay.
+The owner is the stable NODE key, not the current AUTHOR or MODEL key.
+`peers.json`'s `owner` field must match the NODE pubkey or the press cannot
+authenticate as relay owner. Writer entries remain distinct author identities;
+the write gate never lets a writer impersonate another key.
 
 ### What changed in the relay's security posture
 
@@ -233,10 +231,9 @@ boundary, not friction. This is the change from "embedded server for one" to
 - **Iroh/libp2p direct sync.** An optional P2P fast lane for when two presses are
   mutually online — a latency/privacy optimization, not a correctness
   requirement (self-sufficiency §R1 makes it unnecessary for correctness).
-  The libp2p dependency is now also used by the rendezvous layer
-  (`rendezvous.md` §2.2: Kademlia DHT in the Rust backend); a direct-sync
-  fast lane would reuse that same libp2p transport. Deferred as an
-  optimization, not blocked on a missing dependency.
+  The planned rendezvous DHT would introduce libp2p in the Rust backend
+  (`rendezvous.md` §2.2); a direct-sync fast lane could later reuse it. Both
+  are deferred and the dependency is not present today.
 - **Peer-list portability across devices.** The private local ACL is per-device.
   Multi-device sync of the peer list (not the key — that's NIP-46's job) is
-  unsettled; a sealed trace on the owner's own relay is the likely vehicle.
+  unsettled; a stepped trace on the owner's own relay is the likely vehicle.

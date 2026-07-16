@@ -1,11 +1,11 @@
 /**
- * The Times view — zines on this relay, ranked by metric per unit time.
+ * The Times view — the temporal projection of the shared social query.
  *
  * The ranked unit is the ZINE (folder), not the tag or the file name. For the
- * active time window (24h / 7d / 30d / all), every FileTraceNode the read
- * relays hold is grouped by its source folder and each zine is ranked by the
- * selected metric — activity (seals), citations, recency, or voices (distinct
- * authors, a liveness signal). A seals-per-bucket chart above the leaderboard
+ * active time window (24h / 7d / 30d / all), every matching FileTraceNode the
+ * configured read relays hold is grouped by its source folder and ranked by the
+ * selected metric — activity (steps), citations, recency, or voices (distinct
+ * authors, a liveness signal). A steps-per-bucket chart above the leaderboard
  * stays as a relay-pulse overview; it's zine-agnostic by construction.
  *
  * This reframes the old Times, which ranked tags and file basenames across
@@ -18,19 +18,18 @@
  * Stacks.
  *
  * Metrics map to the protocol (trace-provenance.md):
- *   - activity   — #t=[tag] saves (seal events) in window (default). Formerly
- *     the tag-activity metric; now the zine's seal count.
+ *   - activity   — #t=[tag] saves (step events) in window (default). Formerly
+ *     the tag-activity metric; now the zine's step count.
  *   - citations  — sum of q-tag counts (deliberate reuse) on the zine's events.
- *   - recency    — rank by the zine's last-seen seal time.
+ *   - recency    — rank by the zine's last-seen step time.
  *   - voices     — distinct signing pubkeys (authors) on the zine's events.
  *
- * Above the leaderboard, the stacked chart plots **minted traces being cited
- * over time**: each band is one minted span, and a band's thickness in a time
- * slice = how many events sealed in that slice cited that span (its `q` tags).
- * Only minted spans (`resolveNodeName` → `kind: "span"`) are plotted, capped at
- * the top 6 by inbound activity plus an "other" band — the long tail of
- * sparsely-cited spans is rolled up so the stack stays readable and name
- * resolution stays bounded.
+ * Above the leaderboard, the chart plots **trace usage over time**. Ordinary
+ * social `q` citations (explicit brackets, tacit tags, replies) and lineage
+ * edges (`forked-from`, `merge-parent`, `extracted-from`) feed the same inbound
+ * usage series; structural LLM-scope q-tags are excluded. Each band is one
+ * target trace, capped at the top 6 plus an "other" band so the long tail stays
+ * readable. The same values render as independent lines or stacked area.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -39,15 +38,23 @@ import type { Event } from "nostr-tools";
 import { eventMeta, fetchRelayActivity, fetchFolderDisplayName, resolveNodeName } from "./provenance.js";
 import { identityColors, identityForPubkey, identityFromPubkey, type KeyIdentity } from "./keys-store.js";
 import { TimesChart, type StackBucket, type StackLayer, type WindowKey } from "./TimesChart.js";
+import {
+  DEFAULT_SOCIAL_QUERY,
+  authorsForSocialScope,
+  matchesSocialText,
+  socialWindowSince,
+  type SocialQuery,
+} from "./social-query.js";
+import { usageTargets } from "./trace-usage.js";
 
 /** How a band's color is derived.
  *  - "trace" — hash the band's nodeId. A minted trace's nodeId is the sha256 of
  *    its canonical event (content included), so the band owns a stable hue tied
  *    to the trace itself: same span, same color on every reload/device. This is
  *    the trace's *identity* color.
- *  - "voice" — the minter's *published* voice identity (kind-34292), so spans
- *    from the same author share the author's chosen colors and the stack reads
- *    as provenance — which voices minted what. Falls back to the pubkey hash
+ *  - "voice" — the target trace author's *published* voice identity
+ *    (kind-34292), so traces from the same author share the author's chosen
+ *    colors. Falls back to the pubkey hash
  *    when no declaration is on the relays (identityForPubkey handles that). */
 type ColorMode = "trace" | "voice";
 
@@ -60,17 +67,16 @@ type ColorMode = "trace" | "voice";
 function colorForNode(
   id: string | null,
   mode: ColorMode,
-  minterIdentity: KeyIdentity | undefined,
+  authorIdentity: KeyIdentity | undefined,
 ): string {
   if (id === null) return "var(--rule-strong)";
-  const identity = mode === "voice" ? minterIdentity ?? identityFromPubkey(id) : identityFromPubkey(id);
+  const identity = mode === "voice" ? authorIdentity ?? identityFromPubkey(id) : identityFromPubkey(id);
   return identityColors(identity, 1).fg;
 }
 /** Max bands plotted before rolling the rest into "other". */
 const MAX_LAYERS = 6;
 /** Cap on resolveNodeName calls per window — the long tail barely registers, so
- *  we only ever resolve the busiest cited nodes (kept over files too, since we
- *  need kind to tell span from file, and now the minter pubkey for voice mode). */
+ *  we only ever resolve the busiest target nodes and their author pubkeys. */
 const RESOLVE_CAP = 20;
 
 type Metric = "activity" | "citations" | "recency" | "voices";
@@ -81,13 +87,15 @@ interface ZineStat {
   folderId: string;
   /** Resolved display name (manifest first-member filename, else id prefix). */
   name: string;
-  /** Seal events in the window carrying this zine — the "activity" metric. */
-  seals: number;
+  /** Step events in the window carrying this zine — the "activity" metric. */
+  steps: number;
   /** Sum of q-tag counts on the zine's events in window. */
   citations: number;
   /** Distinct signing pubkeys — the "voices" liveness metric. */
   voices: Set<string>;
-  /** Most recent sealedAt (ms) among the zine's events in window. */
+  /** Author tags observed in the window, used by the shared text query. */
+  tags: Set<string>;
+  /** Most recent steppedAt (ms) among the zine's events in window. */
   lastSeenMs: number;
 }
 
@@ -95,8 +103,7 @@ interface Aggregation {
   zines: ZineStat[];
   /** The time buckets the chart stacks against (label-only + bounds). */
   buckets: StackBucket[];
-  /** Per cited nodeId, a count array indexed parallel to `buckets`. Built from
-   *  every in-window event's `q` targets — inbound citation volume per trace. */
+  /** Per used nodeId, a count array indexed parallel to `buckets`. */
   perNode: Map<string, number[]>;
 }
 
@@ -142,17 +149,19 @@ function aggregate(events: Event[], window: WindowKey): Aggregation {
       stat = {
         folderId: meta.folderId,
         name: meta.folderId.slice(0, 8),
-        seals: 0,
+        steps: 0,
         citations: 0,
         voices: new Set(),
+        tags: new Set(),
         lastSeenMs: 0,
       };
       byFolder.set(meta.folderId, stat);
     }
-    stat.seals++;
+    stat.steps++;
     stat.citations += meta.citationCount;
     stat.voices.add(event.pubkey);
-    if (meta.sealedAtMs > stat.lastSeenMs) stat.lastSeenMs = meta.sealedAtMs;
+    for (const tag of meta.userTags) stat.tags.add(tag);
+    if (meta.steppedAtMs > stat.lastSeenMs) stat.lastSeenMs = meta.steppedAtMs;
   }
 
   // Build the time buckets: one per bucketSecs span covering [earliest, now].
@@ -176,10 +185,8 @@ function aggregate(events: Event[], window: WindowKey): Aggregation {
     return i >= 0 && i < buckets.length ? i : -1;
   };
 
-  // Per-node inbound citations: for each in-window event, every `q` target it
-  // cites increments that target's count in the event's bucket. A node cited
-  // multiple times by one event still counts once per cite (citationCount is
-  // the q-tag frequency; here we walk the raw targets).
+  // Per-node inbound usage: ordinary social q targets plus provenance lineage
+  // targets. usageTargets excludes model-scope q edges and dedupes per event.
   const perNode = new Map<string, number[]>();
   const ensure = (id: string) => {
     let arr = perNode.get(id);
@@ -193,7 +200,7 @@ function aggregate(events: Event[], window: WindowKey): Aggregation {
     const meta = eventMeta(event);
     const i = bucketIdx(meta.createdAtSec);
     if (i < 0) continue;
-    for (const target of meta.citationTargets) ensure(target)[i]++;
+    for (const target of usageTargets(event)) ensure(target)[i]++;
   }
 
   return { zines: [...byFolder.values()], buckets, perNode };
@@ -202,13 +209,13 @@ function aggregate(events: Event[], window: WindowKey): Aggregation {
 function rank(zines: ZineStat[], metric: Metric): ZineStat[] {
   const sorted = [...zines];
   if (metric === "citations") {
-    sorted.sort((a, b) => b.citations - a.citations || b.seals - a.seals);
+    sorted.sort((a, b) => b.citations - a.citations || b.steps - a.steps);
   } else if (metric === "recency") {
     sorted.sort((a, b) => b.lastSeenMs - a.lastSeenMs);
   } else if (metric === "voices") {
-    sorted.sort((a, b) => b.voices.size - a.voices.size || b.seals - a.seals);
+    sorted.sort((a, b) => b.voices.size - a.voices.size || b.steps - a.steps);
   } else {
-    sorted.sort((a, b) => b.seals - a.seals || b.lastSeenMs - a.lastSeenMs); // activity
+    sorted.sort((a, b) => b.steps - a.steps || b.lastSeenMs - a.lastSeenMs); // activity
   }
   return sorted;
 }
@@ -231,9 +238,10 @@ function barPctForRecency(seenMs: number, edgeMs: number, newestMs: number): num
   return Math.max(8, Math.min(100, frac * 100));
 }
 
-export function TimesView() {
-  const [window, setWindow] = useState<WindowKey>("7d");
+export function TimesView({ query = DEFAULT_SOCIAL_QUERY }: { query?: SocialQuery } = {}) {
+  const window: WindowKey = query.window;
   const [metric, setMetric] = useState<Metric>("activity");
+  const [chartMode, setChartMode] = useState<"lines" | "stacked">("stacked");
   const [refreshKey, setRefreshKey] = useState(0);
   const [events, setEvents] = useState<Event[]>([]);
   const [status, setStatus] = useState<{ state: "idle" | "loading" | "ready" | "error"; msg?: string }>(
@@ -249,8 +257,10 @@ export function TimesView() {
   useEffect(() => {
     let cancelled = false;
     setStatus({ state: "loading" });
-    const since = window === "all" ? undefined : Math.floor(Date.now() / 1000) - WINDOW_SECS[window];
-    fetchRelayActivity({ since })
+    (async () => {
+      const authors = await authorsForSocialScope(query.scope);
+      return fetchRelayActivity({ since: socialWindowSince(query.window), authors });
+    })()
       .then((rows) => {
         if (cancelled) return;
         setEvents(rows);
@@ -263,15 +273,15 @@ export function TimesView() {
     return () => {
       cancelled = true;
     };
-  }, [window, refreshKey]);
+  }, [query.scope, query.window, refreshKey]);
 
-  const agg = useMemo(() => aggregate(events, window), [events, window]);
+  const baseAgg = useMemo(() => aggregate(events, window), [events, window]);
 
   // Resolve display names for the zines in view (bounded by the window's zine
   // count). Best-effort: a failed fetch leaves the id-prefix placeholder.
   useEffect(() => {
     let cancelled = false;
-    const folderIds = agg.zines.map((z) => z.folderId);
+    const folderIds = baseAgg.zines.map((z) => z.folderId);
     if (folderIds.length === 0) return;
     Promise.all(
       folderIds.map((id) => fetchFolderDisplayName(id).catch(() => id.slice(0, 8))),
@@ -284,7 +294,30 @@ export function TimesView() {
     return () => {
       cancelled = true;
     };
-  }, [agg.zines]);
+  }, [baseAgg.zines]);
+
+  // Search is the third shared bound. Resolve names against the full scoped
+  // window first, then recompute both the leaderboard and chart from only the
+  // matching folders so Stacks/Times/Spaces remain intersections of one query.
+  const visibleFolderIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const zine of baseAgg.zines) {
+      if (matchesSocialText(query.text, {
+        folderId: zine.folderId,
+        name: names.get(zine.folderId),
+        tags: [...zine.tags],
+      })) ids.add(zine.folderId);
+    }
+    return ids;
+  }, [baseAgg.zines, names, query.text]);
+  const visibleEvents = useMemo(
+    () => events.filter((event) => {
+      const folderId = eventMeta(event).folderId;
+      return !!folderId && visibleFolderIds.has(folderId);
+    }),
+    [events, visibleFolderIds],
+  );
+  const agg = useMemo(() => aggregate(visibleEvents, window), [visibleEvents, window]);
 
   const ranked = useMemo(() => rank(agg.zines, metric), [agg.zines, metric]);
   // Bar scale tracks the displayed metric.
@@ -295,7 +328,7 @@ export function TimesView() {
         ? z.voices.size
         : metric === "recency"
           ? z.lastSeenMs
-          : z.seals;
+          : z.steps;
   // For recency, "max" is the latest lastSeenMs; bar width is recency rank.
   const maxCount = ranked.reduce((m, z) => Math.max(m, metricValue(z)), 0);
   // Recency bar edge: the window's start (bounded windows), or the oldest zine
@@ -307,50 +340,41 @@ export function TimesView() {
     }
     return Date.now() - WINDOW_SECS[window] * 1000;
   }, [ranked, maxCount, window]);
-  const totalEvents = agg.zines.reduce((s, z) => s + z.seals, 0);
-  // Total inbound citations across all cited nodes this window — the stack sum.
-  const totalCites = useMemo(
+  const totalEvents = agg.zines.reduce((s, z) => s + z.steps, 0);
+  // Total inbound relations across all used nodes this window — the stack sum.
+  const totalUses = useMemo(
     () => Array.from(agg.perNode.values()).reduce((s, arr) => s + arr.reduce((a, b) => a + b, 0), 0),
     [agg.perNode],
   );
 
-  // Build the chart layers from per-node inbound citation counts. Only minted
-  // spans are plotted; we resolve the top RESOLVE_CAP busiest cited node ids
-  // (kept over files too — kind is the only way to tell span from file), keep
-  // the spans among them, plot the top MAX_LAYERS, and roll the rest into one
-  // "other" band. Names/kind start unresolved (placeholder layers render the
-  // top node ids by raw count) and patch in as the cached resolveNodeName calls
-  // settle, mirroring the zine-name pattern.
+  // Build chart layers from per-node inbound usage. Resolve names only for the
+  // busiest bounded prefix, plot the top MAX_LAYERS, and roll every remaining
+  // target into one "other" band without requiring a relay lookup per target.
   const [layers, setLayers] = useState<StackLayer[]>([]);
   useEffect(() => {
     let cancelled = false;
-    // Rank all cited node ids by total inbound count; resolve only the busiest.
+    // Rank every used target by total inbound count.
     const ranked = Array.from(agg.perNode.entries())
       .map(([id, arr]) => [id, arr.reduce((a, b) => a + b, 0)] as const)
       .filter(([, c]) => c > 0)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, RESOLVE_CAP);
+      .sort((a, b) => b[1] - a[1]);
     if (ranked.length === 0) {
       setLayers([]);
       return;
     }
     const allIds = ranked.map(([id]) => id);
+    const resolveIds = allIds.slice(0, RESOLVE_CAP);
     const build = (
       names: Map<string, string>,
-      kinds: Map<string, "file" | "span">,
-      minterIdentities: Map<string, KeyIdentity>,
+      authorIdentities: Map<string, KeyIdentity>,
     ): StackLayer[] => {
-      // Kinds unknown yet (first pass) → treat every id as a span so the
-      // placeholder stack renders the top ids by raw count; it refines to
-      // spans-only once kinds resolve.
-      const spans = allIds.filter((id) => (kinds.get(id) ?? "span") === "span");
-      const top = spans.slice(0, MAX_LAYERS).map((id) => ({
+      const top = allIds.slice(0, MAX_LAYERS).map((id) => ({
         id,
         name: names.get(id) ?? id.slice(0, 8),
-        color: colorForNode(id, colorMode, minterIdentities.get(id)),
+        color: colorForNode(id, colorMode, authorIdentities.get(id)),
         values: agg.perNode.get(id) ?? [],
       }));
-      const restIds = spans.slice(MAX_LAYERS);
+      const restIds = allIds.slice(MAX_LAYERS);
       if (restIds.length > 0) {
         const merged = new Array(agg.buckets.length).fill(0);
         for (const id of restIds) {
@@ -367,35 +391,33 @@ export function TimesView() {
       return top;
     };
     const empty = new Map();
-    setLayers(build(empty, empty, empty));
-    Promise.all(allIds.map(async (id) => [id, await resolveNodeName(id)] as const)).then(async (resolved) => {
+    setLayers(build(empty, empty));
+    Promise.all(resolveIds.map(async (id) => [id, await resolveNodeName(id)] as const)).then(async (resolved) => {
       if (cancelled) return;
       const names = new Map<string, string>();
-      const kinds = new Map<string, "file" | "span">();
-      const minterPubkeys = new Map<string, string>(); // nodeId → minter pubkey
+      const authorPubkeys = new Map<string, string>(); // nodeId → target author
       for (const [id, chip] of resolved) {
         names.set(id, chip?.name ?? id.slice(0, 8));
-        if (chip?.kind) kinds.set(id, chip.kind);
-        if (chip?.pubkey) minterPubkeys.set(id, chip.pubkey);
+        if (chip?.pubkey) authorPubkeys.set(id, chip.pubkey);
       }
-      // Voice mode needs each minter's *published* identity (kind-34292), an
+      // Voice mode needs each target author's *published* identity (kind-34292), an
       // async fetch. Trace mode skips this — it hashes the nodeId directly.
-      // Build once now (names + kinds refined, voice colors still hashed), then
+      // Build once now (names refined, voice colors still hashed), then
       // again once identities resolve so the bands adopt the authors' colors.
-      setLayers(build(names, kinds, empty));
+      setLayers(build(names, empty));
       if (colorMode !== "voice") return;
-      const uniqueMinters = [...new Set(minterPubkeys.values())];
+      const uniqueAuthors = [...new Set(authorPubkeys.values())];
       const byPubkey = new Map<string, KeyIdentity>();
       await Promise.all(
-        uniqueMinters.map(async (pk) => byPubkey.set(pk, await identityForPubkey(pk))),
+        uniqueAuthors.map(async (pk) => byPubkey.set(pk, await identityForPubkey(pk))),
       );
       if (cancelled) return;
-      const minterIdentities = new Map<string, KeyIdentity>();
-      for (const [id, pk] of minterPubkeys) {
+      const authorIdentities = new Map<string, KeyIdentity>();
+      for (const [id, pk] of authorPubkeys) {
         const ident = byPubkey.get(pk);
-        if (ident) minterIdentities.set(id, ident);
+        if (ident) authorIdentities.set(id, ident);
       }
-      setLayers(build(names, kinds, minterIdentities));
+      setLayers(build(names, authorIdentities));
     });
     return () => {
       cancelled = true;
@@ -405,9 +427,9 @@ export function TimesView() {
   if (status.state === "ready" && totalEvents === 0 && agg.zines.length === 0) {
     return (
       <section className="view-placeholder times-view">
-        <p className="view-placeholder-blurb">No events on this relay in the {window} window yet.</p>
+        <p className="view-placeholder-blurb">No reachable events match the shared {window} query yet.</p>
         <p className="times-empty">
-          Publish to the relay — edit a file in Press, or widen the window to "all" — and activity will appear here.
+          Send a trace, widen the window, or change the social scope; aggregates only include configured read relays.
         </p>
       </section>
     );
@@ -418,25 +440,11 @@ export function TimesView() {
       <header className="times-header">
         <div>
           <p className="view-placeholder-blurb">
-            Zines on this relay ·{" "}
+            Zines matching the shared query ·{" "}
             <span className="times-folder">
               {agg.zines.length} zine{agg.zines.length === 1 ? "" : "s"}
             </span>
           </p>
-        </div>
-        <div className="times-window-pills" role="tablist" aria-label="Time window">
-          {(["24h", "7d", "30d", "all"] as WindowKey[]).map((w) => (
-            <button
-              key={w}
-              type="button"
-              role="tab"
-              aria-selected={window === w}
-              className={"times-pill" + (window === w ? " active" : "")}
-              onClick={() => setWindow(w)}
-            >
-              {w}
-            </button>
-          ))}
         </div>
       </header>
 
@@ -464,10 +472,26 @@ export function TimesView() {
                 title={
                   m === "trace"
                     ? "Color each band by the trace's own identity (nodeId hash)"
-                    : "Color each band by its minter's voice (author pubkey hash)"
+                    : "Color each band by its target trace author's voice"
                 }
               >
                 {m}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="times-color-toggle" role="group" aria-label="Chart form">
+          <span className="times-color-toggle-label">chart</span>
+          <div className="times-window-pills">
+            {(["lines", "stacked"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                aria-pressed={chartMode === mode}
+                className={"times-pill" + (chartMode === mode ? " active" : "")}
+                onClick={() => setChartMode(mode)}
+              >
+                {mode}
               </button>
             ))}
           </div>
@@ -488,11 +512,11 @@ export function TimesView() {
 
       <div className="times-chart">
         <p className="times-chart-caption">
-          minted traces cited · {totalCites} citation{totalCites === 1 ? "" : "s"}
+          trace usage · {totalUses} relation{totalUses === 1 ? "" : "s"}
         </p>
-        <TimesChart buckets={agg.buckets} layers={layers} window={window} />
+        <TimesChart buckets={agg.buckets} layers={layers} window={window} mode={chartMode} />
         {layers.length > 0 && (
-          <ul className="times-chart-legend legend" aria-label="Minted traces in chart">
+          <ul className="times-chart-legend legend" aria-label="Traces in usage chart">
             {layers.map((l) => (
               <li key={l.id} className="legend-item">
                 <span className="swatch-dot" style={{ background: l.color }} />
@@ -530,7 +554,7 @@ export function TimesView() {
                       ? `${z.voices.size} voice${z.voices.size === 1 ? "" : "s"}`
                       : metric === "citations"
                         ? `${z.citations} cite${z.citations === 1 ? "" : "s"}`
-                        : `${z.seals} seal${z.seals === 1 ? "" : "s"}`}
+                        : `${z.steps} step${z.steps === 1 ? "" : "s"}`}
                   </span>
                   <span className="times-tag-time">{timeAgo(z.lastSeenMs)}</span>
                 </li>

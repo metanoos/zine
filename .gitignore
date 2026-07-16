@@ -35,3 +35,4 @@ data/
 # --- ad-hoc client test scripts (not part of the suite) ---
 apps/client/*-test.mjs
 apps/client/ws-test.mjs
+.gstack/

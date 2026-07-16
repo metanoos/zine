@@ -30,12 +30,27 @@ import {
   patchProvider,
   removeProvider,
   saveProviders,
+  type ModelPersonality,
+  type ModelVerbosity,
   type ProviderConfig,
   type ProviderProtocol,
+  type ReasoningEffort,
 } from "./models-store.js";
 import { complete } from "./llm.js";
+import { isAnthropicEffort } from "./model-config.js";
 
 type TestState = Record<string, { state: "idle" | "testing" | "ok" | "error"; msg?: string }>;
+
+const OPENAI_EFFORTS: ReasoningEffort[] = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+const ANTHROPIC_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
 
 export function ModelsView({
   onProvidersChange,
@@ -74,7 +89,7 @@ export function ModelsView({
 
   function updateField(id: string, patch: Partial<Omit<ProviderConfig, "id">>) {
     // patchProvider already persists; refresh local state from its return and
-    // push to App so the topbar model select shows the card label live.
+    // push to App so the action-palette model select shows the card label live.
     const next = patchProvider(id, patch);
     setProviders(next);
     onProvidersChange?.(next);
@@ -134,6 +149,12 @@ export function ModelsView({
         {providers.map((p) => {
           const t = test[p.id] ?? { state: "idle" };
           const isLocal = p.baseUrl.startsWith("http://localhost") || p.baseUrl.startsWith("http://127.");
+          const efforts = p.protocol === "anthropic" ? ANTHROPIC_EFFORTS : OPENAI_EFFORTS;
+          const selectedEffort =
+            p.protocol === "anthropic" && !isAnthropicEffort(p.reasoningEffort)
+              ? ""
+              : p.reasoningEffort ?? "";
+          const temperatureMax = p.protocol === "anthropic" || p.baseUrl.includes("api.z.ai") ? 1 : 2;
           return (
             <div
               key={p.id}
@@ -227,6 +248,105 @@ export function ModelsView({
                   />
                 </label>
               </div>
+              <details className="models-advanced">
+                <summary>
+                  <span>generation options</span>
+                  <span className="models-advanced-hint">provider defaults unless set</span>
+                </summary>
+                <div className="models-fields models-advanced-fields">
+                  <label
+                    className="models-field"
+                    title="Zine adds a system style instruction; personality is not a portable provider API field."
+                  >
+                    <span>personality</span>
+                    <select
+                      value={p.personality ?? ""}
+                      onChange={(e) => updateField(p.id, {
+                        personality: (e.target.value || undefined) as ModelPersonality | undefined,
+                      })}
+                    >
+                      <option value="">model default</option>
+                      <option value="none">none</option>
+                      <option value="friendly">friendly</option>
+                      <option value="pragmatic">pragmatic</option>
+                    </select>
+                  </label>
+                  <label className="models-field" title="Only sent when set and supported by the selected model.">
+                    <span>reasoning effort</span>
+                    <select
+                      value={selectedEffort}
+                      onChange={(e) => updateField(p.id, {
+                        reasoningEffort: (e.target.value || undefined) as ReasoningEffort | undefined,
+                      })}
+                    >
+                      <option value="">provider default</option>
+                      {efforts.map((effort) => (
+                        <option key={effort} value={effort}>{effort}</option>
+                      ))}
+                    </select>
+                  </label>
+                  {p.protocol === "openai" && (
+                    <label className="models-field" title="OpenAI-compatible output detail control; omitted by default.">
+                      <span>verbosity</span>
+                      <select
+                        value={p.verbosity ?? ""}
+                        onChange={(e) => updateField(p.id, {
+                          verbosity: (e.target.value || undefined) as ModelVerbosity | undefined,
+                        })}
+                      >
+                        <option value="">provider default</option>
+                        <option value="low">low</option>
+                        <option value="medium">medium</option>
+                        <option value="high">high</option>
+                      </select>
+                    </label>
+                  )}
+                  <label className="models-field">
+                    <span>temperature</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={temperatureMax}
+                      step={0.1}
+                      value={p.temperature ?? ""}
+                      onChange={(e) => updateField(p.id, {
+                        temperature: Number.isFinite(e.currentTarget.valueAsNumber)
+                          ? e.currentTarget.valueAsNumber
+                          : undefined,
+                      })}
+                      placeholder="provider default"
+                    />
+                  </label>
+                  <label className="models-field">
+                    <span>max output tokens</span>
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={p.maxTokens ?? ""}
+                      onChange={(e) => updateField(p.id, {
+                        maxTokens: Number.isFinite(e.currentTarget.valueAsNumber)
+                          ? Math.max(1, Math.floor(e.currentTarget.valueAsNumber))
+                          : undefined,
+                      })}
+                      placeholder="operation default"
+                    />
+                  </label>
+                  <label
+                    className="models-field models-field-wide"
+                    title="Prepended as a provider-level system instruction for both ordinary ops and agent runs."
+                  >
+                    <span>instructions</span>
+                    <textarea
+                      value={p.instructions ?? ""}
+                      onChange={(e) => updateField(p.id, { instructions: e.target.value || undefined })}
+                      placeholder="optional model-specific instructions or personality…"
+                      rows={3}
+                      spellCheck={true}
+                    />
+                  </label>
+                </div>
+              </details>
               <div className="models-card-footer">
                 <button
                   type="button"

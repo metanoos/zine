@@ -5,10 +5,9 @@
  *
  *   - **Desktop** (`workspace.ts`): a real folder on disk is the private
  *     mirror; the relay is the sync/publish target. Every mutation writes to
- *     disk first, then seals a relay node.
- *   - **Webapp** (`workspace-relay.ts`): no disk. "Home" is a folder on the
- *     hosted relay — reads reconstruct from chains, writes publish events
- *     directly.
+ *     disk first, then steps a relay node.
+ *   - **Webapp/headless** (`workspace-local.ts`): localStorage is the immediate
+ *     source of truth; relay pull/push runs as background synchronization.
  *
  * The two agree because the protocol is already folder-keyed, not
  * author-keyed: a kind-4290 chain is walked by `prev` links (any signer can
@@ -17,9 +16,8 @@
  * a desktop-created folder's chain — the chain just becomes multi-author,
  * which `reconstructFromChain`/`fetchChain` already handle.
  *
- * The relay is authoritative: on attach/boot both backends read the latest
- * relay manifest as the file list of record, so edits from one client are
- * visible to the other on next open.
+ * Both backends use the same protocol and reconcile through the relay without
+ * making editor availability depend on a network round trip.
  */
 
 // --- shared editor types ------------------------------------------------
@@ -33,7 +31,110 @@
 // bridge owns the shape) and carried as an optional on FileState. Type-only,
 // so the storage interface doesn't take a runtime dep on nostr-tools.
 
-import type { ContentCite, SampleEventMeta } from "./provenance.js";
+import type { KEdit, SampleEventMeta } from "./provenance.js";
+
+/**
+ * Append-efficient in-memory KEdit log.
+ *
+ * Each editor transaction contributes one immutable chunk and points at the
+ * previous tail, so appending is O(1). The ordered array needed by the wire or
+ * crash pad is materialized only at those boundaries. This avoids copying the
+ * entire unstepped history on every keystroke.
+ */
+export interface KEditLog {
+  readonly length: number;
+  readonly tail: KEditChunk | null;
+}
+
+interface KEditChunk {
+  readonly edits: readonly KEdit[];
+  readonly previous: KEditChunk | null;
+}
+
+export const EMPTY_KEDIT_LOG: KEditLog = Object.freeze({ length: 0, tail: null });
+
+export function appendKEditLog(log: KEditLog, edits: readonly KEdit[]): KEditLog {
+  if (edits.length === 0) return log;
+  return {
+    length: log.length + edits.length,
+    tail: { edits, previous: log.tail },
+  };
+}
+
+export function keditLogFromArray(edits: readonly KEdit[]): KEditLog {
+  return edits.length === 0 ? EMPTY_KEDIT_LOG : appendKEditLog(EMPTY_KEDIT_LOG, edits);
+}
+
+export function keditLogToArray(log: KEditLog | undefined): KEdit[] {
+  if (!log || log.length === 0) return [];
+  const chunks: (readonly KEdit[])[] = [];
+  for (let chunk = log.tail; chunk; chunk = chunk.previous) chunks.push(chunk.edits);
+  chunks.reverse();
+  const out: KEdit[] = [];
+  for (const chunk of chunks) out.push(...chunk);
+  return out;
+}
+
+/** The next node-local editor transaction id. A Step resets an empty log to
+ *  zero; a crash-pad restore or an in-flight Step suffix continues after the
+ *  newest captured transaction. Legacy logs without ids safely begin at zero
+ *  because their entries cannot collide with a numeric group. */
+export function nextKEditTx(log: KEditLog): number {
+  const edits = log.tail?.edits;
+  const last = edits && edits.length > 0 ? edits[edits.length - 1] : undefined;
+  const tx = last?.tx;
+  return Number.isSafeInteger(tx) && tx !== undefined && tx >= 0 && tx < Number.MAX_SAFE_INTEGER
+    ? tx + 1
+    : 0;
+}
+
+/** Apply every range in one editor transaction atomically. KEdit offsets share
+ *  the transaction's pre-change coordinate space, so descending splices keep
+ *  lower offsets stable. Equal-offset edits run in reverse iteration order to
+ *  preserve their original insertion order. */
+export function applyKEditTransaction(runs: Run[], edits: readonly KEdit[]): Run[] {
+  const baseLength = flattenRuns(runs).length;
+  const changes = edits.map((edit, index) => {
+    const from = Math.max(0, Math.min(edit.from, baseLength));
+    const to = Math.max(from, Math.min(edit.to, baseLength));
+    return { edit, index, from, to };
+  });
+  changes.sort((a, b) => b.from - a.from || b.to - a.to || b.index - a.index);
+
+  let next = runs;
+  for (const { edit, from, to } of changes) {
+    next = spliceRuns(next, from, to, edit.text, edit.voice);
+  }
+  return next;
+}
+
+/**
+ * Remove an already-stepped prefix while preserving edits appended during the
+ * asynchronous Step. Prefix identity is structural: `appendKEditLog` keeps the
+ * prior tail by reference, so we only drain when `stepped` is genuinely an
+ * ancestor of `current`. An unrelated log is returned untouched rather than
+ * risking lost edits.
+ *
+ * Work is proportional to the post-Step suffix, not the full historical log.
+ */
+export function dropKEditLogPrefix(current: KEditLog, stepped: KEditLog): KEditLog {
+  if (stepped.length === 0) return current;
+  if (current.tail === stepped.tail) return EMPTY_KEDIT_LOG;
+
+  const suffixNewestFirst: (readonly KEdit[])[] = [];
+  let cursor = current.tail;
+  while (cursor && cursor !== stepped.tail) {
+    suffixNewestFirst.push(cursor.edits);
+    cursor = cursor.previous;
+  }
+  if (cursor !== stepped.tail) return current;
+
+  let suffix = EMPTY_KEDIT_LOG;
+  for (let i = suffixNewestFirst.length - 1; i >= 0; i--) {
+    suffix = appendKEditLog(suffix, suffixNewestFirst[i]);
+  }
+  return suffix;
+}
 
 export interface Run {
   voice: string;
@@ -56,14 +157,101 @@ export function flattenRuns(runs: Run[]): string {
   return runs.map((r) => r.text).join("");
 }
 
+/** Append one run while preserving provenance seams. Adjacent runs may only
+ * collapse when both their voice and corroborating source are identical. */
+function appendRun(out: Run[], run: Run): void {
+  if (run.text.length === 0) return;
+  const last = out[out.length - 1];
+  if (last && last.voice === run.voice && last.src === run.src) {
+    last.text += run.text;
+  } else {
+    out.push({ ...run });
+  }
+}
+
+/** Slice a run list using the UTF-16 offsets used by JavaScript strings and
+ * CodeMirror. Unlike `[...text]`, this keeps astral characters (emoji, some
+ * CJK extensions) aligned with editor transaction positions. */
+function sliceRuns(runs: Run[], from: number, to: number): Run[] {
+  const out: Run[] = [];
+  let cursor = 0;
+  for (const run of runs) {
+    const end = cursor + run.text.length;
+    const overlapFrom = Math.max(from, cursor);
+    const overlapTo = Math.min(to, end);
+    if (overlapTo > overlapFrom) {
+      appendRun(out, {
+        ...run,
+        text: run.text.slice(overlapFrom - cursor, overlapTo - cursor),
+      });
+    }
+    cursor = end;
+    if (cursor >= to) break;
+  }
+  return out;
+}
+
+/** Apply one editor replacement without re-attributing untouched text.
+ * `start`/`end` are UTF-16 offsets into the pre-edit document. Only inserted
+ * text receives `voice`; surviving runs retain both their voice and `src`. */
+export function spliceRuns(
+  runs: Run[],
+  start: number,
+  end: number,
+  insertText: string,
+  voice: string,
+): Run[] {
+  const length = flattenRuns(runs).length;
+  const from = Math.max(0, Math.min(Math.trunc(start), length));
+  const to = Math.max(from, Math.min(Math.trunc(end), length));
+  const out = sliceRuns(runs, 0, from);
+  appendRun(out, { voice, text: insertText });
+  for (const run of sliceRuns(runs, to, length)) appendRun(out, run);
+  return out;
+}
+
+export interface MinimalTextChange {
+  from: number;
+  to: number;
+  insert: string;
+}
+
+/** Find the smallest single replacement that turns `before` into `after`.
+ * Offsets use UTF-16 so the result can be sent directly to CodeMirror and to
+ * `spliceRuns`. Returns null when the strings are identical. */
+export function minimalTextChange(before: string, after: string): MinimalTextChange | null {
+  if (before === after) return null;
+  const maxPrefix = Math.min(before.length, after.length);
+  let from = 0;
+  while (from < maxPrefix && before[from] === after[from]) from++;
+  let oldEnd = before.length;
+  let newEnd = after.length;
+  while (oldEnd > from && newEnd > from && before[oldEnd - 1] === after[newEnd - 1]) {
+    oldEnd--;
+    newEnd--;
+  }
+  return { from, to: oldEnd, insert: after.slice(from, newEnd) };
+}
+
+/** Reconcile one contiguous external rewrite while retaining the unchanged
+ * prefix and suffix runs. This is for metadata rewrites such as changing one
+ * citation id: the id is the current author's gesture, but the quoted/model
+ * prose around it must keep its original voice. */
+export function reconcileRunsText(runs: Run[], nextText: string, voice: string): Run[] {
+  const change = minimalTextChange(flattenRuns(runs), nextText);
+  return change
+    ? spliceRuns(runs, change.from, change.to, change.insert, voice)
+    : runs;
+}
+
 /**
  * The voice (pubkey) that owns the most characters in `[start, end)` of the
  * flattened run list, by total UTF-16 code-unit length. Offsets are clamped to
  * the document bounds and `start >= end` returns `null` (no region → no voice).
  *
- * Used by the seal path to pick a signer that actually matches the *new* text a
- * seal commits, so a node's `event.pubkey` attributes its net-new content
- * truthfully even when the `authors` map is later lost (see sealNow in App.tsx).
+ * Used by the step path to pick a signer that actually matches the *new* text a
+ * step commits, so a node's `event.pubkey` attributes its net-new content
+ * truthfully even when the `authors` map is later lost (see stepFile in App.tsx).
  * Tie-breaking is first-seen-wins (stable across equal-content runs).
  */
 export function dominantVoiceInRegion(
@@ -107,17 +295,10 @@ export function changedRegion(
   prev: string,
   next: string,
 ): { from: number; to: number } | null {
-  if (prev === next) return null;
-  const maxPrefix = Math.min(prev.length, next.length);
-  let start = 0;
-  while (start < maxPrefix && prev[start] === next[start]) start++;
-  let oldEnd = prev.length;
-  let newEnd = next.length;
-  while (oldEnd > start && newEnd > start && prev[oldEnd - 1] === next[newEnd - 1]) {
-    oldEnd--;
-    newEnd--;
-  }
-  return { from: start, to: newEnd };
+  const change = minimalTextChange(prev, next);
+  return change
+    ? { from: change.from, to: change.from + change.insert.length }
+    : null;
 }
 
 export interface FileState {
@@ -129,8 +310,13 @@ export interface FileState {
   kind?: "file" | "folder";
   runs: Run[];
   /** The latest kind-4290 event id for this file (the chain head). Empty
-   * string while a file exists but hasn't been sealed this session. */
+   * string while a file exists but hasn't been stepped this session. */
   nodeId: string;
+  /** Stable trace identity: the genesis kind-4290 event id. Unlike `nodeId`,
+   * this never changes when the trace takes a Step or moves to another path.
+   * Optional for legacy/local records; readers derive and persist it when the
+   * chain is next resolved. */
+  traceId?: string;
   /** User-authored `t` tags for this file (everything after the folder tag,
    *  which is derived from the path and never stored here). */
   tags: string[];
@@ -147,6 +333,50 @@ export interface FileState {
    *  on disk is clean text with no frontmatter). Drives the event-metadata
    *  strip in the editor pane. */
   eventMeta?: SampleEventMeta;
+  /** The in-flight keystroke log since the last step — drained from the
+   *  editor's `keditField` and threaded through `writeFile` on the next step.
+   *  Not part of long-term FileState identity: cleared after every step, and
+   *  mirrored to the crash pad only so an unstepped buffer survives a reload. */
+  kedits?: KEditLog;
+}
+
+export interface FileStepBaseline {
+  content: string;
+  tags: readonly string[];
+  taggedTraces: readonly string[];
+}
+
+/**
+ * Whether a file has working state waiting for Step.
+ *
+ * A newly created empty file has no prior Step baseline yet, but creation alone
+ * is not an edit: it starts with no badge. Content, tag, citation, or KEdit
+ * activity makes a baseline-less file pending immediately. Once a baseline
+ * exists, its stepped state is the comparison source.
+ */
+export function fileHasUnsteppedChanges(
+  file: FileState,
+  baseline: FileStepBaseline | undefined,
+): boolean {
+  if (file.kind === "folder") return false;
+  const content = flattenRuns(file.runs);
+  const tags = file.tags;
+  const taggedTraces = file.taggedTraces ?? [];
+  if (!baseline) {
+    return (
+      content.length > 0 ||
+      tags.length > 0 ||
+      taggedTraces.length > 0 ||
+      (file.kedits?.length ?? 0) > 0
+    );
+  }
+  return (
+    baseline.content !== content ||
+    baseline.tags.length !== tags.length ||
+    baseline.tags.some((tag, index) => tag !== tags[index]) ||
+    baseline.taggedTraces.length !== taggedTraces.length ||
+    baseline.taggedTraces.some((nodeId, index) => nodeId !== taggedTraces[index])
+  );
 }
 
 /** A folder's effective trace-tags: the transitive union of every descendant
@@ -235,24 +465,20 @@ export interface Workspace {
   /** Read a file's current text content. */
   readFile(relativePath: string): Promise<string>;
 
-  /** Persist `content` + seal an edit/import node. Returns the new nodeId, or
+  /** Persist `content` + step an edit/import node. Returns the new nodeId, or
    *  the existing one if nothing changed (content hash + tags both match).
-   *  `signer` overrides the signing key for this seal (per-voice Send/zine);
-   *  omit for the default manual-key posture every auto-seal uses.
+   *  `signer` overrides the signing key for this step (per-voice Send/zine);
+   *  omit for the default manual-key posture used by background Steps.
    *  `runs` is the live per-voice attribution to persist alongside the content
    *  so it survives reload; omitted by callers that have no attribution (e.g.
    *  the LLM "reply" path) or that want a single-run reset. `replyingTo`
-   *  is the sealed node id this write is a reply to (the Reply action's
+   *  is the stepped node id this write is a reply to (the Reply action's
    *  source) — emits a `reply-to` delta + paired `q` tag (spec §reply-to
    *  delta type); omit for every ordinary write. `taggedTraces` are cited-trace
    *  node ids tagged onto this file without a body bracket (the protocol's
    *  `tag-add`); each emits a `q` tag + `tag-add` delta, folded into the same
    *  dedup as body quotes and the reply source so a trace cited more than one
-   *  way never doubles up. Omit for every write that doesn't tag a trace.
-   *  `contentCites` are one-shot rendezvous quotes (rendezvous.md §1): orphan-
-   *  text passages the author is attesting interest in, producing `Q` tags
-   *  keyed on the content hash. Transient — consumed by the next seal, not
-   *  persisted on FileState (unlike `taggedTraces`). Omit for every write. */
+   *  way never doubles up. Omit for every write that doesn't tag a trace. */
   writeFile(
     relativePath: string,
     content: string,
@@ -261,22 +487,28 @@ export interface Workspace {
     runs?: Run[],
     replyingTo?: string,
     taggedTraces?: string[],
-    /** One-shot content-cite quotes (rendezvous.md §1). Transient: consumed
-     *  by the next seal, not persisted on FileState. Produces `Q` tags. */
-    contentCites?: ContentCite[],
-    /** When true, seal to the home relay only — don't fan out to external
+    /** The keystroke log drained from the editor's `keditField` at step time.
+     *  One `KEdit` per discrete editor change since the previous step. Landed
+     *  on the node's `kedits` content field for full typo-level replayability. */
+    kedits?: KEdit[],
+    /** When true, step to the home relay only — don't fan out to external
      *  write relays. This is the Step gesture (protocol §8): a local
      *  checkpoint that doesn't leave the machine. Default false (fan out
      *  to all write-enabled relays, the Send posture). */
     localOnly?: boolean,
     /** When true, mint a new checkpoint node even when content/tags/citations
-     *  are unchanged since the last seal. This is the deliberate-gesture path
-     *  (Step/Send/Cmd+S — protocol §8: "When a Step does seal, it mints a node
-     *  carrying the snapshot"). The debounced auto-save leaves this false so a
-     *  redundant trailing seal stays a no-op; only an explicit author action
+     *  are unchanged since the last step. This is the explicit-Step path
+     *  (Step/Cmd+S — protocol §8). The debounced path leaves this false so a
+     *  redundant trailing step stays a no-op; only an explicit author action
      *  forces the checkpoint. */
     force?: boolean,
   ): Promise<string>;
+
+  /** Immediately drain a staged local write to the home relay and return its
+   *  signed node id. Minting uses this barrier because `[[ text | nodeId ]]`
+   *  cannot be resolved against the normal debounced write's temporary empty
+   *  id. Ordinary typing continues to use the debounce. */
+  flushFile(relativePath: string): Promise<string>;
 
   /** Create a new empty file. If it already exists, just open it. */
   createFile(relativePath: string): Promise<string>;
@@ -292,8 +524,10 @@ export interface Workspace {
   /** Move `src` into `destFolder` ("" = root), keeping the basename.
    *  `isFolder` selects the folder-member reparent path (spec §3.3: a folder
    *  member's name lives in the parent only — O(1), no descendant walk) vs the
-   *  file import-at-dest + tombstone-at-source path. `tagsByPath` carries user
-   *  tags so file content survives the reparent (folders carry no user tags). */
+   *  file path. File moves extend the same stable trace identity and change
+   *  folder membership; moving into/restoring from Oblivion likewise never mints a replacement
+   *  genesis. `tagsByPath` carries user tags so file content survives the
+   *  reparent (folders carry no user tags). */
   movePath(
     src: string,
     destFolder: string,
@@ -325,4 +559,20 @@ export interface Workspace {
    *  relay read-only) no-op. Best-effort and non-fatal, like the attribution
    *  sidecar. */
   writeFolderTags(tags: Record<string, string[]>): Promise<void>;
+}
+
+/** Ensure a workspace file path ends in `.md`. Every file in a zine folder is
+ *  markdown — this is the single normalization point called by both backends'
+ *  `writeFile`/`createFile`, so it covers the UI, imports, and the MCP
+ *  `zine_step` tool (which all funnel through those entry points).
+ *
+ *  Operates on the last path segment only; folder prefixes and synthetic
+ *  trace suffixes (e.g. `note.md#fork-abc`) are left intact. */
+export function ensureMdExt(path: string): string {
+  const slash = path.lastIndexOf("/");
+  const name = slash >= 0 ? path.slice(slash + 1) : path;
+  // Empty name or one that already carries `.md` (including a `#suffix`)
+  // needs no change.
+  if (name === "" || name.includes(".md")) return path;
+  return path + ".md";
 }

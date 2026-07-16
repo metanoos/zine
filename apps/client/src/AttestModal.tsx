@@ -4,12 +4,11 @@ import { createPortal } from "react-dom";
 import { decodeGeohash, encodeGeohash, geohashLengthForZoom } from "./geohash.js";
 
 /**
- * Affirm — pin a published position to a geohash + acknowledge the timestamp.
+ * Attest — endorse one already-published node, with an optional note/location.
  *
- * The modal the AUTHOR row's Affirm button opens (protocol §8). Affirm marks an
- * already-sent node as the author's published position. Before attesting, the
- * author picks *where* this affirmation lives on Spaces (a geohash) and
- * *when* (the acknowledged timestamp the NIP-03 OTS attestation anchors from).
+ * The modal the AUTHOR row's Attest button opens (protocol §5A/§8). The
+ * geohash is optional discovery metadata; the signed event's `created_at` is a
+ * claimed publication time, not an OpenTimestamps proof.
  *
  * The map is a precision picker, not a pin viewer. The geohash is rendered as
  * a labeled quadrant (cell box), and the cell's precision follows the map
@@ -20,17 +19,12 @@ import { decodeGeohash, encodeGeohash, geohashLengthForZoom } from "./geohash.js
  * inside coarser ones. That makes the Spaces rule — a pin shows only at the
  * zoom matching its geohash length — legible at pick time rather than a
  * mystery when a zine later "disappears."
- *
- * The clock shows the current time as the acknowledgment stamp. The OTS
- * attestation itself is fire-and-forget (see affirmNode); the "next NIP-03
- * timestamp" is the next Bitcoin block the commitment will anchor into, which
- * can't be known ahead of time — so we show now and frame it honestly.
  */
 
 const STYLE_LIGHT = "https://tiles.openfreemap.org/styles/positron";
 const STYLE_DARK = "https://tiles.openfreemap.org/styles/dark";
 const CAMERA_KEY = "zine.globe.camera";
-const MIN_ZOOM = 3;
+const MIN_ZOOM = 2;
 const MAX_ZOOM = 18;
 
 interface Camera {
@@ -100,14 +94,7 @@ function precisionLabel(length: number): string {
   return "≈building";
 }
 
-function fmtClock(d: Date): string {
-  // ISO-like, second precision, UTC. UTC because the OTS anchor is a global
-  // (blockchain) timestamp, not a local one.
-  const p = (n: number, l = 2) => String(n).padStart(l, "0");
-  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
-}
-
-export function AffirmModal({
+export function AttestModal({
   path,
   onClose,
   onConfirm,
@@ -122,17 +109,8 @@ export function AffirmModal({
   const [geohash, setGeohash] = useState<string | undefined>(undefined);
   // Current zoom, to drive the precision label / live re-encode feedback.
   const [zoom, setZoom] = useState<number>(loadCamera().zoom);
-  const [now, setNow] = useState(() => new Date());
-  // Optional curatorial note attached to the affirmation. Content-only on the
-  // affirm node (covered by the OTS stamp via the event id). Free text; the
-  // caller decides whether to require it (today: optional, geohash still gates).
+  // Optional curatorial note carried by the TraceAttestation event.
   const [message, setMessage] = useState("");
-
-  // Live clock — ticks every second while the modal is open.
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, []);
 
   // Draw (or clear) the selected cell + its ancestor outlines. Re-runs whenever
   // the picked geohash changes. Layer/source ids are stable so this is an
@@ -142,13 +120,13 @@ export function AffirmModal({
     if (!map) return;
     const redraw = () => {
       // Tear down any prior cell layers/sources from a previous pick.
-      for (const id of ["affirm-cell-fill", "affirm-cell-line", "affirm-parent-line", "affirm-cell-label"]) {
+      for (const id of ["attest-cell-fill", "attest-cell-line", "attest-parent-line", "attest-cell-label"]) {
         if (map.getLayer(id)) map.removeLayer(id);
       }
-      for (const id of ["affirm-cell", "affirm-parents"]) {
+      for (const id of ["attest-cell", "attest-parents"]) {
         if (map.getSource(id)) map.removeSource(id);
       }
-      const labelEl = document.getElementById("affirm-cell-label");
+      const labelEl = document.getElementById("attest-cell-label");
       if (labelEl) labelEl.remove();
 
       if (!geohash) return;
@@ -156,17 +134,17 @@ export function AffirmModal({
       if (!feat) return;
 
       // Selected cell: filled + outlined.
-      map.addSource("affirm-cell", { type: "geojson", data: feat });
+      map.addSource("attest-cell", { type: "geojson", data: feat });
       map.addLayer({
-        id: "affirm-cell-fill",
+        id: "attest-cell-fill",
         type: "fill",
-        source: "affirm-cell",
+        source: "attest-cell",
         paint: { "fill-color": "var(--accent, #2563eb)", "fill-opacity": 0.18 },
       });
       map.addLayer({
-        id: "affirm-cell-line",
+        id: "attest-cell-line",
         type: "line",
-        source: "affirm-cell",
+        source: "attest-cell",
         paint: { "line-color": "var(--accent, #2563eb)", "line-width": 2 },
       });
 
@@ -176,11 +154,11 @@ export function AffirmModal({
         .map((h) => cellPolygon(h))
         .filter((f): f is GeoJSON.Feature<GeoJSON.Polygon> => f !== null);
       if (parents.length) {
-        map.addSource("affirm-parents", { type: "geojson", data: { type: "FeatureCollection", features: parents } });
+        map.addSource("attest-parents", { type: "geojson", data: { type: "FeatureCollection", features: parents } });
         map.addLayer({
-          id: "affirm-parent-line",
+          id: "attest-parent-line",
           type: "line",
-          source: "affirm-parents",
+          source: "attest-parents",
           paint: { "line-color": "#999", "line-width": 1, "line-opacity": 0.4 },
         });
       }
@@ -188,8 +166,8 @@ export function AffirmModal({
       // Label the selected cell at its center with the geohash string.
       const box = decodeGeohash(geohash);
       const el = document.createElement("div");
-      el.id = "affirm-cell-label";
-      el.className = "affirm-cell-label";
+      el.id = "attest-cell-label";
+      el.className = "attest-cell-label";
       el.textContent = geohash;
       new maplibregl.Marker({ element: el, anchor: "center" }).setLngLat([box.lng, box.lat]).addTo(map);
     };
@@ -215,6 +193,10 @@ export function AffirmModal({
     });
     mapRef.current = map;
 
+    map.on("style.load", () => {
+      map.setProjection({ type: "globe" });
+    });
+
     map.on("moveend", () => setZoom(map.getZoom()));
 
     // Click picks a geohash: encode the clicked point at the precision matching
@@ -233,59 +215,54 @@ export function AffirmModal({
   const fileName = path.split("/").pop() ?? path;
 
   return createPortal(
-    <div className="compose-overlay affirm-overlay" onClick={onClose}>
-      <div className="compose-dialog affirm-dialog" onClick={(e) => e.stopPropagation()}>
-        <div className="affirm-head">
-          <h2 className="affirm-title">Affirm</h2>
-          <button type="button" className="affirm-close" aria-label="Close" onClick={onClose}>×</button>
+    <div className="compose-overlay attest-overlay" onClick={onClose}>
+      <div className="compose-dialog attest-dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="attest-head">
+          <h2 className="attest-title">Attest</h2>
+          <button type="button" className="attest-close" aria-label="Close" onClick={onClose}>×</button>
         </div>
-        <p className="affirm-blurb">
-          Mark <strong>{fileName}</strong> as your published position. Pin it to a geohash on Spaces and
-          acknowledge the timestamp the NIP-03 attestation anchors from.
+        <p className="attest-blurb">
+          Mark the selected version of <strong>{fileName}</strong> as a position you stand behind.
+          A note and a Spaces location are optional.
         </p>
 
-        <div className="affirm-map" ref={containerRef} />
+        <div className="attest-map" ref={containerRef} />
 
-        <div className="affirm-hint">
+        <div className="attest-hint">
           {geohash ? (
             <>
-              <span className="affirm-geohash-label">{geohash}</span>
-              <span className="affirm-precision">
+              <span className="attest-geohash-label">{geohash}</span>
+              <span className="attest-precision">
                 {geohash.length} chars · {precisionLabel(geohash.length)} · visible at this zoom level
               </span>
-              <span className="affirm-repick">click again to refine</span>
+              <button type="button" className="attest-repick" onClick={() => setGeohash(undefined)}>
+                clear location
+              </button>
             </>
           ) : (
             <span>
-              Click the map to pin a geohash — zoom in for finer precision, out for coarser.
+              Optionally click the map to pin a geohash — zoom in for finer precision, out for coarser.
               Current zoom would pin a length-{geohashLengthForZoom(zoom)} cell ({precisionLabel(geohashLengthForZoom(zoom))}).
             </span>
           )}
         </div>
 
-        <div className="affirm-clock-row">
-          <span className="affirm-clock-label">Acknowledged timestamp</span>
-          <span className="affirm-clock">{fmtClock(now)}</span>
-          <span className="affirm-clock-note">OTS anchors to the next Bitcoin block from this moment.</span>
-        </div>
-
         <textarea
-          className="affirm-message"
-          placeholder="optional note — a brief curatorial message attached to this affirmation"
+          className="attest-message"
+          placeholder="optional note — a brief curatorial message attached to this published node"
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           rows={2}
         />
 
-        <div className="affirm-actions">
+        <div className="attest-actions">
           <button type="button" className="confirm-cancel" onClick={onClose}>Cancel</button>
           <button
             type="button"
-            className="confirm-delete affirm-confirm"
-            disabled={!geohash}
+            className="confirm-delete attest-confirm"
             onClick={() => onConfirm(geohash, message)}
           >
-            Affirm
+            Attest
           </button>
         </div>
       </div>

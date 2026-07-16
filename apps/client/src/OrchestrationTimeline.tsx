@@ -14,7 +14,7 @@
  *
  * The stream is re-fetched when `folderId` changes and when App() bumps
  * `refreshKey` after a folder-chain mutation (membership change, rename, or a
- * focus drain that seals onto the next folder node) — see the files-signature
+ * focus drain that steps onto the next folder node) — see the files-signature
  * effect in App.tsx. This is the same `refreshKey` convention PalettePanel uses.
  *
  * Spec: protocol/trace-provenance.md §3.3 (FolderDelta vocabulary), §8 (focus
@@ -103,7 +103,7 @@ function deltaKind(delta: FolderDelta): "add" | "remove" | "rename" | "mount" | 
 function fmtTime(ms: number): string {
   const d = new Date(ms);
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 export function OrchestrationTimeline({
@@ -112,7 +112,7 @@ export function OrchestrationTimeline({
 }: {
   folderId: string | null;
   /** Bumped by App() after a folder-chain mutation (membership change, rename,
-   *  or a focus drain that lands on the next folder-node seal) so this panel
+   *  or a focus drain that lands on the next folder-node step) so this panel
    *  re-fetches the stream without needing an event bus. Mirrors PalettePanel's
    *  `refreshKey`. */
   refreshKey: number;
@@ -212,11 +212,11 @@ export function OrchestrationTimeline({
             <li
               key={i}
               className={"orchestration-row orchestration-" + kind + (isSel ? " is-selected" : "")}
-              title={fmtTime(e.sealedAt)}
+              title={fmtTime(e.steppedAt)}
               onClick={() => setSelected(i)}
             >
               <span className="orchestration-row-label">{deltaLabel(e.delta)}</span>
-              <span className="orchestration-row-time">{fmtTime(e.sealedAt)}</span>
+              <span className="orchestration-row-time">{fmtTime(e.steppedAt)}</span>
             </li>
           );
         })}

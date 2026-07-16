@@ -28,8 +28,8 @@ const IS_WIN = process.platform === "win32";
 
 // --- version-gated prerequisites ---------------------------------------
 
-// Node ≥ 20 — matches the Tauri/vite toolchain floor and BUILD.md.
-const MIN_NODE = [20, 0];
+// Node ≥ 20.19 — matches Vite's toolchain floor and the client release guide.
+const MIN_NODE = [20, 19];
 // Go ≥ 1.25 — relay/go.mod declares go 1.25.5; older toolchains reject it.
 const MIN_GO = [1, 25];
 
@@ -108,7 +108,7 @@ function checkPrereqs() {
 
   // Optional: Tor (onion reachability). Missing is non-fatal — the relay
   // sidecar and local authoring work without it; only inbound peer
-  // reachability is lost. See apps/client/src-tauri/BUILD.md §1b.
+  // reachability is lost. See apps/client/README.md, "Release builds," §1b.
   if (!capture("tor", ["--version"])) {
     console.log(
       "ℹ tor not found on PATH — optional (onion reachability only).\n" +

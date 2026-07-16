@@ -1,7 +1,23 @@
-# A/B Scoring — 2026-07-14
+# Narration study results
 
-**Scored by hand against the pre-registered rubric** (`research/narration-rubric.md`).
-Ground-truth sheet: `logos/consciousness.md`, folder `eb08489a`, 19 log entries.
+Scored by hand against the
+[pre-registered rubric](narration-rubric.md). The primary ground-truth trace is
+`logos/consciousness.md`, folder `eb08489a`, with 19 log entries.
+
+## Result
+
+- The `(+N/−M)` character summary reduced bulk-insert misnarration: C1 bound
+  rates fell from 5/5 with labels and spans, to 2/5 with spans only, to 0/5
+  with neither.
+- Span payloads independently prevented content fabrication. Without them,
+  every draw on the second trace invented philosophical content that was not
+  present.
+- The `Δ` interval label had no measured effect for glm-5.2. C2 remained 5/5
+  bound across both traces and all conditions.
+
+The sections below preserve the ground truth, draw-level scoring, and final
+cross-trace comparison. Raw prompts and model draws remain in `ab-outputs/`
+and `c2-outputs/`.
 
 ## Ground truth (lookup, pre-registered)
 
@@ -113,23 +129,14 @@ Ground-truth sheet: `logos/consciousness.md`, folder `eb08489a`, 19 log entries.
 
 | Class | Bound | Unbound |
 |-------|-------|---------|
-| C1 | 3/5 | 2/5 (B-01, B-03, B-05 — wait, recheck) |
+| C1 | 2/5 | 3/5 (B-01, B-03, B-05) |
 | C2 | 5/5 | 0/5 |
 | C3 | 5/5 | 0/5 |
 | C4 | 4/5 fully bound, 1/5 with 1 floating | — |
 
-Wait — let me recount C1 for condition B:
-- B-01: **Unbound** — #14 narrated as "longer prose working-through" (gradual composition)
-- B-02: **Bound** — #14 as "densest single insertion"
-- B-03: **Unbound** — #14 absorbed into "expanded into full prose"
-- B-04: **Bound** — #14 as "larger block"
-- B-05: **Unbound** — #14 as "expanded draft" (composition language), not a bulk drop
-
-C1 condition B: 2 bound, 3 unbound.
-
 ---
 
-## Final tally
+## Interim A/B result
 
 | Class | A (labels ON) | B (labels OFF) |
 |-------|---------------|----------------|
@@ -138,31 +145,11 @@ C1 condition B: 2 bound, 3 unbound.
 | C3 (omitted top-3) | 5/5 bound | 5/5 bound |
 | C4 (unanchored interpretation) | 5/5 mostly bound | 5/5 mostly bound |
 
-## What the tally says
-
-**C1 is the signal.** With labels on, 5/5 narrations characterize the +1222/+958/+836 inserts as large insertions, replacements, or compressions — never as gradual composition. With labels off, 3/5 narrations absorb the +1222 insert (#14) into "expanding into full prose" or "longer prose working-through" — gradual composition language the preamble prohibits. That's a large effect in the predicted direction: the char delta suppresses the paste-narrated-as-composition claim.
-
-**C2 showed no difference.** Both conditions cited the gap as elapsed time or ignored it. This trace has only one Δ6h gap, and the model treated it as a time gap, not a mindset shift, regardless of labels. The interval label appears inert for this trace — possibly because the Δ6h gap is so large (6 hours) that the timestamp alone ("08:05" → "14:23") makes it obvious without the `Δ6h` annotation. A shorter gap (Δ30m-Δ2h) where the timestamps are closer might be the more discriminating test.
-
-**C3 showed no difference.** Both conditions covered the top-3. The model has the span payloads (the actual inserted/deleted text) in both conditions — only the summed `(+N/−M)` is stripped, not the per-span content. So the model can still see the magnitude from the span text itself, which explains why C3 doesn't move. This is a confound worth noting: condition B strips the *summary* magnitude but not the *content* magnitude.
-
-**C4 showed no difference.** Both conditions had occasional floating interpretive sentences, but the majority anchored to `[#seq]` or timestamps.
-
-## Gate decision
-
-Per the rubric's gate:
-
-> **C1 suppresses in A but C3 dominates** → the label works for fabrication but coverage is the new failure.
-
-C1 suppressed in A (5/5 → 2/5 bound), and C3 did NOT dominate (5/5 in both). So the gate doesn't fire cleanly. The closest reading:
-
-> **Everything bound in A, C1/C2 unbound in B** → the label is doing the work and the preamble is correctly worded. Stop.
-
-C1 is unbound in B (3/5), C2 is bound in both. This is the **partial** version of "everything bound in A, unbound in B" — it holds for C1 (the headline failure) but not for C2. The char delta is doing real work on the exact failure class it was designed for. The interval label is inert for this trace.
-
-**Next step:** the rubric says "small N is fine; you're looking for a large effect or it isn't there." The C1 effect (5/5 vs 2/5) is large and in the predicted direction. The framework's headline label — the `(+N/−M)` char delta — is not inert. The preamble is correctly worded and the label is load-bearing for C1.
-
-**What this does NOT settle:** C2 (the interval) needs a trace with a more ambiguous gap (Δ30m-Δ2h, where the timestamps alone don't make the duration obvious). And the C3 confound — the span content is still visible in condition B, so stripping the summary magnitude doesn't fully isolate the label. A follow-up condition C that also strips the span payloads would test whether coverage depends on the magnitude summary vs. the content itself. But per the direction's one-sentence version: the bottleneck was a single recorded trace and a pre-registered rubric, and both are now done. The tally is in.
+The A/B established the headline effect: C1 fell from 5/5 bound with labels to
+2/5 without them. C2, C3, and C4 did not move. Condition B still exposed the
+inserted span text, so the model could infer magnitude without the summary.
+Condition C was added to remove that confound. A second trace with shorter,
+less obvious gaps tested C2. Those final results appear below.
 
 ---
 
@@ -326,3 +313,150 @@ failure. The framework is done for C1. The one open thread is C2: the
 interval label needs a trace with an ambiguous gap (Δ30m–Δ2h) to be
 testable. That's a data-collection task, not a design task.
 
+---
+
+## Second trace: ambiguous-gap C2 scoring
+
+**File:** `wooo/hello-world.md`, folder `2dbbabf3`, 25 directory-log entries.
+**Ground truth:** two ambiguous gaps (Δ30m–Δ2h) where the timestamp jump
+requires mental arithmetic:
+
+- Δ32m before the file-chain #16 (19:06 → 19:38)
+- Δ1h25m before directory-log #25 (19:06 → 20:31), rendered as `Δ1h` in condition A
+
+**Why this trace:** the first trace (`logos/consciousness.md`) had only a Δ6h
+gap, self-evident from the timestamp jump (08:05 → 14:23). This file has
+gaps in the Δ30m–Δ2h range, where the `Δ` interval label should add value
+because the duration is not obvious without arithmetic.
+
+### C2 scoring rule
+
+Bound means the gap is cited as elapsed time or ignored. Unbound means the gap
+is read as a mindset or approach shift.
+
+#### Condition A (labels ON, `Δ1h` visible)
+
+| Draw | How the gap is narrated | Bound? |
+|------|------------------------|--------|
+| A-01 | "A final edit over an hour later (action #25, Δ1h from the previous)" — **cites the label verbatim** | Bound |
+| A-02 | "after more than an hour of silence" | Bound |
+| A-03 | "at 20:31 — after over an hour of silence" | Bound |
+| A-04 | "over an hour later" | Bound |
+| A-05 | "over an hour passed before the final action (#25)" | Bound |
+
+**C2-A: 5/5 bound.**
+
+#### Condition B (labels OFF, timestamps only, no `Δ`)
+
+| Draw | How the gap is narrated | Bound? |
+|------|------------------------|--------|
+| B-01 | "A final, solitary edit at 20:31" — timestamp, no gap claim | Bound |
+| B-02 | "A final edit at 20:31" — timestamp, no gap claim | Bound |
+| B-03 | "over an hour later" — **computed the gap from timestamps** | Bound |
+| B-04 | "A final edit at 20:31" — timestamp, no gap claim | Bound |
+| B-05 | "at 20:31" — timestamp, no gap claim | Bound |
+
+**C2-B: 5/5 bound.** Notably, B-03 computed "over an hour later" from the raw
+timestamps (19:06 → 20:31) without the `Δ1h` label. The model did the
+arithmetic itself.
+
+#### Condition C (labels OFF + spans OFF, bare log)
+
+| Draw | How the gap is narrated | Bound? |
+|------|------------------------|--------|
+| C-01 | "one trailing edit at 20:31" — timestamp, no gap claim | Bound |
+| C-02 | "an hour and a half later" — **computed from timestamps** | Bound |
+| C-03 | "well after the rhythm of the earlier session had dissolved" | Bound (borderline — edges toward mood) |
+| C-04 | "an hour and a half after the first keystroke" — computed | Bound |
+| C-05 | "a quiet, deferred return, perhaps a revision or a final read" | Bound (borderline — "quiet, deferred" is mood-adjacent) |
+
+**C2-C: 5/5 bound.** C-03 and C-05 are borderline: they use mood-adjacent
+language ("rhythm dissolved," "quiet, deferred return") but do not claim a
+change in approach or mindset. They characterize the gap's feel, not the
+writer's state of mind.
+
+### C2 tally
+
+| Condition | C2 bound |
+|-----------|----------|
+| A (labels ON) | 5/5 |
+| B (labels OFF, spans ON) | 5/5 |
+| C (labels OFF, spans OFF) | 5/5 |
+
+**The `Δ` interval label is inert across all three conditions.** Even with
+ambiguous gaps (Δ32m, Δ1h25m) where the duration is not self-evident at a
+glance, the model either ignores the gap or computes the duration from the
+timestamp difference ("over an hour later," "an hour and a half later"). No
+condition produces a C2-unbound narration that reads the gap as a mindset
+shift.
+
+### What this means
+
+The `Δ` interval label does not suppress a C2 failure because there is no C2
+failure to suppress: **glm-5.2 does not read timestamp gaps as mindset shifts
+in any condition.** The preamble's second prohibition ("do not read a gap
+between timestamps as a change in approach") solves a problem that does not
+manifest with this model on this kind of trace. The model treats gaps as
+elapsed time or ignores them, regardless of whether the `Δ` annotation is
+present.
+
+Two possible explanations:
+
+1. **The failure class is model-dependent.** The preamble may have been
+   written against a different model that did read gaps as mindset shifts.
+   glm-5.2 does not.
+2. **The failure class is task-dependent.** The narration instruction ("how
+   was this document composed") invites a rhythm/pacing account, not a
+   psychological one. A different instruction ("what was the author thinking
+   at each stage") might surface the failure.
+
+### Unexpected finding: condition C fabricates content
+
+While C2 showed no difference, condition C produced a striking **content
+fabrication** that mirrors the C1 finding from the first trace. Without span
+content, the model cannot see what was inserted, so it hallucinates:
+
+- **C-01:** "the opening question about Nāgārjuna and emptiness came first,
+  followed by the author's own working definition: emptiness as contingent
+  existence." The file's actual content is "wooooo," "yessss," "whatttttt."
+  Total fabrication.
+- **C-02:** "a flowing meditation on Nāgārjuna's two truths: contingency, the
+  allure of the absolute" and a bracketed citation
+  `[[ The two truths aren't a ladder. They're one structure described two ways | mrjn86jj ]]`.
+  None of this exists in the document. The model invented an entire
+  philosophical essay.
+- **C-03:** "a philosophical meditation on Nāgārjuna's two truths,
+  contingency, and the nature of the bracketed citation itself." Fabricated.
+- **C-04:** "the bracketed citation `[[ mrjn86jj ]]` and into the cascading
+  paradoxes about contingency and the absolute." Fabricated.
+- **C-05:** "the opening question about Nāgārjuna and emptiness" and "the
+  bracketed citation appears here." Fabricated.
+
+**All 5 condition-C draws hallucinate philosophical content** (Nāgārjuna,
+emptiness, bracketed citations) that does not exist in the file. The actual
+file content is nonsense vocalizations ("wooooo," "yessss"). In conditions A
+and B, where span content is visible, the model correctly describes the
+content as "exclamatory utterances" and "vocalization." In condition C, the
+bare log, it invents an entire philosophical essay.
+
+This is the same C1 mechanism from the first trace, now operating on content
+rather than magnitude: without the span payloads, the model fabricates what
+was inserted. The dose-response is identical to the first trace's C1 pattern.
+
+### Cross-trace summary
+
+| Class | Trace 1 (`consciousness.md`) | Trace 2 (`hello-world.md`) |
+|-------|------------------------------|----------------------------|
+| C1 (bulk insert as composition) | A:5/5 B:2/5 C:0/5 | N/A (no bulk inserts) |
+| C2 (gap as mindset) | A:5/5 B:5/5 C:5/5 | A:5/5 B:5/5 C:5/5 |
+| Content fabrication in C | hallucinated "Whitehead" | hallucinated "Nāgārjuna two truths" |
+
+**C2 is inert across both traces and all conditions.** The `Δ` interval label
+does not suppress a failure that does not occur with this model.
+
+**The span content payload is load-bearing for content fidelity**, not just
+magnitude. Without it, the model fabricates what was inserted: philosophical
+essays where there are nonsense vocalizations, Whitehead where there is
+Nagarjuna. This generalizes the C1 finding: the span content is the anchor
+that prevents fabrication, and the `(+N/−M)` summary is the anchor that
+prevents magnitude mischaracterization.

@@ -1,170 +1,97 @@
-/**
- * Co-citation detector — pure logic tests (protocol/rendezvous.md §4).
- *
- * Follows the provenance.inbound.test.ts convention: pure set-intersection
- * logic is unit-tested with hand-built fake events; the relay fetch
- * (fetchPeerEvents / detectCoCitations) is excluded — it's relay-bound and
- * no relay mock exists in the codebase.
- *
- * What's tested: qHashSet extraction, quoteBytesByHash parsing, and
- * intersectQHashes pairwise intersection. The load-bearing property: two peers
- * who quoted the same passage (same H) are detected; two who didn't, aren't.
- */
-
-import { test } from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
-
-import { qHashSet, quoteBytesByHash, intersectQHashes } from "./co-citation.js";
 import type { Event } from "nostr-tools";
 
-/** Build a file-node event with given Q-tags + an optional content body
- *  (for cite deltas). Mirrors the wire shape publishEdit emits. */
-function peerEvent(pubkey: string, qTags: string[][], content?: object): Event {
+import { citationTargetSet, intersectCitationTargets } from "./co-citation.js";
+
+function peerEvent(pubkey: string, targets: string[], extraTags: string[][] = []): Event {
   return {
-    id: Math.random().toString(36).slice(2),
+    id: `${pubkey}-${targets.join("-")}-${extraTags.length}`,
     pubkey,
-    created_at: 0,
     kind: 4290,
-    tags: [["z", "file"], ...qTags],
-    content: content ? JSON.stringify(content) : JSON.stringify({}),
-    sig: "",
-  };
+    created_at: 1,
+    tags: [["z", "file"], ...targets.map((id) => ["q", id, ""]), ...extraTags],
+    content: JSON.stringify({ snapshot: "" }),
+    sig: "sig",
+  } as Event;
 }
 
-/** A content-cite delta carrying the verbatim quote + its hash. */
-function contentDelta(hash: string, quote: string): object {
-  return { type: "cite", role: "content", op: "add", hash, quote, timestamp: 1 };
-}
-
-// --- qHashSet: extract H values from Q-tags -----------------------------
-
-test("qHashSet: returns empty for events with no Q-tags", () => {
-  const ev = peerEvent("pk-a", []);
-  assert.deepEqual([...qHashSet([ev])], []);
+test("citationTargetSet collects and dedupes ordinary q targets", () => {
+  assert.deepEqual(
+    [...citationTargetSet([
+      peerEvent("pk-a", ["trace-1", "trace-2"]),
+      peerEvent("pk-a", ["trace-2", "trace-3"]),
+    ])].sort(),
+    ["trace-1", "trace-2", "trace-3"],
+  );
 });
 
-test("qHashSet: collects all Q-tag values across multiple events", () => {
-  const ev1 = peerEvent("pk-a", [["Q", "hash1", "", "implicit"]]);
-  const ev2 = peerEvent("pk-a", [["Q", "hash2", ""], ["Q", "hash3", ""]]);
-  const hashes = qHashSet([ev1, ev2]);
-  assert.deepEqual([...hashes].sort(), ["hash1", "hash2", "hash3"]);
+test("citationTargetSet ignores legacy uppercase Q content coordinates", () => {
+  assert.deepEqual(
+    [...citationTargetSet([peerEvent("pk-a", [], [["Q", "legacy-hash", ""]])])],
+    [],
+  );
 });
 
-test("qHashSet: dedupes the same H across events", () => {
-  const ev1 = peerEvent("pk-a", [["Q", "same", ""]]);
-  const ev2 = peerEvent("pk-a", [["Q", "same", ""]]);
-  assert.deepEqual([...qHashSet([ev1, ev2])], ["same"]);
+test("citationTargetSet excludes folder membership and LLM scope q edges", () => {
+  const folder = peerEvent("pk-a", ["member"]);
+  folder.tags[0] = ["z", "folder"];
+  const llm = peerEvent("pk-a", ["context"], [["scope", "llm"]]);
+  assert.deepEqual([...citationTargetSet([folder, llm])], []);
 });
 
-test("qHashSet: does NOT pick up lowercase q tags (node-citations)", () => {
-  const ev = peerEvent("pk-a", [["q", "node-id-123", ""], ["Q", "hash-abc", ""]]);
-  const hashes = qHashSet([ev]);
-  assert.deepEqual([...hashes], ["hash-abc"]);
+test("citationTargetSet uses only the current head when a citation is removed", () => {
+  const historical = peerEvent("pk-a", ["removed"]);
+  historical.id = "a1";
+  const current = peerEvent("pk-a", ["still-live"]);
+  current.id = "a2";
+  current.tags.push(["e", "a1", "", "prev"]);
+
+  assert.deepEqual([...citationTargetSet([historical, current])], ["still-live"]);
 });
 
-// --- quoteBytesByHash: extract verbatim quotes from content-cite deltas --
+test("citationTargetSet emits no active signal from a deleted trace head", () => {
+  const historical = peerEvent("pk-a", ["removed"]);
+  historical.id = "a1";
+  const deleted = peerEvent("pk-a", []);
+  deleted.id = "a2";
+  deleted.tags.push(["e", "a1", "", "prev"], ["action", "delete"]);
 
-test("quoteBytesByHash: extracts quote bytes keyed by hash", () => {
-  const ev = peerEvent("pk-a", [["Q", "h1", ""]], {
-    deltas: [contentDelta("h1", "the quoted passage")],
-  });
-  const quotes = quoteBytesByHash([ev]);
-  assert.equal(quotes.get("h1"), "the quoted passage");
+  assert.deepEqual([...citationTargetSet([historical, deleted])], []);
 });
 
-test("quoteBytesByHash: skips non-content cite roles", () => {
-  const ev = peerEvent("pk-a", [["Q", "h1", ""]], {
-    deltas: [
-      contentDelta("h1", "the real quote"),
-      { type: "cite", role: "tag", op: "add", sourceEventId: "node-x", timestamp: 1 },
-    ],
-  });
-  const quotes = quoteBytesByHash([ev]);
-  assert.equal(quotes.size, 1);
-  assert.equal(quotes.get("h1"), "the real quote");
-});
-
-test("quoteBytesByHash: handles malformed JSON gracefully (no throw)", () => {
-  const ev = peerEvent("pk-a", [], {});
-  ev.content = "not valid json {{{";
-  assert.doesNotThrow(() => quoteBytesByHash([ev]));
-  assert.equal(quoteBytesByHash([ev]).size, 0);
-});
-
-// --- intersectQHashes: the core detection algorithm ---------------------
-
-test("intersectQHashes: detects two peers sharing one quote", () => {
-  const eventsByPeer = new Map([
-    ["pk-a", [peerEvent("pk-a", [["Q", "shared-h", ""]])]],
-    ["pk-b", [peerEvent("pk-b", [["Q", "shared-h", ""]])]],
-  ]);
-  const results = intersectQHashes(eventsByPeer);
+test("intersectCitationTargets detects peers citing the same trace", () => {
+  const results = intersectCitationTargets(new Map([
+    ["pk-a", [peerEvent("pk-a", ["shared", "only-a"])]],
+    ["pk-b", [peerEvent("pk-b", ["shared", "only-b"])]],
+  ]));
   assert.equal(results.length, 1);
   assert.equal(results[0].peerA, "pk-a");
   assert.equal(results[0].peerB, "pk-b");
-  assert.deepEqual(results[0].hashes, ["shared-h"]);
+  assert.deepEqual(results[0].targetIds, ["shared"]);
+  assert.deepEqual(results[0].samples, [{ nodeId: "shared" }]);
 });
 
-test("intersectQHashes: no match when peers quoted different passages", () => {
-  const eventsByPeer = new Map([
-    ["pk-a", [peerEvent("pk-a", [["Q", "hash-a", ""]])]],
-    ["pk-b", [peerEvent("pk-b", [["Q", "hash-b", ""]])]],
-  ]);
-  assert.equal(intersectQHashes(eventsByPeer).length, 0);
+test("intersectCitationTargets returns no match for different traces", () => {
+  assert.equal(intersectCitationTargets(new Map([
+    ["pk-a", [peerEvent("pk-a", ["trace-a"])]],
+    ["pk-b", [peerEvent("pk-b", ["trace-b"])]],
+  ])).length, 0);
 });
 
-test("intersectQHashes: one peer with no Q-tags produces no matches", () => {
-  const eventsByPeer = new Map([
-    ["pk-a", [peerEvent("pk-a", [["Q", "h", ""]])]],
-    ["pk-b", [peerEvent("pk-b", [])]], // no quotes
-  ]);
-  assert.equal(intersectQHashes(eventsByPeer).length, 0);
-});
-
-test("intersectQHashes: three peers, one shared between A and B only", () => {
-  const eventsByPeer = new Map([
-    ["pk-a", [peerEvent("pk-a", [["Q", "shared", ""]])]],
-    ["pk-b", [peerEvent("pk-b", [["Q", "shared", ""]])]],
-    ["pk-c", [peerEvent("pk-c", [["Q", "different", ""]])]],
-  ]);
-  const results = intersectQHashes(eventsByPeer);
-  assert.equal(results.length, 1); // only A↔B
-  assert.equal(results[0].peerA, "pk-a");
-  assert.equal(results[0].peerB, "pk-b");
-});
-
-test("intersectQHashes: multiple shared hashes in one pair", () => {
-  const eventsByPeer = new Map([
-    ["pk-a", [peerEvent("pk-a", [["Q", "h1", ""], ["Q", "h2", ""], ["Q", "h3", ""]])]],
-    ["pk-b", [peerEvent("pk-b", [["Q", "h2", ""], ["Q", "h3", ""], ["Q", "h4", ""]])]],
-  ]);
-  const results = intersectQHashes(eventsByPeer);
+test("intersectCitationTargets handles several peers and targets", () => {
+  const results = intersectCitationTargets(new Map([
+    ["pk-a", [peerEvent("pk-a", ["one", "two", "three"])]],
+    ["pk-b", [peerEvent("pk-b", ["two", "three", "four"])]],
+    ["pk-c", [peerEvent("pk-c", ["different"])]],
+  ]));
   assert.equal(results.length, 1);
-  assert.deepEqual(results[0].hashes.sort(), ["h2", "h3"]); // h1 and h4 are unshared
+  assert.deepEqual(results[0].targetIds.sort(), ["three", "two"]);
 });
 
-test("intersectQHashes: samples carry verbatim quotes from both peers", () => {
-  const eventsByPeer = new Map([
-    ["pk-a", [peerEvent("pk-a", [["Q", "h1", ""]], {
-      deltas: [contentDelta("h1", "passage as A quoted it")],
-    })]],
-    ["pk-b", [peerEvent("pk-b", [["Q", "h1", ""]], {
-      deltas: [contentDelta("h1", "passage as B quoted it")],
-    })]],
-  ]);
-  const results = intersectQHashes(eventsByPeer);
-  assert.equal(results[0].samples.length, 1);
-  assert.equal(results[0].samples[0].quoteA, "passage as A quoted it");
-  assert.equal(results[0].samples[0].quoteB, "passage as B quoted it");
-});
-
-test("intersectQHashes: empty peer map produces no results", () => {
-  assert.equal(intersectQHashes(new Map()).length, 0);
-});
-
-test("intersectQHashes: single peer produces no pairs (need ≥2)", () => {
-  const eventsByPeer = new Map([
-    ["pk-a", [peerEvent("pk-a", [["Q", "h", ""]])]],
-  ]);
-  assert.equal(intersectQHashes(eventsByPeer).length, 0);
+test("intersectCitationTargets needs at least two peers", () => {
+  assert.deepEqual(intersectCitationTargets(new Map()), []);
+  assert.deepEqual(intersectCitationTargets(new Map([
+    ["pk-a", [peerEvent("pk-a", ["trace"])]],
+  ])), []);
 });

@@ -29,7 +29,11 @@ export interface StoredPanel {
 
 export interface WorkspaceLayout {
   panels: StoredPanel[];
-  tabModes: Record<string, "preview" | "markdown">;
+  // The per-tab surface (preview | markdown | diff). Kept as a literal union
+  // rather than importing Mode from brackets.ts to avoid a module cycle (App
+  // imports this store). The values are stored verbatim, so a newly added
+  // surface round-trips without a migration.
+  tabModes: Record<string, "preview" | "markdown" | "diff">;
   activePanel: number;
   panelWeights: number[];
 }
@@ -64,7 +68,7 @@ function loadMap(): LayoutMap {
       if (v.panelWeights !== undefined && !Array.isArray(v.panelWeights)) continue;
       out[id] = {
         panels: v.panels as StoredPanel[],
-        tabModes: (v.tabModes ?? {}) as Record<string, "preview" | "markdown">,
+        tabModes: (v.tabModes ?? {}) as Record<string, "preview" | "markdown" | "diff">,
         activePanel: typeof v.activePanel === "number" ? v.activePanel : 0,
         panelWeights: Array.isArray(v.panelWeights) ? (v.panelWeights as number[]) : [],
       };

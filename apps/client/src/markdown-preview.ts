@@ -95,9 +95,171 @@ const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})/;
 const FENCE_CLOSE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 const HEADING_RE = /^(#{1,6})([ \t]+)(.*)$/;
 const BLOCKQUOTE_RE = /^(>{1,})[ \t]?/;
-const UL_RE = /^([*+-])[ \t]+/;
-const OL_RE = /^(\d{1,9})[.)][ \t]+/;
+const UL_RE = /^([ \t]*)([*+-])([ \t]+)/;
+const OL_RE = /^([ \t]*)(\d{1,9}[.)])([ \t]+)/;
 const TASK_RE = /^\[([ xX])\][ \t]+/;
+
+export interface MarkdownListLine {
+  kind: "unordered" | "ordered";
+  /** Zero-based structural depth, derived from parent content columns. */
+  depth: number;
+  /** Source offset where the visible marker starts, after leading indent. */
+  markerStart: number;
+  /** Source offset immediately after the marker's trailing whitespace. */
+  markerEnd: number;
+}
+
+interface MarkdownListCandidate extends Omit<MarkdownListLine, "depth"> {
+  indentColumns: number;
+  contentIndent: number;
+}
+
+/** Count source columns using four-column tab stops, matching the editor's
+ *  tab-size. Offsets remain string offsets; columns are used only to compare
+ *  Markdown indentation. */
+function sourceColumns(text: string): number {
+  let columns = 0;
+  for (const char of text) {
+    columns = char === "\t" ? columns + (4 - (columns % 4)) : columns + 1;
+  }
+  return columns;
+}
+
+function markdownListCandidate(line: string): MarkdownListCandidate | null {
+  const unordered = UL_RE.exec(line);
+  if (unordered) {
+    return {
+      kind: "unordered",
+      markerStart: unordered[1].length,
+      markerEnd: unordered[0].length,
+      indentColumns: sourceColumns(unordered[1]),
+      contentIndent: sourceColumns(unordered[0]),
+    };
+  }
+
+  const ordered = OL_RE.exec(line);
+  if (ordered) {
+    return {
+      kind: "ordered",
+      markerStart: ordered[1].length,
+      markerEnd: ordered[0].length,
+      indentColumns: sourceColumns(ordered[1]),
+      contentIndent: sourceColumns(ordered[0]),
+    };
+  }
+
+  return null;
+}
+
+/** Analyze list structure without changing the Markdown bytes. A child marker
+ *  belongs beneath the deepest active item whose content column it reaches.
+ *  This accepts both common two-space and four-space authoring styles, treats
+ *  0–3 leading spaces as top-level marker variance, and leaves a standalone
+ *  four-space-indented marker as code rather than inventing a list. */
+export function analyzeMarkdownListLines(lines: readonly string[]): Array<MarkdownListLine | null> {
+  const result: Array<MarkdownListLine | null> = [];
+  const levels: Array<{ contentIndent: number }> = [];
+  let blankSinceList = false;
+  let inFence = false;
+  let fenceChar = "";
+
+  for (const line of lines) {
+    const openM = FENCE_OPEN_RE.exec(line);
+    if (!inFence && openM) {
+      inFence = true;
+      fenceChar = openM[1][0];
+      levels.length = 0;
+      blankSinceList = false;
+      result.push(null);
+      continue;
+    }
+    if (inFence) {
+      const closeM = FENCE_CLOSE_RE.exec(line);
+      if (closeM && closeM[1][0] === fenceChar) {
+        inFence = false;
+        fenceChar = "";
+      }
+      result.push(null);
+      continue;
+    }
+
+    if (line.trim().length === 0) {
+      if (levels.length > 0) blankSinceList = true;
+      result.push(null);
+      continue;
+    }
+
+    // These blocks terminate a list in the preview's existing block model.
+    // Check thematic breaks before candidates because `* * *` also begins
+    // with a syntactically valid unordered-list marker.
+    if (isHr(line) || HEADING_RE.test(line) || BLOCKQUOTE_RE.test(line)) {
+      levels.length = 0;
+      blankSinceList = false;
+      result.push(null);
+      continue;
+    }
+
+    const candidate = markdownListCandidate(line);
+    if (!candidate) {
+      // A non-list line directly after an item is a possible lazy continuation.
+      // After a blank it starts a new block, so later indented markers must not
+      // inherit stale nesting state.
+      if (blankSinceList) levels.length = 0;
+      result.push(null);
+      continue;
+    }
+
+    let parentDepth = -1;
+    for (let depth = levels.length - 1; depth >= 0; depth--) {
+      if (candidate.indentColumns >= levels[depth].contentIndent) {
+        parentDepth = depth;
+        break;
+      }
+    }
+
+    const depth = parentDepth + 1;
+    if (parentDepth < 0 && candidate.indentColumns > 3) {
+      // With no active parent, CommonMark interprets four leading spaces as
+      // an indented code block, not a list item.
+      result.push(null);
+      continue;
+    }
+
+    levels.length = depth;
+    levels.push({ contentIndent: candidate.contentIndent });
+    blankSinceList = false;
+    result.push({
+      kind: candidate.kind,
+      depth,
+      markerStart: candidate.markerStart,
+      markerEnd: candidate.markerEnd,
+    });
+  }
+
+  return result;
+}
+
+const LIST_INDENT_REM = 1.25;
+
+/** CSS-variable value used by list line decorations. Kept pure for regression
+ *  coverage; CSS adds the same 1.25rem as the base first-level inset. */
+export function markdownListIndent(depth: number): string {
+  return `${depth * LIST_INDENT_REM}rem`;
+}
+
+function listLineDecoration(
+  className: string,
+  depth: number,
+  attributes: Record<string, string> = {},
+): Decoration {
+  return Decoration.line({
+    class: `md-li-line ${className}`,
+    attributes: {
+      ...attributes,
+      style: `--md-list-indent: ${markdownListIndent(depth)}`,
+    },
+  });
+}
 
 /** Is `line` (already stripped of leading indent) a thematic break (hr)?
  *  Three or more of `-`, `*`, or `_`, optionally space-separated, nothing
@@ -222,6 +384,7 @@ function buildMarkdownDecorations(view: EditorView): DecorationSet {
   const text = doc.toString();
   const decos: Range<Decoration>[] = [];
   const sel = view.state.selection.main;
+  const listLines = analyzeMarkdownListLines(text.split("\n"));
 
   // Reserved ranges = the press's own bracket/command marks. We never emit a
   // decoration overlapping these (they're already replaced by chips). Both
@@ -328,9 +491,11 @@ function buildMarkdownDecorations(view: EditorView): DecorationSet {
     }
 
     // --- unordered list (incl. task) ------------------------------------
-    const ulM = UL_RE.exec(lineText);
-    if (ulM) {
-      const markerLen = ulM[0].length;
+    const listItem = listLines[i - 1];
+    if (listItem?.kind === "unordered") {
+      // markerEnd includes leading source indentation. Preview replaces the
+      // whole prefix and reapplies structural depth as a stable CSS inset.
+      const markerLen = listItem.markerEnd;
       const rest = lineText.slice(markerLen);
       const taskM = TASK_RE.exec(rest);
       if (taskM) {
@@ -338,7 +503,7 @@ function buildMarkdownDecorations(view: EditorView): DecorationSet {
         const fullMarkerLen = markerLen + taskM[0].length;
         const checked = taskM[1] !== " " && taskM[1] !== "";
         decos.push(
-          Decoration.line({ class: "md-li-line md-task-line" }).range(lineFrom, lineFrom),
+          listLineDecoration("md-task-line", listItem.depth).range(lineFrom, lineFrom),
         );
         if (!nearSelection(sel.from, sel.to, lineFrom, lineFrom + fullMarkerLen)) {
           decos.push(
@@ -353,8 +518,14 @@ function buildMarkdownDecorations(view: EditorView): DecorationSet {
         continue;
       }
       // Plain unordered item: hide `- `/`* `/`+ `, CSS ::before draws `•`.
-      decos.push(Decoration.line({ class: "md-li-line md-ul-line" }).range(lineFrom, lineFrom));
-      if (!nearSelection(sel.from, sel.to, lineFrom, lineFrom + markerLen)) {
+      const sourceVisible = nearSelection(sel.from, sel.to, lineFrom, lineFrom + markerLen);
+      decos.push(
+        listLineDecoration(
+          "md-ul-line" + (sourceVisible ? " md-list-source-visible" : ""),
+          listItem.depth,
+        ).range(lineFrom, lineFrom),
+      );
+      if (!sourceVisible) {
         decos.push(Decoration.replace({}).range(lineFrom, lineFrom + markerLen));
       }
       lineExclude.push({ from: lineFrom, to: lineFrom + markerLen });
@@ -362,12 +533,25 @@ function buildMarkdownDecorations(view: EditorView): DecorationSet {
       continue;
     }
 
-    // --- ordered list (digit left visible as content) -------------------
-    const olM = OL_RE.exec(lineText);
-    if (olM) {
-      decos.push(Decoration.line({ class: "md-li-line md-ol-line" }).range(lineFrom, lineFrom));
-      // The `1.` is content — keep it. Scan inline over the whole line.
-      scanLineInline(decos, lineFrom, lineText, 0, lineExclude, sel, reserved);
+    // --- ordered list ---------------------------------------------------
+    if (listItem?.kind === "ordered") {
+      const markerLen = listItem.markerEnd;
+      const marker = lineText.slice(listItem.markerStart, markerLen).trimEnd();
+      const sourceVisible = nearSelection(sel.from, sel.to, lineFrom, lineFrom + markerLen);
+      decos.push(
+        listLineDecoration(
+          "md-ol-line" + (sourceVisible ? " md-list-source-visible" : ""),
+          listItem.depth,
+          { "data-md-marker": marker },
+        ).range(lineFrom, lineFrom),
+      );
+      // The line-level ::before marker is absolutely positioned, so it cannot
+      // affect the row baseline or wrap separately from the item text.
+      if (!sourceVisible) {
+        decos.push(Decoration.replace({}).range(lineFrom, lineFrom + markerLen));
+      }
+      lineExclude.push({ from: lineFrom, to: lineFrom + markerLen });
+      scanLineInline(decos, lineFrom, lineText, markerLen, lineExclude, sel, reserved);
       continue;
     }
 

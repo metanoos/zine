@@ -31,10 +31,11 @@ const IGNORED_SEGMENTS: &[&str] = &[
 ///
 /// Locates the relay binary via (in order):
 ///   1. `TRACER_RELAY_BIN` env var (dev override / pointing at a custom build)
-///   2. the bundled resource `binaries/zine-relay` (installed app — this is the
+///   2. in debug builds, the monorepo default `../../../relay/zine-relay`
+///      (`npm run dev` builds this from current source before launching Tauri)
+///   3. the bundled resource `binaries/zine-relay` (installed app — this is the
 ///      path that makes a distributed build actually run)
-///   3. the monorepo default `../../../relay/zine-relay` relative to this
-///      crate (`tauri dev` from a checkout)
+///   4. the monorepo path as a final fallback when no resource exists
 ///
 /// Then connects to ws://127.0.0.1:4869 — if that's already accepting TCP, we
 /// assume a relay is already running (e.g. another launch started one) and
@@ -117,7 +118,20 @@ fn resolve_relay_binary(app: &tauri::AppHandle) -> Result<String, String> {
         }
         return Err(format!("TRACER_RELAY_BIN set but not found: {}", bin));
     }
-    // 2. Bundled resource — the path that matters for a distributed build.
+
+    // 2. Debug checkout — prefer the binary the root dev script just built.
+    // The checked-in bundle resource can target a prior source revision and is
+    // for release packaging, not the live development loop.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let candidate = Path::new(manifest_dir)
+        .join(format!("../../../relay/zine-relay{}", EXE_SUFFIX));
+    let candidate = candidate.canonicalize().unwrap_or(candidate);
+    #[cfg(debug_assertions)]
+    if candidate.exists() {
+        return Ok(candidate.to_string_lossy().into_owned());
+    }
+
+    // 3. Bundled resource — the path that matters for a distributed build.
     //    `binaries/zine-relay` / `binaries/zine-relay.exe` is declared in
     //    tauri.conf.json bundle.resources.
     let resource_name = format!("binaries/zine-relay{}", EXE_SUFFIX);
@@ -126,11 +140,9 @@ fn resolve_relay_binary(app: &tauri::AppHandle) -> Result<String, String> {
             return Ok(resource.to_string_lossy().into_owned());
         }
     }
-    // 3. Monorepo default: src-tauri/ -> ../../../relay/zine-relay (tauri dev).
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let candidate = Path::new(manifest_dir)
-        .join(format!("../../../relay/zine-relay{}", EXE_SUFFIX));
-    let candidate = candidate.canonicalize().unwrap_or(candidate);
+
+    // 4. Monorepo fallback (also gives release-from-checkout a useful error
+    // path when the bundle resource was omitted).
     if candidate.exists() {
         return Ok(candidate.to_string_lossy().into_owned());
     }
@@ -139,6 +151,52 @@ fn resolve_relay_binary(app: &tauri::AppHandle) -> Result<String, String> {
         EXE_SUFFIX,
         candidate.display()
     ))
+}
+
+/// Run the relay binary's one-shot reset mode. Keeping the database deletion
+/// inside the relay binary means the process that owns the SQLite schema also
+/// owns its reset semantics; the Tauri shell never reaches into the database.
+fn run_relay_factory_reset(bin: &str) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(bin) {
+            let mut perms = meta.permissions();
+            if (perms.mode() & 0o100) == 0 {
+                perms.set_mode(perms.mode() | 0o100);
+                fs::set_permissions(bin, perms)
+                    .map_err(|e| format!("make relay binary executable at {bin}: {e}"))?;
+            }
+        }
+    }
+
+    let output = Command::new(bin)
+        .arg("--reset")
+        .output()
+        .map_err(|e| format!("run relay factory reset at {bin}: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if stderr.is_empty() {
+        format!("relay factory reset exited with {}", output.status)
+    } else {
+        format!("relay factory reset failed: {stderr}")
+    })
+}
+
+/// Factory-reset the desktop-owned records before the webview clears its own
+/// localStorage. The first pass removes the old ACL and events. The running
+/// relay polls its ACL every five seconds, so wait one full poll interval, then
+/// purge once more to catch any final in-flight write from the old webview.
+/// Returning only after the second pass guarantees the fresh browser key can
+/// mint a new root against an empty, local-mode sidecar.
+#[tauri::command]
+async fn factory_reset(app: tauri::AppHandle) -> Result<(), String> {
+    let bin = resolve_relay_binary(&app)?;
+    run_relay_factory_reset(&bin)?;
+    std::thread::sleep(Duration::from_millis(5_250));
+    run_relay_factory_reset(&bin)
 }
 
 // --- disk backing for the workspace -------------------------------------
@@ -662,7 +720,7 @@ fn extract_sse_data(raw_event: &str) -> String {
 // calendars directly (they don't send CORS headers), so like `llm_fetch` this
 // is a thin Rust proxy: it takes a Nostr event id (hex SHA-256), submits the
 // raw 32-byte digest to a calendar, and returns the .ots proof base64-encoded.
-// The JS side builds + signs the NIP-03 kind-1040 attestation around it.
+// The JS side builds + signs the NIP-03 kind-1040 anchor around it.
 //
 // Single calendar for now (plumbing). The submission is one POST per calendar,
 // so multi-calendar redundancy is additive later — it just needs binary proof
@@ -1244,6 +1302,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             spawn_relay,
+            factory_reset,
             pick_folder,
             pick_file,
             scan_external,

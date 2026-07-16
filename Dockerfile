@@ -6,7 +6,7 @@
 #
 # Desktop installers (dmg/msi/AppImage) are NOT built here — Tauri can't
 # cross-build mac/win/linux in one Linux container. Build them per-platform
-# (see apps/client/src-tauri/BUILD.md) and drop them into ./downloads/, which
+# (see apps/client/README.md, "Release builds") and drop them into ./downloads/, which
 # is mounted or COPYd into /app/downloads.
 
 # --- stage 1: webapp ------------------------------------------------------

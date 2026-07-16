@@ -21,6 +21,7 @@
  * `relay.created_at * 1000 > local.updatedAt`.
  */
 
+import type { KEdit } from "./provenance.js";
 import type { FolderRef, Run } from "./workspace-core.js";
 
 const PREFIX = "zine.folder.";
@@ -33,9 +34,20 @@ export interface LocalFile {
   kind?: "file" | "folder";
   content: string;
   tags: string[];
-  /** The latest kind-4290 node id sealed for this file (relay chain head), or
+  /** The latest kind-4290 node id stepped for this file (relay chain head), or
    *  "" if not yet pushed. Used as prevEventId on the next relay push. */
   nodeId: string;
+  /** Stable file-trace identity (genesis event id). Optional on legacy local
+   * records and backfilled the next time their relay chain is resolved. */
+  traceId?: string;
+  /** Durable local movement journal. It is written before the relay-side half
+   * of a move/to-Oblivion/restore gesture and cleared only after the new file
+   * node and folder membership land. This lets attach retry an interrupted
+   * gesture. */
+  pendingMove?: {
+    kind: "move" | "to-oblivion" | "restore";
+    fromPath: string;
+  };
   /** ms-precision local write time. The tiebreaker vs the relay. */
   updatedAt: number;
   /** Live per-voice attribution (the editor's run list). Optional: absent on
@@ -49,31 +61,40 @@ export interface LocalFile {
    *  on legacy records and relay-pulled content → push uses the active voice.
    *  Stores a pubkey, never a secret; resolved to bytes via keys-store at push. */
   voicePubkey?: string;
-  /** The sealed node id this write is a reply to (Reply action's source),
+  /** The stepped node id this write is a reply to (Reply action's source),
    *  held here only until the next debounced relay push consumes it into a
    *  `reply-to` delta + paired `q` tag (spec §reply-to delta type) —
-   *  `writeFile` has no synchronous seal step to carry it directly, unlike the
-   *  disk/relay backends. Cleared by `pushToRelay` once sealed. */
+   *  `writeFile` has no synchronous Step to carry it directly, unlike the
+   *  disk/relay backends. Cleared by `pushToRelay` once stepped. */
   pendingReplyingTo?: string;
   /** Cited-trace node ids tagged onto this file without a body bracket (the
    *  protocol's `tag-add`, spec §Tagging vs. bracketing) — persistent, like
-   *  `tags`, NOT one-shot like `pendingReplyingTo`: a tag stays across seals
+   *  `tags`, NOT one-shot like `pendingReplyingTo`: a tag stays across steps
    *  until untagged, so every push re-emits them. Read back from the relay head
    *  as (head q-tags) minus (body brackets) on attach. */
   taggedTraces?: string[];
-  /** When true, the next debounced relay push seals to the home relay only
+  /** When true, the next debounced relay push steps to the home relay only
    *  (the Step gesture, protocol §8) — doesn't fan out to external write
    *  relays. Like `pendingReplyingTo`, this is one-shot: consumed (and
    *  cleared) by `pushToRelay` on the next push. Absent → fan out (the
    *  default Send posture). */
   pendingLocalOnly?: boolean;
   /** When true, the next debounced relay push mints a new checkpoint node
-   *  even when content/tags/citations are unchanged since the last seal — the
-   *  deliberate-gesture path (Step/Send, protocol §8: "When a Step does seal,
-   *  it mints a node"). One-shot like `pendingLocalOnly`: consumed (and
+   *  even when content/tags/citations are unchanged since the last step — the
+   *  deliberate explicit-Step path (protocol §8). One-shot like
+   *  `pendingLocalOnly`: consumed (and
    *  cleared) by `pushToRelay`. Absent → the content-hash no-op branch
    *  collapses a redundant trailing debounce, as before. */
   pendingForce?: boolean;
+  /** One-shot keystroke log drained from the editor at step time, staged for
+   *  the next debounced relay push. Consumed (and cleared) by `pushToRelay`.
+   *  Absent on nodes stepped with an empty buffer (e.g. a forced no-op Step). */
+  pendingKedits?: KEdit[];
+  /** The in-flight keystroke log mirrored to the crash pad (desktop) so an
+   *  unstepped buffer survives a reload. Distinct from `pendingKedits`: this is
+   *  the live editor buffer for crash recovery, not the one-shot push stage.
+   *  Absent on the primary store and on stepped/clean files. */
+  kedits?: KEdit[];
 }
 
 export interface LocalFolder {
@@ -84,6 +105,9 @@ export interface LocalFolder {
    *  implicit in file paths; this is the one piece of folder metadata. Optional
    *  — absent on legacy records → no folder tags until the user adds one. */
   folderTags?: Record<string, string[]>;
+  /** Paths the user has shielded (excluded from context injection). Stored as an
+   *  array because JSON has no Set; folder paths exclude their whole subtree. */
+  shieldedPaths?: string[];
 }
 
 function key(folderId: string): string {
@@ -99,11 +123,27 @@ export function loadLocalFolder(folderId: string): LocalFolder | null {
     if (typeof parsed.id !== "string" || typeof parsed.files !== "object" || !parsed.files) {
       return null;
     }
+    const files = parsed.files as Record<string, LocalFile>;
+    // Migrate the short-lived pre-Oblivion movement-journal spelling. Keeping
+    // this at the storage boundary prevents the old synonym from leaking back
+    // into the application model while an interrupted gesture is resumed.
+    for (const file of Object.values(files)) {
+      const persisted = file as unknown as {
+        pendingMove?: { kind: string; fromPath: string };
+      };
+      if (persisted.pendingMove?.kind === "archive") {
+        file.pendingMove = {
+          kind: "to-oblivion",
+          fromPath: persisted.pendingMove.fromPath,
+        };
+      }
+    }
     return {
       id: parsed.id,
       label: parsed.label,
-      files: parsed.files as Record<string, LocalFile>,
+      files,
       folderTags: parsed.folderTags,
+      shieldedPaths: parsed.shieldedPaths,
     };
   } catch {
     return null;
@@ -132,12 +172,15 @@ export function saveLocalFile(
     content: string;
     tags: string[];
     nodeId: string;
+    traceId?: string;
+    pendingMove?: LocalFile["pendingMove"];
     runs?: Run[];
     voicePubkey?: string;
     pendingReplyingTo?: string;
     taggedTraces?: string[];
     pendingLocalOnly?: boolean;
     pendingForce?: boolean;
+    pendingKedits?: KEdit[];
   },
   label?: string,
 ): void {
@@ -146,6 +189,10 @@ export function saveLocalFile(
     content: data.content,
     tags: data.tags,
     nodeId: data.nodeId,
+    ...(data.traceId ?? existing.files[relativePath]?.traceId
+      ? { traceId: data.traceId ?? existing.files[relativePath]?.traceId }
+      : {}),
+    ...(data.pendingMove ? { pendingMove: data.pendingMove } : {}),
     updatedAt: Date.now(),
     // Persist runs only when the caller has live attribution. Absent (rather
     // than []) on relay pulls / legacy writes → loads as a single run.
@@ -155,9 +202,10 @@ export function saveLocalFile(
     ...(data.taggedTraces && data.taggedTraces.length > 0 ? { taggedTraces: data.taggedTraces } : {}),
     // One-shot flags consumed by the next pushToRelay. Persisted so they survive
     // the debounce gap (writeFile returns; pushToRelay fires later from the same
-    // record). Cleared by pushToRelay after the seal lands.
+    // record). Cleared by pushToRelay after the step lands.
     ...(data.pendingLocalOnly ? { pendingLocalOnly: data.pendingLocalOnly } : {}),
     ...(data.pendingForce ? { pendingForce: data.pendingForce } : {}),
+    ...(data.pendingKedits ? { pendingKedits: data.pendingKedits } : {}),
   };
   if (label !== undefined) existing.label = label;
   saveLocalFolder(existing);
@@ -172,13 +220,22 @@ export function deleteLocalFile(folderId: string, relativePath: string): void {
 }
 
 /** Move a file's path within a local folder. Synchronous. */
-export function moveLocalFile(folderId: string, oldPath: string, newPath: string): void {
+export function moveLocalFile(
+  folderId: string,
+  oldPath: string,
+  newPath: string,
+  pendingMove?: LocalFile["pendingMove"],
+): void {
   const existing = loadLocalFolder(folderId);
   if (!existing) return;
   const file = existing.files[oldPath];
   if (!file) return;
   delete existing.files[oldPath];
-  existing.files[newPath] = { ...file, updatedAt: Date.now() };
+  existing.files[newPath] = {
+    ...file,
+    ...(pendingMove ? { pendingMove } : {}),
+    updatedAt: Date.now(),
+  };
   saveLocalFolder(existing);
 }
 
@@ -193,6 +250,19 @@ export function loadLocalFolderTags(folderId: string): Record<string, string[]> 
 export function saveLocalFolderTags(folderId: string, tags: Record<string, string[]>): void {
   const existing = loadLocalFolder(folderId) ?? { id: folderId, files: {} };
   saveLocalFolder({ ...existing, folderTags: tags });
+}
+
+/** The exact persisted shielded set for a folder. */
+export function loadLocalShielded(folderId: string): Set<string> {
+  const folder = loadLocalFolder(folderId);
+  const arr = folder?.shieldedPaths;
+  return arr ? new Set(arr) : new Set();
+}
+
+/** Overwrite a folder's shielded set. */
+export function saveLocalShielded(folderId: string, paths: Set<string>): void {
+  const existing = loadLocalFolder(folderId) ?? { id: folderId, files: {} };
+  saveLocalFolder({ ...existing, shieldedPaths: [...paths] });
 }
 
 // --- folder discovery ----------------------------------------------------
@@ -252,7 +322,7 @@ export function forgetLocalFolder(folderId: string): void {
 // --- crash pad (desktop) ------------------------------------------------
 //
 // On desktop, the real on-disk folder is a committed snapshot: it only moves
-// when the user Steps (Cmd+S) the active file. Every other dirty file's
+// when the user Steps (Cmd+S) the active file. Every other unstepped file's
 // buffer lives here, in a localStorage "crash pad" under a distinct prefix.
 // The pad survives crashes/reloads/folder-switches and auto-restores on boot,
 // so work is never lost — but the disk file stays pristine until the user
@@ -283,6 +353,7 @@ export function mirrorPad(
     runs?: Run[];
     voicePubkey?: string;
     taggedTraces?: string[];
+    kedits?: KEdit[];
   },
 ): void {
   try {
@@ -296,6 +367,7 @@ export function mirrorPad(
       ...(data.runs && data.runs.length > 0 ? { runs: data.runs } : {}),
       ...(data.voicePubkey ? { voicePubkey: data.voicePubkey } : {}),
       ...(data.taggedTraces && data.taggedTraces.length > 0 ? { taggedTraces: data.taggedTraces } : {}),
+      ...(data.kedits && data.kedits.length > 0 ? { kedits: data.kedits } : {}),
     };
     localStorage.setItem(padKey(folderId), JSON.stringify(pad));
   } catch {
@@ -316,7 +388,7 @@ export function loadPad(folderId: string): Record<string, LocalFile> | null {
   }
 }
 
-/** Remove one path from a folder's pad (called after a successful seal).
+/** Remove one path from a folder's pad (called after a successful step).
  *  If the pad becomes empty, the key is removed entirely. Synchronous. */
 export function clearPadPath(folderId: string, relativePath: string): void {
   try {

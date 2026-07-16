@@ -22,17 +22,21 @@ import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import {
-  affirmNode,
+  attestNode,
   eventMeta,
   fetchChain,
   fetchEventById,
   fetchManifest,
   publishHardenedSpan,
-  sendSealed,
+  sendStep,
+  upsertManifestEntry,
 } from "../../client/src/provenance.js";
-import { createRelayWorkspace } from "../../client/src/workspace-relay.js";
+import { createLocalWorkspace } from "../../client/src/workspace-local.js";
 import { loadOrCreateVoice } from "../../client/src/identity.js";
 import type { Workspace } from "../../client/src/workspace-core.js";
+import { getOrCreateMintFolder } from "../../client/src/root.js";
+import { MINT, mintedPath } from "../../client/src/generated-paths.js";
+import { saveLocalFile } from "../../client/src/local-store.js";
 
 /** The headless press's signing key. Seeded on first call, persisted via the
  *  localStorage shim into ~/.zine/mcp.json. Distinct from the desktop app's
@@ -41,9 +45,9 @@ export function agentVoice() {
   return loadOrCreateVoice();
 }
 
-/** Build the relay-backed workspace the headless press binds to. */
+/** Build the local-first workspace the headless press binds to. */
 export function createMcpWorkspace(): Workspace {
-  return createRelayWorkspace();
+  return createLocalWorkspace();
 }
 
 /** Wrap a JSON-serializable payload as an MCP tool result (single text block). */
@@ -94,7 +98,7 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
   server.tool(
     "zine_read_file",
     "Read a file's current text and its trace head (the latest kind-4290 node: " +
-      "id, action, when sealed). Content is reconstructed from the trace chain.",
+      "id, action, when stepped). Content is reconstructed from the trace chain.",
     { relativePath: z.string().describe("file path within the folder, e.g. 'essay.md'") },
     async ({ relativePath }) => {
       const ref = requireFolder(workspace);
@@ -107,15 +111,15 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
         content,
         headNodeId: head?.id ?? null,
         action: meta?.action ?? null,
-        sealedAtMs: head ? (meta?.sealedAtMs ?? null) : null,
+        steppedAtMs: head ? (meta?.steppedAtMs ?? null) : null,
       });
     },
   );
 
   server.tool(
     "zine_get_history",
-    "Walk a file's trace chain (genesis → head), returning each sealed node's " +
-      "id, advisory action, seal time, and optional summary. Ordering is the " +
+    "Walk a file's trace chain (genesis → head), returning each stepped node's " +
+      "id, advisory action, step time, and optional summary. Ordering is the " +
       "prev-chain, never created_at (spec §2).",
     { relativePath: z.string() },
     async ({ relativePath }) => {
@@ -135,7 +139,7 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
           return {
             nodeId: e.id,
             action: meta.action ?? null,
-            sealedAtMs: meta.sealedAtMs ?? null,
+            steppedAtMs: meta.steppedAtMs ?? null,
             signer: e.pubkey,
             summary,
           };
@@ -181,7 +185,7 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
         authors: parsed.authors ?? null,
         voices: parsed.voices ?? null,
         summary: parsed.summary ?? null,
-        sealedAtMs: meta.sealedAtMs ?? null,
+        steppedAtMs: meta.steppedAtMs ?? null,
       });
     },
   );
@@ -190,8 +194,8 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
 
   server.tool(
     "zine_step",
-    "Step (spec §8): seal a kind-4290 node for `relativePath` with the given " +
-      "content, signed by the agent voice. Sealed to the home relay ONLY — the " +
+    "Step (spec §8): step a kind-4290 node for `relativePath` with the given " +
+      "content, signed by the agent voice. Stepped to the home relay ONLY — the " +
       "node has not left the author's machine. Call zine_send to publish it. " +
       "This is the local-checkpoint gesture; most steps stay local (drafts, " +
       "experiments). Returns the new node id.",
@@ -211,7 +215,7 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
     async ({ relativePath, content, tags, replyingTo, taggedTraces }) => {
       const ref = requireFolder(workspace);
       const signer = agentVoice().secretKey;
-      // Step seals locally (localOnly=true); Send is a separate, deliberate act.
+      // Step steps locally (localOnly=true); Send is a separate, deliberate act.
       const nodeId = await workspace.writeFile(
         relativePath,
         content,
@@ -223,7 +227,9 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
         undefined,
         replyingTo,
         taggedTraces,
+        undefined, // no editor keystroke log in the headless press
         true, // localOnly — the sovereignty filter
+        true, // an explicit Step always mints one checkpoint
       );
       return jsonResult({ nodeId, folderId: ref.id, sent: false });
     },
@@ -231,71 +237,62 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
 
   server.tool(
     "zine_send",
-    "Send (spec §8): push an already-sealed node to every write-enabled relay. " +
-      "The node was signed when it was sealed (by zine_step); Send only changes " +
-      "reachability — it lets the node leave the machine. Idempotent. The " +
-      "sovereignty filter: not every Step is Sent.",
-    { nodeId: z.string().describe("id of the sealed node to publish") },
-    async ({ nodeId }) => {
+    "Send (spec §8): Step the supplied state only when it differs from the " +
+      "latest Step, then publish the current node to every write-enabled relay. This is " +
+      "the discussion gesture; unlike zine_step it deliberately leaves the machine.",
+    {
+      relativePath: z.string(),
+      content: z.string().describe("the file's full present text"),
+      tags: z.array(z.string()).optional().describe("user-authored topical labels"),
+      replyingTo: z.string().optional().describe("node id this write replies to"),
+      taggedTraces: z.array(z.string()).optional().describe("node ids tagged onto this file"),
+    },
+    async ({ relativePath, content, tags, replyingTo, taggedTraces }) => {
+      const ref = requireFolder(workspace);
+      const signer = agentVoice().secretKey;
+      const nodeId = await workspace.writeFile(
+        relativePath,
+        content,
+        tags ?? [],
+        signer,
+        undefined,
+        replyingTo,
+        taggedTraces,
+        undefined, // no editor keystroke log in the headless press
+        true, // Record pending changes locally before distribution.
+        false, // Unchanged Send reuses the latest Step.
+      );
       const event = await fetchEventById(nodeId);
-      if (!event) {
-        throw new Error(
-          `cannot send: no sealed node with id ${nodeId} on the home relay. ` +
-            `Was it stepped first?`,
-        );
-      }
-      await sendSealed(event);
-      return jsonResult({ nodeId, sent: true });
+      if (!event) throw new Error("latest Step is unavailable on the home relay");
+      await sendStep(event, signer);
+      return jsonResult({ nodeId, folderId: ref.id, sent: true });
     },
   );
 
   server.tool(
-    "zine_affirm",
-    "Affirm (spec §8): mark a SENT node as the author's published position. " +
-      "Decoupled from Send — Affirm comes after the node has been sent and " +
+    "zine_attest",
+    "Attest (spec §8): mark a SENT node as the author's published position. " +
+      "Decoupled from Send — Attest comes after the node has been sent and " +
       "read, as a post-hoc endorsement of one's own work. Requires prior Send " +
-      "(affirming a node never sent is invalid by construction). A NIP-03 " +
-      "anteriority attestation is fired asynchronously and never blocks the " +
-      "gesture. Returns the new affirm node id.",
+      "(attesting a node never sent is invalid by construction). Returns the " +
+      "new append-only TraceAttestation event id.",
     {
-      citedNodeId: z.string().describe("id of the SENT node being affirmed"),
-      citedOwnerPubkey: z
-        .string()
-        .describe("pubkey of the cited node's signer (carried on the q tag, §3.1)"),
-      relativePath: z
-        .string()
-        .optional()
-        .describe("path for the affirm node's own chain (defaults to the cited node's)"),
-      content: z
-        .string()
-        .optional()
-        .describe("snapshot for the affirm node (defaults to the cited node's snapshot)"),
+      citedNodeId: z.string().describe("id of the SENT node being attested"),
+      message: z.string().optional().describe("optional note attached to the endorsement"),
+      geohash: z.string().optional().describe("optional location for spatial discovery"),
     },
-    async ({ citedNodeId, citedOwnerPubkey, relativePath, content }) => {
-      const ref = requireFolder(workspace);
+    async ({ citedNodeId, message, geohash }) => {
+      requireFolder(workspace);
       const signer = agentVoice().secretKey;
 
-      // §8: affirm requires prior Send. We can't perfectly prove Send across
-      // the relay set, but the cited node must at least be fetchable — an
-      // unfetchable node is one nobody can read, which is exactly the
-      // "affirming something no one can fetch" lie §8 forbids.
-      const cited = await fetchEventById(citedNodeId);
-      if (!cited) {
-        throw new Error(
-          `cannot affirm ${citedNodeId}: not fetchable on the configured relays. ` +
-            `Send it first (§8 forbids affirming a node no one can read).`,
-        );
-      }
-      const citedContent = JSON.parse(cited.content) as { snapshot?: string; contentHash?: string };
-      const affirm = await affirmNode(citedNodeId, citedOwnerPubkey, {
-        prevEventId: null, // the affirm node stands alone on its own gesture
-        relativePath: relativePath ?? eventMeta(cited).relativePath ?? "affirm.md",
-        folderId: ref.id,
-        snapshot: content ?? citedContent.snapshot ?? "",
-        contentHash: citedContent.contentHash ?? "",
+      // attestNode enforces prior Send by fetching the target from a configured
+      // write-enabled, non-loopback relay before it publishes the endorsement.
+      const attest = await attestNode(citedNodeId, undefined, {
         signer,
+        ...(message ? { message } : {}),
+        ...(geohash ? { geohash } : {}),
       });
-      return jsonResult({ affirmNodeId: affirm.id, affirmedNode: citedNodeId });
+      return jsonResult({ attestationId: attest.id, attestedNode: citedNodeId });
     },
   );
 
@@ -315,13 +312,39 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
     },
     async ({ originPath, phrase, originNodeId }) => {
       const ref = requireFolder(workspace);
+      const voice = agentVoice();
+      const mintFolderId = await getOrCreateMintFolder(ref.id, voice.secretKey);
+      const manifest = await fetchManifest(mintFolderId);
+      const occupied = new Set(manifest.map((entry) => `${MINT}/${entry.relativePath}`));
+      const localPath = mintedPath(phrase, new Date(), occupied);
+      const memberName = localPath.slice(`${MINT}/`.length);
       const minted = await publishHardenedSpan({
-        folderId: ref.id,
-        originPath,
+        folderId: mintFolderId,
+        relativePath: memberName,
         phrase,
         originNodeId,
+        signer: voice.secretKey,
+        localOnly: true,
       });
-      return jsonResult({ mintedNodeId: minted.id });
+      const parsed = JSON.parse(minted.content) as { contentHash?: string };
+      await upsertManifestEntry(
+        mintFolderId,
+        {
+          kind: "file",
+          relativePath: memberName,
+          latestNodeId: minted.id,
+          contentHash: parsed.contentHash ?? "",
+        },
+        voice.secretKey,
+        { localOnly: true },
+      );
+      saveLocalFile(ref.id, localPath, {
+        content: phrase,
+        tags: [],
+        nodeId: minted.id,
+        runs: [{ voice: voice.publicKey, text: phrase }],
+      });
+      return jsonResult({ mintedNodeId: minted.id, path: localPath, originPath });
     },
   );
 

@@ -18,6 +18,24 @@
 
 export type ProviderProtocol = "openai" | "anthropic";
 
+/** Provider-neutral reasoning levels. Individual models support subsets; an
+ *  omitted value means "let the provider/model choose" and is always safe. */
+export type ReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
+
+/** OpenAI-compatible output-detail control. Other protocols simply omit it. */
+export type ModelVerbosity = "low" | "medium" | "high";
+
+/** Zine-owned communication presets. These are translated to a transparent
+ *  system instruction because personality is not a portable provider field. */
+export type ModelPersonality = "none" | "friendly" | "pragmatic";
+
 export interface ProviderConfig {
   /** Stable id (so edits survive reordering). Ids derived from a preset carry
    *  the preset's slug; ad-hoc ones get timestamped ids. */
@@ -27,6 +45,16 @@ export interface ProviderConfig {
   baseUrl: string;
   modelId: string;
   apiKey: string;
+  /** Optional generation controls. Missing means provider/model default, which
+   *  keeps old saved cards backward-compatible and unsupported models usable. */
+  reasoningEffort?: ReasoningEffort;
+  verbosity?: ModelVerbosity;
+  personality?: ModelPersonality;
+  temperature?: number;
+  maxTokens?: number;
+  /** Provider-level system instructions, applied to both single-shot ops and
+   *  agent runs. Voice prompts remain a separate per-voice layer. */
+  instructions?: string;
   /** The preset this provider was created from, if any. Pure bookkeeping —
    *  the entry is fully owned by the user and freely deletable/editable.
    *  Currently surfaced only to suppress the preset in the "add" menu once it
@@ -61,42 +89,42 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     label: "z.ai (Anthropic)",
     protocol: "anthropic",
     baseUrl: "https://api.z.ai/api/anthropic",
-    modelId: "glm-4.6",
+    modelId: "glm-5.2",
   },
   {
     slug: "zai-openai",
     label: "z.ai (OpenAI)",
     protocol: "openai",
     baseUrl: "https://api.z.ai/api/paas/v4",
-    modelId: "glm-4.6",
+    modelId: "glm-5.2",
   },
   {
     slug: "anthropic",
     label: "Anthropic",
     protocol: "anthropic",
     baseUrl: "https://api.anthropic.com",
-    modelId: "claude-sonnet-4-5",
+    modelId: "claude-fable-5",
   },
   {
     slug: "openai",
     label: "OpenAI",
     protocol: "openai",
     baseUrl: "https://api.openai.com/v1",
-    modelId: "gpt-4o",
+    modelId: "gpt-5.6-sol",
   },
   {
     slug: "openrouter",
     label: "OpenRouter",
     protocol: "openai",
     baseUrl: "https://openrouter.ai/api/v1",
-    modelId: "anthropic/claude-sonnet-4.5",
+    modelId: "anthropic/claude-fable-5",
   },
   {
     slug: "ollama",
     label: "Ollama (local)",
     protocol: "openai",
     baseUrl: "http://localhost:11434/v1",
-    modelId: "llama3.1",
+    modelId: "gpt-oss:20b",
   },
 ];
 

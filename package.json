@@ -10,6 +10,6 @@
     "build:relay": "node scripts/build-relay.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19"
   }
 }

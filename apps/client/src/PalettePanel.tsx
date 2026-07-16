@@ -8,7 +8,7 @@
  *   - Copy: writes the full `[[ text | nodeId ]]` citation to the clipboard,
  *     so a ⌘V elsewhere (this doc, another doc, even another app) lands a
  *     real, resolvable citation. Pasting into a zine doc installs a
- *     reference; the next seal records the component trace (spec:189).
+ *     reference; the next step records the component trace (spec:189).
  *   - Remove: drops the curated reference. The minted node is immutable,
  *     so the node itself stays on the relay — only the curation moves.
  *
@@ -66,7 +66,7 @@ export function PalettePanel({
 
   async function handleRemove(nodeId: string) {
     // Optimistic remove; the relay write follows. A failed write restores on
-    // the next refreshKey bump (App re-fetches on seal).
+    // the next refreshKey bump (App re-fetches on step).
     setItems((prev) => prev.filter((i) => i.nodeId !== nodeId));
     try {
       await removeFromPalette(nodeId);

@@ -35,11 +35,30 @@ import {
   type DoorEntry,
 } from "./doors-store.js";
 import { detectCoCitations, type CoCitation } from "./co-citation.js";
+import { addFollow, loadFollows, removeFollow, type FollowEntry } from "./follows-store.js";
+
+type NetworkCategory = "node" | "seeds" | "following" | "peers" | "co-citations";
+
+const NETWORK_CATEGORIES: Array<{
+  id: NetworkCategory;
+  label: string;
+  description: string;
+}> = [
+  { id: "node", label: "Node", description: "This press and its doors" },
+  { id: "seeds", label: "Seeds", description: "Durable relay copies" },
+  { id: "following", label: "Following", description: "Whose work you read" },
+  { id: "peers", label: "Peers", description: "Trusted access" },
+  {
+    id: "co-citations",
+    label: "Co-citations",
+    description: "Possible introductions",
+  },
+];
 
 /**
  * The networking view — one surface for how this machine talks to the network.
  *
- * Three sections, one per role in the network:
+ * Five categories, one selected at a time:
  *
  *   - Node: this machine and every way to reach it. The owner-key picker
  *     (which keychain key owns the relay — signs NIP-42 AUTH, is the `owner`
@@ -56,12 +75,21 @@ import { detectCoCitations, type CoCitation } from "./co-citation.js";
  *     and the pubkey allowlist. On the webapp this is desktop-only, so the
  *     section shows a note instead.
  *
+ *   - Following: a local, unilateral reader preference used by the shared
+ *     Stacks/Times/Spaces query. It grants no access and publishes no ACL.
+ *
+ *   - Co-citations (desktop only): possible introductions between peers who
+ *     quoted the same passages.
+ *
  * An onion is a *door*, not an identity: the owner key is who you are (AUTH);
  * doors are where peers find you. Adding a door opens another address into the
  * same relay without granting owner privilege — so you can run several onions
  * at once and rotate without downtime.
  */
 export function NetworkingView() {
+  const [activeCategory, setActiveCategory] =
+    useState<NetworkCategory>("node");
+
   // --- seeds (external relays) --------------------------------------------
   const [entries, setEntries] = useState<RelayEntry[]>(() => loadRelays());
   const [draftUrl, setDraftUrl] = useState("");
@@ -86,95 +114,249 @@ export function NetworkingView() {
 
   return (
     <section className="view-placeholder networking-view">
-      <p className="view-placeholder-blurb">
-        Your node, your seeds, your peers — where your writing lives, where it's backed up, and who can reach you.
-      </p>
-
-      {/* --- Node (the machine + all its addresses) ---------------------- */}
-      <NodeSection />
-
-      {/* --- Seeds (external relays) ------------------------------------- */}
-      <div className="networking-section settings-card">
-        <h2 className="networking-section-title">Seeds</h2>
-        <p className="networking-section-sub">
-          Durability backups — your node is primary, these hold a copy so peers can read when your desktop is offline.
+      <aside className="networking-categories">
+        <p className="networking-intro">
+          Where your writing lives, how it stays available, and who can reach
+          it.
         </p>
+        <nav className="networking-category-list" aria-label="Network categories">
+          {NETWORK_CATEGORIES.map((category) => {
+            const active = category.id === activeCategory;
+            return (
+              <button
+                key={category.id}
+                id={`network-category-${category.id}`}
+                type="button"
+                className={`networking-category${active ? " active" : ""}`}
+                aria-current={active ? "page" : undefined}
+                aria-controls={`network-panel-${category.id}`}
+                onClick={() => setActiveCategory(category.id)}
+              >
+                <span className="networking-category-label">
+                  {category.label}
+                </span>
+                <span className="networking-category-description">
+                  {category.description}
+                </span>
+              </button>
+            );
+          })}
+        </nav>
+      </aside>
 
-        {external.length === 0 ? (
-          <p className="relay-empty">
-            No seeds — add one below.
-          </p>
-        ) : (
-          <ul className="relay-list">
-            {external.map((e) => (
-              <li key={e.id} className="settings-row relay-row">
-                <div className="relay-row-main">
-                  <span className="relay-url" title={e.url}>
-                    {e.url}
-                  </span>
-                </div>
-                <div className="relay-row-controls">
-                  <label className="relay-toggle">
-                    <input
-                      type="checkbox"
-                      checked={e.read}
-                      onChange={(ev) =>
-                        commitRelays(setRelayRead(e.id, ev.target.checked))
-                      }
-                    />
-                    <span>read</span>
-                  </label>
-                  <label className="relay-toggle">
-                    <input
-                      type="checkbox"
-                      checked={e.write}
-                      onChange={(ev) =>
-                        commitRelays(setRelayWrite(e.id, ev.target.checked))
-                      }
-                    />
-                    <span>write</span>
-                  </label>
-                  <button
-                    type="button"
-                    className="relay-delete"
-                    title="Remove"
-                    onClick={() => commitRelays(removeRelay(e.id))}
-                  >
-                    <Trash2 size={16} strokeWidth={1.75} />
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
+      <div className="networking-detail">
+        <div className="networking-detail-inner">
+          <div
+            id="network-panel-node"
+            role="region"
+            aria-labelledby="network-category-node"
+            hidden={activeCategory !== "node"}
+          >
+            {/* --- Node (the machine + all its addresses) --------------- */}
+            <NodeSection />
+          </div>
 
-        <form
-          className="relay-add"
-          onSubmit={(ev) => {
-            ev.preventDefault();
-            onAddRelay();
-          }}
-        >
-          <input
-            className="relay-add-input"
-            type="text"
-            placeholder="wss://relay.example.com"
-            value={draftUrl}
-            onChange={(ev) => setDraftUrl(ev.target.value)}
-          />
-          <button type="submit" className="settings-add-btn">
-            <Plus size={16} strokeWidth={1.75} />
-            <span>Add</span>
-          </button>
-        </form>
+          <div
+            id="network-panel-seeds"
+            role="region"
+            aria-labelledby="network-category-seeds"
+            hidden={activeCategory !== "seeds"}
+          >
+            {/* --- Seeds (external relays) ------------------------------ */}
+            <div className="networking-section">
+              <h2 className="networking-section-title">Seeds</h2>
+              <p className="networking-section-sub">
+                Durable copies of your writing. Your node stays primary; seeds
+                keep it readable while this desktop is offline.
+              </p>
+
+              {external.length === 0 ? (
+                <p className="relay-empty">No seeds yet. Add one below.</p>
+              ) : (
+                <ul className="relay-list">
+                  {external.map((e) => (
+                    <li key={e.id} className="settings-row relay-row">
+                      <div className="relay-row-main">
+                        <span className="relay-url" title={e.url}>
+                          {e.url}
+                        </span>
+                      </div>
+                      <div className="relay-row-controls">
+                        <label className="relay-toggle">
+                          <input
+                            type="checkbox"
+                            checked={e.read}
+                            onChange={(ev) =>
+                              commitRelays(
+                                setRelayRead(e.id, ev.target.checked),
+                              )
+                            }
+                          />
+                          <span>read</span>
+                        </label>
+                        <label className="relay-toggle">
+                          <input
+                            type="checkbox"
+                            checked={e.write}
+                            onChange={(ev) =>
+                              commitRelays(
+                                setRelayWrite(e.id, ev.target.checked),
+                              )
+                            }
+                          />
+                          <span>write</span>
+                        </label>
+                        <button
+                          type="button"
+                          className="relay-delete"
+                          title="Remove"
+                          onClick={() => commitRelays(removeRelay(e.id))}
+                        >
+                          <Trash2 size={16} strokeWidth={1.75} />
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <form
+                className="relay-add"
+                onSubmit={(ev) => {
+                  ev.preventDefault();
+                  onAddRelay();
+                }}
+              >
+                <input
+                  className="relay-add-input"
+                  type="text"
+                  placeholder="wss://relay.example.com"
+                  value={draftUrl}
+                  onChange={(ev) => setDraftUrl(ev.target.value)}
+                />
+                <button type="submit" className="settings-add-btn">
+                  <Plus size={16} strokeWidth={1.75} />
+                  <span>Add seed</span>
+                </button>
+              </form>
+            </div>
+          </div>
+
+          <div
+            id="network-panel-following"
+            role="region"
+            aria-labelledby="network-category-following"
+            hidden={activeCategory !== "following"}
+          >
+            <FollowingSection />
+          </div>
+
+          <div
+            id="network-panel-peers"
+            role="region"
+            aria-labelledby="network-category-peers"
+            hidden={activeCategory !== "peers"}
+          >
+            {/* --- Peers (desktop only) --------------------------------- */}
+            <PeersSection />
+          </div>
+
+          <div
+            id="network-panel-co-citations"
+            role="region"
+            aria-labelledby="network-category-co-citations"
+            hidden={activeCategory !== "co-citations"}
+          >
+            {/* --- Co-citations (desktop only) -------------------------- */}
+            <CoCitationsSection />
+          </div>
+        </div>
       </div>
-
-      {/* --- Peers (desktop only) ---------------------------------------- */}
-      <PeersSection />
-
-      {/* --- Co-citations (desktop only) --------------------------------- */}
-      <CoCitationsSection />
     </section>
+  );
+}
+
+/** Following answers "whose visible work do I want in my social views?" It is
+ * intentionally independent from Peers, which answers "who may read my node?" */
+function FollowingSection() {
+  const [entries, setEntries] = useState<FollowEntry[]>(() => loadFollows());
+  const [draft, setDraft] = useState("");
+  const [label, setLabel] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const sync = () => setEntries(loadFollows());
+    window.addEventListener("storage", sync);
+    return () => window.removeEventListener("storage", sync);
+  }, []);
+
+  function onAdd() {
+    setError(null);
+    if (!draft.trim()) return;
+    try {
+      setEntries(addFollow(draft, label));
+      setDraft("");
+      setLabel("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  return (
+    <div className="networking-section">
+      <h2 className="networking-section-title">Following</h2>
+      <p className="networking-section-sub">
+        A private reading list for Stacks, Times, and Spaces. Following someone does not make them a peer or let them read your node.
+      </p>
+      {error && <div className="peers-error">{error}</div>}
+      <ul className="peer-list">
+        {entries.map((entry) => (
+          <li key={entry.pubkey} className="settings-row peer-row">
+            <span>
+              {entry.label && <strong className="follow-label">{entry.label}</strong>}
+              <code className="peer-pubkey" title={entry.pubkey}>
+                {entry.pubkey.slice(0, 24)}…{entry.pubkey.slice(-8)}
+              </code>
+            </span>
+            <button
+              type="button"
+              className="peer-delete"
+              title="Unfollow"
+              onClick={() => setEntries(removeFollow(entry.pubkey))}
+            >
+              <Trash2 size={16} strokeWidth={1.75} />
+            </button>
+          </li>
+        ))}
+        {entries.length === 0 && <li className="peer-empty">Nobody followed yet.</li>}
+      </ul>
+      <form
+        className="peer-add follow-add"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onAdd();
+        }}
+      >
+        <input
+          className="peer-add-input"
+          type="text"
+          placeholder="npub1… or hex pubkey"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+        <input
+          className="peer-add-input follow-label-input"
+          type="text"
+          placeholder="local label (optional)"
+          value={label}
+          onChange={(event) => setLabel(event.target.value)}
+        />
+        <button type="submit" className="settings-add-btn" disabled={!draft.trim()}>
+          <Plus size={16} strokeWidth={1.75} />
+          <span>Follow</span>
+        </button>
+      </form>
+    </div>
   );
 }
 
@@ -363,6 +545,10 @@ function NodeSection() {
   return (
     <div className="networking-section">
       <h2 className="networking-section-title">Node</h2>
+      <p className="networking-section-sub">
+        This press, its owner identity, and every address peers can use to find
+        it.
+      </p>
 
       {/* --- Local relay URL (always shown) ---------------------------- */}
       <div className="settings-row local-node-row">
@@ -562,10 +748,14 @@ function PeersSection() {
 
   if (!isTauri()) {
     return (
-      <div className="networking-section settings-card">
+      <div className="networking-section">
         <h2 className="networking-section-title">Peers</h2>
-        <p className="view-placeholder-blurb">
-          Desktop-only — open this view in the desktop app.
+        <p className="networking-section-sub">
+          People allowed to connect directly to your node.
+        </p>
+        <p className="networking-desktop-note">
+          Peer access is managed in the desktop app, where your local node is
+          running.
         </p>
       </div>
     );
@@ -653,14 +843,14 @@ function PeersSection() {
 /**
  * Co-citations section — the v1 rendezvous surface (protocol/rendezvous.md §4).
  *
- * For each pair of peers who both quoted the same passage (same content hash H),
+ * For each pair of peers who both cited the same trace,
  * shows an introduction card: the two pubkeys, how many passages they share,
  * and a sample of the shared text. The introducer brokers but does not admit —
  * adding either peer to the other's list stays a separate human act in the
  * Peers section above.
  *
  * Desktop-only (peers are desktop-only). Runs the detection sweep on mount and
- * every 5 minutes, mirroring the attestation-upgrade interval pattern. A peer's
+ * every 5 minutes, mirroring the anchor-upgrade interval pattern. A peer's
  * chain is readable only if replicated to a seed this machine reads — the honest
  * v1 boundary noted in co-citation.ts.
  */
@@ -708,10 +898,14 @@ function CoCitationsSection() {
 
   if (!isTauri()) {
     return (
-      <div className="networking-section settings-card">
+      <div className="networking-section">
         <h2 className="networking-section-title">Co-citations</h2>
-        <p className="view-placeholder-blurb">
-          Desktop-only — open this view in the desktop app.
+        <p className="networking-section-sub">
+          Possible introductions between peers who cited the same traces.
+        </p>
+        <p className="networking-desktop-note">
+          Co-citations are scanned in the desktop app, where peer chains are
+          available.
         </p>
       </div>
     );
@@ -721,7 +915,7 @@ function CoCitationsSection() {
     <div className="networking-section">
       <h2 className="networking-section-title">Co-citations</h2>
       <p className="networking-section-sub">
-        Pairs of your peers who quoted the same passage — a signal they might
+        Pairs of your peers who cited the same traces — a signal they might
         know each other. You broker the intro; adding them stays your call in
         Peers above.
       </p>
@@ -749,15 +943,15 @@ function CoCitationsSection() {
                   {m.peerA.slice(0, 12)}…
                 </span>
                 <span className="cocitation-shared-count">
-                  {m.hashes.length} shared {m.hashes.length === 1 ? "passage" : "passages"}
+                  {m.targetIds.length} shared {m.targetIds.length === 1 ? "trace" : "traces"}
                 </span>
                 <span className="cocitation-pubkey" title={m.peerB}>
                   {m.peerB.slice(0, 12)}…
                 </span>
               </div>
               {m.samples.slice(0, 3).map((s) => (
-                <blockquote key={s.hash} className="cocitation-sample">
-                  {s.quoteA ?? s.quoteB ?? "(quote unavailable)"}
+                <blockquote key={s.nodeId} className="cocitation-sample">
+                  {s.text ?? `trace ${s.nodeId.slice(0, 12)}…`}
                 </blockquote>
               ))}
               {m.samples.length > 3 && (

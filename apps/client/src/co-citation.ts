@@ -4,8 +4,8 @@
  * The v1 rendezvous mechanism: client-side set intersection over chains the
  * introducer is already authorized to read. For each pair of peers (A, B) that
  * you — the introducer C — mutually trust, compute the intersection of their
- * Q-tag sets (rendezvous coordinates H). If they share any, surface an
- * introduction: "A and B both quoted the same passage(s) — introduce?"
+ * ordinary `q` citation targets. If they share any, surface an introduction:
+ * "A and B both cited the same trace(s) — introduce?"
  *
  * This is trust-bounded by construction: C sees the coincidence only because C
  * is the one node already authorized to read both chains. C brokers the
@@ -20,86 +20,60 @@
  *
  * Two layers, split for testability (following the provenance.inbound.test.ts
  * convention — pure logic is unit-tested, relay fetches are excluded):
- *   - `intersectQHashes` (pure): given two peers' event sets, compute shared H.
+ *   - `intersectCitationTargets` (pure): compute shared cited trace ids.
  *   - `detectCoCitations` (relay-bound): enumerate peers, fetch each one's
  *     recent events from relays C already reads, feed to the pure layer.
  */
 
 import type { Event } from "nostr-tools";
 
-import { eventMeta, queryMany, getReadRelays } from "./provenance.js";
+import { eventMeta, fetchEventById, queryMany, getReadRelays } from "./provenance.js";
 
-/** A co-citation match between two peers on one or more shared quotes.
- *  `hashes` are the shared H values; `samples` carries up to 2 verbatim quote
- *  bytes per H (one per peer, when available) so the human vetting the intro
- *  can read what they actually share without re-fetching. */
+/** A co-citation match between two peers on one or more shared trace targets. */
 export interface CoCitation {
   peerA: string;
   peerB: string;
-  hashes: string[];
-  samples: { hash: string; quoteA?: string; quoteB?: string }[];
+  targetIds: string[];
+  samples: { nodeId: string; text?: string }[];
 }
 
-/** Extract the set of Q-tag hashes (rendezvous coordinates) from a set of
- *  events — the union of every `contentCiteHashes` across every event. Pure,
- *  no IO. This is H_X in the rendezvous.md §4.1 algorithm. */
-export function qHashSet(events: Event[]): Set<string> {
-  const hashes = new Set<string>();
-  for (const ev of events) {
-    for (const h of eventMeta(ev).contentCiteHashes) {
-      hashes.add(h);
-    }
+/** Extract ordinary trace-citation targets from current heads only. Reverse
+ * relay scans return historical nodes too; unioning every q edge would keep a
+ * removed citation socially active forever. Within the fetched peer window, a
+ * node is historical whenever another fetched node names it as `prev`.
+ * `action:delete` heads emit no active signal. Folder membership and LLM scope
+ * q-tags remain structural/context edges, not social citations. */
+export function citationTargetSet(events: Event[]): Set<string> {
+  const targets = new Set<string>();
+  const historicalIds = new Set<string>();
+  for (const event of events) {
+    const prev = event.tags.find((tag) => tag[0] === "e" && tag[3] === "prev")?.[1];
+    if (prev) historicalIds.add(prev);
   }
-  return hashes;
-}
-
-/** Extract a hash → quote-bytes map from a set of events, by reading the
- *  `role: "content"` cite deltas (rendezvous.md §1.1: the delta carries the
- *  verbatim `quote` field). Pure. Used to populate `samples` so the
- *  introducer can show what the shared passage actually says. */
-export function quoteBytesByHash(events: Event[]): Map<string, string> {
-  const out = new Map<string, string>();
   for (const ev of events) {
-    try {
-      const parsed = JSON.parse(ev.content) as { deltas?: unknown[] };
-      if (!Array.isArray(parsed.deltas)) continue;
-      for (const d of parsed.deltas) {
-        if (
-          d &&
-          typeof d === "object" &&
-          (d as { type?: string }).type === "cite" &&
-          (d as { role?: string }).role === "content"
-        ) {
-          const c = d as { hash?: string; quote?: string };
-          if (typeof c.hash === "string" && typeof c.quote === "string" && !out.has(c.hash)) {
-            out.set(c.hash, c.quote);
-          }
-        }
-      }
-    } catch {
-      // malformed/non-JSON content — skip this event
-    }
+    if (historicalIds.has(ev.id)) continue;
+    if (!ev.tags.some((tag) => tag[0] === "z" && tag[1] === "file")) continue;
+    if (ev.tags.some((tag) => tag[0] === "scope" && tag[1] === "llm")) continue;
+    if (ev.tags.some((tag) => tag[0] === "action" && tag[1] === "delete")) continue;
+    for (const nodeId of eventMeta(ev).citationTargets) targets.add(nodeId);
   }
-  return out;
+  return targets;
 }
 
 /** Compute the co-citation intersections across a set of peers, given each
  *  peer's fetched events. Pure — no IO, fully unit-testable. This is the core
- *  of the rendezvous.md §4.1 algorithm: for each pair (A, B), intersect H_A
- *  and H_B; if non-empty, emit a CoCitation.
+ *  of the rendezvous.md §4.1 algorithm: for each pair (A, B), intersect their
+ *  ordinary q-tag targets; if non-empty, emit a CoCitation.
  *
  *  O(P² × E) where P = peer count, E = avg events per peer. Fine for the small
  *  peer graphs this system is designed for (peers.json is a hand-curated ACL,
  *  not a social graph — tens of peers, not thousands). */
-export function intersectQHashes(
+export function intersectCitationTargets(
   eventsByPeer: Map<string, Event[]>,
 ): CoCitation[] {
-  // Pre-compute each peer's hash set + quote map once (not per-pair).
-  const hashSets = new Map<string, Set<string>>();
-  const quoteMaps = new Map<string, Map<string, string>>();
+  const targetSets = new Map<string, Set<string>>();
   for (const [peer, events] of eventsByPeer) {
-    hashSets.set(peer, qHashSet(events));
-    quoteMaps.set(peer, quoteBytesByHash(events));
+    targetSets.set(peer, citationTargetSet(events));
   }
 
   const peers = [...eventsByPeer.keys()];
@@ -108,26 +82,21 @@ export function intersectQHashes(
     for (let j = i + 1; j < peers.length; j++) {
       const a = peers[i];
       const b = peers[j];
-      const hA = hashSets.get(a)!;
-      const hB = hashSets.get(b)!;
+      const targetsA = targetSets.get(a)!;
+      const targetsB = targetSets.get(b)!;
       const shared: string[] = [];
       // Iterate the smaller set for efficiency.
-      const [smaller, larger] = hA.size <= hB.size ? [hA, hB] : [hB, hA];
-      for (const h of smaller) {
-        if (larger.has(h)) shared.push(h);
+      const [smaller, larger] =
+        targetsA.size <= targetsB.size ? [targetsA, targetsB] : [targetsB, targetsA];
+      for (const nodeId of smaller) {
+        if (larger.has(nodeId)) shared.push(nodeId);
       }
       if (shared.length === 0) continue;
-      const qA = quoteMaps.get(a)!;
-      const qB = quoteMaps.get(b)!;
       results.push({
         peerA: a,
         peerB: b,
-        hashes: shared,
-        samples: shared.map((h) => ({
-          hash: h,
-          quoteA: qA.get(h),
-          quoteB: qB.get(h),
-        })),
+        targetIds: shared,
+        samples: shared.map((nodeId) => ({ nodeId })),
       });
     }
   }
@@ -174,14 +143,28 @@ export async function fetchPeerEvents(
 }
 
 /** The full detection sweep: fetch each peer's recent events, compute
- *  intersections, return co-citation matches sorted by shared-hash count
+ *  intersections, return co-citation matches sorted by shared-target count
  *  (most overlap first — the strongest signal for a human vetting intros). */
 export async function detectCoCitations(
   pubkeys: string[],
   limit = 100,
 ): Promise<CoCitation[]> {
   const eventsByPeer = await fetchPeerEvents(pubkeys, limit);
-  const matches = intersectQHashes(eventsByPeer);
-  // Sort by number of shared hashes descending — rare/strong matches first.
-  return matches.sort((a, b) => b.hashes.length - a.hashes.length);
+  const matches = intersectCitationTargets(eventsByPeer);
+  const targetIds = [...new Set(matches.flatMap((match) => match.targetIds))];
+  const textByTarget = new Map<string, string>();
+  await Promise.all(targetIds.map(async (nodeId) => {
+    const event = await fetchEventById(nodeId).catch(() => null);
+    if (!event) return;
+    try {
+      const parsed = JSON.parse(event.content) as { snapshot?: unknown };
+      if (typeof parsed.snapshot === "string") textByTarget.set(nodeId, parsed.snapshot);
+    } catch {
+      // A shared target remains useful even if its preview cannot be decoded.
+    }
+  }));
+  for (const match of matches) {
+    match.samples = match.targetIds.map((nodeId) => ({ nodeId, text: textByTarget.get(nodeId) }));
+  }
+  return matches.sort((a, b) => b.targetIds.length - a.targetIds.length);
 }

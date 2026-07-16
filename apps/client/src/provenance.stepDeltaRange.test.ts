@@ -1,7 +1,7 @@
 /**
  * Tests for `stepDeltaRange`: the common-prefix/suffix diff folded to a single
  * `{from,to}` range in the NEW text's coordinate space. This is what folder
- * replay uses to scroll the editor to the footprint of a seal's deltas.
+ * replay uses to scroll the editor to the footprint of a step's deltas.
  *
  * The four cases that matter:
  *  1. insert → range spans the newly written text in the new doc.
@@ -44,7 +44,7 @@ test("stepDeltaRange: identical strings return null", () => {
 });
 
 test("stepDeltaRange: empty → content spans the whole new doc (genesis)", () => {
-  // The file's first seal: prev is "" so the whole import is the footprint.
+  // The file's first step: prev is "" so the whole import is the footprint.
   const range = stepDeltaRange("", "first line\nsecond line");
   assert.deepEqual(range, { from: 0, to: "first line\nsecond line".length });
 });

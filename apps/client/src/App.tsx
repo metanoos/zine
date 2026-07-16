@@ -17,17 +17,17 @@ import {
   keymap,
   lineNumbers,
   ViewPlugin,
+  WidgetType,
   type DecorationSet,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { markdownIndentExtensions } from "./tab-indent.js";
 import {
   sampleRelays,
   hitToDocument,
   appendToPalette,
   fetchPalette,
   rankSampleHits,
-  fetchFolderOwner,
-  forkFolder,
   forkFileFromNode,
   upsertManifestEntry,
   resolveTagCandidates,
@@ -36,6 +36,8 @@ import {
   fetchFolderActivity,
   fetchFolderNodes,
   fetchEventById,
+  publishHardenedSpan,
+  sendStep,
   reconstructUpTo,
   reconstructRunsUpTo,
   auditAttribution,
@@ -43,12 +45,11 @@ import {
   parseAuthors,
   eventMeta,
   resolveNodeName,
+  resolveCitationChip,
   bufferFocus,
-  flushFocusCheckpoint,
   focusTimeline,
   getOrCreateRuleTrace,
   setPendingLlmMeta,
-  createFolderGenesis,
   fetchManifest,
   findMergeCandidates,
   incorporateMergeCandidate,
@@ -61,37 +62,61 @@ import {
   type FocusEntry,
   type CitationChip,
   type MergeCandidate,
-  findInbound,
-  affirmNode,
-  sha256HexLocal,
+  type KEdit,
+  excludeInboundSources,
+  findInboundSnapshot,
+  resolveTraceChain,
+  resolveTraceIdentity,
+  revokeTrace,
+  attestNode,
+  fetchAttestationCounts,
   type TraceInbound,
 } from "./provenance.js";
 import { MergePanel } from "./MergePanel.js";
 import { MergePreviewModal } from "./MergePreviewModal.js";
 import { threeWayMerge, autoMergedText } from "./three-way-merge.js";
-import { AffirmModal } from "./AffirmModal.js";
+import { AttestModal } from "./AttestModal.js";
+import { RunModal } from "./RunModal.js";
+import { PromptInspectorModal } from "./PromptInspectorModal.js";
+import { runAgentLoop, type AgentCtx } from "./agent-loop.js";
 import { ownerFolderOf, activeMounted } from "./focus-routing.js";
+import { activateTreeItem, type ActivatableTreeItem } from "./tree-routing.js";
 import type { Event } from "nostr-tools";
 import { diffLines } from "diff";
 import {
   bracketExtensions,
   bracketVoiceResolverFacet,
+  doubleBackspaceUnwrapCommand,
   findCommands,
+  findMintSelectionTarget,
   findPendingBrackets,
+  findResolvedBrackets,
+  focusedVoiceFacet,
   iterBrackets,
   modeCompartment,
   modeFacet,
   onSelectSpanFacet,
   onCopySpanFacet,
   resolveBracket,
+  resolvedBracketMarkup,
   selectedNodeIdFacet,
   wrapSelectionCommand,
   type Mode,
 } from "./brackets.js";
 import { markdownPreviewExtensions } from "./markdown-preview.js";
+import {
+  classifyPaletteSelection,
+  palettePrimaryAction,
+  paletteSecondaryActions,
+  type PaletteSelectionState,
+} from "./palette.js";
+import {
+  COIN_CLIPBOARD_MIME,
+  canCoinText,
+  parseCoinClipboardEnvelope,
+  serializeCoinClipboardEnvelope,
+} from "./coin-clipboard.js";
 
-import { OrchestrationTimeline } from "./OrchestrationTimeline.js";
-import { LlmReconstructPanel } from "./LlmReconstructPanel.js";
 import { DownloadView } from "./Download.js";
 import { AboutView } from "./About.js";
 import { NetworkingView } from "./Networking.js";
@@ -100,6 +125,12 @@ import { KeysView } from "./KeysView.js";
 import { GlobeView } from "./Globe.js";
 import { TimesView } from "./TimesView.js";
 import { ListingsView } from "./ListingsView.js";
+import { SocialQueryBar } from "./SocialQueryBar.js";
+import {
+  loadSocialQuery,
+  saveSocialQuery,
+  type SocialQuery,
+} from "./social-query.js";
 import { PinPanel } from "./PinPanel.js";
 import { OperatorView } from "./OperatorView.js";
 import {
@@ -111,12 +142,15 @@ import {
 } from "./operator-store.js";
 import {
   identityColors,
+  identityForPubkey,
   loadKeys,
   authorVoice,
   secretKeyForVoice,
+  subscribeVoiceIdentities,
   voiceSpanStyle,
   type KeyEntry,
 } from "./keys-store.js";
+import { VoiceLegend } from "./VoiceLegend.js";
 import {
   loadWorkspaceLayout,
   saveWorkspaceLayout,
@@ -126,14 +160,14 @@ import { getVoiceProvider, setVoiceProvider } from "./voice-provider-store.js";
 import { getVoicePrompt } from "./voice-prompt-store.js";
 import { loadProviders, type ProviderConfig } from "./models-store.js";
 import { complete, type ChatMessage } from "./llm.js";
+import { captureKEditTransaction, groupKEditsByTransaction } from "./kedit-capture.js";
 import {
-  attachFolder,
-  bootFromRelay,
+  captureStreamingScrollAnchor,
+  restoreStreamingScrollTop,
+} from "./streaming-scroll.js";
+import {
   chooseFolder,
   chooseFile,
-  defaultFolder,
-  getAttachedFolder,
-  createDiskWorkspace,
   scanExternal,
   reifyToDisk,
   type Run,
@@ -142,80 +176,119 @@ import {
   type SampleEventMeta,
   type AttachedFolder,
 } from "./workspace.js";
-import { createLocalWorkspace, pullFromRelay, type StagedMerge } from "./workspace-local.js";
-import { loadLocalFolder, saveLocalFile, mirrorPad, clearPadPath, loadPad, type LocalFile } from "./local-store.js";
-import { saveAttachedFolder } from "./registry.js";
-import { changedRegion, dominantVoiceInRegion, type Workspace } from "./workspace-core.js";
+import { createLocalWorkspace, type StagedMerge } from "./workspace-local.js";
+import { loadLocalFolder, saveLocalFile, mirrorPad, clearPadPath, loadPad, loadLocalShielded, saveLocalShielded, type LocalFile } from "./local-store.js";
+import {
+  EMPTY_KEDIT_LOG,
+  applyKEditTransaction,
+  appendKEditLog,
+  changedRegion,
+  dominantVoiceInRegion,
+  dropKEditLogPrefix,
+  ensureMdExt,
+  fileHasUnsteppedChanges,
+  keditLogFromArray,
+  keditLogToArray,
+  minimalTextChange,
+  nextKEditTx,
+  reconcileRunsText,
+  spliceRuns,
+  type FileStepBaseline,
+  type KEditLog,
+  type Workspace,
+} from "./workspace-core.js";
 import { getPublicKey } from "nostr-tools/pure";
-import { isTauri, resolveRelayUrl } from "./identity.js";
+import { isTauri, loadOrCreateVoice, resolveRelayUrl } from "./identity.js";
+import {
+  getOrCreateMintFolder,
+  getRootId,
+  getRootLabel,
+  mintRoot,
+  setRootLabel,
+  DEFAULT_ROOT_LABEL,
+} from "./root.js";
 import {
   getSubstrateVoice,
   getSubstrateSignerKeyId,
   setSubstrateSignerKeyId,
   getSubstrateBindingPubkey,
 } from "./external-voice-store.js";
-import { gatherContextBlock, clearChainMemo, renderLimelightLog } from "./context-gather.js";
-import { SYSTEM_PREAMBLE } from "./system-preamble.js";
+import { gatherContextBlock, clearChainMemo, renderLimelightLog, isShielded } from "./context-gather.js";
 import {
-  listFolders,
-  rememberFolder,
-  forgetFolder,
-  getActiveFolder,
-  setActiveFolder,
-  findFolder,
-} from "./folders.js";
+  applyScopeClick,
+  mountsForGroupAction,
+  pathIsMounted,
+  pathInEffectiveScopes,
+  rebaseMountsAfterMove,
+  scopeKey,
+  topLevelMountedPaths,
+  type ScopeRef,
+} from "./scope-model.js";
+import { SYSTEM_PREAMBLE } from "./system-preamble.js";
+import { planDelivery } from "./step-policy.js";
+import { occupancyTransitions, type OccupancyEntry } from "./panel-occupancy.js";
+import {
+  createReplayPanels,
+  removeReplayPanels,
+} from "./replay-panel-layout.js";
+import {
+  extendMessages,
+  settleMessages,
+  settleDedupeMessages,
+  stirMessages,
+  replyMessages,
+  receiveMessages,
+  type OpKind as PromptOpKind,
+  type OpInputs,
+} from "./op-prompts.js";
 import {
   BarChart3,
+  BookOpen,
   Code,
-  CornerDownRight,
+  Coins,
   Cpu,
   Download,
   Eye,
   FileText,
   Folder,
   FolderOpen,
+  GitCompare,
   GitFork,
   Globe,
-  History,
   KeyRound,
   Layers3,
+  Leaf,
   Megaphone,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
-  Plus,
   Quote,
   Radio,
-  RotateCcw,
   Settings,
   Sun,
-  Tag as TagIcon,
+  Trash2,
   type LucideIcon,
 } from "lucide-react";
+import {
+  MINT,
+  OBLIVION,
+  forkPathForMint,
+  formatLocalSecondStamp,
+  isMintPath as isMint,
+  isOblivionPath as isOblivion,
+  isSystemRootPath,
+  mintedPath,
+  slugifyFilename,
+  uniquePath,
+} from "./generated-paths.js";
+import { deleteOutcomeMessage } from "./delete-confirmation.js";
+import { closeDeletedTabs, type DeleteTabTarget } from "./delete-tabs.js";
+import {
+  buildDirectoryTree,
+  type TreeEntry,
+  type TreeNode,
+} from "./tree-model.js";
 import "./App.css";
-
-interface TreeNode {
-  name: string;
-  path: string;
-  type: "file" | "folder";
-  children?: TreeNode[];
-  /** True only for the synthetic top-level node representing the mounted
-   *  folder (path === ROOT). Not draggable or deletable, but renamable
-   *  (updates the folder's display label). Still selectable and a valid
-   *  drop target. Set once when the tree is wrapped under the root in the
-   *  App `tree` memo. */
-  isRoot?: boolean;
-}
-
-/** The `onReconciled` callback shape for the background desktop reconcile.
- *  Called per-file as provenance backfills (`file` = the reconciled state) or
- *  per deletion (`file` = null — the file was tombstoned off disk). `.bind(id)`
- *  sets the race-guard token once the attach resolves and the folder id is
- *  known. */
-interface ReconcileCallback {
-  (path: string, file: FileState | null): void;
-  bind: (folderId: string) => void;
-}
 
 // Active new-file/new-folder creation. `parent` is the folder path the new
 // item should be created inside ("" = workspace root). Set by the
@@ -236,16 +309,20 @@ interface Creating {
 interface PanelState {
   tabs: string[];
   active: string;
+  /** Ephemeral column created for animated replay, never persisted. */
+  replayOwned?: boolean;
 }
+
+type PanelOccupancy = OccupancyEntry<FocusSelection>;
 
 
 // The unified "active trace" — there is always one once the user has selected
-// anything, and it is what the top bar's ACTIONS row operates on. A trace is
-// the protocol's single primitive (file | folder | minted [[ span ]]), all
+// anything, and it is what the action palette's ACTIONS row operates on. A trace is
+// the protocol's single primitive (file | folder | coin), all
 // realized as a kind-4290 nucleus. `path` is set for file/folder selections;
-// `nodeId` is the trace nucleus id (file/folder chain head or minted-span id);
-// `phrase` carries the visible text for a span selection.
-type SelectionKind = "file" | "folder" | "span";
+// `nodeId` is the trace nucleus id (file/folder chain head or coin id);
+// `phrase` carries the visible text for a coin selection.
+type SelectionKind = "file" | "folder" | "coin";
 interface SelectionRef {
   kind: SelectionKind;
   path?: string;
@@ -253,30 +330,40 @@ interface SelectionRef {
   phrase?: string;
 }
 
-// One seal in a folder-wide replay timeline. `contentUpToHere` is the file's
-// text as of this seal (the chain replayed genesis→this node), precomputed at
+interface CoinClipboardCitation {
+  phrase: string;
+  nodeId: string;
+}
+
+interface CoinClipboardTicket {
+  phrase: string;
+  citation: Promise<CoinClipboardCitation>;
+}
+
+// One step in a folder-wide replay timeline. `contentUpToHere` is the file's
+// text as of this step (the chain replayed genesis→this node), precomputed at
 // `beginReplay` so stepping is O(1) per step. The step list is ordered by
-// `sealedAtMs` ascending and interleaves every file's seals AND every folder
+// `steppedAtMs` ascending and interleaves every file's steps AND every folder
 // membership event (kind 4292: add/remove/rename).
 interface ReplayStep {
   event: Event;
   relativePath: string;
   meta: EventMeta;
   contentUpToHere: string;
-  /** Per-author runs reconstructed from the chain's deltas up to this seal.
+  /** Per-author runs reconstructed from the chain's deltas up to this step.
    *  Each inserted range is attributed to the node's signer (event.pubkey), so
    *  the editor colors historical text by who actually wrote it — not by the
    *  session's latest signer. Drives `runs` in replayStepTo. */
   runsUpToHere: Run[];
-  /** The footprint of *this seal's* deltas in `contentUpToHere`'s coordinate
-   *  space — the changed region vs the previous seal of the same file (or the
+  /** The footprint of *this step's* deltas in `contentUpToHere`'s coordinate
+   *  space — the changed region vs the previous step of the same file (or the
    *  whole document for the file's genesis). Drives the editor's scroll-into-
    *  -view during replay so the action that produced each delta lands in view,
-   *  not off-screen. `null` only when the seal touched nothing (a tag/reply-
-   *  -only edit on a non-first seal). */
+   *  not off-screen. `null` only when the step touched nothing (a tag/reply-
+   *  -only edit on a non-first step). */
   changeRange: { from: number; to: number } | null;
   /** Present when this step is a FOLDER MEMBERSHIP event (kind 4292), not a file
-   *  content seal. A membership step has no `contentUpToHere`/`runsUpToHere`/
+   *  content step. A membership step has no `contentUpToHere`/`runsUpToHere`/
    *  `changeRange` (those are "" / [] / null) — it's a structural station on the
    *  timeline, labeled with the membership change (added/removed/renamed X) and
    *  shown only via the stepper's step label. Scrubbing onto a membership step
@@ -286,15 +373,14 @@ interface ReplayStep {
   membership?: { type: "add" | "remove" | "rename"; path: string };
 }
 
-// One frame of per-character typewriter playback — the file's runs after
-// applying exactly one more character of one delta. `sealIndex` is the index
-// into `replay.steps` of the seal whose delta produced this char, so a pause
-// can snap the seal cursor to the right save point. Built once per play
-// session (buildPlayTimeline) and torn down on pause/stop; the seal stepper
-// and its slider keep working at save-point granularity the whole time.
+// One frame of keystroke playback — the file's runs after applying one editor
+// transaction. `stepIndex` is the index into `replay.steps` of the Step whose
+// transaction produced this frame, so a pause can snap the cursor to the right
+// save point. Built once per play session and torn down on pause/stop; the Step
+// timeline and its slider keep working at save-point granularity throughout.
 interface PlayFrame {
   path: string;
-  sealIndex: number;
+  stepIndex: number;
   runs: Run[];
 }
 
@@ -380,16 +466,6 @@ function flatten(runs: Run[]): string {
   return runs.map((r) => r.text).join("");
 }
 
-/** Merge two staged-pull lists, deduping by path. A fresh pull that re-stages
- *  the same path (still diverged) replaces the earlier entry; new paths are
- *  appended. Keeps the badge count honest across repeated background pulls. */
-function mergeStagedLists(prev: StagedMerge[], incoming: StagedMerge[]): StagedMerge[] {
-  const byPath = new Map<string, StagedMerge>();
-  for (const m of prev) byPath.set(m.path, m);
-  for (const m of incoming) byPath.set(m.path, m); // newest wins
-  return [...byPath.values()];
-}
-
 /** Reconstruct a FileState from a crash-pad entry overlaid on the disk-scanned
  *  state. The pad entry carries the buffer's content (a flat string) and
  *  optionally the live per-voice run list. When runs are present and flatten to
@@ -410,6 +486,9 @@ function mergePadIntoFileState(existing: FileState | undefined, lf: LocalFile): 
     nodeId: lf.nodeId || existing?.nodeId || "",
     tags: lf.tags ?? existing?.tags ?? [],
     taggedTraces: lf.taggedTraces ?? existing?.taggedTraces,
+    // Carry the drained keystroke log so an unstepped buffer survives a
+    // reload and lands on the next step.
+    ...(lf.kedits && lf.kedits.length > 0 ? { kedits: keditLogFromArray(lf.kedits) } : {}),
     ...(existing?.eventMeta ? { eventMeta: existing.eventMeta } : {}),
   };
 }
@@ -436,32 +515,10 @@ function isValidTagToken(name: string): boolean {
   return TAG_TOKEN_RE.test(name);
 }
 
-function runsToChars(runs: Run[]): { ch: string; voice: string }[] {
-  const out: { ch: string; voice: string }[] = [];
-  for (const r of runs) for (const ch of r.text) out.push({ ch, voice: r.voice });
-  return out;
-}
-
-function charsToRuns(chars: { ch: string; voice: string }[]): Run[] {
-  const out: Run[] = [];
-  for (const c of chars) {
-    const last = out[out.length - 1];
-    if (last && last.voice === c.voice) last.text += c.ch;
-    else out.push({ voice: c.voice, text: c.ch });
-  }
-  return out;
-}
-
-function spliceRuns(runs: Run[], start: number, end: number, insertText: string, voice: string): Run[] {
-  const chars = runsToChars(runs);
-  const insertChars = [...insertText].map((ch) => ({ ch, voice }));
-  return charsToRuns([...chars.slice(0, start), ...insertChars, ...chars.slice(end)]);
-}
-
-// The four topbar LLM operations. With a non-empty editor selection, each
+// The four action-palette LLM operations. With a non-empty editor selection, each
 // acts on just the selected text (continuing/condensing/reinventing/replying
 // to that range in place); with no selection, each acts on the whole document.
-export type OpKind = "extend" | "settle" | "stir" | "reply" | "receive" | "step" | "send" | "affirm";
+export type OpKind = "extend" | "settle" | "stir" | "reply" | "receive" | "step" | "send" | "attest" | "run";
 
 /** Split flat doc text into preserved bracket spans (`[[ … ]]`, kept verbatim)
  *  and the loose prose between them. The substrate for Settle (condense loose)
@@ -479,93 +536,6 @@ function partitionDoc(text: string): { kind: "bracket" | "loose"; text: string }
   }
   if (cursor < text.length) parts.push({ kind: "loose", text: text.slice(cursor) });
   return parts;
-}
-
-/** Settle: condense a loose segment tersely. Never emit `[[ ]]` — brackets are
- *  authored by hand, not by the condenser. Repeated Settle rounds thus drive the
- *  file toward only bracketed text. */
-function SETTLE_MESSAGES(loose: string): ChatMessage[] {
-  return [
-    {
-      role: "system",
-      content:
-        `${SYSTEM_PREAMBLE}\n\n` +
-        "YOUR ROLE — Settle: the condenser. You take one passage of loose prose " +
-        "and return a terse, dense version: cut filler, tighten phrasing, keep " +
-        "every load-bearing idea. You do NOT add new content, arguments, or " +
-        "facts. You do NOT emit brackets of any kind (Settle never creates " +
-        "sediment — only the human does, by hand). The passage after the " +
-        "context block, under no header, is the text to condense. Return ONLY " +
-        "the condensed prose — no preamble, no commentary, no fences.",
-    },
-    { role: "user", content: loose },
-  ];
-}
-
-/** Settle (de-dupe mode): collapse near-duplicate files into one. Triggered
- *  when Settle runs with a folder in scope rather than a file focus. The user
- *  message carries each candidate file under a numbered header; the model
- *  returns a single merged version that preserves every load-bearing idea
- *  across the duplicates and drops nothing essential. Scanning the same path
- *  twice yields two copies by design; Settle is the deliberate gesture that
- *  collapses that accumulated redundancy into one voiced revision. */
-function SETTLE_DEDUPE_MESSAGES(duplicates: { path: string; content: string }[]): ChatMessage[] {
-  const body = duplicates
-    .map((d, i) => `--- FILE ${i + 1}: ${d.path} ---\n${d.content}`)
-    .join("\n\n");
-  return [
-    {
-      role: "system",
-      content:
-        `${SYSTEM_PREAMBLE}\n\n` +
-        "YOUR ROLE — Settle (de-dupe): the reconciler. You are given several " +
-        "files that are near-duplicates of the same content (acquired by " +
-        "repeated scans of the same source). Merge them into ONE coherent, " +
-        "complete version: keep every load-bearing idea that appears in ANY " +
-        "copy, reconcile differences by preferring the more specific/complete " +
-        "reading, and drop pure redundancy. You do NOT add new content beyond " +
-        "what the copies contain. You do NOT emit fences, headers, or preamble. " +
-        "Return ONLY the merged text.",
-    },
-    { role: "user", content: body },
-  ];
-}
-
-/** Stir: rewrite the loose prose freely, applying every `(( command ))`, while
- *  preserving the bracketed anchors verbatim. Single model call: the commands
- *  ARE the editing instructions, applied directly to the loose prose in one
- *  pass. The model places anchors via [[ANCHOR N]] markers; `reweaveAnchors`
- *  (below) substitutes the real anchor text for them afterward. */
-function SHAKE_MESSAGES(loose: string, anchorCount: number, commands: string[]): ChatMessage[] {
-  const cmdList = commands.length > 0
-    ? commands.map((c, i) => `${i + 1}. (( ${c} ))`).join("\n")
-    : "(no commands — reinvent freely in the same spirit)";
-  const anchorLine = anchorCount > 0
-    ? `The original prose contained ${anchorCount} bracketed anchor(s). Place each at the right spot in your rewrite via a \`[[ANCHOR N]]\` marker (1 through ${anchorCount}, in their original order). The system substitutes the real bracket text for each marker; keep the marker text exactly as written. Do not invent anchors beyond the ${anchorCount} given.`
-    : "There were no bracketed anchors in the original. Do not introduce any.";
-  return [
-    {
-      role: "system",
-      content:
-        `${SYSTEM_PREAMBLE}\n\n` +
-        "YOUR ROLE — Stir: the reinventor. You rewrite loose prose freely while " +
-        "applying the listed `(( command ))` directives and preserving the " +
-        "bracketed anchors. The commands are editing instructions — rewrite the " +
-        "prose so that each command is carried out, integrated naturally into " +
-        "the flow. Treat the commands as authorial intent, not as text to quote " +
-        "or acknowledge. Do NOT emit raw `((` or `))`. \n\n" +
-        anchorLine + "\n\n" +
-        "The text after the context block, under `--- loose prose ---`, is the " +
-        "prose to rewrite. Return ONLY the rewritten prose (with any " +
-        "`[[ANCHOR N]]` markers placed) — no preamble, no fences, no commentary.",
-    },
-    {
-      role: "user",
-      content:
-        `--- commands ---\n${cmdList}\n\n` +
-        `--- loose prose ---\n${loose || "(empty)"}`,
-    },
-  ];
 }
 
 /** Substitute the model's [[ANCHOR N]] markers with the real, verbatim bracket
@@ -603,114 +573,6 @@ function stripRanges(text: string, ranges: [number, number][]): string {
   return out;
 }
 
-/** Reply: write a response doc that may cite minted traces by nodeId. */
-function RESPOND_MESSAGES(source: string, traces: string): ChatMessage[] {
-  return [
-    {
-      role: "system",
-      content:
-        `${SYSTEM_PREAMBLE}\n\n` +
-        "YOUR ROLE — Reply: the replier. You write a new response document " +
-        "engaging with the source text. This op is the only one authorized to " +
-        "EMIT new brackets: where you reference a minted passage from the " +
-        "available traces, cite it inline as `[[ short quote | nodeId ]]` using " +
-        "that trace's EXACT nodeId (copied from the list, never invented). " +
-        "Citations should be accurate and sparing — one per load-bearing " +
-        "reference, not decorative. The rest of your response is natural prose. " +
-        "\n\n" +
-        "FORMAT — first line MUST be exactly `TITLE: <short descriptive name>` " +
-        "(3–8 words, no file extension, no path, no quotes). Then a blank line. " +
-        "Then the response body only — no other preamble, no meta-commentary, " +
-        "no fences. The TITLE line names the new document; it is stripped before " +
-        "the body is saved.\n\n" +
-        "After the context block you will see `--- available minted traces ---` " +
-        "(the citable passages, with their nodeIds) and `--- source document ---` " +
-        "(the text to reply to). Reply to the source; use the traces as " +
-        "citable backing.",
-    },
-    {
-      role: "user",
-      content:
-        (traces ? `--- available minted traces ---\n${traces}\n\n` : "") +
-        `--- source document ---\n${source || "(empty)"}`,
-    },
-  ];
-}
-
-/** Receive: observe the delta + limelight logs of the folder and produce an
- *  analysis of the author's writing process (rhythm, revision intensity, focus
- *  patterns). Read-only — unlike Reply it cites no traces and writes no
- *  brackets; it only narrates what the logs reveal. The limelight log (panel-
- *  occupancy history) arrives in the user message when the folder has one;
- *  the delta log and file contents already arrive in the shared context block.
- *  Output is an audit doc the user can check, so it follows the same `TITLE:`
- *  header convention as Reply. */
-function RECEIVE_MESSAGES(limelightLog: string): ChatMessage[] {
-  const limelightSection = limelightLog
-    ? `\n\nAfter the context block you will see \`--- limelight log: <folder>/ ---\` ` +
-      "(which file was mounted in which panel and when). Read it as evidence " +
-      "of focus: how long attention held, which files were touched briefly and " +
-      "abandoned, what was visible when changes were made. Cite panel numbers " +
-      "and timestamps as you would the delta log.\n\n"
-    : "\n\nNo limelight log was provided for this folder (it predates panel-" +
-      "occupancy tracking, or the focus chain is empty). Do not invent focus " +
-      "observations; analyze only the delta log and file contents you do have, " +
-      "and say so where that leaves a gap.\n\n";
-  return [
-    {
-      role: "system",
-      content:
-        `${SYSTEM_PREAMBLE}\n\n` +
-        "You are Receive. You observe the delta log of a zine folder and " +
-        "produce an analysis of the author's writing process — rhythm, " +
-        "emphasis, hesitation, revision intensity, and the relationships " +
-        "between files over time.\n\n" +
-        "You will receive:\n" +
-        "- The directory action log (timestamped edits with character deltas and `Δ` intervals)\n" +
-        "- The limelight log (which file was mounted in which panel and when)\n" +
-        "- Access to the current contents of files for grounding\n\n" +
-        "Your job is NOT to evaluate the writing. It is to characterize the " +
-        "*process* that produced it.\n\n" +
-        "Report on:\n" +
-        "- **Rhythm**: bursts vs. steady flow; long gaps and what they might indicate structurally\n" +
-        "- **Revision density**: where text was added once and left vs. where it was repeatedly modified\n" +
-        "- **Retention and loss**: large deletions, what preceded them, what survived\n" +
-        "- **Focus patterns**: which files held attention longest, which were touched briefly and abandoned\n" +
-        "- **Cross-file relationships**: temporal sequences suggesting one file informed another\n" +
-        "- **Limelight behavior**: what was visible when changes were made\n\n" +
-        "Write as prose observations, not bullet points. Be specific — cite " +
-        "timestamps and deltas as evidence. Acknowledge uncertainty rather " +
-        "than narrate beyond the evidence. You are interpreting a footprint, " +
-        "not describing the walker.\n\n" +
-        "Your output is saved as a file the user can audit. Write accordingly: " +
-        "with humility, with precision, and with the understanding that " +
-        "someone will check your work.\n\n" +
-        "FORMAT — first line MUST be exactly `TITLE: <short descriptive name>` " +
-        "(3–8 words, no file extension, no path, no quotes). Then a blank line. " +
-        "Then the analysis body only — no other preamble, no meta-commentary, " +
-        "no fences. The TITLE line names the new document; it is stripped " +
-        "before the body is saved." +
-        limelightSection +
-        "The delta log and full file contents are in the context block above.",
-    },
-    {
-      role: "user",
-      content: limelightLog ? `--- limelight log ---\n${limelightLog}` : "(no limelight log for this folder)",
-    },
-  ];
-}
-
-/** Slugify a human phrase into a filename stem (lowercase, hyphenated, ≤40). */
-function slugifyFilename(phrase: string, fallback = "response"): string {
-  return (
-    phrase
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 40) || fallback
-  );
-}
-
 /**
  * Split a Reply model stream into an optional TITLE header + body.
  * The model is asked to emit `TITLE: <name>` as its first line. Until that
@@ -740,36 +602,6 @@ function parseReplyOutput(
     return { title: title || null, body: rest, headerDone: true };
   }
   return { title: null, body: raw, headerDone: true };
-}
-
-function buildTree(entries: { path: string; type: "file" | "folder" }[]): TreeNode[] {
-  const root: TreeNode = { name: "", path: "", type: "folder", children: [] };
-  for (const { path, type } of entries) {
-    const parts = path.split("/").filter(Boolean);
-    if (!parts.length) continue;
-    let cur = root;
-    let acc = "";
-    parts.forEach((part, i) => {
-      acc = acc ? `${acc}/${part}` : part;
-      const isLast = i === parts.length - 1;
-      const leafType: "file" | "folder" = isLast ? type : "folder";
-      let child = cur.children!.find((c) => c.name === part);
-      if (!child) {
-        child = { name: part, path: acc, type: leafType, children: leafType === "folder" ? [] : undefined };
-        cur.children!.push(child);
-      }
-      cur = child;
-    });
-  }
-  function sortNode(node: TreeNode) {
-    if (!node.children) return;
-    node.children.sort((a, b) =>
-      a.type !== b.type ? (a.type === "folder" ? -1 : 1) : a.name.localeCompare(b.name),
-    );
-    node.children.forEach(sortNode);
-  }
-  sortNode(root);
-  return root.children!;
 }
 
 // --- tree moves (drag & drop) -----------------------------------------
@@ -812,33 +644,18 @@ function parentPath(path: string): string {
   return i === -1 ? ROOT : path.slice(0, i);
 }
 
-/** Coerce a SelectionRef (file | folder | span) into a context-gather scope
- *  (file | folder). Scope is never a span — a span selection falls back to the
- *  whole-folder scope (ROOT), and a null/empty scope does too. This is the seam
- *  between the UI's SelectionRef and the gatherer's narrower ScopeRef. */
-function scopeToGather(s: SelectionRef | null | undefined): {
-  kind: "file" | "folder";
-  path: string;
-} {
-  if (s && (s.kind === "file" || s.kind === "folder") && s.path != null) {
-    return { kind: s.kind, path: s.path };
-  }
-  return { kind: "folder", path: ROOT };
-}
-
-/** Is `targetPath` within the scope subtree? The invariant that makes "content
- *  never travels without its orchestration" true: a write op may only target a
- *  file whose chain + membership events are already in the gathered context. A
- *  file scope admits its parent folder's subtree (siblings-and-below); a folder
- *  scope admits its own subtree; ROOT admits everything. */
-function isInScope(scope: SelectionRef | null, targetPath: string): boolean {
-  if (!targetPath) return true;
-  if (!scope || !scope.path || scope.path === ROOT) return true; // whole folder
-  // A file scope roots at its parent directory — siblings-and-below are in scope.
-  const root =
-    scope.kind === "file" ? parentPath(scope.path) : scope.path;
-  if (root === ROOT) return true;
-  return targetPath === root || targetPath.startsWith(root + "/");
+/** Effective scope is the selected union with shielded traversal boundaries. */
+function isInScope(
+  scopes: readonly ScopeRef[],
+  shielded: Set<string>,
+  targetPath: string,
+): boolean {
+  return (
+    !!targetPath &&
+    !isOblivion(targetPath) &&
+    !isMint(targetPath) &&
+    pathInEffectiveScopes(scopes, shielded, targetPath)
+  );
 }
 
 // Does `parent` contain any file or folder beneath it? Used by both move and
@@ -864,6 +681,13 @@ function canDrop(
   files: Set<string>,
   folders: Set<string>,
 ): boolean {
+  // Mint is a flat, append-only system region. Ordinary items cannot be moved
+  // into it. Dragging one of its coins out is a Fork gesture, so the original
+  // remains and basename collisions are resolved when the fork path is built.
+  if (isMint(destFolder) || (isOblivion(destFolder) && isMint(src))) return false;
+  if (isMint(src)) {
+    return src !== MINT && !isSystemRootPath(destFolder);
+  }
   if (destFolder === parentPath(src)) return false; // already here
   if (isDescendantOrSelf(src, destFolder)) return false; // can't move into self/descendant
   const name = basename(src);
@@ -921,8 +745,15 @@ function mapPanel(
   idx: number,
   fn: (p: PanelState) => PanelState,
 ): PanelState[] {
+  const current = panels[idx];
+  // A replay tick can remove an ephemeral panel between pointer-down and the
+  // tab action. Treat that stale index as a no-op instead of calling `fn` with
+  // undefined (the `p.tabs` crash reported by close/open handlers).
+  if (!current) return panels;
+  const updated = fn(current);
+  if (updated === current) return panels;
   const next = [...panels];
-  next[idx] = fn(next[idx]);
+  next[idx] = updated;
   return next;
 }
 
@@ -954,13 +785,13 @@ function nextActive(tabs: string[], removed: string): string {
 // preview rather than recalling a surface the user abandoned. A pure function
 // so callers can pass it straight to setTabModes.
 function pruneTabModes(
-  modes: Record<string, "preview" | "markdown">,
+  modes: Record<string, Mode>,
   panels: PanelState[],
-): Record<string, "preview" | "markdown"> {
+): Record<string, Mode> {
   const open = new Set<string>();
   for (const p of panels) for (const t of p.tabs) open.add(t);
   if (open.size === 0) return {};
-  const next: Record<string, "preview" | "markdown"> = {};
+  const next: Record<string, Mode> = {};
   for (const [path, mode] of Object.entries(modes)) {
     if (open.has(path)) next[path] = mode;
   }
@@ -983,7 +814,7 @@ function reconcileLayout(
   panels: PanelState[];
   activePanel: number;
   weights: number[];
-  tabModes: Record<string, "preview" | "markdown">;
+  tabModes: Record<string, Mode>;
 } | null {
   const exists = (p: string): boolean => isFolderTab(p) || p in scanned;
   const panels: PanelState[] = [];
@@ -1007,20 +838,6 @@ function reconcileLayout(
   if (panels.length === 1) weights = [1];
   const tabModes = pruneTabModes(saved.tabModes, panels);
   return { panels, activePanel, weights, tabModes };
-}
-
-// Append `-2`, `-3`, … before the extension until `path` is free in `taken`.
-// Used so two sampled events with the same pubkey/id prefix (or a re-sample)
-// don't clobber an existing file. Also used when Reply titles a new doc.
-function uniquePath(path: string, taken: Set<string>): string {
-  if (!taken.has(path)) return path;
-  const dot = path.lastIndexOf(".");
-  const stem = dot > 0 ? path.slice(0, dot) : path;
-  const ext = dot > 0 ? path.slice(dot) : "";
-  for (let i = 2; ; i++) {
-    const candidate = `${stem}-${i}${ext}`;
-    if (!taken.has(candidate)) return candidate;
-  }
 }
 
 // --- components ---------------------------------------------------------
@@ -1068,6 +885,12 @@ function CreateRow({
         ref={inputRef}
         className={"create-input" + (error ? " invalid" : "")}
         type="text"
+        // Filenames are identifiers, not prose — disable the mobile/IME
+        // auto-capitalize + auto-complete + spellcheck so the typed casing is
+        // preserved verbatim (e.g. lowercase "drafts" stays lowercase).
+        autoCapitalize="off"
+        autoComplete="off"
+        spellCheck={false}
         value={draft}
         placeholder={placeholder}
         onClick={(e) => e.stopPropagation()}
@@ -1092,7 +915,9 @@ function TreeItem({
   depth,
   collapsed,
   onToggleFolder,
-  openTabs,
+  focusedTabPath,
+  scopes,
+  shielded,
   draggingPaths,
   dropTargetPath,
   onDragStart,
@@ -1100,6 +925,7 @@ function TreeItem({
   onDragLeaveTarget,
   onDropOn,
   canDropOn,
+  dragEffect,
   onContextMenuRow,
   renamingPath,
   renameInputRef,
@@ -1109,7 +935,6 @@ function TreeItem({
   onRenameKey,
   onRenameCommit,
   onRenameCancel,
-  selectedPaths,
   onRowActivate,
   onCreateStart,
   creating,
@@ -1125,24 +950,28 @@ function TreeItem({
   depth: number;
   collapsed: Set<string>;
   onToggleFolder: (path: string) => void;
-  openTabs: string[];
-  /** Set of tree paths in the current multi-selection. Drives the highlight
-   *  on each row (a row is gold iff its path is in the set). */
-  selectedPaths: Set<string>;
+  /** Tree path shown by the active tab in the focused panel. Kept separate
+   *  from scope so switching tabs never changes which traces are mounted. */
+  focusedTabPath: string | null;
+  /** Explicit mounts. Their folder descendants belong to derived scope. */
+  scopes: readonly ScopeRef[];
+  /** Shielded paths. A folder shields its entire subtree. */
+  shielded: Set<string>;
   /** Row click with modifier context. The Sidebar owns the selection model:
-   *  plain click selects-sole + activates (file opens, folder toggles);
-   *  Cmd/Ctrl-click toggles membership without activating; Shift-click ranges
+   *  plain click mounts-sole + activates (file opens, folder toggles);
+   *  Cmd/Ctrl-click toggles a mount without activating; Shift-click ranges
    *  from the anchor. Folder expand/collapse is folded in here so a plain
    *  click both selects and toggles, matching the prior single-select UX. */
-  onRowActivate: (path: string, e: React.MouseEvent) => void;
+  onRowActivate: (item: ActivatableTreeItem, e: React.MouseEvent) => void;
   draggingPaths: Set<string>;
   dropTargetPath: string | null;
-  onDragStart: (path: string) => void;
+  onDragStart: (item: ActivatableTreeItem) => void;
   onDragEnterTarget: (path: string) => void;
   onDragLeaveTarget: (path: string) => void;
   onDropOn: (path: string) => void;
   canDropOn: (path: string) => boolean;
-  onContextMenuRow: (e: React.MouseEvent, path: string) => void;
+  dragEffect: () => "copy" | "move";
+  onContextMenuRow: (e: React.MouseEvent, item: ActivatableTreeItem) => void;
   renamingPath: string | null;
   renameInputRef: React.RefObject<HTMLInputElement | null>;
   renameDraft: string;
@@ -1170,24 +999,52 @@ function TreeItem({
   const isDragging = draggingPaths.has(node.path);
   const isDropTarget = dropTargetPath === node.path;
   const isRenaming = renamingPath === node.path;
-
+  const isTabFocused = focusedTabPath !== null && node.path === focusedTabPath;
   if (node.type === "folder") {
     const isOpen = !collapsed.has(node.path);
     const dropAllowed = canDropOn(node.path);
-    const folderSelected = selectedPaths.has(node.path);
     const isRoot = node.isRoot === true;
+    const isCappedSystemRegion =
+      node.systemKind === "mint" || node.systemKind === "oblivion";
+    // A directly mounted shielded trace starts a new inclusion root; shielded
+    // descendants below that root remain traversal boundaries.
+    const folderMounted = pathIsMounted(scopes, node.path);
+    const folderShielded = isShielded(shielded, node.path);
+    const folderInScope =
+      !isOblivion(node.path) &&
+      !isMint(node.path) &&
+      pathInEffectiveScopes(scopes, shielded, node.path);
+    const folderShownShielded = folderShielded && !folderInScope;
+    const folderIconClass =
+      "tree-icon" +
+      (folderShownShielded ? " tree-icon-shielded" : folderInScope ? " tree-icon-in-scope" : "");
     const rowClass =
       "tree-row tree-folder" +
       (isRoot ? " tree-row-root" : "") +
-      (folderSelected ? " tree-row-selected" : "") +
+      (isTabFocused ? " tree-row-tab-focused" : "") +
+      (folderMounted ? " tree-row-mounted" : "") +
+      (folderShownShielded ? " tree-row-shielded" : "") +
       (isDragging ? " tree-dragging" : "") +
       (isDropTarget && dropAllowed ? " tree-drop-target" : "") +
       (isDropTarget && !dropAllowed ? " tree-drop-denied" : "");
+    const folderGlyph =
+      node.systemKind === "mint" ? (
+        <Leaf size={13} className="tree-icon" aria-hidden="true" />
+      ) : node.systemKind === "oblivion" ? (
+        <Trash2 size={13} className="tree-icon" aria-hidden="true" />
+      ) : node.systemKind === "root" ? (
+        <BookOpen size={13} className={folderIconClass} aria-hidden="true" />
+      ) : isOpen ? (
+        <FolderOpen size={13} className={folderIconClass} aria-hidden="true" />
+      ) : (
+        <Folder size={13} className={folderIconClass} aria-hidden="true" />
+      );
     return (
-      <div>
+      <div className={"tree-node" + (isCappedSystemRegion ? " tree-node-system" : "")}>
         <div
           className={rowClass}
           style={indent}
+          aria-current={isTabFocused ? "true" : undefined}
           draggable={!isRoot && !isRenaming}
           onDragStart={(e) => {
             // copyMove: tree reparent uses "move"; tag-strip drop uses "copy".
@@ -1197,10 +1054,10 @@ function TreeItem({
             // text/plain fallback for hosts that strip custom MIME types
             // (WKWebView / some Tauri shells) on getData at drop time.
             e.dataTransfer.setData("text/plain", `zine-path:${node.path}`);
-            onDragStart(node.path);
+            onDragStart(node);
           }}
           onDragEnter={(e) => {
-            if (draggingPaths.size > 0 && !draggingPaths.has(node.path)) {
+            if (canDropOn(node.path)) {
               e.preventDefault();
               onDragEnterTarget(node.path);
             }
@@ -1209,9 +1066,12 @@ function TreeItem({
             // The root is always a drop target (drop on root = move to root);
             // other folders only when a drop is allowed and they're not the
             // dragged source.
-            if (draggingPaths.size > 0 && !draggingPaths.has(node.path) && canDropOn(node.path)) {
+            if (canDropOn(node.path)) {
               e.preventDefault();
-              e.dataTransfer.dropEffect = "move";
+              e.dataTransfer.dropEffect = dragEffect();
+              // dragenter can race the dragstart render in WebKit. Reassert
+              // the target from dragover so the valid-target ring still paints.
+              onDragEnterTarget(node.path);
             }
           }}
           onDragLeave={(e) => {
@@ -1220,11 +1080,14 @@ function TreeItem({
             onDragLeaveTarget(node.path);
           }}
           onDrop={(e) => {
-            e.preventDefault();
+            // Never let a folder-row drop fall through to the tree container's
+            // "move to root" surface, even when this folder is invalid.
             e.stopPropagation();
+            if (!canDropOn(node.path)) return;
+            e.preventDefault();
             onDropOn(node.path);
           }}
-          onContextMenu={(e) => onContextMenuRow(e, node.path)}
+          onContextMenu={(e) => onContextMenuRow(e, node)}
           onClick={(e) => {
             // Don't toggle collapse when the rename input is mounted; clicking
             // into the field would otherwise yank the row open/closed. A plain
@@ -1232,21 +1095,32 @@ function TreeItem({
             // clicks (cmd/shift) are handled by onRowActivate, which only
             // toggles expand on a plain (non-modifier) click.
             if (!isRenaming) {
-              onRowActivate(node.path, e);
+              onRowActivate(node, e);
               if (!e.metaKey && !e.ctrlKey && !e.shiftKey) onToggleFolder(node.path);
             }
           }}
         >
-          {isOpen ? (
-            <FolderOpen size={13} className="tree-icon" aria-hidden="true" />
+          {node.systemKind ? (
+            <span
+              className="tree-icon-slot tree-system-icon"
+              title={node.systemKind === "mint" ? "Mint" : node.systemKind === "oblivion" ? "Oblivion" : "Root"}
+              aria-hidden="true"
+            >
+              {folderGlyph}
+            </span>
           ) : (
-            <Folder size={13} className="tree-icon" aria-hidden="true" />
+            <span className="tree-icon-slot" aria-hidden="true">
+              {folderGlyph}
+            </span>
           )}
           {isRenaming ? (
             <input
               ref={renameInputRef}
               className={"create-input" + (renameError ? " invalid" : "")}
               type="text"
+              autoCapitalize="off"
+              autoComplete="off"
+              spellCheck={false}
               value={renameDraft}
               placeholder="folder name…"
               onClick={(e) => e.stopPropagation()}
@@ -1264,7 +1138,16 @@ function TreeItem({
           ) : (
             <span className="tree-name">{node.name}</span>
           )}
-          {isRoot && (
+          {node.attestations !== undefined && (
+            <span
+              className="tree-attestation-badge"
+              title={`${node.attestations} reachable attestation${node.attestations === 1 ? "" : "s"}`}
+              aria-label={`${node.attestations} reachable attestation${node.attestations === 1 ? "" : "s"}`}
+            >
+              {node.attestations}
+            </span>
+          )}
+          {isRoot && node.systemKind === "root" && (
             <span
               className="tree-row-actions"
               onClick={(e) => e.stopPropagation()}
@@ -1293,7 +1176,12 @@ function TreeItem({
           {isRenaming && renameError && <p className="create-error">{renameError}</p>}
         </div>
         {isOpen && (
-          <>
+          <div
+            className={
+              "tree-children" +
+              (isCappedSystemRegion ? " tree-system-children" : "")
+            }
+          >
             {node.children!.map((c) => (
               <TreeItem
                 key={c.path}
@@ -1301,7 +1189,9 @@ function TreeItem({
                 depth={depth + 1}
                 collapsed={collapsed}
                 onToggleFolder={onToggleFolder}
-                openTabs={openTabs}
+                focusedTabPath={focusedTabPath}
+                scopes={scopes}
+                shielded={shielded}
                 draggingPaths={draggingPaths}
                 dropTargetPath={dropTargetPath}
                 onDragStart={onDragStart}
@@ -1309,6 +1199,7 @@ function TreeItem({
                 onDragLeaveTarget={onDragLeaveTarget}
                 onDropOn={onDropOn}
                 canDropOn={canDropOn}
+                dragEffect={dragEffect}
                 onContextMenuRow={onContextMenuRow}
                 renamingPath={renamingPath}
                 renameInputRef={renameInputRef}
@@ -1318,7 +1209,6 @@ function TreeItem({
                 onRenameKey={onRenameKey}
                 onRenameCommit={onRenameCommit}
                 onRenameCancel={onRenameCancel}
-                selectedPaths={selectedPaths}
                 onRowActivate={onRowActivate}
                 onCreateStart={onCreateStart}
                 creating={creating}
@@ -1344,47 +1234,70 @@ function TreeItem({
                 onCommit: onCreateCommit,
                 onCancel: onCreateCancel,
               })}
-          </>
+          </div>
         )}
       </div>
     );
   }
 
-  // Is this file open as a tab in any panel? Tints the row icon gold (gold is
-  // reserved for the *selected* row below — merely being open no longer fills
-  // the whole row gold).
-  const isOpen = openTabs.includes(node.path);
-  const fileSelected = selectedPaths.has(node.path);
+  const fileMounted = pathIsMounted(scopes, node.path);
+  const fileShielded = isShielded(shielded, node.path);
+  const fileInScope =
+    !isOblivion(node.path) &&
+    !isMint(node.path) &&
+    pathInEffectiveScopes(scopes, shielded, node.path);
+  const fileShownShielded = fileShielded && !fileInScope;
+  const fileIconClass =
+    "tree-icon" +
+    (fileShownShielded ? " tree-icon-shielded" : fileInScope ? " tree-icon-in-scope" : "");
 
   return (
     <div
       className={
         "tree-row tree-file" +
-        (fileSelected ? " tree-row-selected" : "") +
+        (isTabFocused ? " tree-row-tab-focused" : "") +
+        (fileMounted ? " tree-row-mounted" : "") +
+        (fileShownShielded ? " tree-row-shielded" : "") +
         (isDragging ? " tree-dragging" : "")
       }
       style={indent}
+      aria-current={isTabFocused ? "true" : undefined}
       draggable={!isRenaming}
       onDragStart={(e) => {
         // copyMove: tree reparent uses "move"; tag-strip drop uses "copy".
         e.dataTransfer.effectAllowed = "copyMove";
         e.dataTransfer.setData("text/zine-path", node.path);
         e.dataTransfer.setData("text/plain", `zine-path:${node.path}`);
-        onDragStart(node.path);
+        onDragStart(node);
       }}
-      onContextMenu={(e) => onContextMenuRow(e, node.path)}
+      onContextMenu={(e) => onContextMenuRow(e, node)}
       onClick={(e) => {
         // Don't open the file while its name is being edited. onRowActivate
         // handles plain (select-sole + open) and modifier (cmd/shift) clicks.
-        if (!isRenaming) onRowActivate(node.path, e);
+        if (!isRenaming) onRowActivate(node, e);
       }}
     >
-      <FileText size={13} className={"tree-icon" + (isOpen ? " tree-icon-open" : "")} aria-hidden="true" />
+      {node.systemKind === "minted" ? (
+        <span
+          className="tree-icon-slot tree-system-icon"
+          title="Coin"
+          aria-hidden="true"
+        >
+          <Coins size={13} className="tree-icon" aria-hidden="true" />
+        </span>
+      ) : (
+        <span className="tree-icon-slot" aria-hidden="true">
+          <FileText size={13} className={fileIconClass} aria-hidden="true" />
+        </span>
+      )}
       {isRenaming ? (
         <input
           ref={renameInputRef}
           className={"create-input" + (renameError ? " invalid" : "")}
           type="text"
+          autoCapitalize="off"
+          autoComplete="off"
+          spellCheck={false}
           value={renameDraft}
           placeholder="file name…"
           onClick={(e) => e.stopPropagation()}
@@ -1400,6 +1313,15 @@ function TreeItem({
       ) : (
         <span className="tree-name">{node.name}</span>
       )}
+      {node.attestations !== undefined && (
+        <span
+          className="tree-attestation-badge"
+          title={`${node.attestations} reachable attestation${node.attestations === 1 ? "" : "s"}`}
+          aria-label={`${node.attestations} reachable attestation${node.attestations === 1 ? "" : "s"}`}
+        >
+          {node.attestations}
+        </span>
+      )}
       {isRenaming && renameError && <p className="create-error">{renameError}</p>}
     </div>
   );
@@ -1409,7 +1331,11 @@ function Sidebar({
   tree,
   collapsed,
   onToggleFolder,
-  openTabs,
+  focusedTabPath,
+  scopes,
+  onScopesChange,
+  shielded,
+  onToggleShielded,
   onActivateFile,
   onActivateFolder,
   creating,
@@ -1421,6 +1347,7 @@ function Sidebar({
   folderPaths,
   onMove,
   onDelete,
+  onRevoke,
   onRename,
   samplerOpen,
   onToggleSampler,
@@ -1429,10 +1356,6 @@ function Sidebar({
   onToggleTagBrowser,
   tagBrowser,
   folderId,
-  orchestrationOpen,
-  onToggleOrchestration,
-  orchestrationRefreshKey,
-  activeTracePath,
   onOpenToSide,
   onBeginReplay,
   replayStep,
@@ -1445,13 +1368,22 @@ function Sidebar({
   onStep,
   onTogglePlay,
   onCycleSpeed,
+  playFraction,
   onOpenFolder,
   onOpenSettings,
 }: {
   tree: TreeNode[];
   collapsed: Set<string>;
   onToggleFolder: (path: string) => void;
-  openTabs: string[];
+  /** Tree path shown by the active tab in the focused panel, or null when no
+   *  tab is active. Drives only the focus marker; it never mutates scope. */
+  focusedTabPath: string | null;
+  /** Explicit mounts, owned by App. Effective scope is derived from this set. */
+  scopes: readonly ScopeRef[];
+  onScopesChange: (scopes: ScopeRef[]) => void;
+  /** Shielded traversal boundaries, passed through to each row. */
+  shielded: Set<string>;
+  onToggleShielded: (path: string) => void;
   /** Open a file into the active panel and make it the active trace. Called on
    *  a plain (non-modifier) click of a file row. */
   onActivateFile: (path: string) => void;
@@ -1468,6 +1400,8 @@ function Sidebar({
   folderPaths: Set<string>;
   onMove: (srcs: string[], destFolder: string) => void;
   onDelete: (paths: string[]) => void;
+  /** Publish a NIP-09 request for one file trace without deleting it locally. */
+  onRevoke: (path: string) => Promise<string>;
   onRename: (path: string, newName: string) => string | null;
   samplerOpen: boolean;
   onToggleSampler: () => void;
@@ -1485,12 +1419,6 @@ function Sidebar({
   /** Bumped by App() after a folder-chain mutation so the orchestration panel
    *  re-fetches its stream. */
   orchestrationRefreshKey: number;
-  /** The focused panel's active trace path (a file path, or a folder relpath
-   *  when its active tab is a folder sentinel; "" when the panel is empty).
-   *  Drives the gold "selected" row so the sidebar reflects whichever tab the
-   *  focused panel is showing — set whenever a panel is focused or a tab is
-   *  selected, not only on a tree-row click. */
-  activeTracePath: string;
   /** Open a tree item into a fresh column to the right of the active panel
    *  (the context menu's "Open to side"). A folder opens as a folder tab, a
    *  file as an editor tab; a new column is always spawned. */
@@ -1501,27 +1429,27 @@ function Sidebar({
   onOpenFolder: (path: string) => void;
   /** Open the settings panel (factory reset lives here). */
   onOpenSettings: () => void;
-  /** Bootstrap folder-wide replay (async fetch of the folder's seals). Called
+  /** Bootstrap folder-wide replay (async fetch of the folder's steps). Called
    *  by the transport's ▶ when no timeline is loaded yet. */
   onBeginReplay: () => void;
   /** The current replay step (the one the editor is showing), or null when not
    *  replaying. Drives the transport's hover tooltip (action/file/time/blurb). */
   replayStep: ReplayStep | null;
   /** Current replay index (0-based). `replayCount - 1` is the sticky `last`.
-   *  Display-only position for the transport: while the per-character typewriter
-   *  plays this tracks the frame being typed (each PlayFrame carries its
-   *  producing seal's sealIndex) so the slider/stepper stay in sync with the
+   *  Display-only position for the transport: while keystroke playback runs
+   *  this tracks the edit frame being shown (each PlayFrame carries its
+   *  producing step's stepIndex) so the slider/stepper stay in sync with the
    *  visible typing; otherwise it's the committed `replay.index`. The committed
    *  `replay.index` itself drives the editor's frozen-content override + snapshot
-   *  capture/restore, which must not thrash per character — so the caller derives
+   *  capture/restore, which must not thrash per edit — so the caller derives
    *  this display value without advancing the committed one. */
   replayIndex: number;
   /** Total replay steps in the folder timeline. */
   replayCount: number;
-  /** sealedAtMs per step, in step order. Drives the scan gap ribbon: large
-   *  time gaps between adjacent steps render as labeled, clickable segments
-   *  ("3d", "4h") so the user can jump across idle spans instead of stepping
-   *  one-by-one. `[]` (or omit) hides the ribbon. */
+  /** steppedAtMs per step, in step order. Drives the time-proportional slider
+   *  axis: large time gaps between adjacent steps render as translucent colored
+   *  bands inside the track ("3d", "4h"), clickable to jump across idle spans
+   *  instead of stepping one-by-one. `[]` (or omit) → index-linear fallback. */
   stepTimes?: number[];
   /** Whether the auto-play timer is advancing the timeline. */
   playing: boolean;
@@ -1536,6 +1464,9 @@ function Sidebar({
   onTogglePlay: () => void;
   /** Advance to the next play speed (wraps). */
   onCycleSpeed: () => void;
+  /** Sub-step progress (0..1) through the current save point during
+   *  playback — drives the fractional readout (3.4 / 12) and thumb glide. */
+  playFraction?: number;
 }) {
   // inline rename state. renamingPath is the node being edited; renameDraft is
   // the live input value; renameError keeps the input open on a bad name (same
@@ -1576,15 +1507,17 @@ function Sidebar({
     }
   }, [creating]);
 
-  // multi-selection state. selectedPaths is the set of tree rows the user has
-  // highlighted (via plain/cmd/shift click); anchorPath is the pivot for
-  // shift-click ranges. Cleared on a folder switch (below) so it never refers
-  // to paths that no longer exist.
-  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set());
+  // The shift-range anchor is local interaction state. Mounts live in App;
+  // panels and tabs cannot mutate them by changing focus.
   const [anchorPath, setAnchorPath] = useState<string | null>(null);
+  const mountedPaths = useMemo(() => new Set(scopes.map((scope) => scope.path)), [scopes]);
 
   // drag state lives here — the set of source paths being dragged (one or
   // many) and the currently-hovered drop target (a folder path, or "" for root).
+  // The ref is the event-time authority: native dragenter/dragover can arrive
+  // before dragstart's React state update renders, especially in WKWebView.
+  // State exists for source/target paint only; acceptance and drop read the ref.
+  const draggingPathsRef = useRef<Set<string>>(new Set());
   const [draggingPaths, setDraggingPaths] = useState<Set<string>>(() => new Set());
   const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
 
@@ -1597,38 +1530,28 @@ function Sidebar({
     isFolder: boolean;
     childCount: number;
   } | null>(null);
+  const [confirmRevoke, setConfirmRevoke] = useState<{ path: string; name: string } | null>(null);
+  const [revokeBusy, setRevokeBusy] = useState(false);
+  const [revokeMessage, setRevokeMessage] = useState<string | null>(null);
+  const [revokeError, setRevokeError] = useState<string | null>(null);
 
-  // Clear the tree selection when the attached folder changes — selected paths
-  // from a previous press don't exist in the new one.
+  // Clear the range anchor when the attached folder changes.
   const folderIdRef = useRef(folderId);
   useEffect(() => {
     if (folderIdRef.current !== folderId) {
       folderIdRef.current = folderId;
-      setSelectedPaths(new Set());
       setAnchorPath(null);
     }
   }, [folderId]);
 
-  // Mirror the focused panel's active tab into the tree selection so the gold
-  // highlight follows whichever tab the user is viewing — whether they reached
-  // it by clicking a tree row, selecting a panel tab, or focusing a panel. A
-  // plain tree click already sets this same path, so the effect is a no-op
-  // there; cmd/shift-clicks don't move the focused panel's active tab, so their
-  // multi-select ranges survive (this only fires when activeTracePath changes).
-  useEffect(() => {
-    if (!activeTracePath) return;
-    setSelectedPaths(new Set([activeTracePath]));
-    setAnchorPath(activeTracePath);
-  }, [activeTracePath]);
-
-  // A flat, ordered list of the currently-visible tree paths (files + folders,
+  // A flat, ordered list of the currently-visible tree items (files + folders,
   // depth-first in display order). Shift-click ranges are computed over this so
   // collapsed subtrees are skipped, matching what the user sees.
-  const visiblePaths = useMemo(() => {
-    const out: string[] = [];
+  const visibleItems = useMemo(() => {
+    const out: ScopeRef[] = [];
     const walk = (nodes: TreeNode[]) => {
       for (const n of nodes) {
-        out.push(n.path);
+        out.push({ kind: n.type, path: n.path });
         if (n.type === "folder" && !collapsed.has(n.path) && n.children) walk(n.children);
       }
     };
@@ -1643,62 +1566,35 @@ function Sidebar({
   function createParent(): string {
     // Prefer the sole selected folder: clicking a New button after selecting a
     // folder should nest inside it, regardless of which tab the focused panel
-    // is showing (selecting a folder via a plain click updates `selectedPaths`
-    // but not `activeTracePath`, which only follows open tabs). Same folder-test
-    // as the context menu: ROOT, an explicit empty-folder entry, or anything
-    // with a nested child. Falls through to the active-trace scope otherwise.
-    if (selectedPaths.size === 1) {
-      const sel = [...selectedPaths][0];
-      if (sel === ROOT || folderPaths.has(sel) || hasChild(filePaths, folderPaths, sel)) {
-        return sel;
+    // is showing. `focusedTabPath` follows open tabs, while `scopes` changes
+    // only through tree gestures. Falls back to focused-panel location when
+    // there is not exactly one scoped folder.
+    if (scopes.length === 1) {
+      const selected = scopes[0];
+      if (selected.kind === "folder") {
+        return selected.path;
       }
     }
-    const p = activeTracePath;
+    const p = focusedTabPath;
     if (!p) return ROOT;
     if (folderPaths.has(p) || hasChild(filePaths, folderPaths, p)) return p;
     return parentPath(p);
   }
 
-  // The row-click router. Plain click selects `path` sole and activates it
-  // (a file opens into the active panel; a folder's expand is toggled by the
-  // caller). Cmd/Ctrl-click toggles membership without activating. Shift-click
-  // selects the range from the anchor to `path` (inclusive), keeping the
-  // anchor as-is so repeated shift-clicks adjust the far end.
-  function onRowActivate(path: string, e: React.MouseEvent) {
-    const additive = e.metaKey || e.ctrlKey;
-    if (e.shiftKey && anchorPath != null) {
-      const a = visiblePaths.indexOf(anchorPath);
-      const b = visiblePaths.indexOf(path);
-      if (a !== -1 && b !== -1) {
-        const [lo, hi] = a < b ? [a, b] : [b, a];
-        const range = new Set(visiblePaths.slice(lo, hi + 1));
-        // shift+cmd adds the range to the existing selection instead of replacing.
-        setSelectedPaths(additive ? new Set([...selectedPaths, ...range]) : range);
-        return;
-      }
-      // anchor not visible (collapsed/moved): fall through to a sole select.
-    }
-    if (additive) {
-      setSelectedPaths((prev) => {
-        const next = new Set(prev);
-        if (next.has(path)) next.delete(path);
-        else next.add(path);
-        return next;
-      });
-      setAnchorPath(path);
-      return;
-    }
-    // plain click (or shift-click with no anchor): select-sole + activate.
-    // Files open into the active panel; folders become the active trace without
-    // opening anything (their expand toggle is handled by the row's onClick).
-    // The synthetic root (path === ROOT) is always a folder.
-    setSelectedPaths(new Set([path]));
-    setAnchorPath(path);
-    if (path === ROOT || folderPaths.has(path) || hasChild(filePaths, folderPaths, path)) {
-      onActivateFolder(path);
-    } else {
-      onActivateFile(path);
-    }
+  // The tree is the sole mount-selection surface. Modifier clicks only update
+  // mounts; a plain click also activates the trace (file opens, folder toggles).
+  function onRowActivate(item: ActivatableTreeItem, e: React.MouseEvent) {
+    const result = applyScopeClick(
+      scopes,
+      { kind: item.type, path: item.path },
+      visibleItems,
+      anchorPath,
+      { additive: e.metaKey || e.ctrlKey, range: e.shiftKey },
+    );
+    onScopesChange(result.scopes);
+    setAnchorPath(result.anchorPath);
+    if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+    activateTreeItem(item, { file: onActivateFile, folder: onActivateFolder });
   }
 
   // dismiss the context menu on any pointer-down outside the menu itself, or
@@ -1722,24 +1618,27 @@ function Sidebar({
     };
   }, [ctxMenu]);
 
-  // Right-click selects-sole if the row wasn't already selected, otherwise
-  // keeps the current selection so the menu acts on the whole set.
-  function openContextMenu(e: React.MouseEvent, path: string) {
+  // Right-click mounts-sole if the row wasn't already mounted, otherwise keeps
+  // the current mounts so the menu acts on the whole set.
+  function openContextMenu(e: React.MouseEvent, item: ActivatableTreeItem) {
     e.preventDefault();
     e.stopPropagation();
-    if (!selectedPaths.has(path)) {
-      setSelectedPaths(new Set([path]));
-      setAnchorPath(path);
+    const actionMounts = mountsForGroupAction(scopes, {
+      kind: item.type,
+      path: item.path,
+    });
+    if (!mountedPaths.has(item.path)) {
+      onScopesChange(actionMounts);
+      setAnchorPath(item.path);
     }
-    setCtxMenu({ x: e.clientX, y: e.clientY, path });
+    setCtxMenu({ x: e.clientX, y: e.clientY, path: item.path });
   }
 
   // The paths a Delete should act on: the current selection, pruned of any
   // path nested beneath another selected path (an ancestor carries its
   // descendants, so listing both would double-count).
   function topLevelSelected(): string[] {
-    const all = [...selectedPaths];
-    return all.filter((p) => !all.some((q) => q !== p && isDescendantOrSelf(q, p)));
+    return topLevelMountedPaths(scopes);
   }
 
   function requestDelete(paths: string[]) {
@@ -1828,63 +1727,45 @@ function Sidebar({
   // drop target and gate preventDefault. A drop is offered as long as at least
   // one source can move there (the drop handler prunes the ones that can't).
   function canDropOn(destFolder: string): boolean {
-    if (draggingPaths.size === 0) return false;
-    for (const src of draggingPaths) {
+    const current = draggingPathsRef.current;
+    if (current.size === 0) return false;
+    if (current.has(destFolder)) return false;
+    for (const src of current) {
       if (canDrop(src, destFolder, filePaths, folderPaths)) return true;
     }
     return false;
   }
 
+  function dragEffect(): "copy" | "move" {
+    return [...draggingPathsRef.current].some((path) => isMint(path) && path !== MINT)
+      ? "copy"
+      : "move";
+  }
+
   function clearDrag() {
-    setDraggingPaths(new Set());
+    const empty = new Set<string>();
+    draggingPathsRef.current = empty;
+    setDraggingPaths(empty);
     setDropTargetPath(null);
   }
 
   return (
     <nav className="sidebar">
-      <ReplayTransport
-        index={replayIndex}
-        count={replayCount}
-        playing={playing}
-        playSpeed={playSpeed}
-        replayActive={replayActive}
-        onBegin={onBeginReplay}
-        onStep={onStep}
-        onTogglePlay={onTogglePlay}
-        onCycleSpeed={onCycleSpeed}
-        stepTimes={stepTimes}
-        // Hover context for the row: the current step's action, file, time,
-        // and (for LLM seals) its summary or prompt. On `last` this is the
-        // just-sealed node; on a historical step it's the save point being
-        // verified. Only shown once replay is active.
-        containerTitle={
-          replayStep
-            ? replayStep.membership
-              ? // A membership step's label is the structural change itself —
-                // "added notes/draft.md", "removed old.md" — not file prose.
-                [
-                  replayStep.membership.type,
-                  replayStep.membership.path,
-                  new Date(replayStep.meta.sealedAtMs).toLocaleString(),
-                ]
-                  .filter(Boolean)
-                  .join(" · ")
-              : [
-                  replayStep.meta.action ?? "edit",
-                  replayStep.relativePath,
-                  new Date(replayStep.meta.sealedAtMs).toLocaleString(),
-                  sealDescription(replayStep.event).summary ??
-                    sealDescription(replayStep.event).prompt,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")
-            : undefined
-        }
-      />
+      <div className="sidebar-settings-bar">
+        <button
+          type="button"
+          className="icon-btn sidebar-settings-btn"
+          title="Settings"
+          aria-label="Settings"
+          onClick={onOpenSettings}
+        >
+          <Settings size={16} aria-hidden="true" />
+        </button>
+      </div>
       <div
         className={"tree" + (dropTargetPath === ROOT && canDropOn(ROOT) ? " tree-drop-target" : "")}
         onDragEnter={(e) => {
-          if (draggingPaths.size > 0 && e.target === e.currentTarget) {
+          if (e.target === e.currentTarget && canDropOn(ROOT)) {
             e.preventDefault();
             setDropTargetPath(ROOT);
           }
@@ -1893,14 +1774,16 @@ function Sidebar({
           // allow dropping onto empty space inside the tree → move to root.
           // child rows stopPropagation on their own drops, so this only fires
           // for the bare container.
-          if (draggingPaths.size > 0 && canDropOn(ROOT)) {
+          if (e.target === e.currentTarget && canDropOn(ROOT)) {
             e.preventDefault();
-            e.dataTransfer.dropEffect = "move";
+            e.dataTransfer.dropEffect = dragEffect();
+            setDropTargetPath(ROOT);
           }
         }}
         onDrop={(e) => {
+          if (e.target !== e.currentTarget || !canDropOn(ROOT)) return;
           e.preventDefault();
-          onMove([...draggingPaths], ROOT);
+          onMove([...draggingPathsRef.current], ROOT);
           clearDrag();
         }}
         onDragEnd={clearDrag}
@@ -1912,30 +1795,36 @@ function Sidebar({
             depth={0}
             collapsed={collapsed}
             onToggleFolder={onToggleFolder}
-            openTabs={openTabs}
+            focusedTabPath={focusedTabPath}
+            scopes={scopes}
+            shielded={shielded}
             draggingPaths={draggingPaths}
             dropTargetPath={dropTargetPath}
-            onDragStart={(path) => {
-              // Dragging an unselected row drags just that row (and makes it
-              // the sole selection, like a plain click); dragging a selected
-              // row drags the whole selection.
-              if (selectedPaths.has(path)) {
-                setDraggingPaths(new Set(selectedPaths));
-              } else {
-                setSelectedPaths(new Set([path]));
-                setAnchorPath(path);
-                setDraggingPaths(new Set([path]));
+            onDragStart={(item) => {
+              const actionMounts = mountsForGroupAction(scopes, {
+                kind: item.type,
+                path: item.path,
+              });
+              // Dragging an explicitly mounted row drags the mounted group;
+              // dragging any other row first mounts it alone.
+              if (!mountedPaths.has(item.path)) {
+                onScopesChange(actionMounts);
+                setAnchorPath(item.path);
               }
+              const nextDragging = new Set(topLevelMountedPaths(actionMounts));
+              draggingPathsRef.current = nextDragging;
+              setDraggingPaths(nextDragging);
             }}
             onDragEnterTarget={setDropTargetPath}
             onDragLeaveTarget={(path) => {
               setDropTargetPath((cur) => (cur === path ? null : cur));
             }}
             onDropOn={(destFolder) => {
-              onMove([...draggingPaths], destFolder);
+              onMove([...draggingPathsRef.current], destFolder);
               clearDrag();
             }}
             canDropOn={canDropOn}
+            dragEffect={dragEffect}
             onContextMenuRow={openContextMenu}
             renamingPath={renamingPath}
             renameInputRef={renameInputRef}
@@ -1945,7 +1834,6 @@ function Sidebar({
             onRenameKey={onRenameKey}
             onRenameCommit={commitRename}
             onRenameCancel={cancelRename}
-            selectedPaths={selectedPaths}
             onRowActivate={onRowActivate}
             onCreateStart={(kind) => onCreateStart(kind, createParent())}
             creating={creating}
@@ -1973,38 +1861,42 @@ function Sidebar({
             // offers the folder actions in its context menu too.
             const isFolder =
               ctxMenu.path === ROOT ||
+              isSystemRootPath(ctxMenu.path) ||
               folderPaths.has(ctxMenu.path) ||
               hasChild(filePaths, folderPaths, ctxMenu.path);
-            return isFolder ? (
-              <button
-                type="button"
-                className="ctx-menu-item"
-                // Open the folder as the special folder:// tab in the active
-                // panel (not a file tab). Distinct from "Open to side", which
-                // spawns a fresh column.
-                onClick={() => {
-                  const p = ctxMenu.path;
-                  setCtxMenu(null);
-                  onOpenFolder(p);
-                }}
-              >
-                Open
-              </button>
+            // Open actions are inherently single-target. Hide them for a
+            // mounted group rather than silently applying them to one member.
+            return !isFolder && mountedPaths.size === 1 ? (
+              <>
+                <button
+                  type="button"
+                  className="ctx-menu-item"
+                  // Open the file as a tab in the active panel.
+                  onClick={() => {
+                    const p = ctxMenu.path;
+                    setCtxMenu(null);
+                    onOpenFolder(p);
+                  }}
+                >
+                  Open
+                </button>
+                <button
+                  type="button"
+                  className="ctx-menu-item"
+                  // Open this file into a fresh column immediately to the right
+                  // of the active panel.
+                  onClick={() => {
+                    const p = ctxMenu.path;
+                    setCtxMenu(null);
+                    onOpenToSide(p);
+                  }}
+                >
+                  Open to side
+                </button>
+                <div className="ctx-menu-separator" aria-hidden="true" />
+              </>
             ) : null;
           })()}
-          <button
-            type="button"
-            className="ctx-menu-item"
-            // Open this item into a fresh column immediately to the right of
-            // the active panel. Replaces the per-row info button.
-            onClick={() => {
-              const p = ctxMenu.path;
-              setCtxMenu(null);
-              onOpenToSide(p);
-            }}
-          >
-            Open to side
-          </button>
           {(() => {
             // New File / New Folder target the right-clicked folder. Same
             // folder-test as elsewhere: an explicit empty-folder entry, or any
@@ -2013,9 +1905,15 @@ function Sidebar({
             // "new" in its context menu too.
             const isFolder =
               ctxMenu.path === ROOT ||
+              isSystemRootPath(ctxMenu.path) ||
               folderPaths.has(ctxMenu.path) ||
               hasChild(filePaths, folderPaths, ctxMenu.path);
-            return isFolder ? (
+            // Creation needs one destination folder, so it is not offered for
+            // a multi-mount context action.
+            return isFolder &&
+              mountedPaths.size === 1 &&
+              !isMint(ctxMenu.path) &&
+              !isOblivion(ctxMenu.path) ? (
               <>
                 <button
                   type="button"
@@ -2043,24 +1941,81 @@ function Sidebar({
               </>
             ) : null;
           })()}
-          <button
-            type="button"
-            className="ctx-menu-item"
-            // Rename is a single-item operation; disable it when the selection
-            // spans more than one row so the affordance matches the behavior.
-            // The synthetic root is renamable (display label only).
-            disabled={selectedPaths.size > 1}
-            onClick={() => requestRename(ctxMenu.path)}
-          >
-            Rename
-          </button>
-          {ctxMenu.path !== ROOT && (
+          {(() => {
+            // Restore: move an item in Oblivion (or selection) back to root. Only
+            // offered on items INSIDE oblivion (not the oblivion root itself).
+            const inOblivion = topLevelSelected().filter((p) => isOblivion(p) && p !== OBLIVION);
+            return inOblivion.length > 0 ? (
+              <button
+                type="button"
+                className="ctx-menu-item"
+                onClick={() => {
+                  setCtxMenu(null);
+                  onMove(inOblivion, ROOT);
+                }}
+              >
+                Restore{inOblivion.length > 1 ? ` (${inOblivion.length})` : ""}
+              </button>
+            ) : null;
+          })()}
+          {ctxMenu.path !== ROOT && !isMint(ctxMenu.path) && !isOblivion(ctxMenu.path) && (
+            <>
+              <button
+                type="button"
+                className="ctx-menu-item"
+                title={
+                  shielded.has(ctxMenu.path)
+                    ? "Include in command scope again"
+                    : "Exclude from command scope"
+                }
+                onClick={() => {
+                  const p = ctxMenu.path;
+                  setCtxMenu(null);
+                  onToggleShielded(p);
+                }}
+              >
+                {shielded.has(ctxMenu.path)
+                  ? "Unshield from command scope"
+                  : "Shield from command scope"}
+              </button>
+              <div className="ctx-menu-separator" aria-hidden="true" />
+            </>
+          )}
+          {!isMint(ctxMenu.path) && !isOblivion(ctxMenu.path) && (
+            <button
+              type="button"
+              className="ctx-menu-item"
+              // Rename is a single-item operation; disable it when the selection
+              // spans more than one row so the affordance matches the behavior.
+              // The synthetic root is renamable (display label only).
+              disabled={mountedPaths.size > 1}
+              onClick={() => requestRename(ctxMenu.path)}
+            >
+              Rename
+            </button>
+          )}
+          {filePaths.has(ctxMenu.path) && topLevelSelected().length === 1 && (
+            <button
+              type="button"
+              className="ctx-menu-item danger"
+              onClick={() => {
+                const path = ctxMenu.path;
+                setCtxMenu(null);
+                setRevokeMessage(null);
+                setRevokeError(null);
+                setConfirmRevoke({ path, name: basename(path) });
+              }}
+            >
+              Request relay revocation…
+            </button>
+          )}
+          {ctxMenu.path !== ROOT && !isSystemRootPath(ctxMenu.path) && !isMint(ctxMenu.path) && (
             <button
               type="button"
               className="ctx-menu-item danger"
               onClick={() => requestDelete(topLevelSelected())}
             >
-              Delete{selectedPaths.size > 1 ? ` (${selectedPaths.size})` : ""}
+              Delete{mountedPaths.size > 1 ? ` (${mountedPaths.size})` : ""}
             </button>
           )}
         </div>
@@ -2075,14 +2030,14 @@ function Sidebar({
               {confirmDelete.paths.length > 1
                 ? confirmDelete.isFolder
                   ? confirmDelete.childCount > 0
-                    ? `Delete ${confirmDelete.paths.length} items (including ${confirmDelete.childCount} item${confirmDelete.childCount === 1 ? "" : "s"} inside selected folders)? This cannot be undone.`
-                    : `Delete ${confirmDelete.paths.length} items? This cannot be undone.`
-                  : `Delete ${confirmDelete.paths.length} items? This cannot be undone.`
+                    ? `Delete ${confirmDelete.paths.length} items (including ${confirmDelete.childCount} item${confirmDelete.childCount === 1 ? "" : "s"} inside selected folders)?`
+                    : `Delete ${confirmDelete.paths.length} items?`
+                  : `Delete ${confirmDelete.paths.length} items?`
                 : confirmDelete.isFolder
                   ? confirmDelete.childCount > 0
-                    ? `Delete folder "${confirmDelete.name}" and ${confirmDelete.childCount} item${confirmDelete.childCount === 1 ? "" : "s"} inside it? This cannot be undone.`
-                    : `Delete empty folder "${confirmDelete.name}"? This cannot be undone.`
-                  : `Delete "${confirmDelete.name}"? This cannot be undone.`}
+                    ? `Delete folder "${confirmDelete.name}" and ${confirmDelete.childCount} item${confirmDelete.childCount === 1 ? "" : "s"} inside it?`
+                    : `Delete empty folder "${confirmDelete.name}"?`
+                  : `Delete "${confirmDelete.name}"?`} {deleteOutcomeMessage(confirmDelete.paths)}
             </p>
             <div className="confirm-actions">
               <button type="button" className="confirm-cancel" onClick={() => setConfirmDelete(null)}>
@@ -2102,23 +2057,99 @@ function Sidebar({
           </div>
         </div>
       )}
+      {confirmRevoke && (
+        <div
+          className="confirm-overlay"
+          onClick={() => {
+            if (!revokeBusy) setConfirmRevoke(null);
+          }}
+        >
+          <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
+            <p className="confirm-message">
+              Request relay revocation for “{confirmRevoke.name}”? This publishes a NIP-09
+              deletion request for Steps signed by your current pen. It does not delete the
+              local copy, cannot revoke other voices’ Steps, and relays or caches may retain data.
+            </p>
+            {revokeMessage && <p className="confirm-message" role="status">{revokeMessage}</p>}
+            {revokeError && <p className="create-error" role="alert">{revokeError}</p>}
+            <div className="confirm-actions">
+              <button
+                type="button"
+                className="confirm-cancel"
+                disabled={revokeBusy}
+                onClick={() => setConfirmRevoke(null)}
+              >
+                {revokeMessage ? "Close" : "Cancel"}
+              </button>
+              {!revokeMessage && (
+                <button
+                  type="button"
+                  className="confirm-delete"
+                  disabled={revokeBusy}
+                  onClick={() => {
+                    setRevokeBusy(true);
+                    setRevokeError(null);
+                    void onRevoke(confirmRevoke.path)
+                      .then((message) => setRevokeMessage(message))
+                      .catch((error) =>
+                        setRevokeError(error instanceof Error ? error.message : String(error)),
+                      )
+                      .finally(() => setRevokeBusy(false));
+                  }}
+                >
+                  {revokeBusy ? "Requesting…" : "Request revocation"}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {samplerOpen && <SampleModal onClose={onToggleSampler}>{sampler}</SampleModal>}
       {tagBrowserOpen && (
         <SampleModal title="Browse a tag" onClose={onToggleTagBrowser}>
           {tagBrowser}
         </SampleModal>
       )}
-      <div className="sidebar-footer-bar">
-        <button
-          type="button"
-          className="icon-btn sidebar-settings-btn"
-          title="Settings"
-          aria-label="Settings"
-          onClick={onOpenSettings}
-        >
-          <Settings size={16} aria-hidden="true" />
-        </button>
-      </div>
+      <ReplayTransport
+        index={replayIndex}
+        count={replayCount}
+        playing={playing}
+        playSpeed={playSpeed}
+        replayActive={replayActive}
+        onBegin={onBeginReplay}
+        onStep={onStep}
+        onTogglePlay={onTogglePlay}
+        onCycleSpeed={onCycleSpeed}
+        stepTimes={stepTimes}
+        playFraction={playFraction}
+        // Hover context for the row: the current step's action, file, time,
+        // and (for LLM steps) its summary or prompt. On `last` this is the
+        // just-stepped node; on a historical step it's the save point being
+        // verified. Only shown once replay is active.
+        containerTitle={
+          replayStep
+            ? replayStep.membership
+              ? // A membership step's label is the structural change itself —
+                // "added notes/draft.md", "removed old.md" — not file prose.
+                [
+                  replayStep.membership.type,
+                  replayStep.membership.path,
+                  new Date(replayStep.meta.steppedAtMs).toLocaleString(),
+                ]
+                  .filter(Boolean)
+                  .join(" · ")
+              : [
+                  replayStep.meta.action ?? "edit",
+                  replayStep.relativePath,
+                  new Date(replayStep.meta.steppedAtMs).toLocaleString(),
+                  stepDescription(replayStep.event).summary ??
+                    stepDescription(replayStep.event).prompt,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")
+            : undefined
+        }
+      />
     </nav>
   );
 }
@@ -2143,7 +2174,7 @@ function SampleModal({
   onClose: () => void;
   title?: string;
   /** Widens the dialog for content that needs more than the default
-   *  compose-dialog width (e.g. the Seals modal's side-by-side list+diff). */
+   *  compose-dialog width (e.g. the Steps modal's side-by-side list+diff). */
   wide?: boolean;
 }) {
   // Escape closes, matching CreateModal and the existing confirm dialogs.
@@ -2181,19 +2212,20 @@ function SampleModal({
   );
 }
 
-// --- seals modal (history + diff) ---------------------------------------
+// --- step snapshot helpers ----------------------------------------------
 //
-// Every FileTraceNode carries its own full `snapshot` (protocol §Save/seal
-// triggers) — O(1) read of "content as of any seal", no delta replay needed —
-// so a history view is just a list over `fetchChain`'s result (genesis→latest,
-// already fetched by App.openSeals). Reuses the SampleModal shell above for
-// the overlay/close chrome. Read-only: view + step + diff, no restore.
+// Every FileTraceNode carries its own full `snapshot` (protocol §Save/step
+// triggers) — O(1) read of "content as of any step", no delta replay needed.
+// The chronological Steps modal that used these helpers is gone; the
+// step-to-step review now happens in Diff mode while scrubbing the stepper.
+// stepSnapshot reads a single node's snapshot; stepDescription pulls an LLM
+// step's prompt/summary for the replay summary line.
 
 /** Pulls a kind-4290 event's `snapshot` string straight out of its content —
  *  same O(1) read every other provenance display already relies on (see
  *  reconstructFromChain, provenance.ts), just for a single node instead of
  *  replaying a whole chain. */
-function sealSnapshot(event: Event): string {
+function stepSnapshot(event: Event): string {
   try {
     const parsed = JSON.parse(event.content) as { snapshot?: string };
     return typeof parsed.snapshot === "string" ? parsed.snapshot : "";
@@ -2202,10 +2234,10 @@ function sealSnapshot(event: Event): string {
   }
 }
 
-/** Pulls an LLM seal's `prompt` and `summary` out of its content JSON for the
- *  replay summary line. Both are optional (only LLM-action seals carry them;
- *  edit/import seals have neither). Returns whatever is present. */
-function sealDescription(event: Event): { prompt?: string; summary?: string } {
+/** Pulls an LLM step's `prompt` and `summary` out of its content JSON for the
+ *  replay summary line. Both are optional (only LLM-action steps carry them;
+ *  edit/import steps have neither). Returns whatever is present. */
+function stepDescription(event: Event): { prompt?: string; summary?: string } {
   try {
     const parsed = JSON.parse(event.content) as { prompt?: string; summary?: string };
     const out: { prompt?: string; summary?: string } = {};
@@ -2217,135 +2249,160 @@ function sealDescription(event: Event): { prompt?: string; summary?: string } {
   }
 }
 
-function SealsModal({
-  relativePath,
-  chain,
-  pinnedEventId,
-  onClose,
-}: {
-  relativePath: string;
-  /** genesis → latest, as returned by fetchChain. */
-  chain: Event[];
-  /** Seeds the selected index at this exact node (the "replying to ↑" entry
-   *  point) instead of the latest seal. */
-  pinnedEventId?: string;
-  onClose: () => void;
-}) {
-  const pinnedIndex = pinnedEventId ? chain.findIndex((e) => e.id === pinnedEventId) : -1;
-  const [selectedIndex, setSelectedIndex] = useState(pinnedIndex >= 0 ? pinnedIndex : chain.length - 1);
-  const [diffMode, setDiffMode] = useState<"prev" | "current" | "none">("prev");
 
-  const selected = chain[selectedIndex];
-  const selectedText = selected ? sealSnapshot(selected) : "";
-  const currentText = chain.length > 0 ? sealSnapshot(chain[chain.length - 1]) : "";
-  const prevText = selectedIndex > 0 ? sealSnapshot(chain[selectedIndex - 1]) : null;
-  // "vs prev" has nothing to compare at genesis; "vs current" is a no-op at
-  // the head; "no diff" always shows the plain content pane.
-  const diffTarget =
-    diffMode === "current" ? currentText : diffMode === "prev" ? prevText : null;
+// --- in-place diff pane --------------------------------------------------
+//
+// Replaces the editor surface in the panel when the active tab's mode is
+// "diff" (the third surface alongside Preview/Markdown). The editor
+// (FileEditor) stays mounted underneath — LLM ops, palette citations, and
+// Cmd+S step all hold its view ref regardless of which surface is showing —
+// this pane is just an absolute overlay that covers it visually. Reuses the
+// same jsdiff + steps-diff-add/-remove/-same spans MergePreviewModal uses.
+//
+// Two modes of operation, selected by whether the replay stepper has frozen
+// THIS file on a historical step (replayStepText != null):
+//
+// LIVE (not frozen) — "what have I changed since I stepped?"
+//   • vs current (default): head step chain[last] vs the working buffer —
+//     uncommitted edits since your last step.
+//   • vs prev: chain[last−1] vs the working buffer — everything since the prior
+//     step. Null at genesis → empty state.
+//
+// REPLAY (frozen on step #N) — "what did THIS step change?" This is the
+// step-to-step review path that replaces the old chronological Steps modal:
+// scope the file, scrub the stepper, and read each step's delta here. The
+// replay stepper overwrites file.runs with step #N's snapshot (replayStepTo),
+// so the working buffer is NOT flatten(file.runs) here — the live buffer is
+// passed in via replayLiveText (parked in replay.snapshot[path]).
+//   • vs prev (default): the previous content-step of this file vs step #N —
+//     the delta THIS step introduced.
+//   • vs live: the live buffer (replayLiveText) vs step #N — how the live doc
+//     has drifted from this checkpoint.
+// The chain fetch is skipped entirely in replay mode (both sides are known).
+function DiffPane({
+  file,
+  path,
+  folderId,
+  replayStepText,
+  replayPrevText,
+  replayLiveText,
+  header,
+  footer,
+}: {
+  file: FileState;
+  path: string;
+  folderId: string;
+  /** The frozen replay step's content snapshot, or null when the stepper isn't
+   *  frozen on this file. Presence selects replay mode. */
+  replayStepText?: string | null;
+  /** In replay mode, the previous content-step of this file (vs prev). Null at
+   *  this file's genesis. Unused in live mode. */
+  replayPrevText?: string | null;
+  /** In replay mode, the live working buffer (vs live). Unused in live mode. */
+  replayLiveText?: string | null;
+  /** Scroll-native mode + outgoing-citation row. */
+  header?: ReactNode;
+  /** Incoming citations, encountered after the diff body. */
+  footer?: ReactNode;
+}) {
+  const frozen = replayStepText != null;
+  const workingText = flatten(file.runs ?? []);
+  // The two stepped snapshots to diff against. Fetched on head/path change; null
+  // while loading or when the chain is too short to have that comparison.
+  const [headText, setHeadText] = useState<string | null>(null);
+  const [prevText, setPrevText] = useState<string | null>(null);
+  const [diffMode, setDiffMode] = useState<"current" | "prev">("current");
+
+  useEffect(() => {
+    // Replay mode knows both sides already — skip the fetch entirely.
+    if (frozen) return;
+    let cancelled = false;
+    if (!folderId || !path) return;
+    setHeadText(null);
+    setPrevText(null);
+    fetchChain(folderId, path).then((chain) => {
+      if (cancelled) return;
+      if (chain.length > 0) {
+        setHeadText(stepSnapshot(chain[chain.length - 1]));
+        setPrevText(chain.length >= 2 ? stepSnapshot(chain[chain.length - 2]) : null);
+      } else {
+        setHeadText(null);
+        setPrevText(null);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [folderId, path, file.nodeId, frozen]);
+
+  // Right side of the diff (the "as it is now" text). Replay → frozen step;
+  // live → working buffer.
+  const rightText = frozen ? replayStepText! : workingText;
+  // Left side per toggle. Replay maps "current"→live buffer, "prev"→previous
+  // same-file step; live maps "current"→head, "prev"→prev step.
+  const diffTarget = frozen
+    ? diffMode === "current"
+      ? replayLiveText ?? null
+      : replayPrevText ?? null
+    : diffMode === "current"
+      ? headText
+      : prevText;
   const diffParts = useMemo(
-    () => (diffTarget !== null ? diffLines(diffTarget, selectedText) : null),
-    [diffTarget, selectedText],
+    () => (diffTarget != null ? diffLines(diffTarget, rightText) : null),
+    [diffTarget, rightText],
   );
+  const isEmpty =
+    diffParts !== null &&
+    diffParts.length > 0 &&
+    diffParts.every((p) => !p.added && !p.removed);
+
+  // "current" relabels to "vs live" in replay mode so it names the real
+  // comparison (the head isn't the right side when frozen on a step).
+  const currentLabel = frozen ? "vs live" : "vs current";
 
   return (
-    <SampleModal title={`Seals · ${relativePath}`} onClose={onClose} wide>
-      <div className="seals-modal">
-        <div className="seals-list" role="listbox" aria-label="Seal history">
-          {chain.map((event, idx) => {
-            const meta = eventMeta(event);
-            return (
-              <button
-                key={event.id}
-                type="button"
-                role="option"
-                aria-selected={idx === selectedIndex}
-                className={
-                  "seals-row" +
-                  (idx === selectedIndex ? " active" : "") +
-                  (event.id === pinnedEventId ? " pinned" : "")
-                }
-                onClick={() => setSelectedIndex(idx)}
-              >
-                <span className="seals-row-date">{new Date(meta.sealedAtMs).toLocaleString()}</span>
-                <span
-                  className={
-                    "seals-row-action" + ((meta.action ?? "edit") === "external" ? " seals-row-action--external" : "")
-                  }
-                >
-                  {meta.action ?? "edit"}
-                </span>
-                <span className="seals-row-id">{event.id.slice(0, 8)}</span>
-              </button>
-            );
-          }).reverse()}
-        </div>
-        <div className="seals-detail">
-          <div className="seals-controls">
-            <button
-              type="button"
-              className="seals-step-btn"
-              disabled={selectedIndex <= 0}
-              onClick={() => setSelectedIndex((i) => Math.max(0, i - 1))}
-            >
-              ← older
-            </button>
-            <span className="seals-position">
-              {selectedIndex + 1} / {chain.length}
-            </span>
-            <button
-              type="button"
-              className="seals-step-btn"
-              disabled={selectedIndex >= chain.length - 1}
-              onClick={() => setSelectedIndex((i) => Math.min(chain.length - 1, i + 1))}
-            >
-              newer →
-            </button>
-            <div className="seals-diff-toggle" role="group" aria-label="Diff against">
-              <button
-                type="button"
-                className={"seals-diff-btn" + (diffMode === "prev" ? " active" : "")}
-                onClick={() => setDiffMode("prev")}
-              >
-                vs prev
-              </button>
-              <button
-                type="button"
-                className={"seals-diff-btn" + (diffMode === "current" ? " active" : "")}
-                onClick={() => setDiffMode("current")}
-              >
-                vs current
-              </button>
-              <button
-                type="button"
-                className={"seals-diff-btn" + (diffMode === "none" ? " active" : "")}
-                onClick={() => setDiffMode("none")}
-              >
-                no diff
-              </button>
-            </div>
-          </div>
-          {diffParts ? (
-            <pre className="seals-diff">
-              {diffParts.map((part, i) => (
-                <span
-                  key={i}
-                  className={part.added ? "seals-diff-add" : part.removed ? "seals-diff-remove" : "seals-diff-same"}
-                >
-                  {part.value}
-                </span>
-              ))}
-            </pre>
-          ) : (
-            <pre className="seals-content">{selectedText}</pre>
-          )}
-          {/* §3.7: when the selected seal is an LLM call, show the reconstructed
-              submitted prompt (system + user) + scope + model config below the
-              content. Renders nothing for non-LLM seals. */}
-          {selected && <LlmReconstructPanel event={selected} />}
+    <div className="panel-diff-pane">
+      {header}
+      <div className="panel-diff-controls">
+        <div className="steps-diff-toggle" role="group" aria-label="Diff against">
+          <button
+            type="button"
+            className={"steps-diff-btn" + (diffMode === "current" ? " active" : "")}
+            onClick={() => setDiffMode("current")}
+          >
+            {currentLabel}
+          </button>
+          <button
+            type="button"
+            className={"steps-diff-btn" + (diffMode === "prev" ? " active" : "")}
+            onClick={() => setDiffMode("prev")}
+          >
+            vs prev
+          </button>
         </div>
       </div>
-    </SampleModal>
+      {diffTarget === null ? (
+        <p className="panel-diff-empty">
+          {diffMode === "prev"
+            ? "No prior step to diff against."
+            : "Not yet stepped — nothing to diff."}
+        </p>
+      ) : isEmpty ? (
+        <p className="panel-diff-empty">No changes since last step.</p>
+      ) : (
+        <pre className="panel-diff">
+          {diffParts!.map((part, i) => (
+            <span
+              key={i}
+              className={part.added ? "steps-diff-add" : part.removed ? "steps-diff-remove" : "steps-diff-same"}
+            >
+              {part.value}
+            </span>
+          ))}
+        </pre>
+      )}
+      {footer}
+    </div>
   );
 }
 
@@ -2438,25 +2495,28 @@ function OperatorSetupModal({
 
 // --- folder-wide replay transport --------------------------------------
 //
-// Always-visible transport pinned at the top of the sidebar (under "Switch
-// folder"). Two rows, shown directly (no "Replay folder" gate):
+// Always-visible transport pinned at the bottom of the sidebar. Two rows,
+// shown directly (no "Replay folder" gate):
 //   row 1 — stepper + counter:  ⏮ ◀ [n / total] ▶ ⏭   (left-aligned)
 //   row 2 — transport:          ▶/⏸  ·  N×  ·  [===== slider =====]
 // The stepper + slider jump save-point to save-point. Play animates per
 // character (typewriter). `last` is sticky (resting = live document): a new
-// seal while parked at the right end appends a step, the counter ticks up, and
+// step while parked at the right end appends a step, the counter ticks up, and
 // the slider's max grows to include it. Before replay is bootstrapped (count
 // 0) the step buttons disable and ▶ becomes "load & play" — it bootstraps the
 // timeline (beginReplay is async) then starts playback.
 //
-// Scan gap ribbon: the slider stays index-linear (one tick per save point, so
-// close reading stays precise), but a thin ribbon beneath it flags LARGE time
-// gaps between adjacent steps. A gap is "large" when it exceeds 3× the median
-// inter-step interval — adaptive, so a folder edited across months shows day-
-// gaps while one edited in a session shows minute-gaps. Each large gap renders
-// as a labeled, clickable chip ("3d", "4h", "12m"); clicking seeks to the step
-// AFTER the gap (point-based, matching the rest of the stepper — no range
-// selection). Pure rendering + seek; no new state or fetch.
+// Time-proportional axis: the slider is a custom control (a native <input
+// type="range"> can't map its thumb to anything but linear-in-value). Ticks,
+// thumb, and idle bands are all positioned by real steppedAtMs via stepAxis,
+// so a 3-day gap reads wider than a 3-second one. Large idle spans (>3× the
+// median inter-step interval) render as translucent COLORED BANDS inside the
+// track, clickable to jump past the idle stretch (the old separate ribbon is
+// gone — the bands are in-track now). The n / count readout goes fractional
+// (e.g. 3.4 / 12) while playback is mid-way through a save point's char
+// reveal, and the thumb interpolates between ticks during play. Playback
+// itself advances one char per tick everywhere, so it never dwells on idle —
+// the bands are "skipped" in wall-clock terms by construction.
 
 /** Compact, human-readable duration for a gap label. Picks the largest unit
  *  that fits (days → hours → minutes → seconds), rounded. <1s renders as "" so
@@ -2492,6 +2552,65 @@ function computeGaps(times: number[]): { afterIndex: number; ms: number }[] {
   }
   return out;
 }
+
+/** Fraction (0..1) of step `i` along a time-proportional axis — ticks/thumb/
+ *  bands are spaced by real steppedAtMs instead of evenly by index. Falls back
+ *  to index-linear when there are <2 steps or the timestamps aren't monotonic
+ *  (e.g. all-equal/zero steppedAtMs), so a bad timeline can't collapse the axis. */
+function timeFraction(stepTimes: number[], i: number): number {
+  const n = stepTimes.length;
+  if (n < 2 || i <= 0) return 0;
+  if (i >= n - 1) return 1;
+  const span = stepTimes[n - 1] - stepTimes[0];
+  if (span <= 0) return i / (n - 1);
+  return (stepTimes[i] - stepTimes[0]) / span;
+}
+
+/** Inverse of timeFraction for the slider's drag/keyboard handlers: pick the
+ *  step whose time-fraction is nearest `f`. Last-wins on ties so dragging right
+ *  monotonically advances. */
+function fractionToStep(stepTimes: number[], f: number): number {
+  const n = stepTimes.length;
+  if (n < 2) return 0;
+  const clamped = Math.max(0, Math.min(1, f));
+  let best = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < n; i++) {
+    const d = Math.abs(timeFraction(stepTimes, i) - clamped);
+    if (d <= bestDist) {
+      bestDist = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/** Position helper for ReplayTransport: time-proportional when we have a full
+ *  timeline (one timestamp per step), index-linear otherwise. Centralizes the
+ *  fallback so the slider, ticks, and bands all share one axis. */
+function stepAxis(stepTimes: number[] | undefined, count: number): (i: number) => number {
+  if (stepTimes && stepTimes.length === count && count > 1) {
+    return (i: number) => timeFraction(stepTimes, i);
+  }
+  return (i: number) => (count > 1 ? i / (count - 1) : 0);
+}
+
+/** Sub-step progress (0..1) of the playback cursor through its enclosing
+ *  save point — drives the fractional readout (3.4 / 12) and the thumb's
+ *  interpolation between ticks. `timeline` is the per-char play frames,
+ *  `cursor` the current frame index. Returns 0 when not mid-reveal (or when a
+ *  step has only one frame, where there's nothing to sub-divide). */
+function stepPlayFraction(timeline: PlayFrame[] | null, cursor: number): number {
+  if (!timeline || cursor < 0 || cursor >= timeline.length) return 0;
+  const step = timeline[cursor].stepIndex;
+  let start = cursor;
+  while (start > 0 && timeline[start - 1].stepIndex === step) start--;
+  let end = cursor;
+  while (end + 1 < timeline.length && timeline[end + 1].stepIndex === step) end++;
+  const span = end - start;
+  return span > 0 ? (cursor - start) / span : 0;
+}
+
 function ReplayTransport({
   index,
   count,
@@ -2504,6 +2623,7 @@ function ReplayTransport({
   onCycleSpeed,
   containerTitle,
   stepTimes,
+  playFraction,
 }: {
   index: number;
   count: number;
@@ -2515,7 +2635,7 @@ function ReplayTransport({
    *  mid-playback). Highlights the ⏭ skip-to-live escape as the way out —
    *  landing on `last` flips this false and lifts read-only. */
   replayActive: boolean;
-  /** Bootstrap replay (async fetch of the folder's seals). Called by ▶ when no
+  /** Bootstrap replay (async fetch of the folder's steps). Called by ▶ when no
    *  timeline is loaded yet. */
   onBegin: () => void;
   /** Seek replay to step `n`. Driven by the stepper buttons and the slider. */
@@ -2527,15 +2647,33 @@ function ReplayTransport({
   /** Hover context for the whole block: the current step's action/file/time/(blurb).
    *  Lets the condensed layout still say where you are without a summary line. */
   containerTitle?: string;
-  /** sealedAtMs per step, in step order. Drives the scan gap ribbon. */
+  /** steppedAtMs per step, in step order. Drives the time-proportional axis. */
   stepTimes?: number[];
+  /** Sub-step progress (0..1) through the current save point during
+   *  playback — drives the fractional readout (3.4 / 12) and lets the thumb
+   *  interpolate between ticks. 0 when parked/not playing. */
+  playFraction?: number;
 }) {
   const bootstrapped = count > 0;
   const first = index <= 0;
   const last = index >= count - 1;
-  // The slider's discrete stops are the save points. With ≤1 step there's
-  // nothing to scrub, so render a degenerate 0..0 range.
-  const max = Math.max(0, count - 1);
+  // The custom slider is positioned by absolute time (stepAxis), not by index.
+  // A native <input type="range"> can't map its thumb to anything but linear-
+  // in-value, so this is a div + pointer/keyboard handler replicating the
+  // native contract (drag, arrows, Home/End, a11y). Seeking stays integer
+  // (fractionToStep snaps to the nearest save point).
+  const tf = stepAxis(stepTimes, count);
+  const gaps = stepTimes && stepTimes.length > 0 ? computeGaps(stepTimes) : [];
+  const frac = playFraction ?? 0;
+  // The readout goes fractional only mid-reveal: parked = "3 / 12", playing
+  // between steps 3→4 = "3.4 / 12". toFixed(1) drops the decimal for .0.
+  const shown = playing && frac > 0 ? (index + frac).toFixed(1) : String(index + 1);
+  const clampStep = (n: number) => Math.max(0, Math.min(count - 1, n));
+  const seekFromClientX = (clientX: number, el: HTMLElement) => {
+    const rect = el.getBoundingClientRect();
+    const f = rect.width > 0 ? (clientX - rect.left) / rect.width : 0;
+    onStep(stepTimes && stepTimes.length === count ? fractionToStep(stepTimes, f) : clampStep(Math.round(f * (count - 1))));
+  };
   return (
     <div
       className={"sidebar-replay" + (playing ? " is-playing" : "")}
@@ -2546,7 +2684,7 @@ function ReplayTransport({
       <div className="sidebar-replay-row sidebar-replay-stepper">
         <button
           type="button"
-          className="seals-step-btn"
+          className="steps-step-btn"
           disabled={!bootstrapped || first || playing}
           onClick={() => onStep(0)}
           title="First save point"
@@ -2555,19 +2693,19 @@ function ReplayTransport({
         </button>
         <button
           type="button"
-          className="seals-step-btn"
+          className="steps-step-btn"
           disabled={!bootstrapped || first || playing}
           onClick={() => onStep(index - 1)}
           title="Previous save point"
         >
           ◀
         </button>
-        <span className="seals-position" title="Save point position in the folder timeline">
-          {count > 0 ? `${index + 1} / ${count}` : "— / —"}
+        <span className="steps-position" title="Save point position in the folder timeline">
+          {count > 0 ? `${shown} / ${count}` : "— / —"}
         </span>
         <button
           type="button"
-          className="seals-step-btn"
+          className="steps-step-btn"
           disabled={!bootstrapped || last || playing}
           onClick={() => onStep(index + 1)}
           title="Next save point"
@@ -2577,11 +2715,11 @@ function ReplayTransport({
         <button
           type="button"
           className={
-            "seals-step-btn" + (replayActive && !last ? " sidebar-replay-skip" : "")
+            "steps-step-btn" + (replayActive && !last ? " sidebar-replay-skip" : "")
           }
           // ⏭ is the read-only escape: always enabled (even mid-playback) so
           // the highlighted button reliably drops you back on the live doc.
-          // onStep tears down the char timeline before seeking to `last`.
+          // onStep tears down the edit timeline before seeking to `last`.
           disabled={!bootstrapped || last}
           onClick={() => onStep(count - 1)}
           title="Skip to live (latest save point)"
@@ -2592,7 +2730,7 @@ function ReplayTransport({
       <div className="sidebar-replay-row sidebar-replay-transport">
         <button
           type="button"
-          className="seals-step-btn sidebar-replay-play"
+          className="steps-step-btn sidebar-replay-play"
           disabled={playing}
           onClick={() => (bootstrapped ? onTogglePlay() : onBegin())}
           title={
@@ -2600,7 +2738,7 @@ function ReplayTransport({
               ? "Pause playback"
               : bootstrapped
                 ? "Play through the timeline"
-                : "Load this folder's seals and play"
+                : "Load this folder's steps and play"
           }
         >
           {playing ? "⏸" : "▶"}
@@ -2613,101 +2751,121 @@ function ReplayTransport({
         >
           {playSpeed}×
         </button>
-        <div className="sidebar-replay-slider-wrap">
-          {/* Savepoint ticks: one per step, positioned at the same fraction the
-              slider itself maps step i to (min=0, max=count-1 → i/(count-1)).
-              Purely visual (aria-hidden) — the range input stays interactive.
-              A positioned overlay rather than <datalist> because range tick
-              rendering is inconsistent across UAs (WebKit/Chromium draw them,
-              Firefox doesn't) and this gives full styling control. */}
+        <div
+          // Custom time-proportional slider. role=slider + aria-valu* gives
+          // screen readers the same contract the old <input type="range"> had.
+          // onPointerDown both seeks-and-begins-drag (pointer capture keeps the
+          // drag tracking outside the element). Disabled while playing — seek
+          // pauses playback anyway, and dragging during autoplay would fight it.
+          className="sidebar-replay-track"
+          role="slider"
+          aria-label="Replay position"
+          aria-valuemin={0}
+          aria-valuemax={Math.max(0, count - 1)}
+          aria-valuenow={index}
+          aria-valuetext={`Save point ${index + 1} of ${count}`}
+          aria-disabled={!bootstrapped || playing}
+          tabIndex={bootstrapped && !playing ? 0 : -1}
+          onPointerDown={(e) => {
+            if (!bootstrapped || playing) return;
+            (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+            seekFromClientX(e.clientX, e.currentTarget);
+          }}
+          onPointerMove={(e) => {
+            // Only treat as a drag while the pointer is held (buttons pressed).
+            if (e.buttons === 0) return;
+            if (!bootstrapped || playing) return;
+            seekFromClientX(e.clientX, e.currentTarget);
+          }}
+          onKeyDown={(e) => {
+            if (!bootstrapped || playing) return;
+            switch (e.key) {
+              case "ArrowRight":
+              case "ArrowUp":
+                e.preventDefault();
+                onStep(index + 1);
+                break;
+              case "ArrowLeft":
+              case "ArrowDown":
+                e.preventDefault();
+                onStep(index - 1);
+                break;
+              case "Home":
+                e.preventDefault();
+                onStep(0);
+                break;
+              case "End":
+                e.preventDefault();
+                onStep(count - 1);
+                break;
+            }
+          }}
+        >
+          {/* Track rule: the 3px baseline the ticks/thumb sit on. */}
+          <span className="sidebar-replay-rule" aria-hidden="true" />
+          {/* Idle bands: large time gaps (>3× median interval) rendered in-track
+              as translucent colored spans, clickable to jump past the idle
+              stretch. Replaces the old separate ScanGapRibbon. */}
+          {gaps.map((g) => {
+            const label = formatGap(g.ms);
+            if (!label) return null;
+            const left = tf(g.afterIndex);
+            const width = tf(g.afterIndex + 1) - left;
+            const target = g.afterIndex + 1;
+            return (
+              <button
+                key={g.afterIndex}
+                type="button"
+                className={
+                  "sidebar-replay-band" + (index === target ? " is-current" : "")
+                }
+                style={{ left: `${left * 100}%`, width: `${width * 100}%` }}
+                // Stop propagation so clicking a band seeks instead of starting
+                // a track drag; disabled mid-playback to match the rest.
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  if (!playing) onStep(target);
+                }}
+                aria-hidden="true"
+                tabIndex={-1}
+                title={`Skip ${label} idle → save point ${target + 1} of ${count}`}
+              >
+                {label}
+              </button>
+            );
+          })}
+          {/* Savepoint ticks: one per step, positioned along the time axis.
+              Dim so the thumb reads as the live position; pointer-events:none
+              so the track stays the only interactive layer. */}
           {count > 0 && (
             <div className="sidebar-replay-ticks" aria-hidden="true">
               {Array.from({ length: count }, (_, i) => (
                 <span
                   key={i}
                   className="sidebar-replay-tick"
-                  style={{ left: `${count > 1 ? (i / (count - 1)) * 100 : 0}%` }}
+                  style={{ left: `${tf(i) * 100}%` }}
                 />
               ))}
             </div>
           )}
-          <input
-            // Local key so React doesn't fight a drag in progress when `index`
-            // updates from auto-play — without it the input can jump mid-drag.
-            key={count}
-            type="range"
-            className="sidebar-replay-slider"
-            min={0}
-            max={max}
-            value={Math.min(index, max)}
-            onChange={(e) => onStep(Number(e.target.value))}
-            title={`Save point ${index + 1} of ${count}`}
-            aria-label="Replay position"
-          />
+          {/* Thumb: interpolates between the current tick and the next by
+              `playFraction` during playback, so it glides across the time axis
+              rather than snapping per save point. */}
+          {count > 0 && (
+            <span
+              className="sidebar-replay-thumb"
+              aria-hidden="true"
+              style={{
+                left: `${(tf(index) + (tf(Math.min(index + 1, count - 1)) - tf(index)) * frac) * 100}%`,
+              }}
+            />
+          )}
         </div>
       </div>
-      {stepTimes && stepTimes.length > 0 && (
-        <ScanGapRibbon
-          times={stepTimes}
-          count={count}
-          index={index}
-          onStep={onStep}
-        />
-      )}
     </div>
   );
 }
 
-/** The scan gap ribbon: a thin strip beneath the slider that flags large time
- *  gaps between adjacent save points. Each gap is a clickable chip positioned
- *  at the same fraction as the slider tick BEFORE it; clicking seeks to the
- *  step after the gap (the next save point). The ribbon is purely additive —
- *  the slider's index-linear ticks (close-reading precision) are untouched, and
- *  the ribbon only renders when there are large gaps to show. */
-function ScanGapRibbon({
-  times,
-  count,
-  index,
-  onStep,
-}: {
-  times: number[];
-  count: number;
-  index: number;
-  onStep: (n: number) => void;
-}) {
-  const gaps = computeGaps(times);
-  if (gaps.length === 0) return null;
-  return (
-    <div className="sidebar-replay-row sidebar-replay-gaps" aria-label="Time gaps between save points">
-      {gaps.map((g) => {
-        // Position the chip at the tick of the step BEFORE the gap — visually
-        // "the gap opens after here". left% mirrors the slider's step mapping.
-        const left = count > 1 ? (g.afterIndex / (count - 1)) * 100 : 0;
-        const label = formatGap(g.ms);
-        if (!label) return null;
-        const target = g.afterIndex + 1; // seek to the step after the gap
-        return (
-          <button
-            key={g.afterIndex}
-            type="button"
-            className={
-              "sidebar-replay-gap" +
-              (index === target ? " is-current" : "")
-            }
-            style={{ left: `${left}%` }}
-            // Transform centers the chip on its tick so labels don't run off
-            // the right edge at the tail of the slider.
-            // eslint-disable-next-line react/forbid-dom-props
-            onClick={() => onStep(target)}
-            title={`Skip ${label} idle → save point ${target + 1} of ${count}`}
-          >
-            {label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
 // Telescope icon). Fans a Nostr filter out to a set of relays and writes the
 // deduped results into samples/ as files — see App.runSample. Lives in the
 // sidebar; the App owns the state and handler so they can touch files/panels.
@@ -2950,8 +3108,8 @@ const EYE_SPEECH = "👁️\u200d🗨️";
 
 // The voice new text is attributed to — resolved to the keychain's AUTHOR key
 // pubkey at edit time (see keys-store.ts), so switching the AUTHOR key in the
-// TopBar changes who subsequent edits are attributed to without a reload.
-// Pre-keychain this was the hardcoded "alice". Resolved live at each call site
+// ActionPalette changes who subsequent edits are attributed to without a reload.
+// Pre-keychain this was the hardcoded "author-1". Resolved live at each call site
 // rather than captured once at module load (a module-level const would freeze
 // the attribution to whatever key was AUTHOR when the bundle loaded).
 //
@@ -2973,6 +3131,9 @@ const voiceCompartment = new Compartment();
  *  global voice-attribution toggle flips — without rebuilding the editor's
  *  whole extension set (which would reset doc state, history, etc.). */
 const voiceAttributionCompartment = new Compartment();
+/** Holds the legend's temporary voice isolation. Reconfiguring it rebuilds
+ * ordinary run marks and Preview-mode citation widgets in one transaction. */
+const focusedVoiceCompartment = new Compartment();
 /** Hold the selected-span facet + chip-click handler so the bracket layer can
  *  re-ring the selected `[[ span ]]` and report chip clicks without rebuilding
  *  the editor. Reconfigured live from FileEditor when `selection` moves. */
@@ -3005,6 +3166,9 @@ function replayReadOnlyFilter(
 /** Carries an externally-imposed Run[] (agent write / file switch). Tagged
  *  so the updateListener knows not to echo it back as a user edit. */
 const setRunsEffect = StateEffect.define<Run[]>();
+/** Triggers a decoration-only repaint after a foreign kind-34292 identity
+ * resolves. Voice/bracket plugins already rebuild on arbitrary effects. */
+const refreshVoiceStylesEffect = StateEffect.define<null>();
 
 /** Tags a doc-change transaction with the exact voice an LLM op streamed under.
  *  Carried in the same transaction as the change, so attribution can't drift
@@ -3039,6 +3203,44 @@ const voiceField = StateField.define<Run[]>({
   },
 });
 
+/** Synchronizes the editor-owned KEdit log with FileState after a Step, tab
+ *  switch, crash-pad restore, or agent write. */
+const setKEditsEffect = StateEffect.define<KEditLog>();
+
+/** The keystroke log: one `KEdit` per discrete editor change since the last
+ *  step (or the last programmatic content swap). A parallel sink to
+ *  `voiceField` — same `iterChanges` walk, same voice resolution, but appends
+ *  to a log instead of splicing runs. CodeMirror suppresses transactions
+ *  during IME composition, so a Chinese/Japanese/Korean commit lands as ONE
+ *  entry (the committed text), never the intermediate pinyin — CJK is free.
+ *  Undo/redo transactions retain CodeMirror's semantic history intent, and
+ *  every range in a multi-range transaction shares one node-local `tx` id.
+ *
+ *  Synchronized after Step by `setKEditsEffect` and reset on programmatic
+ *  repopulation (via the `setRunsEffect` gate, mirroring `voiceField`). Memory
+ *  is bounded to the edits after the latest Step. */
+const keditField = StateField.define<KEditLog>({
+  create: () => EMPTY_KEDIT_LOG,
+  update(buf, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setKEditsEffect)) return e.value;
+    }
+    // Same gate as voiceField: a setRunsEffect-tagged transaction is a
+    // programmatic content swap (file switch, agent write, replay restore) —
+    // not a user edit, so the keystroke log resets.
+    for (const e of tr.effects) {
+      if (e.is(setRunsEffect)) return EMPTY_KEDIT_LOG;
+    }
+    if (!tr.docChanged) return buf;
+    // Same voice resolution as voiceField.update: op-tagged voice wins over
+    // the facet AUTHOR voice, with authorVoice() as the final fallback.
+    const opVoice = tr.effects.find((e) => e.is(opVoiceEffect))?.value;
+    const pen = opVoice || tr.state.facet(voiceFacet) || authorVoice();
+    const add = captureKEditTransaction(tr, pen, nextKEditTx(buf));
+    return appendKEditLog(buf, add);
+  },
+});
+
 const voiceDecorations = ViewPlugin.fromClass(
   class {
     decorations: DecorationSet;
@@ -3054,63 +3256,193 @@ const voiceDecorations = ViewPlugin.fromClass(
   { decorations: (v) => v.decorations },
 );
 
-// Stick-to-bottom: when the scroller is parked near the bottom and a
-// doc-changing transaction lands (an LLM streaming a delta, a relay push
-// appending content), re-pin to the new bottom so the viewport follows the
-// stream. CM6's own scrolledToBottom compensation only fires when the viewport
-// didn't change and no measures are pending (the `else` branch in its measure
-// loop) — a long document streaming content below the fold changes the
-// viewport, so that path is skipped and the view drifts up a line per token.
-//
-// The re-pin is deferred to the next animation frame so it runs *after* CM6's
-// own measure loop (also rAF-scheduled, registered before this callback) has
-// applied its scroll-anchor compensation. Setting scrollTop synchronously in
-// update() would race that loop and get overwritten. It never fights the
-// reader: a scrolled-up position has wasAtBottom === false, so nothing happens
-// and the scroll-anchor stability from the sync effect's append-only path
-// keeps the visible line put. The threshold (24px) forgives a fraction-of-a-
-// line drift mid-stream so "pinned" stays sticky across rapid tokens.
-const STICK_BOTTOM_THRESHOLD = 24;
-function isScrolledToBottom(view: EditorView): boolean {
-  const el = view.scrollDOM;
-  return el.scrollTop >= el.scrollHeight - el.clientHeight - STICK_BOTTOM_THRESHOLD;
+// Streaming scroll anchor: an external append captures one of two reader
+// intents before CodeMirror redraws. Bottom means follow the growing document;
+// fixed means restore the exact prior scrollTop after CM's wrapped-line and
+// virtual-viewport measurements settle. Direct LLM edits carry opVoiceEffect;
+// React-driven Reply/Receive streams arrive as append-only setRuns updates.
+// Ordinary typing and explicit scrollIntoView requests stay on CodeMirror's
+// native cursor behavior.
+function isStreamedChange(update: import("@codemirror/view").ViewUpdate): boolean {
+  if (!update.docChanged) return false;
+
+  const isDirectLlmChange = update.transactions.some((tr) =>
+    tr.effects.some((effect) => effect.is(opVoiceEffect)),
+  );
+  if (isDirectLlmChange) return true;
+
+  const isExternalRunsChange = update.transactions.some((tr) =>
+    tr.effects.some((effect) => effect.is(setRunsEffect)),
+  );
+  if (!isExternalRunsChange) return false;
+
+  const oldLength = update.startState.doc.length;
+  let sawAppend = false;
+  let appendOnly = true;
+  update.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+    if (fromA !== oldLength || toA !== oldLength || inserted.length === 0) {
+      appendOnly = false;
+    } else {
+      sawAppend = true;
+    }
+  });
+  return appendOnly && sawAppend;
 }
+
 const stickToBottom = ViewPlugin.fromClass(
   class {
-    wasAtBottom = true;
     pending: number | null = null;
+    userScrolling = false;
+    userScrollVersion = 0;
+    userScrollTimer: number | null = null;
+    readonly view: EditorView;
+    readonly win: Window;
+
     constructor(view: EditorView) {
-      this.wasAtBottom = isScrolledToBottom(view);
+      this.view = view;
+      this.win = view.scrollDOM.ownerDocument.defaultView ?? window;
+      view.scrollDOM.addEventListener("wheel", this.noteUserScrollIntent, { passive: true });
+      view.scrollDOM.addEventListener("touchstart", this.noteUserScrollIntent, { passive: true });
+      view.scrollDOM.addEventListener("pointerdown", this.noteScrollbarPointer, {
+        passive: true,
+      });
+      view.scrollDOM.addEventListener("keydown", this.noteScrollKey);
+      view.scrollDOM.addEventListener("scroll", this.noteUserScroll, { passive: true });
     }
-    update(update: import("@codemirror/view").ViewUpdate) {
-      // A re-pin is already in flight: leave wasAtBottom alone so the stream
-      // keeps following — the transient mid-growth scroll position would read
-      // as "not at bottom" and break the follow on the next token.
-      if (this.pending !== null) return;
-      if (update.docChanged && this.wasAtBottom) {
-        // Re-pin on the next frame, after CM6's measure loop settles. Coalesce
-        // rapid tokens (each schedules a dispatch) into one rAF via the guard.
-        const view = update.view;
-        this.pending = requestAnimationFrame(() => {
-          this.pending = null;
-          const el = view.scrollDOM;
-          el.scrollTop = el.scrollHeight;
-          // Re-read after re-pinning so wasAtBottom reflects the pinned state,
-          // not the mid-growth position seen synchronously below.
-          this.wasAtBottom = isScrolledToBottom(view);
-        });
-        return;
+
+    armUserScrollExpiry = () => {
+      if (this.userScrollTimer !== null) this.win.clearTimeout(this.userScrollTimer);
+      this.userScrollTimer = this.win.setTimeout(() => {
+        this.userScrolling = false;
+        this.userScrollTimer = null;
+      }, 250);
+    };
+
+    noteUserScrollIntent = () => {
+      this.userScrolling = true;
+      this.userScrollVersion += 1;
+      this.armUserScrollExpiry();
+    };
+
+    noteScrollbarPointer = (event: PointerEvent) => {
+      // Pointer events targeting the scroller itself come from its scrollbar;
+      // clicks inside the document target a content descendant.
+      if (event.target === this.view.scrollDOM) this.noteUserScrollIntent();
+    };
+
+    noteScrollKey = (event: KeyboardEvent) => {
+      if (
+        event.key === "ArrowUp" ||
+        event.key === "ArrowDown" ||
+        event.key === "PageUp" ||
+        event.key === "PageDown" ||
+        event.key === "Home" ||
+        event.key === "End"
+      ) {
+        this.noteUserScrollIntent();
       }
-      // Stash the post-update position for the next change's "was at bottom".
-      this.wasAtBottom = isScrolledToBottom(update.view);
+    };
+
+    noteUserScroll = () => {
+      if (!this.userScrolling) return;
+      this.userScrollVersion += 1;
+      this.armUserScrollExpiry();
+    };
+
+    update(update: import("@codemirror/view").ViewUpdate) {
+      if (!isStreamedChange(update) || this.pending !== null || this.userScrolling) return;
+
+      // Plugin updates run before CodeMirror redraws its DOM. These are the old
+      // scroll metrics, which are exactly the state the reader chose.
+      const view = update.view;
+      const el = view.scrollDOM;
+      const anchor = captureStreamingScrollAnchor(el);
+      const userScrollVersion = this.userScrollVersion;
+
+      // CodeMirror schedules its own measure frame before plugins are updated.
+      // Our later frame restores the policy after CM has settled its height map.
+      this.pending = this.win.requestAnimationFrame(() => {
+        this.pending = null;
+        if (this.userScrolling || this.userScrollVersion !== userScrollVersion) return;
+        el.scrollTop = restoreStreamingScrollTop(anchor, el);
+      });
     }
+
     destroy() {
-      // Cancel a pending re-pin so it doesn't fire on a destroyed view's
-      // scrollDOM after a tab switch or editor teardown.
-      if (this.pending !== null) cancelAnimationFrame(this.pending);
+      if (this.pending !== null) this.win.cancelAnimationFrame(this.pending);
+      if (this.userScrollTimer !== null) this.win.clearTimeout(this.userScrollTimer);
+      this.view.scrollDOM.removeEventListener("wheel", this.noteUserScrollIntent);
+      this.view.scrollDOM.removeEventListener("touchstart", this.noteUserScrollIntent);
+      this.view.scrollDOM.removeEventListener("pointerdown", this.noteScrollbarPointer);
+      this.view.scrollDOM.removeEventListener("keydown", this.noteScrollKey);
+      this.view.scrollDOM.removeEventListener("scroll", this.noteUserScroll);
     }
   },
 );
+
+// --- document chrome slots ---------------------------------------------
+//
+// The mode/citation controls belong to the document rather than the fixed
+// panel frame: the outgoing row should leave the viewport as the reader moves
+// down, and inbound citations should be encountered after the final line. Two
+// block widgets provide stable React portal targets at offsets 0 and doc.length
+// while leaving CodeMirror in charge of the one scroll surface. Mapping the
+// decorations through each transaction keeps the bottom slot after appended or
+// replaced text without remounting it during streamed writes.
+type EditorChromeSlot = "top" | "bottom";
+type EditorChromeSlotMount = (slot: EditorChromeSlot, element: HTMLElement | null) => void;
+
+class EditorChromeSlotWidget extends WidgetType {
+  constructor(
+    readonly slot: EditorChromeSlot,
+    readonly onMount: EditorChromeSlotMount,
+  ) {
+    super();
+  }
+
+  eq(other: EditorChromeSlotWidget): boolean {
+    return other.slot === this.slot && other.onMount === this.onMount;
+  }
+
+  toDOM(): HTMLElement {
+    const element = document.createElement("div");
+    element.className = `editor-chrome-slot editor-chrome-${this.slot}`;
+    this.onMount(this.slot, element);
+    return element;
+  }
+
+  destroy(_element: HTMLElement): void {
+    this.onMount(this.slot, null);
+  }
+
+  // Buttons, picker inputs, and citation links inside the portal own their
+  // events. CodeMirror should not turn those gestures into text selections.
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+function editorChromeSlots(onMount: EditorChromeSlotMount): Extension {
+  const top = Decoration.widget({
+    widget: new EditorChromeSlotWidget("top", onMount),
+    block: true,
+    side: -100,
+  });
+  const bottom = Decoration.widget({
+    widget: new EditorChromeSlotWidget("bottom", onMount),
+    block: true,
+    side: 100,
+  });
+  return StateField.define<DecorationSet>({
+    create(state) {
+      return Decoration.set([top.range(0), bottom.range(state.doc.length)], true);
+    },
+    update(slots, transaction) {
+      return transaction.docChanged ? slots.map(transaction.changes) : slots;
+    },
+    provide: (field) => EditorView.decorations.from(field),
+  });
+}
 
 function buildVoiceDecorations(view: EditorView): DecorationSet {
   // Non-throwing field read (field(x, false) → undefined if absent): after a
@@ -3120,20 +3452,26 @@ function buildVoiceDecorations(view: EditorView): DecorationSet {
   // nothing for one frame until the view remounts under the new extensions.
   const runs = view.state.field(voiceField, false);
   if (!runs) return Decoration.none;
+  const focusedVoice = view.state.facet(focusedVoiceFacet);
   const decos: Range<Decoration>[] = [];
   let pos = 0;
   for (const r of runs) {
-    const len = [...r.text].length;
+    const len = r.text.length;
     if (len > 0) {
-      // Shared resolution: known keychain keys get their generative identity
-      // (font + fg/bg); unknown pubkeys (sampled/federated text) fall back to
-      // the 6-color hash bucket. Since Preview and Markdown are the same
-      // CodeMirror doc (modeFacet just switches its decorations), a voice
-      // renders the same color in both modes automatically.
+      // Shared resolution: every pubkey gets a full identity (local,
+      // relay-published, or deterministic fallback). Preview and Markdown are
+      // the same CodeMirror doc, so a voice renders identically in both.
       const { className, style } = voiceSpanStyle(r.voice);
+      const focusClass = focusedVoice
+        ? r.voice === focusedVoice
+          ? " voice-span--focused"
+          : " voice-span--muted"
+        : "";
       decos.push(
         Decoration.mark(
-          style ? { class: className, attributes: { style } } : { class: className },
+          style
+            ? { class: className + focusClass, attributes: { style } }
+            : { class: className + focusClass },
         ).range(pos, pos + len),
       );
       pos += len;
@@ -3155,7 +3493,7 @@ function voiceAtOffset(view: EditorView, offset: number): string {
   if (!runs) return "";
   let pos = 0;
   for (const r of runs) {
-    const len = [...r.text].length;
+    const len = r.text.length;
     if (len <= 0) continue;
     if (offset < pos + len) return r.voice;
     pos += len;
@@ -3166,7 +3504,7 @@ function voiceAtOffset(view: EditorView, offset: number): string {
 const editorTheme = EditorView.theme({
   "&": {
     flex: "1",
-    backgroundColor: "var(--surface-raised)",
+    backgroundColor: "var(--editor-surface, var(--surface-raised))",
     color: "var(--ink)",
     fontSize: "1.1rem",
     height: "100%",
@@ -3174,10 +3512,18 @@ const editorTheme = EditorView.theme({
   ".cm-scroller": {
     fontFamily: "var(--font-body)",
     lineHeight: "1.75",
-    padding: "2.25rem clamp(0.3125rem, 1.25vw, 1.25rem)",
+    // The citation widgets own the block-axis insets so their bars remain
+    // flush with the tab/footer; the scroller owns the matching inline inset.
+    padding: "0 var(--editor-content-inset-inline)",
+    // CodeMirror defaults this axis to auto for unwrapped code. This press
+    // always wraps, so transient widget overflow must not expose a scrollbar.
+    overflowX: "hidden",
     overflowY: "auto",
   },
-  ".cm-content": { caretColor: "var(--accent)" },
+  // Every editor uses line wrapping, so the content flex item must be allowed
+  // below its descendants' min-content width. Citation status labels otherwise
+  // turn a narrow panel into a horizontally scrolling CodeMirror surface.
+  ".cm-content": { caretColor: "var(--accent)", padding: "0", minWidth: "0" },
   "&.cm-focused": { outline: "none" },
   // Line-number gutter: blends with the panel surface so it reads as a margin
   // rather than a separate column. Top padding mirrors .cm-scroller so each
@@ -3196,16 +3542,20 @@ const editorTheme = EditorView.theme({
 });
 
 function buildExtensions(
-  onUserEdit: (runs: Run[]) => void,
+  onUserEdit: (runs: Run[], kedits: KEditLog) => void,
   voice: string,
   mode: Mode,
   voiceAttribution: boolean,
+  focusedVoice: string,
   onSelection: (sel: { from: number; to: number } | null) => void,
   selectedNodeId: string,
   onSelectSpan: (nodeId: string, phrase: string) => void,
   onCopySpan: (nodeId: string, phrase: string) => void,
+  onCopySelection: (view: EditorView, event: ClipboardEvent) => boolean,
+  onPasteSelection: (view: EditorView, event: ClipboardEvent) => boolean,
   readOnly: boolean,
   onReject: () => void,
+  onChromeSlotMount: EditorChromeSlotMount,
 ): Extension[] {
   const liftRuns = EditorView.updateListener.of((update) => {
     for (const tr of update.transactions) {
@@ -3214,7 +3564,11 @@ function buildExtensions(
         // rationale. If the field is absent (stale view post-HMR), skip the
         // lift rather than throwing; the next legitimate render resyncs.
         const runs = update.state.field(voiceField, false);
-        if (runs) onUserEdit(runs);
+        // Same non-throwing read for the keystroke log. Mirrors runs into
+        // FileState.kedits on every edit so stepFile can drain it without
+        // reaching into the editor view (which lives in a different scope).
+        const kedits = update.state.field(keditField, false);
+        if (runs) onUserEdit(runs, kedits ?? EMPTY_KEDIT_LOG);
       }
     }
   });
@@ -3233,7 +3587,15 @@ function buildExtensions(
     // Line-number gutter down the left edge of each panel — CM's built-in
     // counter, themed via editorTheme + the .cm-gutters rule in App.css.
     lineNumbers(),
+    ...markdownIndentExtensions,
     keymap.of([
+      // Backspace twice over one selected bracket to unwrap it into ordinary
+      // text. This binding runs before CodeMirror's default deletion command;
+      // broader selections still flow through bracketProtect below.
+      { key: "Backspace", run: doubleBackspaceUnwrapCommand() },
+      // One four-space unit nests both ordered and unordered CommonMark list
+      // items. Shift+Tab removes the same unit; no literal tab is written.
+      indentWithTab,
       ...defaultKeymap,
       ...historyKeymap,
       // Cmd/Ctrl+B: wrap the selection in `[[ ]]` (pending bracket; protected
@@ -3246,11 +3608,14 @@ function buildExtensions(
     // Per-panel AUTHOR voice, reconfigurable via voiceCompartment (see FileEditor).
     voiceCompartment.of(voiceFacet.of(voice)),
     voiceField,
+    // Keystroke log — parallel sink to voiceField, drained at step time.
+    keditField,
     // Voice color decorations, gated by the global voice-attribution toggle.
     // Reconfigured live via voiceAttributionCompartment (see FileEditor) when
     // the user flips the rail toggle — drops to [] (no coloring) or restores
     // voiceDecorations without remounting the editor.
     voiceAttributionCompartment.of(voiceAttribution ? voiceDecorations : []),
+    focusedVoiceCompartment.of(focusedVoiceFacet.of(focusedVoice)),
     // Preview/Markdown surface, reconfigurable via modeCompartment (see
     // FileEditor) — switches which decorations bracketExtensions() emits.
     modeCompartment.of(modeFacet.of(mode)),
@@ -3271,20 +3636,27 @@ function buildExtensions(
     // user keystrokes are dropped and pulse the reject flash; programmatic
     // content swaps (setRunsEffect) pass through. Empty (no-op) when live.
     readOnlyCompartment.of(readOnly ? replayReadOnlyFilter(onReject) : []),
+    // Scroll-native React portal targets: outgoing citations before the first
+    // line, inbound citations after the final line.
+    editorChromeSlots(onChromeSlotMount),
     // Bracket layer (minting authoring surface + rewrite protection — the
     // single protection marker per trace-provenance.md "Rewrite protection").
     // Decoration marks `[[ ]]` / `(( ))` in Markdown mode, or collapses them
     // into atomic chip widgets in Preview mode (modeFacet); bracketProtect
-    // spares fully-contained brackets from a delete in either mode. Wrapping
-    // a selection is opt-in via the selection menu's bracket action or
-    // Cmd/Ctrl+S over a selection (App's wrapSelection path), not a selection
-    // side effect.
+    // spares fully-contained brackets from ordinary deletion in either mode,
+    // while Cut and paste/type-over keep normal selection semantics. Wrapping
+    // is opt-in via Cmd/Ctrl+B or selected-text Step, never a selection side
+    // effect.
     ...bracketExtensions(),
     // Markdown preview pass — inert in Markdown mode (returns Decoration.none),
     // active only in Preview, where it hides/stylizes standard markdown symbols
     // (#, **, `, -, >, ~~, fences). Reads modeFacet so a mode switch
     // redecorates at once; mirrors the bracket layer's rebuild triggers.
     ...markdownPreviewExtensions(),
+    EditorView.domEventHandlers({
+      copy: (event, view) => onCopySelection(view, event),
+      paste: (event, view) => onPasteSelection(view, event),
+    }),
     liftRuns,
     trackSelection,
     editorTheme,
@@ -3313,12 +3685,19 @@ function FileEditor({
   voice,
   mode,
   voiceAttribution,
+  focusedVoice,
   selectedNodeId,
   scrollTarget,
   readOnly,
   onSelectSpan,
   onCopySpan,
+  onCopySelection,
+  onPasteSelection,
   onReplayEditAttempt,
+  topChrome,
+  bottomChrome,
+  citationDropMarkup,
+  onCitationDrop,
 }: {
   file: FileState;
   /** The file's path — the editor's identity for doc-sync. A tab switch changes
@@ -3327,7 +3706,7 @@ function FileEditor({
    *  run equality — otherwise the body would stay on the old file while the
    *  sidebar (tracking the active tab) moved on. */
   path: string;
-  onEdit: (runs: Run[]) => void;
+  onEdit: (runs: Run[], kedits: KEditLog) => void;
   onView?: (view: EditorView | null) => void;
   /** Notified with the editor's selection range (or null when empty), so the
    *  selection menu can anchor to the head and ops can scope to the selection. */
@@ -3338,7 +3717,9 @@ function FileEditor({
   mode: Mode;
   /** Whether per-voice text color is shown. Global; reconfigured live. */
   voiceAttribution: boolean;
-  /** nodeId of the selected minted span, or "" when none — rings the
+  /** Voice isolated from the document legend, or empty for the normal view. */
+  focusedVoice: string;
+  /** nodeId of the selected coin, or "" when none — rings the
    *  matching `[[ span ]]` in this editor. */
   selectedNodeId: string;
   /** A range to scroll into view in this editor's current doc — set by folder
@@ -3351,20 +3732,49 @@ function FileEditor({
    *  content swaps (tab switch, agent write, replay stepping, playback) still
    *  land via setRunsEffect. Live (false) on the resting `last` step. */
   readOnly: boolean;
-  /** Clicking a citation chip selects that minted span as the active trace. */
+  /** Clicking a citation chip selects that coin as the active trace. */
   onSelectSpan: (nodeId: string, phrase: string) => void;
   /** Clicking a citation chip's copy button curates the span (clipboard +
    *  palette append). Mirrors onSelectSpan's ref-indirection so the chip's
    *  copy widget stays current without rebuilding the editor. */
   onCopySpan: (nodeId: string, phrase: string) => void;
+  /** Copy/paste hooks that upgrade an intra-press text transfer into a
+   * coin-backed resolved citation. Returning false preserves native clipboard
+   * behavior for external/plain text. */
+  onCopySelection: (view: EditorView, event: ClipboardEvent) => boolean;
+  onPasteSelection: (view: EditorView, event: ClipboardEvent) => boolean;
   /** Fired when the user tries to edit while replay-frozen (a keystroke the
    *  read-only filter drops). The reject flash still pulses; this callback lets
    *  the App surface the fork-from-snapshot modal. Only fires when `readOnly`
    *  is true (mid-replay on a historical step). */
   onReplayEditAttempt?: () => void;
+  /** Controls mounted before the first document line. They live inside
+   *  CodeMirror's scroll surface through a block-widget portal. */
+  topChrome?: ReactNode;
+  /** Read-only provenance mounted after the final document line. */
+  bottomChrome?: ReactNode;
+  /** Resolve an internal tree drag to bracket markup. Returning null rejects
+   *  the drop; App currently accepts only immutable Mint coins here. */
+  citationDropMarkup?: (srcPath: string) => string | null;
+  /** Runs after a bracket drop lands, so the owning panel becomes focused. */
+  onCitationDrop?: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const chromeSlotsAliveRef = useRef(true);
+  const [chromeSlots, setChromeSlots] = useState<{
+    top: HTMLElement | null;
+    bottom: HTMLElement | null;
+  }>({ top: null, bottom: null });
+  const chromeSlotMountRef = useRef<EditorChromeSlotMount | null>(null);
+  if (chromeSlotMountRef.current === null) {
+    chromeSlotMountRef.current = (slot, element) => {
+      if (!chromeSlotsAliveRef.current) return;
+      setChromeSlots((current) =>
+        current[slot] === element ? current : { ...current, [slot]: element },
+      );
+    };
+  }
 
   // Stable callback into the latest onEdit without rebuilding extensions.
   const onEditRef = useRef(onEdit);
@@ -3380,6 +3790,10 @@ function FileEditor({
   // Same indirection for the chip's copy-curates side effect.
   const onCopySpanRef = useRef(onCopySpan);
   onCopySpanRef.current = onCopySpan;
+  const onCopySelectionRef = useRef(onCopySelection);
+  onCopySelectionRef.current = onCopySelection;
+  const onPasteSelectionRef = useRef(onPasteSelection);
+  onPasteSelectionRef.current = onPasteSelection;
 
   // Reject flash: a rejected keystroke (read-only replay gate) pulses the
   // editor red for 0.9s. Rapid rejects keep the pulse lit (the timer re-arms)
@@ -3408,16 +3822,20 @@ function FileEditor({
   const extensionsRef = useRef<Extension[] | null>(null);
   if (extensionsRef.current === null) {
     extensionsRef.current = buildExtensions(
-      (runs) => onEditRef.current(runs),
+      (runs, kedits) => onEditRef.current(runs, kedits),
       voice,
       mode,
       voiceAttribution,
+      focusedVoice,
       (has) => onSelectionRef.current?.(has),
       selectedNodeId,
       (nodeId, phrase) => onSelectSpanRef.current(nodeId, phrase),
       (nodeId, phrase) => onCopySpanRef.current(nodeId, phrase),
+      (view, event) => onCopySelectionRef.current(view, event),
+      (view, event) => onPasteSelectionRef.current(view, event),
       readOnly,
       () => triggerRejectRef.current(),
+      chromeSlotMountRef.current,
     );
   }
 
@@ -3428,6 +3846,9 @@ function FileEditor({
   // Mount once.
   useEffect(() => {
     if (!hostRef.current) return;
+    // React StrictMode runs this setup/cleanup pair twice in development.
+    // Re-open slot delivery before constructing the replacement view.
+    chromeSlotsAliveRef.current = true;
     pathRef.current = path;
     const view = new EditorView({
       state: EditorState.create({
@@ -3436,15 +3857,40 @@ function FileEditor({
       }),
       parent: hostRef.current,
     });
+    // Install the run map synchronously in the same task as the document. The
+    // passive prop-sync effect is too late for the first keystroke: an edit in
+    // that gap starts from voiceField's empty default and hands the existing
+    // document to the active AUTHOR voice.
+    view.dispatch({
+      effects: [
+        setRunsEffect.of(file.runs ?? []),
+        setKEditsEffect.of(file.kedits ?? EMPTY_KEDIT_LOG),
+      ],
+    });
     viewRef.current = view;
     onView?.(view);
     return () => {
+      chromeSlotsAliveRef.current = false;
       view.destroy();
       viewRef.current = null;
       onView?.(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // FileState is the cross-component handoff boundary for the KEdit log. A
+  // successful Step replaces its already-written prefix with only the edits
+  // typed while the relay write was in flight; mirror that exact remainder
+  // back into CodeMirror before another input event can land.
+  useLayoutEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const expected = file.kedits ?? EMPTY_KEDIT_LOG;
+    const current = view.state.field(keditField, false);
+    if (current !== undefined && current !== expected) {
+      view.dispatch({ effects: setKEditsEffect.of(expected) });
+    }
+  }, [path, file.kedits]);
 
   // Switching the AUTHOR key reconfigures the voice facet live — subsequent
   // keystrokes (and streamed LLM deltas) are attributed to the new voice
@@ -3479,6 +3925,40 @@ function FileEditor({
     });
   }, [voiceAttribution]);
 
+  // Hovering or pinning a legend chip isolates that voice without changing
+  // the document or selection. The facet is shared with brackets.ts so
+  // Preview-mode citation phrases participate in the same focus treatment.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: focusedVoiceCompartment.reconfigure(focusedVoiceFacet.of(focusedVoice)),
+    });
+  }, [focusedVoice]);
+
+  // Resolve every real pubkey in the current document once. Text paints at
+  // once with a deterministic identity; a published kind-34292 declaration
+  // arriving later notifies the subscription below and causes a decoration-
+  // only refresh, preserving editor state/history and the KEdit log.
+  const voiceSetRef = useRef<Set<string>>(new Set());
+  voiceSetRef.current = new Set((file.runs ?? []).map((run) => run.voice));
+  const resolvableVoices = [...voiceSetRef.current]
+    .filter((pubkey) => /^[0-9a-f]{64}$/i.test(pubkey))
+    .sort()
+    .join("\u0000");
+  useEffect(() => {
+    if (!resolvableVoices) return;
+    for (const pubkey of resolvableVoices.split("\u0000")) {
+      void identityForPubkey(pubkey);
+    }
+  }, [resolvableVoices]);
+  useEffect(() => {
+    return subscribeVoiceIdentities((pubkey) => {
+      if (!voiceSetRef.current.has(pubkey)) return;
+      viewRef.current?.dispatch({ effects: refreshVoiceStylesEffect.of(null) });
+    });
+  }, []);
+
   // Entering/leaving a frozen replay step reconfigures the read-only gate live
   // — user keystrokes start/stop being dropped without remounting the editor.
   // useLayoutEffect (like the voice reconfigure above) so the gate is in place
@@ -3493,7 +3973,7 @@ function FileEditor({
     });
   }, [readOnly]);
 
-  // Moving the active-trace selection onto/off a minted span re-rings the
+  // Moving the active-trace selection onto/off a coin re-rings the
   // matching `[[ span ]]` live. The chip-click handler is stable via ref, so it
   // needs no matching effect.
   useEffect(() => {
@@ -3509,7 +3989,7 @@ function FileEditor({
   // inline comments for the path-switch-first ordering (advancing pathRef and
   // swapping the doc before the voiceField-absent bail is what keeps a tab
   // switch from wedging on the old file post-HMR):
-  useEffect(() => {
+  useLayoutEffect(() => {
     const view = viewRef.current;
     if (!view) return;
     const switched = pathRef.current !== path;
@@ -3527,7 +4007,15 @@ function FileEditor({
       pathRef.current = path;
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: flatten(file.runs ?? []) },
-        effects: setRunsEffect.of(file.runs ?? []),
+        // A tab owns its own selection. Without an explicit cursor CodeMirror
+        // remaps the previous file's highlighted range through this replacement;
+        // equal-length text (notably a just-minted Coin) inherits the range and
+        // makes the palette offer Mint again on an immutable trace.
+        selection: EditorSelection.cursor(0),
+        effects: [
+          setRunsEffect.of(file.runs ?? []),
+          setKEditsEffect.of(file.kedits ?? EMPTY_KEDIT_LOG),
+        ],
       });
       return;
     }
@@ -3551,13 +4039,19 @@ function FileEditor({
     if (newText.length > oldText.length && newText.startsWith(oldText)) {
       view.dispatch({
         changes: { from: oldText.length, insert: newText.slice(oldText.length) },
-        effects: setRunsEffect.of(file.runs ?? []),
+        effects: [
+          setRunsEffect.of(file.runs ?? []),
+          setKEditsEffect.of(file.kedits ?? EMPTY_KEDIT_LOG),
+        ],
       });
       return;
     }
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: newText },
-      effects: setRunsEffect.of(file.runs ?? []),
+      effects: [
+        setRunsEffect.of(file.runs ?? []),
+        setKEditsEffect.of(file.kedits ?? EMPTY_KEDIT_LOG),
+      ],
     });
   }, [path, file.runs]);
 
@@ -3581,61 +4075,146 @@ function FileEditor({
     });
   }, [scrollTarget, path]);
 
+  // Portal content changes independently of CodeMirror's document. Observe the
+  // two slot boxes so citation wrapping, empty states, and inbound expansion
+  // immediately update CM's block-height map and scroll range. CodeMirror lays
+  // block widgets inside the padded text column (and, in Markdown mode, after
+  // the line-number gutter), so measure those live insets and cancel them with
+  // negative inline margins. The rows then meet the scrollport's side edges
+  // while the document text keeps its reading padding.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || typeof ResizeObserver === "undefined") return;
+
+    const fitSlotToScrollport = (slot: HTMLElement | null) => {
+      if (!slot) return;
+      const scrollRect = view.scrollDOM.getBoundingClientRect();
+      const slotRect = slot.getBoundingClientRect();
+      const previousStart = Number(slot.dataset.chromeBleedStart ?? 0);
+      const previousEnd = Number(slot.dataset.chromeBleedEnd ?? 0);
+      const scrollStart = scrollRect.left;
+      const scrollEnd = scrollRect.right;
+      // Recover the un-bled slot edges from the currently applied margins so
+      // repeated ResizeObserver passes remain stable instead of compounding.
+      const naturalStart = slotRect.left + previousStart;
+      const naturalEnd = slotRect.right - previousEnd;
+      const nextStart = Math.max(0, naturalStart - scrollStart);
+      const nextEnd = Math.max(0, scrollEnd - naturalEnd);
+
+      if (Math.abs(nextStart - previousStart) > 0.1) {
+        slot.dataset.chromeBleedStart = String(nextStart);
+        slot.style.setProperty("--editor-chrome-bleed-start", `${nextStart}px`);
+      }
+      if (Math.abs(nextEnd - previousEnd) > 0.1) {
+        slot.dataset.chromeBleedEnd = String(nextEnd);
+        slot.style.setProperty("--editor-chrome-bleed-end", `${nextEnd}px`);
+      }
+    };
+    const measureChrome = () => {
+      fitSlotToScrollport(chromeSlots.top);
+      fitSlotToScrollport(chromeSlots.bottom);
+      view.requestMeasure();
+    };
+    const observer = new ResizeObserver(measureChrome);
+    if (chromeSlots.top) observer.observe(chromeSlots.top);
+    if (chromeSlots.bottom) observer.observe(chromeSlots.bottom);
+    measureChrome();
+    return () => observer.disconnect();
+  }, [chromeSlots.top, chromeSlots.bottom, topChrome, bottomChrome]);
+
+  const dragHitsDocumentChrome = (target: EventTarget | null) =>
+    target instanceof Element && target.closest(".editor-chrome-slot") !== null;
+
+  function citationDragOver(e: React.DragEvent<HTMLDivElement>) {
+    if (!citationDropMarkup || dragHitsDocumentChrome(e.target)) return;
+    if (!isZinePathDrag(e.dataTransfer)) return;
+    const srcPath = zinePathFromDataTransfer(e.dataTransfer);
+    // WebKit may hide getData() until drop. Accept the known custom drag during
+    // hover, then make the coin-only decision with the real path at drop time.
+    if (srcPath && !citationDropMarkup(srcPath)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }
+
+  function citationDrop(e: React.DragEvent<HTMLDivElement>) {
+    if (!citationDropMarkup || dragHitsDocumentChrome(e.target)) return;
+    const srcPath = zinePathFromDataTransfer(e.dataTransfer);
+    if (!srcPath) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const markup = citationDropMarkup(srcPath);
+    if (!markup) return;
+    if (readOnly) {
+      triggerRejectRef.current();
+      return;
+    }
+    const view = viewRef.current;
+    if (!view) return;
+    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+    if (pos === null) return;
+    view.dispatch({
+      changes: { from: pos, insert: markup },
+      selection: { anchor: pos + markup.length },
+      scrollIntoView: true,
+    });
+    onCitationDrop?.();
+    view.focus();
+  }
+
   return (
-    <div
-      ref={hostRef}
-      className={"editor-host" + (rejecting ? " editor-host-reject" : "")}
-    />
+    <>
+      <div
+        ref={hostRef}
+        className={"editor-host" + (rejecting ? " editor-host-reject" : "")}
+        onDragOverCapture={citationDragOver}
+        onDropCapture={citationDrop}
+      />
+      {chromeSlots.top && topChrome ? createPortal(topChrome, chromeSlots.top) : null}
+      {chromeSlots.bottom && bottomChrome ? createPortal(bottomChrome, chromeSlots.bottom) : null}
+    </>
   );
 }
 
 // --- citation chips ----------------------------------------------------
 //
-// The named list of traces this one composes — every `q` edge on its current
-// head (bracket quotes, the Reply source; tagged zines are filtered out and
-// shown in the tag section via `TaggedTraces`), resolved to a name by
-// `resolveNodeName`. A citation chip is a pinned reference to another trace,
-// labeled by that trace's own name (a file's basename, or for a nameless
-// minted span its phrase). Clicking opens the cited trace's Seals modal
-// pinned to the exact node cited. This subsumes the old single "replying to
-// ↑" chip: a Reply is just one more chip here, labeled with the source file's
-// name.
-// --- inbound tracker (the inverse tag section) -------------------------
+// The named list of traces this one cites — every `q` edge on its current head,
+// resolved to a name by `resolveNodeName`. Each chip explicitly says whether
+// the target is quoted in the document body or cited without a body quote.
+// `FileState.taggedTraces` remains the compatibility storage name for the
+// latter because changing that wire meaning is a protocol change; the UI calls
+// both forms citations.
+// --- inbound tracker ---------------------------------------------------
 //
-// The traces that fork this one, tag it, or cite it (spec §3.8 forks, §6 tags,
-// §3.3 cites) — the INBOUND direction, the inverse of CitationChips/
-// TaggedTraces (which show what THIS trace composes). Each entry is a read-only
-// click-to-open chip; the actions (Incorporate/Reconcile) stay in the workspace
-// merge-banner, so a fork that's also an actionable candidate appears in both.
+// The traces that fork or cite this one — the INBOUND direction. Protocol-level
+// `tag` and `cite` roles are deliberately grouped under the clearer reader term
+// "citation". Each entry is a read-only click-to-open chip; merge actions stay
+// in the workspace banner.
 //
-// Three grouped clusters, left to right: forks (GitFork), tagged-by (Tag),
-// cited-by (Quote). Chips are muted/secondary so the outbound (what I tag) vs
-// inbound (what tags me) split reads at a glance. Hidden entirely when there's
-// no inbound traffic, preserving the existing layout.
+// The band stays mounted even when empty and lives at the end of the document,
+// where it reads as a compact "who points here" footer.
+type InboundFreshness = "fresh" | "stale" | "unavailable";
+
 function InboundRow({
   inbound,
+  freshness,
   onOpen,
 }: {
   inbound: TraceInbound[];
+  freshness?: InboundFreshness;
   onOpen: (nodeId: string) => void;
 }) {
-  // Expanded by default — it's a tracker; the user wants to see them. Collapsed
-  // shows just the count summary. Survives across this Panel's lifetime, not
-  // across files (a fresh mount resets to expanded).
+  // Expanded by default — it's a tracker; the user wants to see them. Survives
+  // across this Panel's lifetime, not across files (a fresh mount resets to
+  // expanded).
   const [expanded, setExpanded] = useState(true);
-  if (inbound.length === 0) return null;
-
   const forks = inbound.filter((e) => e.kind === "fork");
-  const tags = inbound.filter((e) => e.kind === "tag");
-  const cites = inbound.filter((e) => e.kind === "cite");
+  const incomingCitations = inbound.filter((e) => e.kind === "tag" || e.kind === "cite");
 
   // A short pubkey prefix for the fallback label when no name resolved.
   const fallback = (e: TraceInbound) => e.name ?? `${e.ownerPubkey.slice(0, 8)}…`;
-  // Pluralize a count label, omitting zero-count groups from the summary.
-  const sum = (n: number, label: string) => (n > 0 ? `${n} ${label}${n === 1 ? "" : "s"}` : "");
-  const summary = [sum(forks.length, "fork"), sum(tags.length, "tag"), sum(cites.length, "cite")]
-    .filter(Boolean)
-    .join(" · ");
+  const hasInbound = inbound.length > 0;
+  const freshnessLabel =
+    freshness === "stale" ? "stale/offline" : freshness === "unavailable" ? "unavailable" : "";
 
   const renderGroup = (
     kind: TraceInbound["kind"],
@@ -3651,17 +4230,17 @@ function InboundRow({
         <span className="panel-inbound-group-label">{label}</span>
         {entries.map((e) => (
           <button
-            key={`${kind}:${e.sourceEventId}:${e.fromNodeId}`}
+            key={`${e.kind}:${e.sourceTraceId ?? e.sourceEventId}:${e.fromNodeId}`}
             type="button"
             className="panel-inbound-chip"
             title={
               kind === "fork"
                 ? `forked from ${e.fromNodeId.slice(0, 8)}…\nby ${e.ownerPubkey.slice(0, 12)}…\ntrace ${e.sourceEventId}`
-                : `${kind === "tag" ? "tagged by" : "cited by"} ${e.ownerPubkey.slice(0, 12)}…\ntrace ${e.sourceEventId}`
+                : `cited by ${e.ownerPubkey.slice(0, 12)}…\ntrace ${e.sourceEventId}`
             }
             onMouseDown={(ev) => {
               ev.stopPropagation();
-              onOpen(e.sourceEventId);
+              onOpen(e.sourceTraceId ?? e.sourceEventId);
             }}
           >
             <span className="panel-inbound-chip-name">{fallback(e)}</span>
@@ -3672,164 +4251,183 @@ function InboundRow({
   };
 
   return (
-    <div className="panel-inbound-row" aria-label="Inbound — forks, tags, citations">
+    <div className="panel-inbound-row" aria-label="Inbound citations and forks">
       <button
         type="button"
         className="panel-inbound-summary"
-        title={expanded ? "Collapse" : "Expand"}
+        title={
+          freshnessLabel
+            ? `Inbound result is ${freshnessLabel}`
+            : hasInbound
+              ? expanded
+                ? "Collapse inbound traces"
+                : "Expand inbound traces"
+              : "No inbound traces or citations"
+        }
+        aria-expanded={hasInbound ? expanded : undefined}
+        disabled={!hasInbound}
         onMouseDown={(e) => {
           e.stopPropagation();
           setExpanded((v) => !v);
         }}
       >
-        <CornerDownRight size={11} aria-hidden="true" />
-        <span>{summary}</span>
+        <span>
+          CITATIONS IN: {inbound.length}{freshnessLabel ? ` · ${freshnessLabel}` : ""}
+        </span>
       </button>
-      {expanded && (
+      {hasInbound && expanded && (
         <>
           {renderGroup("fork", GitFork, "forked by", forks)}
-          {renderGroup("tag", TagIcon, "tagged by", tags)}
-          {renderGroup("cite", Quote, "cited by", cites)}
+          {renderGroup("cite", Quote, "cited by", incomingCitations)}
         </>
       )}
     </div>
   );
 }
 
-function CitationChips({
-  chips,
-  onOpen,
-}: {
-  chips: CitationChip[];
-  onOpen: (nodeId: string) => void;
-}) {
-  if (chips.length === 0) return null;
-  return (
-    <div className="panel-cites" aria-label="Cited traces">
-      {chips.map((c) => (
-        <button
-          key={c.nodeId}
-          type="button"
-          className={"panel-cite" + (c.kind === "span" ? " panel-cite-span" : "")}
-          title={`trace ${c.nodeId}\n${c.kind === "file" ? "file" : "minted span"}`}
-          onMouseDown={(e) => {
-            e.stopPropagation();
-            onOpen(c.nodeId);
-          }}
-        >
-          <Layers3 size={11} aria-hidden="true" />
-          <span className="panel-cite-name">{c.name}</span>
-        </button>
-      ))}
-    </div>
-  );
+interface OutgoingCitation extends CitationChip {
+  /** True when a resolved `[[ phrase | nodeId ]]` in the current body points here. */
+  quoted: boolean;
+  /** Explicit no-body citation; removable without editing document text. */
+  removable: boolean;
 }
 
-// --- tagged traces (the tag section) -----------------------------------
-//
-// The traces tagged onto this one — the `tag-add` subset of the head's `q`
-// edges (those not also quoted in the body), each reified as a closable chip.
-// Per the model, a "tag" names a trace (a sealed `q`-target — a published zine
-// OR an unpublished local savepoint), never a bare string: this is the tag
-// section, and it holds only traces. The free-floating `#text` authoring
-// surface is gone from the panel; `FileState.tags` / `#t` Nostr emission stay
-// intact behind the scenes for generic-client discoverability. Each chip opens
-// the tagged trace's Seals modal on name-click and untags on the `×` — the
-// first UI affordance to *remove* a tagged trace (editTaggedTraces always
-// accepted a full list; nothing called it with a filtered one before).
-function TaggedTraces({
+function CitationChips({
   chips,
+  readOnly,
   onOpen,
   onRemove,
 }: {
-  chips: CitationChip[];
+  chips: OutgoingCitation[];
+  readOnly: boolean;
   onOpen: (nodeId: string) => void;
   onRemove: (nodeId: string) => void;
 }) {
   if (chips.length === 0) return null;
   return (
-    <div className="panel-tagged" aria-label="Tagged traces">
-      {chips.map((c) => (
-        <span
-          key={c.nodeId}
-          className={"panel-tag-trace" + (c.kind === "span" ? " panel-tag-trace-span" : "")}
-          title={`trace ${c.nodeId}\n${c.kind === "file" ? "file" : "minted span"}`}
-        >
-          <button
-            type="button"
-            className="panel-tag-trace-name"
-            onMouseDown={(e) => {
-              e.stopPropagation();
-              onOpen(c.nodeId);
-            }}
+    <div className="panel-cites" aria-label="Outgoing citations">
+      {chips.map((c) => {
+        const stepsBehind = c.stepsBehind ?? 0;
+        const behindLabel = stepsBehind > 999 ? "999+" : String(stepsBehind);
+        let stepState = "Target trace head unavailable";
+        if (c.availability === "revoked") {
+          stepState = "Target has an author-signed relay revocation request";
+        } else if (c.availability === "in-oblivion") {
+          stepState = "Target is in Oblivion and opens read-only";
+        } else if (c.availability === "deleted") {
+          stepState = "Target trace is deleted; no retained Oblivion copy is known to this press";
+        } else if (c.availability === "unavailable") {
+          stepState = "Target Step is currently unavailable; revocation is not verified";
+        } else if (c.stepsBehind != null) {
+          stepState =
+            stepsBehind > 0
+              ? `${stepsBehind} Step${stepsBehind === 1 ? "" : "s"} behind current trace`
+              : "Current trace Step";
+        }
+        const availabilityLabel =
+          c.availability && c.availability !== "available"
+            ? ` · ${c.availability === "in-oblivion" ? "in Oblivion" : c.availability}`
+            : "";
+        return (
+          <span
+            key={c.nodeId}
+            className={
+              "panel-cite" +
+              (c.kind === "coin" ? " panel-cite-coin" : "") +
+              (c.quoted ? " panel-cite-quoted" : "") +
+              (c.availability ? ` panel-cite-${c.availability}` : "")
+            }
+            title={`${c.quoted ? "Quoted in text" : "Citation without a body quote"}\nCites Step ${c.nodeId}\n${stepState}`}
           >
-            <Layers3 size={11} aria-hidden="true" />
-            <span className="panel-tag-trace-label">{c.name}</span>
-          </button>
-          <button
-            type="button"
-            className="panel-tag-trace-remove"
-            aria-label={`Untag ${c.name}`}
-            onMouseDown={(e) => {
-              e.stopPropagation();
-              onRemove(c.nodeId);
-            }}
-          >
-            ×
-          </button>
-        </span>
-      ))}
+            <button
+              type="button"
+              className="panel-cite-open"
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                onOpen(c.nodeId);
+              }}
+            >
+              {stepsBehind > 0 ? (
+                <span
+                  className="panel-cite-behind-count"
+                  aria-label={stepState}
+                >
+                  {behindLabel}
+                </span>
+              ) : null}
+              {c.quoted ? <Quote size={11} aria-hidden="true" /> : <Layers3 size={11} aria-hidden="true" />}
+              <span className="panel-cite-name">{c.name}</span>
+              <span className="panel-cite-state">
+                {c.quoted ? "quoted" : "cited"}{availabilityLabel}
+              </span>
+            </button>
+            {c.removable && !readOnly && (
+              <button
+                type="button"
+                className="panel-cite-remove"
+                aria-label={`Remove citation to ${c.name}`}
+                onMouseDown={(e) => {
+                  e.stopPropagation();
+                  onRemove(c.nodeId);
+                }}
+              >
+                ×
+              </button>
+            )}
+          </span>
+        );
+      })}
     </div>
   );
 }
 
-/** One candidate sibling trace for the tag-trace picker: its path (for the
+/** One candidate sibling trace for the citation picker: its path (for the
  *  autocomplete label) and its current head nodeId (the `q`-edge target). */
 interface TraceCandidate {
   path: string;
   nodeId: string;
+  traceId?: string;
 }
 
-// --- tag-trace picker --------------------------------------------------
+// --- citation picker ---------------------------------------------------
 //
-// The "tag a trace by name" affordance — the protocol's `tag-add` authoring
-// surface (spec §Tagging vs. bracketing). A small `+ trace` input that
-// autocompletes over the current folder's file basenames; selecting one adds
-// its head nodeId to FileState.taggedTraces, which the debounce picks up and
-// seals as a `q` edge with a `tag-add` delta (no body change). Cross-folder or
-// zine-tagging stays the Tag Browser's job; this is the in-folder fast path.
+// The button after the outgoing citation list opens an autocomplete over the
+// current folder's file basenames; selecting one adds its head nodeId to
+// FileState.taggedTraces, the protocol's existing no-body citation
+// representation (`q` + `tag-add`). The internal name is retained for wire
+// compatibility; the reader-facing concept is a citation.
 //
-// Disabled for read-only/foreign folders (no editTaggedTraces wiring) and for
-// files that haven't sealed yet (no nodeId to cite). Candidates with no nodeId
-// are filtered out — you can't tag what hasn't been sealed.
-function TagTracePicker({
+// Disabled for read-only/foreign folders and for
+// files that haven't stepped yet (no nodeId to cite). Candidates with no nodeId
+// are filtered out — you can't cite what hasn't been stepped.
+function CitationPicker({
   candidates,
-  alreadyTagged,
+  alreadyCited,
   disabled,
+  onActivate,
   onPick,
 }: {
   candidates: TraceCandidate[];
-  alreadyTagged: string[];
+  alreadyCited: string[];
   disabled: boolean;
+  onActivate: () => void;
   onPick: (nodeId: string) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [open, setOpen] = useState(false);
   const trimmed = draft.trim().toLowerCase();
-  const tagged = new Set(alreadyTagged);
+  const cited = new Set(alreadyCited);
   const matches = trimmed
     ? candidates.filter(
         (c) =>
           c.path.toLowerCase().includes(trimmed) &&
-          !tagged.has(c.nodeId) &&
+          !cited.has(c.nodeId) &&
           // Don't suggest the basename of a path identical to the draft — the
-          // picker is for tagging *other* traces; typing the full current name
+          // picker is for citing *other* traces; typing the full current name
           // is the common miscue, so we still show it but the caller dedupes.
           true,
       )
     : [];
-  if (disabled) return null;
-
   function pick(c: TraceCandidate) {
     onPick(c.nodeId);
     setDraft("");
@@ -3841,13 +4439,17 @@ function TagTracePicker({
       <button
         type="button"
         className="panel-cite-add"
-        title="Tag another trace into this one"
-        onClick={() => setOpen((v) => !v)}
+        title={disabled ? "Step this file before inserting citations" : "Insert citation"}
+        aria-expanded={!disabled && open}
+        disabled={disabled}
+        onClick={() => {
+          onActivate();
+          setOpen((v) => !v);
+        }}
       >
-        <Plus size={11} aria-hidden="true" />
-        trace
+        Add Citation
       </button>
-      {open && (
+      {open && !disabled && (
         <div className="panel-cite-picker-pop">
           <input
             className="panel-tag-input"
@@ -3921,12 +4523,11 @@ function EventMetaBar({ meta }: { meta: SampleEventMeta }) {
   );
 }
 
-// --- voices bar --------------------------------------------------------
+// --- action palette definitions ---------------------------------------
 //
-// The bottom strip of each panel: one chip per keychain voice (pubkey). The
-// selected chip is the panel's "pen" — the voice new typed text is attributed
-// to (per-panel, see voiceFacet). Each chip's ▾ menu offers four LLM ops
-// (Extend/Settle/Stir/Reply) that run as that voice.
+// The persistent bottom palette binds AUTHOR, MODEL, and substrate voices to
+// their operations. The selected AUTHOR key is the "pen" new typed text is
+// attributed to; MODEL operations run as the selected model voice.
 
 type SummonStatus = { state: "idle" | "running" | "done" | "error"; msg?: string; op?: OpKind };
 
@@ -3936,22 +4537,23 @@ const VOICE_OPS: { op: OpKind; label: string; title: string; cls: string }[] = [
   { op: "extend", label: "Extend", title: "Append an AI continuation to this file", cls: "op-extend" },
   { op: "stir", label: "Stir", title: "Reinvent loose prose, run (( commands )), preserve [[ anchors ]]", cls: "op-stir" },
   { op: "settle", label: "Settle", title: "File: condense loose prose, keep brackets. Folder: de-dupe near-duplicate scans into one", cls: "op-settle" },
+  { op: "run", label: "Run", title: "Start an agent run — research and draft in a new subfolder under the current scope", cls: "op-run" },
 ];
 
-// Author ops (Step / Send / Affirm) live in the same voice menu but are not
-// LLM ops — they seal or attest the trace, signed as the clicked voice. Split
-// out so the menu doesn't provider-gate them (you can step with no model
-// configured). Step is the deliberate local checkpoint (protocol §8: a rhythm-
-// layer unit, sealed to the local relay only) under a chosen voice's key. Send
-// pushes an already-sealed node to external relays — the "let this leave my
-// machine" gesture. Affirm marks a sent node as the author's published
-// position (protocol §8: a separate, later act); it opens a modal to choose a
-// geohash pin and acknowledge the OTS timestamp before attesting. Per spec,
-// Affirm requires prior Send — gated here on a sealed nodeId existing.
-const VOICE_DELIVER: { op: "step" | "send" | "affirm"; label: string; title: string; cls: string }[] = [
-  { op: "step", label: "Step", title: "Seal this trace as a local checkpoint, signed as this voice", cls: "op-save" },
-  { op: "send", label: "Send", title: "Push this trace to external relays under this voice's key", cls: "op-send" },
-  { op: "affirm", label: "Affirm", title: "Mark this sent node as your published position — pin a geohash + acknowledge the timestamp", cls: "op-affirm" },
+// Author ops (Step or Mint / Send / Attest) live in the palette's AUTHOR row
+// but are not LLM ops — they step, mint, send, or attest the trace, signed as
+// the selected voice. Split out so the palette doesn't provider-gate them (you
+// can step with no model
+// configured). Three stances toward content (protocol §8, §R11.24): Step is
+// the local checkpoint (home relay only — "record for yourself"); Send is the
+// discussion stance ("I want to talk about this" — Steps pending changes, then
+// fans out; otherwise sends the latest Step); Attest is the commitment stance ("I stand behind this"
+// — a rare, deliberate act marking a sent node as published position, opens a
+// modal for geohash + timestamp acknowledgment). Per spec, Attest requires
+// prior Send — gated here on a stepped nodeId existing.
+const PALETTE_DELIVER: { op: "send" | "attest"; label: string; title: string; cls: string }[] = [
+  { op: "send", label: "Send", title: "Open this trace for discussion — Step pending changes, otherwise send the latest Step", cls: "op-send" },
+  { op: "attest", label: "Attest", title: "Mark this sent node as your published position — pin a geohash + acknowledge the timestamp", cls: "op-attest" },
 ];
 
 // The AUTHOR row's leftmost label is itself a control — click it to re-roll the
@@ -3968,7 +4570,7 @@ function rollAuthorAlias(excluding: string): string {
 
 // --- substrate bar -----------------------------------------------------
 //
-// The lower bar of the press mirrors the AUTHOR bar, but cycles the EXTERNAL
+// The palette's lower row mirrors the AUTHOR row, but cycles the EXTERNAL
 // substrate (the foreign party a scan reads from / a reify writes to) instead
 // of the internal typing voice. The substrate is a peer with a voice: scanned
 // content is attributed to it, same provenance shape as a mesh peer's
@@ -3986,12 +4588,13 @@ function nextSubstrate(cur: Substrate): Substrate {
 }
 
 
-// --- top bar -----------------------------------------------------------
+// --- action palette ----------------------------------------------------
 //
-// The single always-visible chrome at the bottom of the press. Two rows in a
-// shared column grid — identity/model left, actions, then status right:
-//   AUTHOR: | pen | Stp Snd Aff · · |  — |  —  | err |  —
-//   model▾  | inj | Rec Rep Ext Set Sti |  — | 1.2k | err |  —
+// The single always-visible palette at the bottom of the press. Three rows in
+// a shared column grid — identity/model left, actions, then status right:
+//   AUTHOR:    | pen | Step/Mint Send Attest · · | — | — | err | —
+//   model▾     | inj | Receive Reply Extend Stir Settle Run | — | 1.2k | err | —
+//   FILESYSTEM | key | Scan Reify · · · · | — | — | — | —
 // The MODEL row's leftmost cell holds the model selector itself (the chosen
 // model name reads as the row's label — no separate "MODEL:" text). Five equal
 // action tracks; AUTHOR uses the first three, MODEL fills all five. An
@@ -3999,14 +4602,14 @@ function nextSubstrate(cur: Substrate): Substrate {
 // click again to abort) instead of a separate Stop button, so the affordance
 // stays where the click that started it landed. Ops gate on the outlined
 // target.
-function TopBar({
+function ActionPalette({
   keys,
   authorKeyId,
   modelKeyId,
   onChooseAuthorKey,
   onChooseModelKey,
   providers,
-  providerTick,
+  resolvedModelProviderId,
   onSelectProvider,
   selection,
   runningOp,
@@ -4014,13 +4617,28 @@ function TopBar({
   onStop,
   opStatus,
   tokenEstimate,
-  canAffirm,
+  /** Open the prompt inspector (click on the token-count indicator). */
+  onInspect,
+  canAttest,
   targetInScope,
+  /** Semantic state of the focused editor passage. Mutates the AUTHOR primary
+   *  slot between Step, Mint, disabled Coin, and disabled invalid Mint. */
+  authorSelectionState,
+  /** True when Send will append a Step before distributing it. */
+  sendAutoSteps,
+  /** True when Step has updates to record, or must create the first node. */
+  stepAvailable,
+  /** Wrap the selected loose passage in double square brackets. */
+  onPreserve,
   onScopeToTarget,
   substrate,
   onChooseSubstrate,
+  substrateKeyId,
+  onChooseSubstrateKey,
   onScan,
   onReifyOp,
+  replayFrozen,
+  onForkReplay,
 }: {
   keys: KeyEntry[];
   /** The AUTHOR (typing + Save/send) voice's key id. */
@@ -4031,11 +4649,11 @@ function TopBar({
   onChooseModelKey: (id: string) => void;
   /** Configured providers for the model select (MODEL-side mode cell). */
   providers: ProviderConfig[];
-  /** Render-tick bumped after a MODEL-model provider pin changes, so the
-   *  model select re-reads the voice-provider store (its true source). */
-  providerTick: number;
-  /** Pin which provider LLM ops run against (per MODEL voice). */
-  onSelectProvider: (pubkey: string, providerId: string) => void;
+  /** Resolved provider id for the MODEL voice, derived in App and passed down
+   *  (same shape as substrateKeyId) so the dropdown's value is always current. */
+  resolvedModelProviderId: string;
+  /** Pin which provider LLM ops run against (the MODEL voice's). */
+  onSelectProvider: (providerId: string) => void;
   /** The currently-outlined trace, or null. Drives which actions are live. */
   selection: SelectionRef | null;
   /** Which op kind is in flight on the target panel, or null when idle. The
@@ -4049,18 +4667,29 @@ function TopBar({
   /** Status of the op-target panel, for the action row's stop/error. */
   opStatus: SummonStatus;
   /** Approximate prompt token count for an op on the target file, or null when
-   *  no folder/file is active. Shown beside the action buttons. */
+   *  no folder/file is active. Shown beside the action buttons, and is the
+   *  click target that opens the prompt inspector. */
   tokenEstimate: number | null;
-  /** Whether the target file has a sealed node to affirm. Affirm is gated on a
-   *  prior seal existing (per spec §8: affirm requires a sent node). */
-  canAffirm: boolean;
+  /** Open the prompt inspector modal (fired by clicking the token count). */
+  onInspect: () => void;
+  /** Whether the target has a concrete node to attest. Prior Send is verified
+   *  against an external relay when the gesture is confirmed. */
+  canAttest: boolean;
   /** Whether the focused/target file is inside the scope subtree. When false,
    *  write ops (Step/Send/Extend/Stir/Settle/Reply) disable — content must not
-   *  travel without its orchestration — and the bar surfaces a "scope to this
+   *  travel without its orchestration — and the palette surfaces a "scope to this
    *  file's folder" affordance via `onScopeToTarget`. Read actions are
-   *  unaffected. Affirm stays live if canAffirm (it's a checkpoint op, not a
-   *  write-into-content op). */
+   *  unaffected. Attest stays live if canAttest (it appends an endorsement,
+   *  not a write into the target content). */
   targetInScope: boolean;
+  /** Semantic state of the focused editor passage presented by the palette. */
+  authorSelectionState: PaletteSelectionState;
+  /** Whether Send's delivery plan is append-and-send rather than send-latest. */
+  sendAutoSteps: boolean;
+  /** Whether the focused trace has work for an explicit Step. */
+  stepAvailable: boolean;
+  /** Preserve the live loose-text selection by wrapping it in `[[ ]]`. */
+  onPreserve: () => void;
   /** Scope the stepper/context to the focused file's parent folder, lifting the
    *  out-of-scope block on write ops. Wired to a one-click affordance shown when
    *  `targetInScope` is false. */
@@ -4079,6 +4708,12 @@ function TopBar({
   onScan: () => void;
   /** Reify: flush a trace out to a picked destination folder. */
   onReifyOp: () => void;
+  /** True when the op-target panel is parked on a replay-frozen historical
+   *  step. Gates the AUTHOR row's Fork action — the only way to edit a
+   *  read-only historical version (seeds a new trace from that step). */
+  replayFrozen: boolean;
+  /** Fork the replayed snapshot into a new editable trace. */
+  onForkReplay: () => void;
 }) {
   // --- AUTHOR alias label -----------------------------------------------
   // Cosmetic click-to-reroll for the AUTHOR row's label. Persisted so a chosen
@@ -4091,8 +4726,9 @@ function TopBar({
   // --- ACTIONS gating ---------------------------------------------------
   const kind = selection?.kind;
   const allowTextOps = kind === "file";
-  const allowReply = kind === "file" || kind === "span";
+  const allowReply = kind === "file" || kind === "coin";
   const allowDeliver = kind === "file" || kind === "folder";
+  const immutableMint = kind === "file" && !!selection?.path && isMint(selection.path);
   // Focus-∈-scope invariant: write ops need both the right selection KIND and
   // the target to be inside the scope subtree. Out-of-scope → the affordance
   // surfaces; the user re-scopes deliberately rather than having content
@@ -4101,14 +4737,10 @@ function TopBar({
   const scopedReply = allowReply && targetInScope;
   const scopedDeliver = allowDeliver && targetInScope;
   const hasProviders = providers.length > 0;
-  // MODEL voice's pinned provider for the model mode cell. When unset, the
-  // first configured provider is the effective choice — same fallback
-  // resolveOpProvider uses, so the dropdown matches what ops run.
-  const modelPubkey = (keys.find((k) => k.id === modelKeyId) ?? null)?.pubkey ?? "";
-  void providerTick; // re-render signal for the store-backed modelProviderId below
-  const modelProviderId = modelPubkey ? getVoiceProvider(modelPubkey) ?? "" : "";
-  const resolvedProviderId =
-    providers.find((p) => p.id === modelProviderId)?.id ?? providers[0]?.id ?? "";
+  const primaryAction = palettePrimaryAction(authorSelectionState);
+  const secondaryActions = paletteSecondaryActions(authorSelectionState);
+  const hasMintablePassage =
+    authorSelectionState === "loose" || authorSelectionState === "pending";
 
   // Key <select> for a row, styled in the chosen voice's font/color.
   function KeySelect({
@@ -4126,7 +4758,7 @@ function TopBar({
       : { fg: "var(--ink)", bg: "transparent" };
     return (
       <select
-        className="topbar-select topbar-key-select"
+        className="action-palette-select action-palette-key-select"
         value={selectedId ?? ""}
         onChange={(e) => onSelect(e.target.value)}
         aria-label={ariaLabel}
@@ -4149,9 +4781,9 @@ function TopBar({
   function ModelSelect() {
     return (
       <select
-        className="topbar-select topbar-model-select"
-        value={resolvedProviderId}
-        onChange={(e) => modelPubkey && onSelectProvider(modelPubkey, e.target.value)}
+        className="action-palette-select action-palette-model-select"
+        value={resolvedModelProviderId}
+        onChange={(e) => onSelectProvider(e.target.value)}
         title="Model for AI ops"
         aria-label="Model for AI ops"
         disabled={providers.length === 0}
@@ -4172,17 +4804,17 @@ function TopBar({
   }
 
   // Columns: label | key | 5 action tracks | model | tokens | error | slot.
-  // AUTHOR Step/Send/Affirm occupy the first three tracks; MODEL ops fill all
+  // AUTHOR Step/Send/Attest occupy the first three tracks; MODEL ops fill all
   // five (Receive/Reply/Extend/Stir/Settle). An in-flight op re-renders its own
   // button as the live stop control (accent + pulse; click again to abort)
   // rather than spawning a separate Stop button — so the affordance stays
   // where the click happened.
   return (
-    <div className="topbar">
-      <div className="topbar-group">
+    <div className="action-palette">
+      <div className="action-palette-group">
         <button
           type="button"
-          className="topbar-label topbar-label-clickable"
+          className="action-palette-label action-palette-label-clickable"
           title={`Click to rename the typing voice — currently ${authorAlias}`}
           onClick={() => {
             const next = rollAuthorAlias(authorAlias);
@@ -4197,49 +4829,120 @@ function TopBar({
           onSelect={onChooseAuthorKey}
           ariaLabel="Author voice"
         />
-        {VOICE_DELIVER.map((v) => {
-          // This op is the one in flight: the button becomes the stop control.
-          const isRunning = runningOp === v.op;
-          // Affirm additionally requires a sealed node to attest; Step/Send
-          // only need a deliverable target (file/folder outlined) AND the target
-          // to be in scope (the focus-∈-scope invariant — Affirm is exempt: it
-          // checkpoints a nodeId, it doesn't write into content). Any other op
-          // running disables the rest until it settles.
-          const deliverGate = v.op === "affirm" ? allowDeliver : scopedDeliver;
+        {(() => {
+          const isRunning = runningOp === "step";
           const enabled =
             isRunning ||
-            (!runningOp && deliverGate && (v.op !== "affirm" || canAffirm));
+            (!runningOp &&
+              primaryAction.actionable &&
+              (hasMintablePassage || stepAvailable) &&
+              (hasMintablePassage ? targetInScope : scopedDeliver) &&
+              !immutableMint);
+          return (
+            <button
+              type="button"
+              className={`action-palette-action op-save action-palette-primary action-palette-primary--${primaryAction.tone}${isRunning ? " running" : ""}`}
+              data-palette-selection={authorSelectionState}
+              disabled={!enabled}
+              title={
+                isRunning
+                  ? `${primaryAction.label} — running, click to stop`
+                  : authorSelectionState === "none" && !stepAvailable
+                    ? "No updates since the last Step"
+                    : primaryAction.title
+              }
+              onClick={() => (isRunning ? onStop() : onOp("step"))}
+            >
+              {primaryAction.label}
+            </button>
+          );
+        })()}
+        {PALETTE_DELIVER.map((v) => {
+          if (v.op === "send" && secondaryActions.preserve) {
+            return (
+              <button
+                key="preserve"
+                type="button"
+                className="action-palette-action op-preserve"
+                disabled={!!runningOp || immutableMint || replayFrozen}
+                title="Wrap the selected passage in [[ ]] so it endures"
+                onClick={onPreserve}
+              >
+                Preserve
+              </button>
+            );
+          }
+          const visible = v.op === "send" ? secondaryActions.send : secondaryActions.attest;
+          if (!visible) {
+            return <span key={v.op} className="action-palette-slot" aria-hidden="true" />;
+          }
+          // This op is the one in flight: the button becomes the stop control.
+          const isRunning = runningOp === v.op;
+          // Attest additionally requires a stepped node to attest; Send only
+          // needs a deliverable target in scope. Any other op running disables
+          // the rest until it settles.
+          const deliverGate =
+            v.op === "attest"
+              ? allowDeliver || authorSelectionState === "coin"
+              : v.op === "send" && immutableMint
+                ? true
+                : scopedDeliver && !immutableMint;
+          const enabled =
+            isRunning ||
+            (!runningOp && deliverGate && (v.op !== "attest" || canAttest));
           return (
             <button
               key={v.op}
               type="button"
-              className={`topbar-action ${v.cls}${isRunning ? " running" : ""}`}
+              className={`action-palette-action ${v.cls}${isRunning ? " running" : ""}${v.op === "send" && sendAutoSteps ? " action-palette-action--auto-step" : ""}`}
               disabled={!enabled}
-              title={isRunning ? `${v.label} — running, click to stop` : v.title}
+              title={
+                isRunning
+                  ? `${v.label} — running, click to stop`
+                  : v.op === "send" && sendAutoSteps
+                    ? "Step the pending trace, then Send it for discussion"
+                    : v.title
+              }
               onClick={() => (isRunning ? onStop() : onOp(v.op))}
             >
               {v.label}
             </button>
           );
         })}
-        <span className="topbar-slot" aria-hidden="true" />
-        <span className="topbar-slot" aria-hidden="true" />
-        <span className="topbar-slot" aria-hidden="true" />
-        <span className="topbar-slot" aria-hidden="true" />
-        <span className="topbar-slot" aria-hidden="true" />
-        <span className="topbar-slot" aria-hidden="true" />
+        {/* Fork: the AUTHOR row's escape hatch from a replay-frozen historical
+            view. The panel is read-only while parked on a past step; Fork seeds
+            a new editable trace from that step's node. Disabled (invisible to
+            action) unless the op-target panel is frozen on a historical step. */}
+        <button
+          type="button"
+          className="action-palette-action action-palette-action-fork"
+          disabled={!replayFrozen}
+          title={
+            replayFrozen
+              ? "Fork this historical version into a new editable trace"
+              : "Fork is available when replay is paused on a past step"
+          }
+          onClick={onForkReplay}
+        >
+          Fork
+        </button>
+        <span className="action-palette-slot" aria-hidden="true" />
+        <span className="action-palette-slot" aria-hidden="true" />
+        <span className="action-palette-slot" aria-hidden="true" />
+        <span className="action-palette-slot" aria-hidden="true" />
+        <span className="action-palette-slot" aria-hidden="true" />
       </div>
 
-      <div className="topbar-group">
+      <div className="action-palette-group">
         {/* The model selector IS the row's label — the chosen model's name
             reads where the voice is declared, at the left edge. Moved from the
             row's end so the active model is visible at a glance instead of
             tucked after the op buttons. The grid cell it vacated becomes a
-            topbar-slot to keep the two rows' shared column template aligned.
+            action-palette-slot to keep the two rows' shared column template aligned.
             A trailing colon mirrors the AUTHOR: label on the row above. */}
-        <span className="topbar-model-cell">
+        <span className="action-palette-model-cell">
           <ModelSelect />
-          <span className="topbar-model-colon" aria-hidden="true">:</span>
+          <span className="action-palette-model-colon" aria-hidden="true">:</span>
         </span>
         <KeySelect
           selectedId={modelKeyId}
@@ -4250,9 +4953,10 @@ function TopBar({
           const isRunning = runningOp === v.op;
           // extend/stir/settle write INTO the existing file, so they obey the
           // focus-∈-scope invariant (must not mutate content whose chain isn't
-          // in context). receive/reply create NEW docs (analysis / citing doc),
-          // so they're gated by kind only, not by scope.
-          const mutatesTarget = v.op !== "receive" && v.op !== "reply";
+          // in context). receive/reply/run create NEW docs/subfolders (analysis /
+          // citing doc / agent run), so they're gated by kind only, not by scope.
+          const createsDoc = v.op === "receive" || v.op === "reply" || v.op === "run";
+          const mutatesTarget = !createsDoc;
           const baseGate = v.op === "receive" ? allowReply : mutatesTarget ? scopedText : scopedReply;
           const enabled =
             isRunning ||
@@ -4261,7 +4965,7 @@ function TopBar({
             <button
               key={v.op}
               type="button"
-              className={`topbar-action ${v.cls}${isRunning ? " running" : ""}`}
+              className={`action-palette-action ${v.cls}${isRunning ? " running" : ""}`}
               disabled={!enabled}
               title={isRunning ? `${v.label} — running, click to stop` : v.title}
               onClick={() => (isRunning ? onStop() : onOp(v.op))}
@@ -4272,55 +4976,57 @@ function TopBar({
         })}
         {/* Model selector moved to the row's label cell (left edge); this slot
             keeps the shared two-row grid template aligned. */}
-        <span className="topbar-slot" aria-hidden="true" />
-        {!targetInScope && selection?.kind === "file" ? (
+        <span className="action-palette-slot" aria-hidden="true" />
+        {!targetInScope && selection?.kind === "file" && !immutableMint && !isOblivion(selection.path ?? "") ? (
           // Out-of-scope nudge: write ops are blocked because the focused file
-          // isn't in the scope subtree. One click re-scopes to its folder
-          // (deliberate act — tab focus never silently moves scope).
+          // isn't in derived scope. One click mounts its folder (a deliberate
+          // act — tab focus never silently changes mounts).
           <button
             type="button"
-            className="topbar-action topbar-rescope"
+            className="action-palette-action action-palette-rescope"
             onClick={onScopeToTarget}
-            title="Write ops need the target inside the scope. Scope the stepper/context to this file's folder."
+            title="Write ops need the target inside scope. Mount this file's folder."
           >
-            Scope to file
+            Mount folder
           </button>
         ) : tokenEstimate != null ? (
-          <span
-            className="topbar-token-count"
-            title="Approximate prompt size for an op on the selected file"
+          <button
+            type="button"
+            className="action-palette-token-count"
+            onClick={onInspect}
+            title="Click to inspect the prompt an op would send · approximate prompt size for an op on the selected file"
           >
             {formatTokens(tokenEstimate)}
-          </span>
+          </button>
         ) : (
-          <span className="topbar-slot" aria-hidden="true" />
+          <span className="action-palette-slot" aria-hidden="true" />
         )}
         {opStatus.state === "error" && opStatus.msg ? (
-          <span className="topbar-action-error" title={opStatus.msg}>
+          <span className="action-palette-action-error" title={opStatus.msg}>
             {opStatus.msg}
           </span>
         ) : opStatus.state === "done" && opStatus.op ? (
-          <span className="topbar-action-done" title="Op completed">
+          <span className="action-palette-action-done" title="Op completed">
             {opStatus.op === "step"
               ? "stepped"
               : opStatus.op === "send"
                 ? "sent"
-                : opStatus.op === "affirm"
-                  ? "affirmed"
+                : opStatus.op === "attest"
+                  ? "attested"
                   : opStatus.op === "receive"
                     ? "received"
-                    : "sealed"}
+                    : "stepped"}
           </span>
         ) : (
-          <span className="topbar-slot" aria-hidden="true" />
+          <span className="action-palette-slot" aria-hidden="true" />
         )}
         {/* Former Stop-button slot: now empty. The stop affordance lives on the
             running op's own button (see .running above), so this track is a
             permanent placeholder to keep the grid's column alignment. */}
-        <span className="topbar-slot" aria-hidden="true" />
+        <span className="action-palette-slot" aria-hidden="true" />
       </div>
 
-      <div className="topbar-group">
+      <div className="action-palette-group">
         {/* The SUBSTRATE row: mirrors the AUTHOR row but cycles the EXTERNAL
             substrate (the foreign party a scan reads from / a reify writes to)
             instead of the internal typing voice. Click the label to cycle
@@ -4329,7 +5035,7 @@ function TopBar({
             there is no disk substrate, so both buttons are inert. */}
         <button
           type="button"
-          className="topbar-label topbar-label-clickable"
+          className="action-palette-label action-palette-label-clickable"
           title={`Click to cycle the substrate — currently ${substrate}`}
           onClick={() => onChooseSubstrate(nextSubstrate(substrate))}
         >
@@ -4345,7 +5051,7 @@ function TopBar({
         />
         <button
           type="button"
-          className="topbar-action op-scan"
+          className="action-palette-action op-scan"
           disabled={!isTauri()}
           title={isTauri() ? "Scan: acquire a file or folder from the substrate as new traces under the scope" : "Scanning is desktop-only (the substrate is the local disk)"}
           onClick={onScan}
@@ -4354,18 +5060,18 @@ function TopBar({
         </button>
         <button
           type="button"
-          className="topbar-action op-reify"
+          className="action-palette-action op-reify"
           disabled={!isTauri()}
           title={isTauri() ? "Reify: flush a trace out to a picked destination folder" : "Reifying is desktop-only (the substrate is the local disk)"}
           onClick={onReifyOp}
         >
           Reify
         </button>
-        <span className="topbar-slot" aria-hidden="true" />
-        <span className="topbar-slot" aria-hidden="true" />
-        <span className="topbar-slot" aria-hidden="true" />
-        <span className="topbar-slot" aria-hidden="true" />
-        <span className="topbar-slot" aria-hidden="true" />
+        <span className="action-palette-slot" aria-hidden="true" />
+        <span className="action-palette-slot" aria-hidden="true" />
+        <span className="action-palette-slot" aria-hidden="true" />
+        <span className="action-palette-slot" aria-hidden="true" />
+        <span className="action-palette-slot" aria-hidden="true" />
       </div>
     </div>
   );
@@ -4376,6 +5082,10 @@ function Panel({
   tabs,
   activePath,
   file,
+  folderId,
+  replayStepText,
+  replayPrevText,
+  replayLiveText,
   active,
   collapsed,
   onFocusPanel,
@@ -4383,7 +5093,7 @@ function Panel({
   onCloseTab,
   onContextMenuTab,
   onEdit,
-  onUntagTrace,
+  onRemoveCitation,
   onView,
   onSelection,
   flash,
@@ -4406,30 +5116,47 @@ function Panel({
   selectedNodeId,
   scrollTarget,
   readOnly,
+  replayFrozen,
+  replayMounted,
   onSelectSpan,
   onCopySpan,
+  onCopySelection,
+  onPasteSelection,
   onReplayEditAttempt,
   citations,
   taggedChips,
   inbound,
+  inboundFreshness,
   onOpenCitation,
   traceCandidates,
   pickerDisabled,
-  onTagTrace,
-  tagDropAccept,
-  onTagTraceByPath,
-  onOpenSeals,
+  onAddCitation,
+  citationDropAccept,
+  onAddCitationByPath,
+  citationBodyDropMarkup,
   mergeCandidates,
   mergeBusy,
   mergeSessionOpen,
   onIncorporateCandidate,
   mergeError,
-  dirtyPaths,
+  unsteppedPathSet,
+  unsteppedEditCounts,
+  tabIsInScope,
 }: {
   panelIdx: number;
   tabs: string[];
   activePath: string;
   file?: FileState;
+  /** The attached folder's id — needed to fetch this file's step chain for the
+   *  in-place Diff surface. "" when no folder is attached. */
+  folderId: string;
+  /** When the replay stepper has frozen THIS file on a historical step, the
+   *  step's content snapshot (else null). Drives replay-mode Diff. */
+  replayStepText?: string | null;
+  /** In replay mode, the previous content-step of this file (vs prev). */
+  replayPrevText?: string | null;
+  /** In replay mode, the live working buffer parked in replay.snapshot. */
+  replayLiveText?: string | null;
   active: boolean;
   /** The sidebar's collapsed-folder set, so a folder tab's icon can mirror the
    *  tree (open vs closed). Optional — omitted/empty reads as "all open". */
@@ -4439,7 +5166,7 @@ function Panel({
   onCloseTab: (path: string) => void;
   /** Right-click on a tab in this panel opens the tab context menu. */
   onContextMenuTab: (e: React.MouseEvent, path: string) => void;
-  onEdit: (runs: Run[]) => void;
+  onEdit: (runs: Run[], kedits: KEditLog) => void;
   onView?: (view: EditorView | null) => void;
   /** Reports this panel's editor selection range (or null when empty) up to
    *  App so the selection menu can open anchored to the selection head. */
@@ -4469,7 +5196,7 @@ function Panel({
    *  editor's voiceAttributionCompartment. Orthogonal to mode — applies in
    *  both preview and markdown. */
   voiceAttribution: boolean;
-  /** nodeId of the selected minted span, or "" when none — rings the matching
+  /** nodeId of the selected coin, or "" when none — rings the matching
    *  `[[ span ]]` inside this panel's editor. */
   selectedNodeId: string;
   /** A doc range to scroll this panel's editor to — driven by folder replay so
@@ -4479,56 +5206,55 @@ function Panel({
   /** Read-only while replay is frozen on a historical step or mid-playback —
    *  passed through to the editor's readOnlyCompartment. */
   readOnly: boolean;
-  /** Clicking a citation chip in this editor selects that minted span. */
+  /** True only when this panel's active file is the replay-stepped (frozen
+   *  historical) one. Drives the provisional/out-of-date border and the fork
+   *  affordance. False at `last`, on membership steps, or when not replaying. */
+  replayFrozen: boolean;
+  /** True for panels spawned by kedit playback. Drives a soft accent border. */
+  replayMounted: boolean;
+  /** Clicking a citation chip in this editor selects that coin. */
   onSelectSpan: (nodeId: string, phrase: string) => void;
   /** Clicking a citation chip's copy button curates the span (clipboard +
    *  palette append). */
   onCopySpan: (nodeId: string, phrase: string) => void;
+  onCopySelection: (view: EditorView, event: ClipboardEvent) => boolean;
+  onPasteSelection: (view: EditorView, event: ClipboardEvent) => boolean;
   /** Fired when the user tries to edit while replay-frozen. The App surfaces
    *  the fork-from-snapshot modal. Passed through to FileEditor. */
   onReplayEditAttempt?: () => void;
-  /** The named traces this file composes — every `q` edge on its current head
-   *  (bracket quotes + Reply source + tagged zines), resolved to chips by
-   *  `resolveNodeName`. Empty/absent while still resolving or for a leaf. The
-   *  tagged-trace subset is rendered separately in the tag section, so this
-   *  list is filtered at the render site to drop those ids. */
+  /** Every resolved `q` edge on this file's current head. */
   citations: CitationChip[];
-  /** The tagged-trace chips — `file.taggedTraces` resolved via
-   *  `resolveNodeName`, keyed on the tagged id set (not the head node) so a
-   *  freshly tagged trace shows instantly, before the debounce seals a new
-   *  head. Rendered in the tag section. */
+  /** Explicit no-body citations, still stored under the protocol-compatible
+   *  `taggedTraces` field. Resolved from the live id set so additions appear
+   *  before the next Step advances the head. */
   taggedChips: CitationChip[];
-  /** The inbound tracker — forks of this trace, traces that tag it, and traces
-   *  that cite it (spec §3.8/§6/§3.3), the inverse of the outbound chips above.
-   *  Read-only click-to-open chips rendered in a second tag-section line. Empty
-   *  when there is no inbound traffic (the band is hidden in that case). */
+  /** Forks and citations that point into this trace. Rendered after the final
+   *  document line as read-only click-to-open chips. */
   inbound: TraceInbound[];
-  /** Clicking a cited-trace chip opens that trace's Seals modal pinned to the
+  /** Verification state for the inbound row. */
+  inboundFreshness?: InboundFreshness;
+  /** Clicking a cited-trace chip opens that trace's Steps modal pinned to the
    *  cited node. */
   onOpenCitation: (nodeId: string) => void;
-  /** Sibling traces in the current folder, available as tag-trace picker
+  /** Sibling traces in the current folder, available to the citation picker
    *  candidates (path + current head nodeId). Built from `files` by the App. */
   traceCandidates: TraceCandidate[];
-  /** Whether the tag-trace picker is disabled (foreign/read-only folder, or the
-   *  active file hasn't sealed yet). */
+  /** Whether the citation picker is disabled (foreign/read-only folder, or the
+   *  active file hasn't stepped yet). */
   pickerDisabled: boolean;
-  /** Add a sibling trace's nodeId to the active file's taggedTraces (the
-   *  protocol's `tag-add`). */
-  onTagTrace: (nodeId: string) => void;
-  /** Remove a tagged trace's nodeId from the active file's taggedTraces
-   *  (untag). Counterpart to `onTagTrace`; the `×` on a tagged-trace chip. */
-  onUntagTrace: (nodeId: string) => void;
-  /** Drag-from-tree → tag: gate whether a dragged tree file (by path) may be
-   *  dropped onto this panel's tag strip. Mirrors the picker's `disabled`
-   *  gate (foreign folder, folder tab, unsealed target) and additionally
-   *  rejects self-drops, unsealed sources, and already-tagged ids. */
-  tagDropAccept: (srcPath: string) => boolean;
-  /** Drag-from-tree → tag: resolve the dragged tree file's path to its head
-   *  nodeId and add it to the active file's taggedTraces (same `tag-add`
-   *  path as the picker). */
-  onTagTraceByPath: (srcPath: string) => void;
-  /** Clicking the "Seals" button (file tabs only). */
-  onOpenSeals?: () => void;
+  /** Add/remove an explicit no-body citation. The backing field retains its
+   *  protocol name (`taggedTraces`) while the UI calls it a citation. */
+  onAddCitation: (nodeId: string) => void;
+  onRemoveCitation: (nodeId: string) => void;
+  /** Drag-from-tree → cite: gate whether a dragged tree file (by path) may be
+   *  dropped onto this panel's citation row. Mirrors the picker's `disabled`
+   *  gate (foreign folder, folder tab, unstepped target) and additionally
+   *  rejects self-drops, unstepped sources, and existing citations. */
+  citationDropAccept: (srcPath: string) => boolean;
+  /** Drag-from-tree → cite through the same path as the picker. */
+  onAddCitationByPath: (srcPath: string) => void;
+  /** Resolve a dragged Mint coin to the bracket inserted into this editor. */
+  citationBodyDropMarkup: (srcPath: string) => string | null;
   /** Incoming forks / sibling heads for the active file. The branch-detection
    *  effect (in App) is scoped to the focused panel's active path, so this is
    *  the same global candidate list passed to every panel — the banner renders
@@ -4539,61 +5265,214 @@ function Panel({
    *  suppresses the banner entry-point so the two don't stack. */
   mergeSessionOpen: boolean;
   onIncorporateCandidate: (c: MergeCandidate) => void;
-  /** Inline failure from the last incorporate/seal attempt, shown under the
+  /** Inline failure from the last incorporate/step attempt, shown under the
    *  banner. Lifts merge errors out of bootError (which only renders on the
-   *  placeholder screen) so a failed Seal no longer flashes and vanishes. */
+   *  placeholder screen) so a failed Step no longer flashes and vanishes. */
   mergeError?: string | null;
-  /** Paths with unsaved buffers (differ from what's on disk). Drives the dirty
-   *  dot on each tab and the Discard menu item's enabled state. Desktop-only
-   *  conceptually (the webapp writes through on every edit), but passed to
-   *  every panel uniformly — empty on the webapp since sealNow seeds there. */
-  dirtyPaths: Set<string>;
+  /** Paths whose working state differs from the latest Step. */
+  unsteppedPathSet: ReadonlySet<string>;
+  /** Discrete editor changes waiting for the next Step, keyed by file path. */
+  unsteppedEditCounts: ReadonlyMap<string, number>;
+  /** Whether a tab's trace belongs to the current effective scope. Tab focus
+   *  does not move scope, so the focused tab may legitimately return false. */
+  tabIsInScope: (tabPath: string) => boolean;
 }) {
-  // Cited traces minus the tagged subset: tagged traces render in the tag
-  // section above, so the CitationChips strip shows only what the body composes
-  // (bracket quotes + the Reply source). `taggedChips` carries the resolved
-  // ids; matching by nodeId keeps this robust to resolution ordering.
-  const taggedIds = new Set(taggedChips.map((c) => c.nodeId));
-  const citedChips = citations.filter((c) => !taggedIds.has(c.nodeId));
+  // One outgoing list, regardless of the protocol path that created the `q`.
+  // Current body brackets are the source of truth for the visible "quoted"
+  // marker; this updates immediately while the head's resolved q-list catches
+  // up on the next Step. Explicit no-body citations are removable in place.
+  const quotedIds = new Set(
+    (file ? findResolvedBrackets(flatten(file.runs ?? [])) : [])
+      .map((bracket) => bracket.nodeId)
+      .filter(Boolean),
+  );
+  const explicitCitationIds = new Set(file?.taggedTraces ?? []);
+  const outgoingById = new Map<string, CitationChip>();
+  for (const chip of [...citations, ...taggedChips]) {
+    if (!outgoingById.has(chip.nodeId)) outgoingById.set(chip.nodeId, chip);
+  }
+  const outgoingCitations: OutgoingCitation[] = [...outgoingById.values()].map((chip) => {
+    const retainedInOblivion = traceCandidates.some(
+      (candidate) =>
+        isOblivion(candidate.path) &&
+        (candidate.nodeId === chip.nodeId ||
+          (!!chip.traceId && candidate.traceId === chip.traceId)),
+    );
+    return {
+      ...chip,
+      ...(retainedInOblivion ? { availability: "in-oblivion" as const } : {}),
+      quoted: quotedIds.has(chip.nodeId),
+      removable: explicitCitationIds.has(chip.nodeId) && !quotedIds.has(chip.nodeId),
+    };
+  });
   // Hovering the bare space past the last tab → "drop at end of this list".
   const listIsEndTarget =
     !!draggingTab &&
     dropTargetTab?.panel === panelIdx &&
     dropTargetTab.path === null;
+  const tabListRef = useRef<HTMLDivElement>(null);
 
-  // Drag-from-tree → tag: the tag strip is a drop target for tree file rows
+  // A classic horizontal scrollbar consumes layout height; overlay scrollbars
+  // do not. Measure what this browser actually subtracts from the tab list and
+  // give precisely that space back to the bar, so the tab row stays header-h
+  // tall in either case. ResizeObserver catches panel resizes that make the
+  // list begin or stop overflowing.
+  useLayoutEffect(() => {
+    const list = tabListRef.current;
+    const bar = list?.parentElement;
+    if (!list || !bar) return;
+
+    const measureScrollbar = () => {
+      const scrollbarHeight = Math.max(0, list.offsetHeight - list.clientHeight);
+      const next = `${scrollbarHeight}px`;
+      if (bar.style.getPropertyValue("--tab-scrollbar-h") !== next) {
+        bar.style.setProperty("--tab-scrollbar-h", next);
+      }
+    };
+
+    measureScrollbar();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measureScrollbar);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [tabs, draggingTab]);
+
+  // Drag-from-tree → citation: the citation row is a drop target for tree files
   // (which carry `text/zine-path` + a plain `zine-path:` fallback). This is a
   // third drag gesture, distinct from the tree's move-into-folder dnd and the
   // panel's tab-reorder dnd — we only react to the zine-path payload, so the
-  // systems can't interfere. `tagDropActive` drives the highlight while a
+  // systems can't interfere. `citationDropActive` drives the highlight while a
   // valid source hovers the strip.
-  const [tagDropActive, setTagDropActive] = useState(false);
+  const [citationDropActive, setCitationDropActive] = useState(false);
   // Merge banner: when there are multiple candidates, collapse them into a
   // single summary line that expands on click — otherwise a busy file with
   // several forks/siblings stacks a row per candidate and swallows the view.
   const [mergeBannerExpanded, setMergeBannerExpanded] = useState(false);
-  function tagStripDragOver(e: React.DragEvent) {
+  // Temporary reader focus driven by the document's Voices legend. It is
+  // panel-local and clears when the front tab changes.
+  const [focusedVoice, setFocusedVoice] = useState("");
+  useEffect(() => setFocusedVoice(""), [activePath]);
+  function citationRowDragOver(e: React.DragEvent) {
+    if (readOnly) return;
     if (!isZinePathDrag(e.dataTransfer)) return; // tab/other drag — leave it alone
     const path = zinePathFromDataTransfer(e.dataTransfer);
     // getData returns "" during dragover in some browsers until drop, so
     // also accept an empty payload as "a tree drag is in progress" and let
-    // tagDropAccept make the final call on drop.
-    if (path && !tagDropAccept(path)) return;
+    // citationDropAccept makes the final call on drop.
+    if (path && !citationDropAccept(path)) return;
     e.preventDefault();
     // Must be one of effectAllowed ("copyMove") — "link" is rejected and the
     // drop dies on WebKit even after preventDefault.
     e.dataTransfer.dropEffect = "copy";
-    setTagDropActive(true);
+    setCitationDropActive(true);
   }
-  function tagStripDrop(e: React.DragEvent) {
+  function citationRowDrop(e: React.DragEvent) {
+    if (readOnly) return;
     const path = zinePathFromDataTransfer(e.dataTransfer);
-    setTagDropActive(false);
+    setCitationDropActive(false);
     if (!path) return;
-    if (!tagDropAccept(path)) return;
+    if (!citationDropAccept(path)) return;
     e.preventDefault();
     e.stopPropagation();
-    onTagTraceByPath(path);
+    onAddCitationByPath(path);
   }
+
+  const modeToggle = !draggingTab ? (
+    <div className="tab-bar-mode" role="group" aria-label="View mode">
+      <button
+        type="button"
+        className={"tab-bar-mode-btn" + (mode === "preview" ? " active" : "")}
+        title="Rendered preview"
+        aria-pressed={mode === "preview"}
+        onMouseDown={(e) => {
+          e.stopPropagation();
+          onFocusPanel();
+          if (mode !== "preview") onSetMode("preview");
+        }}
+      >
+        <Eye size={13} aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        className={"tab-bar-mode-btn" + (mode === "markdown" ? " active" : "")}
+        title="Markdown source"
+        aria-pressed={mode === "markdown"}
+        onMouseDown={(e) => {
+          e.stopPropagation();
+          onFocusPanel();
+          if (mode !== "markdown") onSetMode("markdown");
+        }}
+      >
+        <Code size={13} aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        className={"tab-bar-mode-btn" + (mode === "diff" ? " active" : "")}
+        title="Diff against last step"
+        aria-pressed={mode === "diff"}
+        onMouseDown={(e) => {
+          e.stopPropagation();
+          onFocusPanel();
+          if (mode !== "diff") onSetMode("diff");
+        }}
+      >
+        <GitCompare size={13} aria-hidden="true" />
+      </button>
+    </div>
+  ) : null;
+
+  const citationBar = file ? (
+    <div
+      className={"panel-citation-bar" + (citationDropActive ? " citation-drop-active" : "")}
+      aria-label="Outgoing citations"
+      onDragOver={citationRowDragOver}
+      onDragLeave={() => setCitationDropActive(false)}
+      onDrop={citationRowDrop}
+    >
+      <div className="panel-citation-list">
+        <span className="panel-outbound-summary">
+          <span>CITATIONS OUT: {outgoingCitations.length}</span>
+        </span>
+        <CitationChips
+          chips={outgoingCitations}
+          readOnly={readOnly}
+          onOpen={(nodeId) => {
+            onFocusPanel();
+            onOpenCitation(nodeId);
+          }}
+          onRemove={(nodeId) => {
+            onFocusPanel();
+            onRemoveCitation(nodeId);
+          }}
+        />
+        <CitationPicker
+          candidates={traceCandidates}
+          alreadyCited={file.taggedTraces ?? []}
+          disabled={pickerDisabled || readOnly}
+          onActivate={onFocusPanel}
+          onPick={onAddCitation}
+        />
+      </div>
+    </div>
+  ) : null;
+
+  const provenanceHeader = file ? (
+    <>
+      {citationBar}
+      <VoiceLegend runs={file.runs ?? []} onFocusVoice={setFocusedVoice} />
+    </>
+  ) : null;
+
+  const inboundFooter = file ? (
+    <InboundRow
+      inbound={inbound}
+      freshness={inboundFreshness}
+      onOpen={(nodeId) => {
+        onFocusPanel();
+        onOpenCitation(nodeId);
+      }}
+    />
+  ) : null;
 
   return (
     <section
@@ -4605,7 +5484,9 @@ function Panel({
         // gutter visibility) — the surface itself is always the one
         // CodeMirror editor; mode instead reconfigures its decorations via
         // modeFacet (see FileEditor).
-        (file ? " panel-mode-" + mode : "")
+        (file ? " panel-mode-" + mode : "") +
+        (replayFrozen ? " panel-replay-frozen" : "") +
+        (replayMounted ? " panel-replay-mounted" : "")
       }
       onMouseDownCapture={onFocusPanel}
     >
@@ -4616,6 +5497,7 @@ function Panel({
       {tabs.length > 0 && (
       <div className="tab-bar">
         <div
+          ref={tabListRef}
           className={"tab-list" + (listIsEndTarget ? " tab-list-drop-target" : "")}
           role="tablist"
           onDragEnter={(e) => {
@@ -4645,13 +5527,16 @@ function Panel({
             const isActive = p === activePath;
             // The active trace is the single frontmost tab of the focused
             // panel. Every panel has a front tab (isActive), but only the
-            // focused panel's front tab is the active trace — so the gold
-            // accent (.tab.trace-active) is mutually exclusive across the
-            // whole workspace, never on a background panel.
+            // focused panel's front tab receives the top-border selection
+            // marker (.tab.trace-active).
             const isTraceActive = isActive && active;
+            const isInScope = tabIsInScope(p);
             const isDragging = draggingTab?.path === p && draggingTab.fromPanel === panelIdx;
             const isBeforeTarget =
               dropTargetTab?.panel === panelIdx && dropTargetTab.path === p;
+            const unsteppedEdits = unsteppedEditCounts.get(p) ?? 0;
+            const hasUnsteppedChanges = unsteppedPathSet.has(p);
+            const pendingLabel = unsteppedEdits > 999 ? "999+" : String(unsteppedEdits);
             return (
               <div
                 key={p}
@@ -4659,9 +5544,14 @@ function Panel({
                   "tab" +
                   (isActive ? " active" : "") +
                   (isTraceActive ? " trace-active" : "") +
+                  (isInScope ? " tab-in-scope" : " tab-out-of-scope") +
                   (isDragging ? " tab-dragging" : "") +
                   (isBeforeTarget ? " tab-drop-before" : "") +
-                  (dirtyPaths.has(p) ? " dirty" : "")
+                  (hasUnsteppedChanges ? " tab-unstepped" : "") +
+                  (replayMounted ? " tab-replay-mounted" : "") +
+                  // The replay-frozen path's tab gets a provisional marker so
+                  // it's clear at a glance which open doc is a historical view.
+                  (replayFrozen && isActive ? " tab-replay-frozen" : "")
                 }
                 role="tab"
                 aria-selected={isActive}
@@ -4716,11 +5606,28 @@ function Panel({
                 }}
               >
                 <span className="tab-label">
-                  {/* Status icon to the left of the title. A folder tab's icon
+                  {hasUnsteppedChanges && !isFolderTab(p) ? (
+                    <span
+                      className="tab-unstepped-count"
+                      aria-label={
+                        unsteppedEdits > 0
+                          ? `${unsteppedEdits} edits waiting for Step`
+                          : "Changes waiting for Step"
+                      }
+                      title={
+                        unsteppedEdits > 0
+                          ? `${unsteppedEdits} edit${unsteppedEdits === 1 ? "" : "s"} waiting for Step · ⌘S`
+                          : "Non-text changes waiting for Step · ⌘S"
+                      }
+                    >
+                      {unsteppedEdits > 0 ? pendingLabel : "+"}
+                    </span>
+                  ) : null}
+                  {/* Scope icon to the left of the title. A folder tab's icon
                       mirrors the tree state of that folder: open (FolderOpen)
                       when expanded, closed (Folder) when collapsed. A file tab
-                      shows a file glyph. Color is gold only on the active
-                      trace (.tab.trace-active in CSS), neutral otherwise. */}
+                      shows a file glyph. Scope—not tab selection—controls its
+                      color: gold in scope, dulled outside it. */}
                   {isFolderTab(p) ? (
                     collapsed?.has(folderTabPath(p)) ? (
                       <Folder size={12} className="tab-status tab-status-folder" aria-hidden="true" />
@@ -4750,6 +5657,7 @@ function Panel({
             );
           })}
         </div>
+        {modeToggle}
         {/* Right-edge new-panel drop zone, pinned to the tab bar's right edge.
             This is the primary affordance for "drag a tab right to spawn a
             column": it sits where the user expects (the tab strip's right end)
@@ -4777,106 +5685,12 @@ function Panel({
         )}
       </div>
       )}
-      {file && (
-        <div
-          className={"panel-tags-row" + (tagDropActive ? " tag-drop-active" : "")}
-          onDragOver={tagStripDragOver}
-          onDragLeave={() => setTagDropActive(false)}
-          onDrop={tagStripDrop}
-        >
-          {/* Tagged traces — the tag section. A "tag" names a trace (a sealed
-              `q`-target: a published zine or an unpublished local savepoint),
-              never a bare string, so this is what occupies the tag position.
-              Each chip opens the tagged trace's Seals modal; the `×` untags
-              (drops the id from FileState.taggedTraces). The free-floating
-              `#text` authoring surface is intentionally gone from the panel. */}
-          <TaggedTraces
-            chips={taggedChips}
-            onOpen={(nodeId) => {
-              onFocusPanel();
-              onOpenCitation(nodeId);
-            }}
-            onRemove={(nodeId) => {
-              onFocusPanel();
-              onUntagTrace(nodeId);
-            }}
-          />
-          {/* Cited traces — the `q` edges this file *composes*: body bracket
-              quotes and the Reply source. Tagged traces are rendered above
-              (in the tag section), so they're filtered out of this list to
-              avoid double-showing. Clicking opens the cited trace's Seals modal
-              pinned to the cited node. */}
-          <CitationChips
-            chips={citedChips}
-            onOpen={(nodeId) => {
-              onFocusPanel();
-              onOpenCitation(nodeId);
-            }}
-          />
-          {/* Tag a trace by name (the protocol's `tag-add`) — autocomplete over
-              the current folder's files; selecting one cites its head as a
-              `q` edge with no body bracket. Disabled on foreign/read-only
-              folders and before the active file's first seal. */}
-          <TagTracePicker
-            candidates={traceCandidates}
-            alreadyTagged={file?.taggedTraces ?? []}
-            disabled={pickerDisabled}
-            onPick={onTagTrace}
-          />
-          {/* Preview / Markdown surface toggle. Lives in the tags row (below the
-              tab bar) and acts on the active tab — each file remembers which
-              surface it was left in, so switching tabs restores the surface you
-              chose for that file. Pinned to the row's right edge. */}
-          {!draggingTab && (
-            <div className="tab-bar-mode" role="group" aria-label="View mode">
-              <button
-                type="button"
-                className={"tab-bar-mode-btn" + (mode === "preview" ? " active" : "")}
-                title="Rendered preview"
-                aria-pressed={mode === "preview"}
-                onMouseDown={(e) => {
-                  e.stopPropagation();
-                  onFocusPanel();
-                  if (mode !== "preview") onSetMode("preview");
-                }}
-              >
-                <Eye size={13} aria-hidden="true" />
-              </button>
-              <button
-                type="button"
-                className={"tab-bar-mode-btn" + (mode === "markdown" ? " active" : "")}
-                title="Markdown source"
-                aria-pressed={mode === "markdown"}
-                onMouseDown={(e) => {
-                  e.stopPropagation();
-                  onFocusPanel();
-                  if (mode !== "markdown") onSetMode("markdown");
-                }}
-              >
-                <Code size={13} aria-hidden="true" />
-              </button>
-              <button
-                type="button"
-                className="tab-bar-mode-btn"
-                title="View seal history"
-                onMouseDown={(e) => {
-                  e.stopPropagation();
-                  onFocusPanel();
-                  onOpenSeals?.();
-                }}
-              >
-                <History size={13} aria-hidden="true" />
-              </button>
-            </div>
-          )}
-        </div>
-      )}
       {/* Branch detection banner for this trace: incoming forks / sibling
           heads of the active file. Incorporate is offered on noConflict forks
           (you haven't edited past the fork point) — unilateral accept of their
           snapshot under your key (protocol §3.8); conflict candidates open the
-          three-way MergePanel overlay. Lives directly under the tags row so the
-          reconcile entry point is attached to the trace it concerns. The
+          three-way MergePanel overlay. The
+          reconcile entry point remains attached to the trace it concerns. The
           candidate list is scoped to the focused panel's active path, so this
           renders only on the focused panel; hidden while the MergePanel overlay
           is already open (and on read-only foreign folders). */}
@@ -4945,23 +5759,17 @@ function Panel({
           })()}
         </div>
       )}
-      {file && (
-        <InboundRow
-          inbound={inbound}
-          onOpen={(nodeId) => {
-            onFocusPanel();
-            onOpenCitation(nodeId);
-          }}
-        />
-      )}
       {file?.eventMeta && <EventMetaBar meta={file.eventMeta} />}
       {file ? (
         // .panel-body positions the one CodeMirror surface that now serves
-        // both modes — LLM ops, palette citations, and Cmd+S seal all hold
-        // its view ref regardless of which mode is active. Preview vs
-        // Markdown is purely a decoration/CSS switch (see FileEditor/modeFacet),
-        // not a second mounted component.
-        <div className="panel-body">
+        // all three modes — LLM ops, palette citations, and Cmd+S step all hold
+        // its view ref regardless of which mode is active. Preview vs Markdown
+        // is purely a decoration/CSS switch (see FileEditor/modeFacet), not a
+        // second mounted component. Diff keeps the editor mounted (so the view
+        // ref and unstepped-buffer tracking stay live) but hides it via
+        // `.panel-body.diff-mode .editor-host { visibility: hidden }` and lays
+        // the read-only DiffPane over it as an absolute overlay.
+        <div className={"panel-body" + (mode === "diff" ? " diff-mode" : "")}>
           <FileEditor
             file={file}
             path={activePath}
@@ -4971,13 +5779,32 @@ function Panel({
             voice={voice}
             mode={mode}
             voiceAttribution={voiceAttribution}
+            focusedVoice={focusedVoice}
             selectedNodeId={selectedNodeId}
             scrollTarget={scrollTarget}
             readOnly={readOnly}
             onSelectSpan={onSelectSpan}
             onCopySpan={onCopySpan}
+            onCopySelection={onCopySelection}
+            onPasteSelection={onPasteSelection}
             onReplayEditAttempt={onReplayEditAttempt}
+            citationDropMarkup={citationBodyDropMarkup}
+            onCitationDrop={onFocusPanel}
+            topChrome={mode !== "diff" ? provenanceHeader : null}
+            bottomChrome={mode !== "diff" ? inboundFooter : null}
           />
+          {mode === "diff" && (
+            <DiffPane
+              file={file}
+              path={activePath}
+              folderId={folderId}
+              replayStepText={replayStepText}
+              replayPrevText={replayPrevText}
+              replayLiveText={replayLiveText}
+              header={provenanceHeader}
+              footer={inboundFooter}
+            />
+          )}
         </div>
       ) : (
         <div className="panel-empty" />
@@ -5045,7 +5872,6 @@ function NavRail({
   onToggleExpanded,
   theme,
   onToggleTheme,
-  onResetWorkspace,
   showOperator,
 }: {
   activeView: View;
@@ -5054,8 +5880,6 @@ function NavRail({
   onToggleExpanded: () => void;
   theme: Theme;
   onToggleTheme: () => void;
-  /** Web-only: open the reset-workspace confirm. Absent on desktop. */
-  onResetWorkspace?: () => void;
   /** Web-only: show the operator entry when the current voice is operator or
    *  curation team. Driven by operator-store.isStaff(). */
   showOperator?: boolean;
@@ -5066,9 +5890,9 @@ function NavRail({
       <button
         type="button"
         className={"rail-brand" + (activeView === "about" ? " active" : "")}
-        aria-label="About"
+        aria-label="Docs"
         aria-current={activeView === "about" ? "page" : undefined}
-        title="About"
+        title="Docs"
         onClick={() => onSelect("about")}
       >
         <span className="rail-brand-emoji" aria-hidden="true">{EYE_SPEECH}</span>
@@ -5130,18 +5954,6 @@ function NavRail({
                   expanded={expanded}
                 />
               )}
-              {onResetWorkspace && (
-                <button
-                  type="button"
-                  className="rail-item"
-                  aria-label="Reset workspace"
-                  title="Reset workspace"
-                  onClick={onResetWorkspace}
-                >
-                  <RotateCcw size={20} strokeWidth={1.75} />
-                  {expanded && <span className="rail-item-label">Reset</span>}
-                </button>
-              )}
             </div>
           </>
         )}
@@ -5189,7 +6001,7 @@ function NavRail({
 // --- view placeholder --------------------------------------------------
 
 const VIEW_META: Record<Exclude<View, "editor">, { title: string; blurb: string }> = {
-  about: { title: "About", blurb: "What zine is and how it fits together." },
+  about: { title: "Docs", blurb: "What zine is and how it fits together." },
   listings: { title: "Stacks", blurb: "An editorial selection of zines, arranged into named sections." },
   stats: { title: "Times", blurb: "Zines on this relay, ranked by metric per unit time." },
   globe: { title: "Spaces", blurb: "Zines pinned to geohashes, rendered at their level." },
@@ -5204,7 +6016,7 @@ const VIEW_META: Record<Exclude<View, "editor">, { title: string; blurb: string 
 // (RAIL_TOP/RAIL_LISTS/etc.) so a title and its rail entry can never drift.
 // `editor` ("Press") is added here since VIEW_META intentionally excludes it.
 const VIEW_TITLES: Record<View, string> = {
-  editor: "Press",
+  editor: "The Press",
   about: VIEW_META.about.title,
   listings: VIEW_META.listings.title,
   stats: VIEW_META.stats.title,
@@ -5236,61 +6048,6 @@ function ViewPlaceholder({ view }: { view: Exclude<View, "editor"> }) {
     <section className="view-placeholder">
       <p className="view-placeholder-blurb">{meta.blurb}</p>
       <p className="view-placeholder-soon">Coming soon</p>
-    </section>
-  );
-}
-
-// --- empty state: no folder attached -----------------------------------
-//
-// First-run / detached view. The workspace needs a real folder to manage
-// (disk is the source of truth), so before one is chosen we prompt for it.
-// Offers a one-click default ($HOME/zine) when it exists, plus the full
-// native picker.
-
-function EmptyFolderView({
-  onChoose,
-  defaultPath,
-  onUseDefault,
-  failedFolder,
-  onRetry,
-  error,
-}: {
-  onChoose: () => void;
-  defaultPath: string | null;
-  onUseDefault: (path: string) => void;
-  failedFolder: AttachedFolder | null;
-  onRetry: () => void;
-  error: string | null;
-}) {
-  return (
-    <section className="view-placeholder">
-      <p className="view-placeholder-blurb">
-        zine manages a folder on disk and keeps a provenance record of every
-        edit in the local relay. Choose a folder to start writing.
-      </p>
-      <div className="empty-actions">
-        <button type="button" className="empty-primary-btn" onClick={onChoose}>
-          Choose folder…
-        </button>
-        {defaultPath && (
-          <button
-            type="button"
-            className="empty-secondary-btn"
-            onClick={() => onUseDefault(defaultPath)}
-          >
-            Use {defaultPath}
-          </button>
-        )}
-      </div>
-      {failedFolder && (
-        <p className="empty-failed">
-          Couldn't open <code>{failedFolder.path ?? failedFolder.label}</code>.
-          <button type="button" className="empty-retry-btn" onClick={onRetry}>
-            Try again
-          </button>
-        </p>
-      )}
-      {error && !failedFolder && <p className="empty-error">{error}</p>}
     </section>
   );
 }
@@ -5341,7 +6098,7 @@ class ViewErrorBoundary extends Component<
 // On mount, asks Tauri to spawn the relay sidecar (no-op outside Tauri, e.g.
 // plain `npm run dev` in a browser). Then debounces edits: 1.5s after the
 // last change to a file, or immediately on Cmd+S, it writes the file to disk
-// via workspace.writeFile — which itself seals a kind-4290 node and republishes
+// via workspace.writeFile — which itself steps a kind-4290 node and republishes
 // the kind-34290 manifest, so disk and provenance never drift. The diff/state
 // bookkeeping lives in workspace.ts; this hook just owns the debounce timer.
 
@@ -5349,41 +6106,48 @@ function useProvenance(
   folder: AttachedFolder | null,
   files: Record<string, FileState>,
   replayActiveRef: MutableRefObject<boolean>,
+  // The folder-wide replay snapshot lives in `App` (it drives the transport,
+  // editor override, fork modal, …). `unsteppedPaths` needs it to skip the one
+  // frozen-historical path, so it's threaded in here rather than captured from a
+  // closure it can't see (the hook's own scope has no `replay`).
+  replay: {
+    steps: ReplayStep[];
+    index: number;
+    snapshot: Record<string, FileState>;
+  } | null,
 ) {
   const pendingTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  // Paths with a debounce seal in flight. The external-change rescan reads
+  // Paths with a debounce step in flight. The external-change rescan reads
   // this to avoid clobbering a file the user is mid-edit on — their in-editor
-  // content is newer than disk, so the pending seal must win, not the rescan.
+  // content is newer than disk, so the pending step must win, not the rescan.
   const pendingPaths = useRef<Set<string>>(new Set());
-  // LLM-op seal suppression. Set to true while an op (Extend/Settle/Stir/
-  // Reply) is streaming into the editor: the seal effect skips entirely, so
-  // a burst of per-token state updates doesn't fire intermediate seals. Each
-  // op calls suppressSeal(false) in its finally, and if anything was deferred
-  // it seals exactly once then — making the whole AI insert a single delta.
+  // LLM-op step suppression. Set to true while an op (Extend/Settle/Stir/
+  // Reply) is streaming into the editor: the step effect skips entirely, so
+  // a burst of per-token state updates doesn't fire intermediate steps. Each
+  // op calls suppressStep(false) in its finally, and if anything was deferred
+  // it steps exactly once then — making the whole AI insert a single delta.
   // Without this, a stream whose quiet gap exceeds the debounce (1500ms —
   // model thinking, network hiccup) publishes a half-finished insert, then
   // more tokens arrive and publish again, and the relay's per-connection
   // rate-limit (khatru's ApplySaneDefaults) trips: "rate-limited: slow down".
-  const sealSuppressed = useRef(false);
-  const pendingSealPaths = useRef<Set<string>>(new Set());
+  const stepSuppressed = useRef(false);
+  const pendingStepPaths = useRef<Set<string>>(new Set());
   // The AUTHOR key's secret, threaded in from App() so the debounced auto-save
-  // signs as the AUTHOR key (the TopBar AUTHOR control) rather than the hidden
-  // active-key default. Read lazily inside scheduleSeal's timeout so a
+  // signs as the AUTHOR key (the ActionPalette AUTHOR control) rather than the hidden
+  // active-key default. Read lazily inside scheduleStep's timeout so a
   // mid-debounce AUTHOR switch is honored at fire time. `undefined` means the
-  // AUTHOR key isn't in the keychain (deleted) and sealNow falls back to its
-  // signer default; the LLM-op catch-up seal bypasses this ref and signs with
-  // the MODEL key (passed explicitly via suppressSeal).
+  // AUTHOR key isn't in the keychain (deleted) and stepFile falls back to its
+  // signer default; the LLM-op catch-up step bypasses this ref and signs with
+  // the MODEL key (passed explicitly via suppressStep).
   const authorSignerRef = useRef<(() => Uint8Array | undefined)>(() => undefined);
-  // Content-stable dedup for sealNow: the last (content, tags) actually sealed
-  // per path, so a no-change seal short-circuits before the relay round-trip.
+  // Content-stable dedup for stepFile: the last (content, tags) actually stepped
+  // per path, so a no-change step short-circuits before the relay round-trip.
   // The motivating case is the trailing debounce after an LLM op's catch-up
-  // seal (see sealNow), but it also collapses any other redundant seal.
-  const lastSealedRef = useRef<
-    Map<string, { content: string; tags: string[]; taggedTraces: string[] }>
-  >(new Map());
-  // Seal-on-mount hydration flag: once the boot scan has populated `files`,
+  // step (see stepFile), but it also collapses any other redundant step.
+  const lastSteppedRef = useRef<Map<string, FileStepBaseline>>(new Map());
+  // Step-on-mount hydration flag: once the boot scan has populated `files`,
   // we don't want the first render's debounce effect to re-publish content
-  // that baselineScan already sealed. Cleared by the boot effect in App().
+  // that baselineScan already stepped. Cleared by the boot effect in App().
   const ready = useRef(false);
 
   // Spawn the relay sidecar once on mount. Desktop-only: the sidecar is a
@@ -5410,34 +6174,34 @@ function useProvenance(
   useEffect(() => {
     if (!ready.current || !folder) return;
     // Skip while an LLM op is mid-stream: those per-token state updates must
-    // not trigger intermediate seals (see sealSuppressed). Remember the paths
-    // so the op's release can seal exactly once at the end — the AI insert
-    // then lands as a single delta instead of N checkpoints. Only dirty paths
-    // (content/tags changed since last seal) are buffered — a re-render that
+    // not trigger intermediate steps (see stepSuppressed). Remember the paths
+    // so the op's release can step exactly once at the end — the AI insert
+    // then lands as a single delta instead of N checkpoints. Only unstepped paths
+    // (content/tags changed since last step) are buffered — a re-render that
     // touches `files` for an unrelated reason (nodeId reflection, panel swap)
-    // must not drag every bystander file into the catch-up seal, or the burst
+    // must not drag every bystander file into the catch-up step, or the burst
     // of relay publishes trips the hosted relay's IP rate-limit.
-    if (sealSuppressed.current) {
-      for (const path of dirtySealPaths(files)) pendingSealPaths.current.add(path);
+    if (stepSuppressed.current) {
+      for (const path of unsteppedPaths(files)) pendingStepPaths.current.add(path);
       return;
     }
-    const dirty = dirtySealPaths(files);
-    // No implicit steps, ever. Typing NEVER seals on either platform — both
-    // mirror dirty buffers to the localStorage crash pad only (no seal, no
+    const unstepped = unsteppedPaths(files);
+    // No implicit steps, ever. Typing NEVER steps on either platform — both
+    // mirror unstepped buffers to the localStorage crash pad only (no step, no
     // relay). The buffer survives a crash/refresh (restored from the pad on the
     // next boot) but the timeline doesn't advance until a deliberate gesture:
     // Step/Send (file) or add/remove/rename (folder). This generalizes the
     // desktop contract ("typing never writes the disk file") to the webapp.
-    for (const path of dirty) schedulePad(path, 800);
+    for (const path of unstepped) schedulePad(path, 800);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [files, folder]);
 
-  /** Mirror a dirty file's buffer to the localStorage crash pad after `ms` of
-   *  quiet. The ONLY persistence path for typing: never calls sealNow, so typing
+  /** Mirror an unstepped file's buffer to the localStorage crash pad after `ms` of
+   *  quiet. The ONLY persistence path for typing: never calls stepFile, so typing
    *  never steps. Both platforms use it (desktop's disk file is untouched until
    *  Step; webapp has no disk, so the pad IS its crash-safety). The buffer is
-   *  restored on the next boot via loadPad in openScanned, read as dirty until
-   *  the user Steps. 800ms — tighter than the old 1500ms seal debounce because a
+   *  restored on the next boot via loadPad in openScanned, read as unstepped until
+   *  the user Steps. 800ms — tighter than the old 1500ms step debounce because a
    *  localStorage write is synchronous/cheap and crash loss stays capped low. */
   function schedulePad(path: string, ms: number) {
     clearTimeout(pendingTimers.current[path]);
@@ -5452,57 +6216,57 @@ function useProvenance(
         nodeId: f.nodeId,
         runs: f.runs,
         taggedTraces: f.taggedTraces,
+        kedits: keditLogToArray(f.kedits),
       });
     }, ms);
   }
 
-  /** Paths whose content or tags differ from what was last sealed (or that have
-   *  never been sealed this session). The debounce effect and the suppression
-   *  buffer both consult this so only genuinely-changed files get sealed — the
-   *  root fix for the relay rate-limit fanout where one edit re-sealed every
+  /** Paths whose content or tags differ from what was last stepped (or that have
+   *  never been stepped this session). The debounce effect and the suppression
+   *  buffer both consult this so only genuinely-changed files get stepped — the
+   *  root fix for the relay rate-limit fanout where one edit re-stepped every
    *  file in the folder. */
-  function dirtySealPaths(currentFiles: Record<string, FileState>): string[] {
+  function unsteppedPaths(currentFiles: Record<string, FileState>): string[] {
+    // The replay stepper overwrites one file's `runs` with historical content
+    // (replayStepTo → setFiles). That historical content legitimately differs
+    // from the live stepped baseline, but it is NOT a user edit — it must not
+    // arm the step debounce (which would mirror stale history to the crash
+    // pad) nor light the unstepped-count badge/title. Skip the one overridden
+    // path while parked on a historical step.
+    const replayFrozenPath =
+      replay && replay.index < replay.steps.length - 1 && !replay.steps[replay.index]?.membership
+        ? (replay.steps[replay.index]?.relativePath ?? null)
+        : null;
     const out: string[] = [];
     for (const [path, file] of Object.entries(currentFiles)) {
-      const content = flatten(file.runs);
-      const tags = file.tags;
-      const taggedTraces = file.taggedTraces ?? [];
-      const last = lastSealedRef.current.get(path);
-      if (
-        !last ||
-        last.content !== content ||
-        last.tags.length !== tags.length ||
-        last.tags.some((t, i) => t !== tags[i]) ||
-        (last.taggedTraces ?? []).length !== taggedTraces.length ||
-        (last.taggedTraces ?? []).some((t, i) => t !== taggedTraces[i])
-      ) {
-        out.push(path);
-      }
+      if (path === replayFrozenPath) continue;
+      const last = lastSteppedRef.current.get(path);
+      if (fileHasUnsteppedChanges(file, last)) out.push(path);
     }
     return out;
   }
 
-  /** Gate the seal pipeline while an LLM op is streaming (on = true) and
+  /** Gate the step pipeline while an LLM op is streaming (on = true) and
    *  release it when it finishes. On release, any path the suppressed effect
-   *  deferred is sealed exactly once — the op's whole output becomes a single
+   *  deferred is stepped exactly once — the op's whole output becomes a single
    *  delta. Safe to call true→true or false→false; only the true→false edge
-   *  triggers the catch-up seal.
+   *  triggers the catch-up step.
    *
-   *  `signer` (used only on the release edge) is the voice that release seal
-   *  is signed as — the LLM op's MODEL key, so the AI insert seals as that
+   *  `signer` (used only on the release edge) is the voice that release step
+   *  is signed as — the LLM op's MODEL key, so the AI insert steps as that
    *  voice instead of the AUTHOR key the user is typing under. The debounced
-   *  auto-save (scheduleSeal) separately resolves the AUTHOR key via
-   *  authorSignerRef, so a non-op seal also signs with the AUTHOR key. */
-  function suppressSeal(on: boolean, signer?: Uint8Array) {
+   *  auto-save (scheduleStep) separately resolves the AUTHOR key via
+   *  authorSignerRef, so a non-op step also signs with the AUTHOR key. */
+  function suppressStep(on: boolean, signer?: Uint8Array) {
     if (on) {
-      sealSuppressed.current = true;
+      stepSuppressed.current = true;
       return;
     }
-    sealSuppressed.current = false;
-    // Seal everything the suppressed window saw touched. Snapshot first —
-    // sealNow is async and may interleave with a new suppression turn.
-    const paths = [...pendingSealPaths.current];
-    pendingSealPaths.current.clear();
+    stepSuppressed.current = false;
+    // Step everything the suppressed window saw touched. Snapshot first —
+    // stepFile is async and may interleave with a new suppression turn.
+    const paths = [...pendingStepPaths.current];
+    pendingStepPaths.current.clear();
     for (const p of paths) {
       if (isTauri()) {
         // Desktop: the op's output buffers to the crash pad, same as a manual
@@ -5516,47 +6280,55 @@ function useProvenance(
             nodeId: f.nodeId,
             runs: f.runs,
             taggedTraces: f.taggedTraces,
+            kedits: keditLogToArray(f.kedits),
           });
         }
       } else {
-        void sealNow(p, signer).catch((e) =>
-          console.warn(`[provenance] suppressed-seal catch-up failed for ${p}:`, e),
+        void stepFile(p, signer).catch((e) =>
+          console.warn(`[provenance] suppressed-step catch-up failed for ${p}:`, e),
         );
       }
     }
   }
 
-  async function sealNow(path: string, signer?: Uint8Array, localOnly?: boolean, force?: boolean): Promise<string | undefined> {
+  async function stepFile(path: string, signer?: Uint8Array, localOnly?: boolean, force?: boolean): Promise<string | undefined> {
     if (!folder) return;
-    // Belt-and-suspenders: never seal while replay is parked on a historical
+    // Coins and Oblivion entries are immutable in place. A Mint coin
+    // becomes editable only by forking it into Root; an Oblivion entry must be
+    // restored before authoring.
+    if (isMint(path) || isOblivion(path)) {
+      console.warn("step blocked: Mint and Oblivion are read-only");
+      return;
+    }
+    // Belt-and-suspenders: never step while replay is parked on a historical
     // step. That step's file is frozen with reconstructed content via a
     // setRunsEffect-tagged run (which liftRuns exempts, so editFile/debounce
-    // never fire), but an explicit Cmd+S would otherwise seal that frozen
+    // never fire), but an explicit Cmd+S would otherwise step that frozen
     // content as a new node — polluting the trace. On `last` the editor is
-    // live, so this ref is false and seals flow (the follow effect appends the
-    // new seal as a step and advances the bar to the new last).
+    // live, so this ref is false and steps flow (the follow effect appends the
+    // new step as a step and advances the bar to the new last).
     if (replayActiveRef.current) return;
     const file = files[path];
     if (!file) return;
-    // Content-stable dedup: skip when nothing has changed since the last seal
+    // Content-stable dedup: skip when nothing has changed since the last step
     // for this path. The tail of an LLM op is the motivating case — the op's
-    // catch-up seal (deferred in endOp) commits a new nodeId via setFiles,
+    // catch-up step (deferred in endOp) commits a new nodeId via setFiles,
     // which retriggers the debounce effect; without this guard that trailing
-    // seal re-runs writeFile, and on a laggy remote relay the manifest read
+    // step re-runs writeFile, and on a laggy remote relay the manifest read
     // may not yet reflect the catch-up write, so the content-hash dedup in
     // writeFile misses and it republishes the same content. Short-circuiting
-    // here makes the trailing seal a true no-op for every caller, no relay hop.
+    // here makes the trailing step a true no-op for every caller, no relay hop.
     //
-    // `force` bypasses this: a deliberate Step/Send gesture mints a checkpoint
-    // even when content is unchanged (protocol §8: "When a Step does seal, it
-    // mints a node carrying the snapshot"). Only the explicit gesture passes
-    // force; the debounced auto-save does not, so redundant trailing seals
+    // `force` bypasses this after the palette has authorized an explicit Step.
+    // The palette itself disables Step on a current trace; force only prevents
+    // a now-authorized user gesture from being swallowed by a baseline race.
+    // Debounced auto-save does not pass force, so redundant trailing steps
     // still collapse.
     if (!force) {
       const content = flatten(file.runs);
       const tags = file.tags;
       const taggedTraces = file.taggedTraces ?? [];
-      const last = lastSealedRef.current.get(path);
+      const last = lastSteppedRef.current.get(path);
       if (
         last &&
         last.content === content &&
@@ -5568,11 +6340,11 @@ function useProvenance(
         return file.nodeId;
       }
     }
-    // Resolve the seal's signer to match the voice that actually wrote the
+    // Resolve the step's signer to match the voice that actually wrote the
     // net-new text in this commit, not just the caller's default. The
     // debounced auto-save always passes the AUTHOR key, but an LLM op's
     // streamed MODEL text has already landed in file.runs attributed to the
-    // MODEL voice by the time this seal fires. A seal node carries one
+    // MODEL voice by the time this step fires. A step node carries one
     // `event.pubkey`; on reload, if the per-character `authors` map is ever
     // lost (empty runs, sidecar drift, a misordered fetchChain), the reader
     // falls back to attributing the node's whole net-new text to that single
@@ -5580,11 +6352,11 @@ function useProvenance(
     // that matches the new content's dominant voice means the signer-fallback
     // path also attributes truthfully, independent of whether `authors`
     // survives. The explicit signers from the op paths (pre-op baseline =
-    // AUTHOR, the catch-up seal = MODEL) already match their content, so this
+    // AUTHOR, the catch-up step = MODEL) already match their content, so this
     // only corrects a mismatch; when no secret is available for the dominant
     // voice (e.g. a foreign/sampled voice), the passed signer is kept — safe
     // degradation, no regression.
-    const prevContent = lastSealedRef.current.get(path)?.content ?? "";
+    const prevContent = lastSteppedRef.current.get(path)?.content ?? "";
     const runs = file.runs;
     const content = flatten(file.runs);
     const region = changedRegion(prevContent, content);
@@ -5604,22 +6376,28 @@ function useProvenance(
       // back to a single run if they drift.
       // Pass `file.tags` so a tag-only edit still reaches writeFile with the
       // new labels — writeFile detects the content-hash match but tags-changed
-      // case and seals anyway, so the new `t` tags land on the relay. Hardcoding
+      // case and steps anyway, so the new `t` tags land on the relay. Hardcoding
       // undefined here would drop the tags before publish, and writeFile's
       // content-hash no-op branch would swallow the change (the Times view would
       // never see #logos/#philos etc.).
       //
       // Pending `[[ ]]` brackets are left pending — minting (publishing a
-      // span as its own trace node + resolving `| nodeId`) is opt-in via send,
-      // never a side effect of seal. Resolved brackets this doc already cites
+      // span as its own trace node + resolving `| nodeId`) is opt-in via Mint,
+      // never a side effect of step. Resolved brackets this doc already cites
       // are mirrored as `q` tags by writeFile (findResolvedBrackets), so a
-      // send-created citation flows to the relay on the next seal for free.
+      // send-created citation flows to the relay on the next step for free.
       // `taggedTraces` is the tagged-but-not-quoted set (the protocol's
       // `tag-add`); writeFile folds it into the same q-tag dedup and emits a
-      // `tag-add` delta per id, so adding a trace to this list seals a new node
+      // `tag-add` delta per id, so adding a trace to this list steps a new node
       // even when content is unchanged.
       const tags = file.tags;
       const taggedTraces = file.taggedTraces ?? [];
+      // Drain the keystroke log accumulated in the editor's keditField (mirrored
+      // into FileState.kedits by editFile on every change). One KEdit per
+      // discrete editor change since the previous step — every backspace,
+      // highlight-delete, type-over, and IME commit. Cleared after step below.
+      const steppedKedits = file.kedits ?? EMPTY_KEDIT_LOG;
+      const kedits = keditLogToArray(steppedKedits);
       const nodeId = await writeRef.current(
         path,
         content,
@@ -5627,37 +6405,48 @@ function useProvenance(
         effectiveSigner,
         runs,
         taggedTraces.length > 0 ? taggedTraces : undefined,
+        kedits.length > 0 ? kedits : undefined,
         localOnly,
         force,
       );
-      lastSealedRef.current.set(path, { content, tags: [...tags], taggedTraces: [...taggedTraces] });
+      lastSteppedRef.current.set(path, { content, tags: [...tags], taggedTraces: [...taggedTraces] });
       // Desktop crash pad: the file is now committed to disk, so its buffered
       // copy in the pad is stale — drop it. This is the single chokepoint for
-      // every disk write (Cmd+S/Step/Send/Affirm/direct backend), so clearing
-      // here covers every flush. sealNow is the only thing that reaches the pad
+      // every disk write (Cmd+S/Step/Send/Attest/direct backend), so clearing
+      // here covers every flush. stepFile is the only thing that reaches the pad
       // in reverse, so no other site needs to clear it.
       if (isTauri() && folder) clearPadPath(folder.id, path);
-      // Reflect the freshly-sealed node id back into state so the next diff
+      // Reflect the freshly-stepped node id back into state so the next diff
       // is against the right baseline. Stable-identity update only. The
       // context-block delta-log memo is keyed by this nodeId, so advancing
       // the head auto-invalidates the stale chain — no manual hook here.
-      setFilesRef.current((prev) =>
-        prev[path] && prev[path].nodeId !== nodeId
-          ? { ...prev, [path]: { ...prev[path], nodeId } }
-          : prev,
-      );
+      // Also clear the keystroke log: the buffer has been drained into this
+      // step's `kedits` content field, so the next step window starts fresh.
+      setFilesRef.current((prev) => {
+        if (!prev[path]) return prev;
+        // Drain exactly the prefix this Step wrote. If the user typed while
+        // the relay write was in flight, those newer chunks remain pending.
+        const { kedits: _drained, ...rest } = prev[path];
+        const remaining = dropKEditLogPrefix(prev[path].kedits ?? EMPTY_KEDIT_LOG, steppedKedits);
+        const next: FileState = {
+          ...rest,
+          nodeId,
+          ...(remaining.length > 0 ? { kedits: remaining } : {}),
+        };
+        return { ...prev, [path]: next };
+      });
       return nodeId;
     } catch (e) {
       console.warn(`[provenance] write+publish failed for ${path}:`, e);
     }
   }
 
-  // setFiles is threaded in from App() so sealNow can update nodeId without
+  // setFiles is threaded in from App() so stepFile can update nodeId without
   // a re-render cycle through the debounce effect. Assigned in App()'s body.
   const setFilesRef = useRef<(updater: (prev: Record<string, FileState>) => Record<string, FileState>) => void>(
     () => {},
   );
-  // Write function — threaded in from App() so sealNow uses the active backend
+  // Write function — threaded in from App() so stepFile uses the active backend
   // (disk on desktop, local-primary on webapp) instead of the hardwired disk
   // function. Without this, webapp edits go through the Tauri disk path and
   // silently fail (Tauri not available in a browser).
@@ -5669,20 +6458,21 @@ function useProvenance(
       signer?: Uint8Array,
       runs?: Run[],
       taggedTraces?: string[],
+      kedits?: KEdit[],
       localOnly?: boolean,
       force?: boolean,
     ) => Promise<string>
   >(async () => "");
-  // Seed the last-sealed map for files loaded from disk/relay. Called from
+  // Seed the last-stepped map for files loaded from disk/relay. Called from
   // App's openScanned tail so freshly-attached files are recognized as already
-  // published (they are — that's why they have a nodeId) and don't trip a seal
-  // on the first debounce tick. Without this, dirtySealPaths would mark every
-  // loaded file dirty (lastSealedRef is empty until a seal runs) and the boot
-  // fanout would re-seal the whole folder.
-  const seedSealedRef = useRef<(files: Record<string, FileState>) => void>(() => {});
-  seedSealedRef.current = (seedFiles: Record<string, FileState>) => {
+  // published (they are — that's why they have a nodeId) and don't trip a step
+  // on the first debounce tick. Without this, unsteppedPaths would mark every
+  // loaded file unstepped (lastSteppedRef is empty until a Step runs) and the boot
+  // fanout would re-step the whole folder.
+  const seedSteppedRef = useRef<(files: Record<string, FileState>) => void>(() => {});
+  seedSteppedRef.current = (seedFiles: Record<string, FileState>) => {
     for (const [path, file] of Object.entries(seedFiles)) {
-      lastSealedRef.current.set(path, {
+      lastSteppedRef.current.set(path, {
         content: flatten(file.runs),
         tags: [...file.tags],
         taggedTraces: [...(file.taggedTraces ?? [])],
@@ -5690,109 +6480,38 @@ function useProvenance(
     }
   };
 
-  // Dirty set: paths whose buffer differs from what was last sealed (i.e. what's
-  // on disk). Drives the per-tab dirty dot and the window title. Memoized on
-  // `files` — correct because every seal updates lastSealedRef before its
-  // setFiles, so the post-seal re-render sees the path as clean.
-  const dirtyPaths = useMemo(() => new Set(dirtySealPaths(files)), [files]);
+  // Unstepped set: paths whose buffer differs from what was last stepped.
+  // Drives the per-tab KEdit count and the window title. Memoized on
+  // `files` — correct because every step updates lastSteppedRef before its
+  // setFiles, so the post-step re-render sees the path as clean. Also depends on
+  // `replay`: stepping the timeline changes which (single) path is frozen and
+  // must be skipped, without necessarily touching `files`.
+  const unsteppedPathSet = useMemo(() => new Set(unsteppedPaths(files)), [files, replay]);
+  const unsteppedEditCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const path of unsteppedPathSet) counts.set(path, files[path]?.kedits?.length ?? 0);
+    return counts;
+  }, [files, unsteppedPathSet]);
 
-  return { sealNow, ready, setFilesRef, pendingPaths, writeRef, suppressSeal, seedSealedRef, authorSignerRef, dirtyPaths };
+  return {
+    stepFile,
+    ready,
+    setFilesRef,
+    pendingPaths,
+    writeRef,
+    suppressStep,
+    seedSteppedRef,
+    authorSignerRef,
+    unsteppedPathSet,
+    unsteppedEditCounts,
+  };
 }
 
-// --- selection menu ----------------------------------------------------
-//
-// Opens above the editor's selection head when text is highlighted, offering
-// the two trace-provenance gestures that act on a range:
-//   bracket — wrap the selection in `[[ ]]` (pending; protected from
-//                 overwrite by bracketProtect, never auto-minted).
-//   send        — save the bracketed text as its own trace file and cite it.
-//
-// Portalled to document.body (same pattern as the tree's ctx-menu) so it floats
-// above the editor's clipping containers. Reuses the .ctx-menu / .ctx-menu-item
-// CSS family — mono, raised surface — so it reads as the same kind of surface.
-// Dismiss on Escape or scroll (a pointer-down outside lands as a new selection,
-// which re-anchors the menu via the live trackSelection listener).
-function SelectionMenu({
-  view,
-  onBracket,
-  onZine,
-}: {
-  view: EditorView;
-  onBracket: () => void;
-  onZine: () => void;
-}) {
-  const menuRef = useRef<HTMLDivElement>(null);
-  // Anchor at the selection head (the `to` end), just below it. Re-measured on
-  // each render via useLayoutEffect so the menu tracks the selection as the doc
-  // changes; clamped to the viewport so it never opens off-screen.
-  const [pos, setPos] = useState<{ left: number; top: number }>({ left: 0, top: 0 });
-  useLayoutEffect(() => {
-    const sel = view.state.selection.main;
-    try {
-      const coords = view.coordsAtPos(sel.to);
-      if (coords) {
-        const left = Math.min(coords.left, window.innerWidth - 180);
-        const top = Math.min(coords.bottom + 4, window.innerHeight - 60);
-        setPos({ left: Math.max(8, left), top });
-      }
-    } catch {
-      // coordsAtPos can throw if the position isn't currently rendered; the
-      // menu just stays at its last known position until the next selection.
-    }
-  });
-
-  // Dismiss handlers: Escape returns focus to the editor; scroll closes (the
-  // anchor is stale after a scroll even if the selection survives). A pointer
-  // down outside the menu is left to land as a normal editor click — that
-  // moves the selection, and trackSelection re-opens the menu for the new range.
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") view.focus();
-    }
-    function onScroll() {
-      view.focus();
-    }
-    document.addEventListener("keydown", onKey);
-    document.addEventListener("scroll", onScroll, true);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.removeEventListener("scroll", onScroll, true);
-    };
-  }, [view]);
-
-  return createPortal(
-    <div
-      ref={menuRef}
-      className="ctx-menu selection-menu"
-      style={{ left: pos.left, top: pos.top }}
-      onContextMenu={(e) => e.preventDefault()}
-    >
-      <button
-        type="button"
-        className="ctx-menu-item"
-        // onMouseDown (not onClick) + preventDefault keeps the editor from
-        // losing focus / collapsing the selection before the action reads it.
-        onMouseDown={(e) => {
-          e.preventDefault();
-          onBracket();
-        }}
-      >
-        bracket
-      </button>
-      <button
-        type="button"
-        className="ctx-menu-item"
-        onMouseDown={(e) => {
-          e.preventDefault();
-          onZine();
-        }}
-      >
-        send
-      </button>
-    </div>,
-    document.body,
-  );
-}
+// A right-click menu entry. Either an action button or a visual separator.
+// `disabled` is read by the CSS (faded/inert) — e.g. Cut with no selection.
+export type GlobalCtxItem =
+  | { kind: "action"; label: string; run: () => void; disabled?: boolean }
+  | { kind: "sep" };
 
 function App() {
   // The workspace is folder-driven: `files` starts empty and is populated by
@@ -5800,18 +6519,19 @@ function App() {
   // folder's stable id + absolute path (persisted in localStorage by
   // workspace.ts); null while the user hasn't picked one yet. On the webapp
   // `path` is undefined — the folder lives on the relay, addressed by `id`.
-  const [folder, setFolder] = useState<AttachedFolder | null>(() => getAttachedFolder());
-  // True when the attached folder's latest 4292 head is signed by someone other
-  // than the active voice — i.e. a foreign folder opened for browsing. Writes
-  // are gated until the user forks it into their own namespace (forkCurrentFolder).
-  const [isForeignFolder, setIsForeignFolder] = useState(false);
+  const [folder, setFolder] = useState<AttachedFolder | null>(() => {
+    const id = getRootId();
+    if (!id) return null;
+    const label = getRootLabel() ?? DEFAULT_ROOT_LABEL;
+    return { id, label };
+  });
   // Incoming forks / sibling heads for the active file (branch detection).
   // Refreshed on folder/path change and after incorporate.
   const [mergeCandidates, setMergeCandidates] = useState<MergeCandidate[]>([]);
   const [mergeBusy, setMergeBusy] = useState(false);
   // Merge/reconcile failure surfaced inline (banner + MergePanel). The prior
   // code wrote these to bootError, which only renders on the boot placeholder
-  // screen — so a failed Seal merge flashed "Sealing…" then vanished with no
+  // screen — so a failed Step merge flashed "Stepping…" then vanished with no
   // feedback. This is shown where the action lives.
   const [mergeError, setMergeError] = useState<string | null>(null);
   // Open three-way reconcile session (conflict / sibling candidates).
@@ -5823,7 +6543,7 @@ function App() {
   } | null>(null);
   // Clean-merge preview: an auto-resolved merge (no overlapping conflicts)
   // awaiting a confirm. Unlike mergeSession this is review-only — the merged
-  // body is final, the user just green-lights the seal.
+  // body is final, the user just green-lights the step.
   const [mergePreview, setMergePreview] = useState<{
     candidate: MergeCandidate;
     path: string;
@@ -5831,17 +6551,24 @@ function App() {
     after: string;
   } | null>(null);
   // Background-pull merges that auto-resolved cleanly (no textual conflict) but
-  // are staged for review rather than sealed blindly. Populated by the webapp
+  // are staged for review rather than stepped blindly. Populated by the webapp
   // relay pull. Local is NOT modified while a merge is staged; Accept writes it
-  // and seals the merge node, Close drops it.
+  // and steps the merge node, Close drops it.
   const [stagedMerges, setStagedMerges] = useState<StagedMerge[]>([]);
   const [stagedMergeBusy, setStagedMergeBusy] = useState(false);
   const [stagedMergeError, setStagedMergeError] = useState<string | null>(null);
   const [stagedMergeView, setStagedMergeView] = useState<StagedMerge | null>(null);
-  // Storage backend: disk on desktop, relay-only on webapp. Created once and
-  // held in a ref so mutation call sites have a stable handle. The backend
-  // closes over its attached folder, so callers drop the `folder` arg.
-  const backendRef = useRef<Workspace>(isTauri() ? createDiskWorkspace() : createLocalWorkspace());
+  // Storage backend. The root is always pathless (relay + localStorage crash
+  // pad; disk is touched only by Scan/Reify), so both desktop and webapp use
+  // the local/relay arm — it boots from localStorage instantly and
+  // background-pulls the relay, exactly the pathless-root contract. Held in a
+  // ref so mutation call sites have a stable handle; it closes over the
+  // attached folder, so callers drop the `folder` arg.
+  const backendRef = useRef<Workspace>(createLocalWorkspace());
+  // Opaque clipboard tickets live only in this press session. The system
+  // clipboard carries the ticket alongside ordinary text; paste resolves it
+  // here to a signed coin. Unknown/expired tickets degrade to native text.
+  const coinClipboardTicketsRef = useRef<Map<string, CoinClipboardTicket>>(new Map());
   // Latest folder id, mirrored into a ref so async functions (rescan, ops)
   // can detect a folder switch that happened during their `await` and bail
   // before writing stale state. Without this, a rescan started under folder A
@@ -5855,30 +6582,66 @@ function App() {
   // folder switch so the new folder's first focus isn't suppressed by a stale
   // key from the previous folder.
   const lastFocusKeyRef = useRef<string | null>(null);
+  const panelOccupancyRef = useRef<(PanelOccupancy | null)[]>([]);
   if (prevFolderIdRef.current !== folderIdRef.current) {
     prevFolderIdRef.current = folderIdRef.current;
     lastFocusKeyRef.current = null;
   }
-  // Webapp reset-workspace confirm: nukes the current folder and provisions a
-  // fresh one. Gated by a dialog so the destructive action can't fire on a
-  // stray click.
-  const [confirmReset, setConfirmReset] = useState(false);
   // Settings modal (opened from the sidebar's gear button). Holds the
-  // factory-reset action — nukes all zine.* localStorage and reloads.
+  // factory-reset action — clears browser state plus the desktop sidecar.
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
   const [files, setFiles] = useState<Record<string, FileState>>({});
-  // Sibling traces available as tag-trace picker candidates: every file in the
-  // current folder that has sealed a node this session (has a head nodeId to
-  // cite). Built from `files` so it stays live as files seal/rename. Used only
-  // by the in-folder "+ trace" picker (TagTracePicker); cross-folder tagging is
-  // the Tag Browser's job.
+  // Per-node attestation totals visible from the configured read relays. The
+  // map deliberately includes zeroes once loaded so every stepped trace gets a
+  // stable badge; the badge says "reachable", never "global".
+  const [attestationCounts, setAttestationCounts] = useState<Record<string, number>>({});
+  const attestationNodeSig = useMemo(
+    () => [...new Set(Object.values(files).map((file) => file.nodeId).filter(Boolean))].sort().join("\n"),
+    [files],
+  );
+  useEffect(() => {
+    const nodeIds = attestationNodeSig ? attestationNodeSig.split("\n") : [];
+    if (nodeIds.length === 0) {
+      setAttestationCounts({});
+      return;
+    }
+    let cancelled = false;
+    void fetchAttestationCounts(nodeIds).then((counts) => {
+      if (!cancelled) setAttestationCounts(Object.fromEntries(counts));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [attestationNodeSig]);
+  // Sibling traces available as citation-picker candidates: every file in the
+  // current folder that has stepped a node this session (has a head nodeId to
+  // cite). Built from `files` so it stays live as files step/rename. Used by
+  // the citations-out label picker.
   const traceCandidates = useMemo<TraceCandidate[]>(() => {
     const out: TraceCandidate[] = [];
     for (const [path, f] of Object.entries(files)) {
-      if (f.nodeId) out.push({ path, nodeId: f.nodeId });
+      if (f.kind !== "folder" && f.nodeId) {
+        out.push({ path, nodeId: f.nodeId, ...(f.traceId ? { traceId: f.traceId } : {}) });
+      }
     }
     return out;
   }, [files]);
+  // Citation targets are immutable Steps, but the traces containing those
+  // Steps keep advancing. A local head move refreshes progress immediately;
+  // the epoch also checks relay-side advances made by another press while the
+  // citation row is visible (and immediately when this window regains focus).
+  const localTraceHeadVersion = useMemo(
+    () =>
+      Object.entries(files)
+        .map(([path, file]) => `${path}:${file.traceId ?? ""}:${file.nodeId ?? ""}`)
+        .sort()
+        .join("\n"),
+    [files],
+  );
+  const [citationRefreshEpoch, setCitationRefreshEpoch] = useState(0);
+  const citationResolutionVersion = `${localTraceHeadVersion}\n${citationRefreshEpoch}`;
   // The workspace boots with a single panel that fills the row; the user opens
   // more by right-clicking "Open to side" or dragging a tab onto a panel's
   // right edge (up to MAX_PANELS). Empty panels collapse back out (see
@@ -5889,45 +6652,78 @@ function App() {
   // / commitWithCollapse.
   const [panels, setPanels] = useState<PanelState[]>([{ tabs: [], active: "" }]);
   // The cited traces for each open file — every `q` tag on the file's current
-  // head node, resolved to a name via `resolveNodeName`. This subsumes the old
+  // head node, resolved to a name and exact-step distance via
+  // `resolveCitationChip`. This subsumes the old
   // single `reply-to` chip: a Reply is just one more cited trace here (its
-  // source is a `q` tag on every seal, folded into the same dedup as body
+  // source is a `q` tag on every step, folded into the same dedup as body
   // quotes). Keyed by relativePath; keyed-on-headNodeId is tracked in
-  // `citationHeadByPath` so a new seal re-resolves. Absent = not yet resolved.
+  // `citationHeadByPath` so a new step re-resolves. Absent = not yet resolved.
   const [citationsByPath, setCitationsByPath] = useState<Record<string, CitationChip[]>>({});
   // The head node id each entry in `citationsByPath` was resolved against, so a
-  // re-resolve only fires when the head actually moved (a new seal changed the
+  // re-resolve only fires when the head actually moved (a new step changed the
   // citation set). Without this, every render would refetch.
   const [citationHeadByPath, setCitationHeadByPath] = useState<Record<string, string>>({});
+  // Resolution version for each row. The citing head can stay unchanged while
+  // a cited trace advances, so `citationHeadByPath` alone is not enough to keep
+  // the behind-count current.
+  const [citationResolutionByPath, setCitationResolutionByPath] = useState<Record<string, string>>({});
   // The tagged-trace chips for each open file — `file.taggedTraces` (the
   // `tag-add` subset of the head's `q` edges) resolved to named chips. Keyed on
-  // the tagged id set, NOT on the head node, so a freshly tagged trace appears
-  // instantly — before the debounce seals a new head (which is what the
+  // the cited id set, NOT on the head node, so a fresh citation appears
+  // instantly — before the debounce steps a new head (which is what the
   // `citationsByPath` effect above waits for). `resolveNodeName` caches per
   // node id, so this stays cheap even though it fires on every tag edit.
   const [taggedChipByPath, setTaggedChipByPath] = useState<Record<string, CitationChip[]>>({});
+  const [taggedResolutionByPath, setTaggedResolutionByPath] = useState<Record<string, string>>({});
+  const hasVisibleCitations = panels.some((panel) => {
+    const path = panel.active;
+    return !!path && !isFolderTab(path) && files[path]?.kind !== "folder";
+  });
+  useEffect(() => {
+    if (!hasVisibleCitations) return;
+    const refresh = () => setCitationRefreshEpoch((epoch) => epoch + 1);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") refresh();
+    }, 30_000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [hasVisibleCitations]);
   // The inbound tracker for each open file — forks of it, traces that tag it,
   // and traces that cite it (spec §3.8 forks, §6 tags, §3.3 cites), the inverse
   // of the outbound `citationsByPath`/`taggedChipByPath`. Keyed on the head node
-  // id so a re-resolve only fires when the head actually moved (a new seal may
+  // id so a re-resolve only fires when the head actually moved (a new step may
   // change the inbound set, since cites pin a specific nucleus). `name` on each
   // entry is filled in lazily by the name-resolution effect below.
   const [inboundByPath, setInboundByPath] = useState<Record<string, TraceInbound[]>>({});
-  const [inboundHeadByPath, setInboundHeadByPath] = useState<Record<string, string>>({});
-  // The Seals history/diff modal (Part B): set when the user clicks a panel's
-  // "Seals" button, or the "replying to ↑" chip (which additionally pins a
+  const [inboundResolutionByPath, setInboundResolutionByPath] = useState<Record<string, string>>({});
+  const [inboundFreshnessByPath, setInboundFreshnessByPath] = useState<
+    Record<string, InboundFreshness>
+  >({});
+  // A move into Oblivion updates `files` synchronously, while its relay-side
+  // import+tombstone lands in the background. Hide those source heads from the
+  // already-cached inbound rows during that window; findInbound applies the
+  // same lifecycle rule once the relay catches up.
+  const oblivionInboundSourceIds = useMemo(
+    () =>
+      new Set(
+        Object.entries(files)
+          .filter(([path, file]) => isOblivion(path) && file.kind !== "folder" && !!file.nodeId)
+          .map(([, file]) => file.traceId ?? file.nodeId),
+      ),
+    [files],
+  );
+  // The Steps history/diff modal (Part B): set when the user clicks a panel's
+  // "Steps" button, or the "replying to ↑" chip (which additionally pins a
   // specific historical node). null when closed.
-  const [sealsModal, setSealsModal] = useState<{
-    relativePath: string;
-    chain: Event[];
-    pinnedEventId?: string;
-  } | null>(null);
-  // Folder-wide delta replay (seal-to-seal), sticky at last. `index === last`
-  // is the live editor (no override — edits and seals flow, and a new seal
+  // Folder-wide delta replay (step-to-step), sticky at last. `index === last`
+  // is the live editor (no override — edits and steps flow, and a new step
   // appends a step the follow effect advances to); `index < last` overrides
   // that one step's file with its reconstructed content (frozen — the override
   // is a setRunsEffect write `liftRuns` exempts, so no debounce arms) and gates
-  // sealing off. `snapshot` captures the live FileState of a file the moment
+  // stepping off. `snapshot` captures the live FileState of a file the moment
   // it's frozen so stepping back to last (or exiting) can restore it; only the
   // active historical step's file is ever overridden at a time.
   const [replay, setReplay] = useState<{
@@ -5941,40 +6737,25 @@ function App() {
   // viewing — the fork seeds from that step's event id (spec §3.8: forked-from
   // pins the exact node-version). null = modal dismissed.
   const [forkPrompt, setForkPrompt] = useState<{ stepIndex: number } | null>(null);
-  // The file path the Affirm modal is attesting. Null when the modal is closed;
-  // set by the AUTHOR row's Affirm button (gated on a sealed nodeId). The modal
-  // reads this to know which file's head is being affirmed, and calls
-  // affirmAsVoice(path, geohash) on confirm.
-  const [affirmTarget, setAffirmTarget] = useState<{
+  // The trace target the Attest modal is endorsing. Null when the modal is
+  // closed; set by the AUTHOR row's Attest button (gated on a node id).
+  const [attestTarget, setAttestTarget] = useState<{
     path: string;
-    kind: "file" | "folder";
+    kind: "file" | "folder" | "coin";
     nodeId: string;
-    foreign?: boolean;
   } | null>(null);
+  // Run-modal open state. Opens from the MODEL row's Run button; onStart kicks
+  // off startAgentRun with the composed goal + chosen root provider.
+  const [runOpen, setRunOpen] = useState(false);
   // Per-tab view mode, keyed by file path. Each open file remembers which
   // surface (preview vs markdown) it was last shown on, so switching tabs
   // restores the surface you left it in rather than a single panel-wide mode.
   // Entries persist as long as at least one panel still holds the tab; once a
   // path has no open tab anywhere it's pruned (see setTabModes), so reopening a
   // closed file always starts fresh in preview — the default.
-  const [tabModes, setTabModes] = useState<Record<string, "preview" | "markdown">>({});
+  const [tabModes, setTabModes] = useState<Record<string, Mode>>({});
   const [bootState, setBootState] = useState<"idle" | "scanning" | "ready" | "missing">("idle");
   const [bootError, setBootError] = useState<string | null>(null);
-  // Background provenance reconcile (desktop): true while the post-skeleton
-  // relay reconcile is still filling in nodeIds/runs after the press rendered.
-  // The press is fully usable during this — it's just backfilling provenance.
-  const [reconciling, setReconciling] = useState<boolean>(false);
-  const [defaultPath, setDefaultPath] = useState<string | null>(null);
-  // Desktop crash-pad restore: set when a boot scan overlays buffered files from
-  // the last session's crash pad (files that were dirty when the app closed/
-  // crashed). Drives a dismissible banner — "Restored N unsaved file(s)". The
-  // pad persists until each file is Stepped (which clears it) or Discarded.
-  const [crashRestoreCount, setCrashRestoreCount] = useState<number>(0);
-  // The folder the boot scan failed to re-attach (desktop only). We keep the
-  // remembered path in localStorage instead of wiping it on a transient read
-  // failure, so this holds the path we should Retry — null when boot hasn't
-  // failed or the user has since chosen another folder.
-  const [failedFolder, setFailedFolder] = useState<AttachedFolder | null>(null);
   // Operator layer (webapp only). `operatorState` is null until the first
   // /operator/state fetch resolves; `operatorSetup` opens the bind/rotate
   // modal. The boot effect below triggers the fetch so the setup modal can
@@ -5985,29 +6766,31 @@ function App() {
   );
   const [operatorSetup, setOperatorSetup] = useState<"off" | "boot" | "manual">("off");
   // Mirror of `replay` for use in imperative handlers (replayStepTo/endReplay)
-  // and the sealNow guard, which must read replay-active state without
+  // and the stepFile guard, which must read replay-active state without
   // depending on a re-render. Kept in sync by the effect below.
   const replayRef = useRef<{
     steps: ReplayStep[];
     index: number;
     snapshot: Record<string, FileState>;
   } | null>(null);
-  // Each path's genesis→head chain, captured in beginReplay so per-character
-  // playback (buildPlayTimeline) can expand deltas without refetching. Cleared
+  // Each path's genesis→head chain, captured in beginReplay so keystroke
+  // playback can expand edits without refetching. Cleared
   // in endReplay. Kept in a ref (not state) — it's read imperatively by the
   // play builder and doesn't drive render.
   const replayChainsRef = useRef<Record<string, Event[]>>({});
+  // Paths owned by the current kedit-playback mount. Replay panels themselves
+  // carry `replayOwned`, so ownership survives live-panel closes and index shifts.
+  // Null after playback teardown.
+  const replayPlaybackPathsRef = useRef<Set<string> | null>(null);
   // True when the editor is showing a frozen (non-live) state: parked on a
-  // historical seal step, OR mid-character-playback. Gates sealNow so a stray
-  // Cmd+S can't seal historical/partial content as a new node. On `last` with
-  // play stopped the editor is live, so seals flow (the follow effect appends
+  // historical Step, OR mid-keystroke-playback. Gates stepFile so a stray
+  // Cmd+S can't step historical/partial content as a new node. On `last` with
+  // play stopped the editor is live, so steps flow (the follow effect appends
   // them). The Sidebar's disabled state uses `replay !== null` directly.
   const replayActiveRef = useRef(false);
-  // Per-character typewriter playback. Separate cursor from the seal stepper:
-  // play animates every delta one character at a time (interleaved across
-  // files by seal timestamp), while the stepper/slider stay at save-point
-  // granularity. The frame list is built on play-start and torn down on
-  // pause/stop; a pause snaps the seal cursor to the frame's enclosing seal.
+  // Per-keystroke playback has a separate cursor from the Step timeline. The
+  // stepper/slider stay at save-point granularity while edit frames advance;
+  // pausing snaps the step cursor to the current frame's enclosing step.
   const REPLAY_SPEEDS = [1, 2, 4, 8, 16] as const;
   const [playing, setPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState<number>(1);
@@ -6037,10 +6820,13 @@ function App() {
       setPlaying(false);
       setPlayTimeline(null);
       playTimelineRef.current = null;
-      // Snap the seal cursor to the last real frame's seal so the stepper/
+      // Snap the step cursor to the last real frame's step so the stepper/
       // slider rest at the final save point (one before live).
       const lastReal = tl[tl.length - 2];
-      if (lastReal) replayStepTo(lastReal.sealIndex);
+      if (lastReal) replayStepTo(lastReal.stepIndex);
+      // Remove only the ephemeral replay panels. Any live-layout changes made
+      // during playback remain intact.
+      teardownReplayPanels();
       return;
     }
     const id = setTimeout(() => {
@@ -6050,10 +6836,22 @@ function App() {
       renderPlayFrame(frame, tl[playCursorRef.current] ?? null);
       playCursorRef.current = next;
       setPlayCursor(next);
-    }, 60 / playSpeed);
+      // One full edit per beat, scaled by the selected playback speed.
+    }, 150 / playSpeed);
     return () => clearTimeout(id);
   }, [playing, playCursor, playSpeed, playTimeline]); // eslint-disable-line react-hooks/exhaustive-deps
-  const { sealNow, ready, setFilesRef, pendingPaths, writeRef, suppressSeal, seedSealedRef, authorSignerRef, dirtyPaths } = useProvenance(folder, files, replayActiveRef);
+  const {
+    stepFile,
+    ready,
+    setFilesRef,
+    pendingPaths,
+    writeRef,
+    suppressStep,
+    seedSteppedRef,
+    authorSignerRef,
+    unsteppedPathSet,
+    unsteppedEditCounts,
+  } = useProvenance(folder, files, replayActiveRef, replay);
   // Drop the context-block delta-log memo whenever the attached folder changes
   // (attach, switch, detach) — memoized chains are keyed by folder id + path,
   // so a stale folder id's entries must not survive into the new one.
@@ -6075,9 +6873,8 @@ function App() {
   // stepper isn't empty on page load — it lands on the very last save point
   // (beginReplay sets index: last, which is the live document, no freezing).
   // Fires once per folder attach: the `bootState === "ready"` edge arrives after
-  // openScanned for every load path (desktop attach, webapp auto-open, the
-  // [folder?.id] re-attach), and the folder-id guard dedupes across the
-  // webapp's double openScanned (webAutoOpen → [folder?.id] re-attach). A manual
+  // openScanned for every load path (the [folder?.id] re-attach), and the
+  // folder-id guard dedupes across the boot's re-attach. A manual
   // endReplay keeps the ref set, so re-entering "ready" (e.g. a rescan that
   // flips bootState) won't re-bootstrap over the user's explicit teardown.
   const autoBootstrappedRef = useRef<string | null>(null);
@@ -6094,10 +6891,10 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bootState, folder?.id]);
   // Follow-newest: while replay is parked on `last` (the live position), watch
-  // for newly-sealed node ids. Each new seal appends a step and the bar
+  // for newly-stepped node ids. Each new step appends a step and the bar
   // advances to the new last, so the resting position always reflects current
   // state and the user can keep stepping back to verify each save point as it
-  // lands. Only acts on `last` — on a historical step the guard blocks seals,
+  // lands. Only acts on `last` — on a historical step the guard blocks steps,
   // so nothing changes here. Runs O(files) on every content tick but the async
   // fetchEventById fires only when a nodeId is genuinely new to the timeline.
   useEffect(() => {
@@ -6130,7 +6927,7 @@ function App() {
             meta,
             contentUpToHere: flatten(files[path]?.runs ?? []),
             // Live-document follow step: its runs ARE the live editor's, so the
-            // latest seal still shows the live per-voice attribution (these steps
+            // latest step still shows the live per-voice attribution (these steps
             // sit on `last`, which is never frozen — only historical steps are).
             runsUpToHere: files[path]?.runs ?? [],
             // Follow steps rest on `last` and are never rendered as a frozen
@@ -6151,7 +6948,7 @@ function App() {
         if (!stillLast) return prev;
         const known = new Set(prev.steps.map((s) => s.event.id));
         const merged = [...prev.steps, ...appended.filter((s) => !known.has(s.event.id))];
-        merged.sort((a, b) => a.meta.sealedAtMs - b.meta.sealedAtMs);
+        merged.sort((a, b) => a.meta.steppedAtMs - b.meta.steppedAtMs);
         const next = { ...prev, steps: merged, index: merged.length - 1 };
         replayRef.current = next;
         return next;
@@ -6166,7 +6963,7 @@ function App() {
   // FolderDelta (add/remove/rename/import) has landed on the folder chain and
   // been published — the node id is only written after `await backend…create/
   // writeFile` resolves, so the refetch this triggers never races the publish.
-  // Focus deltas (panel mount/unmount) drain onto the *next* folder-node seal,
+  // Focus deltas (panel mount/unmount) drain onto the *next* folder-node step,
   // which always accompanies a membership change, so they're covered too. We
   // only bump on growth, never on shrink, so closing a file's last bracket or
   // a transient editor tick doesn't thrash the panel with refetches. (This is
@@ -6184,34 +6981,41 @@ function App() {
     if (!grew) return;
     setOrchestrationRefreshKey((k) => k + 1);
   }, [files]);
-  // LLM ops suppress seals while streaming and release on finish; indirection
+  // LLM ops suppress steps while streaming and release on finish; indirection
   // via a ref so the async op's finally always calls the latest closure (the
   // identity changes each render, but the op captured it at await time).
-  const sealGateRef = useRef(suppressSeal);
-  sealGateRef.current = suppressSeal;
-  // Thread setFiles into the hook so sealNow can reflect sealed node ids.
+  const stepGateRef = useRef(suppressStep);
+  stepGateRef.current = suppressStep;
+  // Latest files snapshot for async closures (the agent loop reads/writes draft
+  // FileState across multiple awaits; a ref avoids capturing a stale render).
+  const filesRef = useRef<Record<string, FileState>>({});
+  // Thread setFiles into the hook so stepFile can reflect stepped node ids.
   setFilesRef.current = setFiles;
-  // Thread the backend's write fn into the hook so sealNow routes through the
+  // Mirror files into a ref so async closures (the agent loop) read the latest
+  // state across awaits without capturing a stale render-scope copy.
+  filesRef.current = files;
+  // Thread the backend's write fn into the hook so stepFile routes through the
   // right storage (disk on desktop, localStorage on webapp) instead of the
   // hardwired Tauri disk path.
-  writeRef.current = (path, content, tags, signer, runs, taggedTraces, localOnly, force) => {
-    // Gate writes to foreign folders — the user must fork first. The banner's
-    // Fork button is the path out of read-only. Logging rather than throwing so
-    // a stray keystroke-driven seal doesn't surface as an error toast.
-    if (isForeignFolder) {
-      console.warn("write blocked: viewing a foreign folder — fork it to edit");
-      return Promise.resolve("");
-    }
-    return backendRef.current.writeFile(path, content, tags, signer, runs, undefined, taggedTraces, localOnly, force);
+  writeRef.current = (path, content, tags, signer, runs, taggedTraces, kedits, localOnly, force) => {
+    return backendRef.current.writeFile(path, content, tags, signer, runs, undefined, taggedTraces, kedits, localOnly, force);
   };
   const [activePanel, setActivePanel] = useState<number>(0);
   // Branch detection: rescan incoming forks / sibling heads for the active file.
-  // Fires on folder switch, tab focus, foreign-flag change, and after seals that
+  // Fires on folder switch, tab focus, foreign-flag change, and after steps that
   // advance the head (nodeId). Debounced slightly so rapid tab flips don't spam.
   const activePathForMerge = panels[activePanel]?.active ?? "";
   const activeHeadForMerge = activePathForMerge ? files[activePathForMerge]?.nodeId ?? "" : "";
   useEffect(() => {
-    if (!folder?.id || !activePathForMerge || isForeignFolder) {
+    // Don't run branch detection while parked on a replay step — the stepper
+    // focuses the replayed file, which would re-fire relay queries and pop the
+    // reconcile banner over a read-only historical view. Merge detection is for
+    // live editing; it re-runs when replay exits (replayActiveRef flips false).
+    if (replayActiveRef.current) {
+      setMergeCandidates([]);
+      return;
+    }
+    if (!folder?.id || !activePathForMerge) {
       setMergeCandidates([]);
       return;
     }
@@ -6229,7 +7033,7 @@ function App() {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [folder?.id, activePathForMerge, activeHeadForMerge, isForeignFolder]);
+  }, [folder?.id, activePathForMerge, activeHeadForMerge]);
   // The active editor's live selection range, lifted so the SelectionMenu can
   // open anchored to its head. `{ panelIdx, from, to }` when the focused
   // panel's editor has a non-empty selection; null otherwise. Each panel's
@@ -6239,29 +7043,69 @@ function App() {
     from: number;
     to: number;
   } | null>(null);
-  // The unified "active trace" — the single thing the top bar operates
+  // Global right-click menu. The tree (openContextMenu) and tab
+  // (openTabContextMenu) surfaces stop propagation, so this handler only fires
+  // for surfaces WITHOUT their own menu: the editor, modal text fields,
+  // read-only <pre>, and empty chrome (NavRail/Globe/background). The native
+  // browser menu is suppressed everywhere it catches; empty surfaces render no
+  // menu at all. Items are plain actions + separators; the target (which CM6
+  // view / textarea / pre was clicked) is captured at open time.
+  const [globalCtx, setGlobalCtx] = useState<{
+    x: number;
+    y: number;
+    items: GlobalCtxItem[];
+  } | null>(null);
+  const globalCtxRef = useRef<HTMLDivElement>(null);
+  // Dismiss the global right-click menu on pointer-down outside or Escape —
+  // same pattern as the tree/tab menus. Reuses the .ctx-menu CSS family.
+  useEffect(() => {
+    if (!globalCtx) return;
+    function onPointerDown(e: MouseEvent) {
+      if (globalCtxRef.current && !globalCtxRef.current.contains(e.target as Node)) {
+        setGlobalCtx(null);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setGlobalCtx(null);
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [globalCtx]);
+  // The unified "active trace" — the single thing the action palette operates
   // on. Sticky: it only moves when the user explicitly selects something else
   // (a file, a folder, a palette span, or an editor [[ span ]]); clicking empty
   // space never clears it, so "the last selected trace" is always available.
   const [selection, setSelection] = useState<SelectionRef | null>(null);
-  // The SCOPE mount — the file/folder the stepper scrubs and (recursively)
-  // bounds the context injected into an LLM op. Deliberately distinct from
-  // `selection`/focus: scope only moves on a deliberate tree-click, never when
-  // a tab gains focus (the focus-mirror effect below intentionally does not
-  // touch it). Defaulting to the root folder means "scope = whole attached
-  // folder", which matches the pre-split folder-wide behavior.
-  const [scope, setScope] = useState<SelectionRef | null>(() =>
-    folder ? { kind: "folder", path: ROOT } : null,
+  // This ordered set stores explicit tree mounts. Effective scope is derived
+  // from their folder closures minus shielded boundaries. Mounts are independent
+  // from panel/tab focus and change only through explicit mount gestures or
+  // commands. Root is the default mount.
+  const [scope, setScope] = useState<ScopeRef[]>(() =>
+    folder ? [{ kind: "folder", path: ROOT }] : [],
   );
   // Imperative-handler mirror (same pattern as replayRef) so beginReplay and
-  // op dispatchers can read the current scope without a stale closure.
-  const scopeRef = useRef<SelectionRef | null>(scope);
+  // op dispatchers can read the current mount roots without a stale closure.
+  const scopeRef = useRef<readonly ScopeRef[]>(scope);
   scopeRef.current = scope;
-  // Reset the scope mount when the attached folder changes: a scope pointing
-  // into the old folder's subtree is meaningless in the new one. Defaulting to
-  // the new root folder restores the pre-split "scope = whole folder" behavior.
+  // Shielded paths are persistent traversal boundaries. A shielded folder protects
+  // its subtree from a parent scope; an explicit mount at/inside it starts a
+  // new inclusion root.
+  const [shielded, setShielded] = useState<Set<string>>(() =>
+    folder ? loadLocalShielded(folder.id) : new Set(),
+  );
+  const shieldedRef = useRef<Set<string>>(shielded);
+  shieldedRef.current = shielded;
+  // Reset mounts when the attached folder changes: paths pointing into the old
+  // folder's subtree are meaningless in the new one. Mounting the new root
+  // restores the pre-split "scope = whole folder" behavior.
+  // The shielded set reloads from the new folder's own record.
   useEffect(() => {
-    setScope(folder ? { kind: "folder", path: ROOT } : null);
+    setScope(folder ? [{ kind: "folder", path: ROOT }] : []);
+    setShielded(folder ? loadLocalShielded(folder.id) : new Set());
   }, [folder?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The SUBSTRATE bar's currently-selected foreign substrate — the party a
@@ -6280,26 +7124,26 @@ function App() {
   // The scan picker modal. Open by the Scan button; the user picks a file or
   // folder to acquire as new traces under the scope-folder.
   const [scanOpen, setScanOpen] = useState(false);
-  // Re-bootstrap the timeline when the scope mount changes: a different file or
-  // folder is now the stepper subject, so its steps must be recomputed. Skips
-  // the initial mount (handled by the auto-bootstrap above) and only fires when
+  // Re-bootstrap the timeline when scope/shielded membership changes so its
+  // selected union is recomputed. Skip the initial mount (handled by the
+  // auto-bootstrap above) and only fire when
   // a replay already exists or the folder is ready — otherwise the auto-
   // bootstrap covers it. endReplay first so live state is restored cleanly.
-  const scopeBootRef = useRef<SelectionRef | null>(scope);
+  const scopeBootRef = useRef(`${scopeKey(scope)}|${[...shielded].sort().join(",")}`);
   useEffect(() => {
-    const prev = scopeBootRef.current;
-    scopeBootRef.current = scope;
-    if (!scope || scope === prev) return;
+    const nextKey = `${scopeKey(scope)}|${[...shielded].sort().join(",")}`;
+    if (scopeBootRef.current === nextKey) return;
+    scopeBootRef.current = nextKey;
     if (!folder || bootState !== "ready") return;
     if (replay) endReplay();
     void beginReplay().catch((e) => {
       console.warn("[replay] scope re-bootstrap failed:", e);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope]);
+  }, [scope, shielded]);
   // The keychain. There is no separate "active key" — the two user-facing
   // roles are the **AUTHOR** key and the **MODEL** key, each chosen in the
-  // TopBar (the AUTHOR-row key and the MODEL-row key). Both default to the
+  // ActionPalette (the AUTHOR-row key and the MODEL-row key). Both default to the
   // first keychain key when the user hasn't picked one, and persist per-browser
   // so a chosen AUTHOR/MODEL survives reload. The localStorage slot strings
   // keep their legacy pen/inject names (stable storage keys, not renamed).
@@ -6335,18 +7179,28 @@ function App() {
     setSubstrateSignerKeyId(substrate, id);
     setSubstrate((s) => s); // force re-read of substrateKeyId
   }
+  // Auto-assign the substrate voice at start (and on substrate switch) — the
+  // same guarantee the AUTHOR/MODEL rows enjoy: the key cell is never empty.
+  // getSubstrateVoice is idempotent (first call mints + persists the substrate's
+  // key — e.g. EXTERNAL for FILESYSTEM; later calls look it up) and it respects
+  // a user pin, so this never overrides a choice. Refresh the keychain state
+  // afterwards so substrateKeyId (which reads React `keys`) reflects the entry.
+  useEffect(() => {
+    getSubstrateVoice(substrate);
+    setKeys(loadKeys());
+  }, [substrate]);
   // The first keychain key's pubkey — the fallback both roles resolve to when
-  // no AUTHOR/MODEL has been picked (or its key was deleted), then "alice".
-  const fallbackPubkey = keys[0]?.pubkey ?? "alice";
+  // no AUTHOR/MODEL has been picked (or its key was deleted), then "author-1".
+  const fallbackPubkey = keys[0]?.pubkey ?? "author-1";
   // Resolve each role's pubkey once per render. Falls back to the first
-  // keychain key if the stored role id is gone (key deleted), then "alice".
+  // keychain key if the stored role id is gone (key deleted), then "author-1".
   const authorKey = keys.find((k) => k.id === authorKeyId) ?? null;
   const authorPubkey = authorKey?.pubkey ?? fallbackPubkey;
   const modelKey = keys.find((k) => k.id === modelKeyId) ?? null;
   const modelPubkey = modelKey?.pubkey ?? fallbackPubkey;
   // Hand the debounced auto-save a resolver for the AUTHOR key's secret, so
-  // the 1500ms debounce seal signs as the AUTHOR key — not a hidden active key.
-  // Read at fire time (see scheduleSeal), so an AUTHOR switch mid-debounce wins.
+  // the 1500ms debounce step signs as the AUTHOR key — not a hidden active key.
+  // Read at fire time (see scheduleStep), so an AUTHOR switch mid-debounce wins.
   authorSignerRef.current = () => secretKeyForVoice(authorPubkey) ?? undefined;
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   // Width of the collection/palette sidebar, driven by the .sidebar-resizer
@@ -6401,11 +7255,24 @@ function App() {
   // effect above (write-on-change to localStorage).
   useEffect(() => {
     if (!folder || !ready.current) return;
+    // Replay columns are session-owned animation surfaces, not the user's
+    // workspace. Project them out before saving while preserving any live tab
+    // closes/resizes the user made alongside playback.
+    const live = removeReplayPanels(panels, activePanel);
+    const livePanels: PanelState[] =
+      live.panels.length > 0 ? live.panels : [{ tabs: [], active: "" }];
+    let liveWeights =
+      live.keptIndices.length > 0
+        ? live.keptIndices.map((i) => panelWeights[i] ?? 1)
+        : [1];
+    if (livePanels.length === 1) liveWeights = [1];
     saveWorkspaceLayout(folder.id, {
-      panels,
-      tabModes,
-      activePanel,
-      panelWeights,
+      // Strip the in-memory replay marker as an extra guard against a crashed
+      // playback session leaking ephemeral columns into the next boot.
+      panels: livePanels.map(({ tabs, active }) => ({ tabs, active })),
+      tabModes: pruneTabModes(tabModes, livePanels),
+      activePanel: live.activePanel,
+      panelWeights: liveWeights,
     });
   }, [folder, panels, tabModes, activePanel, panelWeights]);
   // Flex-grow weights are relative shares: a column's pixel width is
@@ -6475,6 +7342,10 @@ function App() {
   // Set when createCommit rejects; cleared on a fresh create attempt or cancel.
   const [createError, setCreateError] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<View>("editor");
+  const [socialQuery, setSocialQuery] = useState<SocialQuery>(() => loadSocialQuery());
+  useEffect(() => {
+    saveSocialQuery(socialQuery);
+  }, [socialQuery]);
   const [theme, setTheme] = useState<Theme>(() => readTheme());
   const [railExpanded, setRailExpanded] = useState<boolean>(() => readRailExpanded());
   // Persist the nav rail's expanded/collapsed state across reloads.
@@ -6542,12 +7413,12 @@ function App() {
   // global active key drives both signing and editor attribution), so there's
   // no per-panel voice array to keep in sync anymore.
   const [summonStatus, setSummonStatus] = useState<SummonStatus[]>([{ state: "idle" }]);
-  // Panel flash on a deliberate Step/Send seal — a brief gold pulse on the
+  // Panel flash on a deliberate Step/Send step — a brief gold pulse on the
   // panel whose file was checkpointed, mirroring the agent-write flash. Cleared
   // by the CSS animation (1.4s) via a timeout; null = no panel flashing.
   const [flashPanel, setFlashPanel] = useState<number | null>(null);
   const flashPanelRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** Pulse the panel flash for a successful deliberate seal. Re-arming re-triggers
+  /** Pulse the panel flash for a successful deliberate step. Re-arming re-triggers
    *  the CSS animation (clearing then setting the class next tick) so two quick
    *  Steps both flash. The 1.4s clear matches the animation duration. */
   function flashPanelFn(idx: number) {
@@ -6563,8 +7434,8 @@ function App() {
   }
   const summonAbort = useRef<(AbortController | null)[]>([null]);
   // The MODEL signer the in-flight op armed in beginOp, stashed so endOp can
-  // hand it to the seal gate's catch-up seal. Undefined = the AUTHOR key
-  // resolves at seal time (manual edits, no op running). See beginOp/endOp.
+  // hand it to the step gate's catch-up step. Undefined = the AUTHOR key
+  // resolves at step time (manual edits, no op running). See beginOp/endOp.
   const opSignerRef = useRef<Uint8Array | undefined>(undefined);
   // When the active panel changes, point the palette's editor handle at the
   // newly-active panel's view. (onView only fires on mount/unmount, so without
@@ -6573,10 +7444,10 @@ function App() {
   useEffect(() => {
     activeEditorView.current = panelViews.current[activePanel] ?? null;
   }, [activePanel]);
-  // voiceProviderTick bumps after a MODEL-model provider pin changes (written to
-  // the localStorage-backed voice-provider-store). TopBar's ModelSelect reads
-  // that store during render, so it needs this App-level bump to re-render and
-  // reflect the new selection — there's no React state for the store to flow through.
+  // voiceProviderTick bumps after the MODEL voice's provider pin changes
+  // (written to the localStorage-backed voice-provider-store). It re-renders
+  // App so resolvedModelProviderId re-derives and flows down to ActionPalette as a
+  // prop — mirroring how a substrate switch re-derives substrateKeyId.
   const [voiceProviderTick, setVoiceProviderTick] = useState(0);
   // orchestrationRefreshKey bumps when the folder's membership set or any file's
   // node id changes, so the OrchestrationTimeline panel re-fetches its stream
@@ -6642,13 +7513,7 @@ function App() {
           const affected = d.type === "rename" ? d.toPath : d.relativePath;
           if (!affected) continue;
           const sc = scopeRef.current;
-          if (sc && sc.path && sc.path !== ROOT) {
-            const within =
-              sc.kind === "file"
-                ? affected === sc.path
-                : affected === sc.path || affected.startsWith(sc.path + "/");
-            if (!within) continue;
-          }
+          if (!pathInEffectiveScopes(sc, shieldedRef.current, affected)) continue;
           appended.push({
             event,
             relativePath: affected,
@@ -6682,7 +7547,7 @@ function App() {
         });
         if (fresh.length === 0) return prev;
         const merged = [...prev.steps, ...fresh];
-        merged.sort((a, b) => a.meta.sealedAtMs - b.meta.sealedAtMs);
+        merged.sort((a, b) => a.meta.steppedAtMs - b.meta.steppedAtMs);
         const next = { ...prev, steps: merged, index: merged.length - 1 };
         replayRef.current = next;
         return next;
@@ -6698,79 +7563,192 @@ function App() {
    *  bracket action and Cmd/Ctrl+S-over-a-selection both call this. Pure wrap —
    *  no publish. Protection from overwrite is immediate via bracketProtect; a
    *  bracket stays pending until send mints it. */
-  function wrapSelection(view: EditorView) {
-    wrapSelectionCommand()(view);
+  function wrapSelection(view: EditorView): boolean {
+    return wrapSelectionCommand()(view);
   }
 
-  /** send: mint a selection by saving its text as its own trace file in the
-   *  folder, then resolve the bracket in the origin doc to cite the new file's
-   *  node. The new file becomes a folder member (kind-4290, action: import);
-   *  the origin's next seal emits the resolved `[[ phrase | nodeId ]]` as a
-   *  `q`-tag citation (writeFile already does this via findResolvedBrackets), so
-   *  the cross-file reference lands on the relay for free. This is the only
-   *  path that mints a bracket.
+  /** Flush the editor's current document to the home relay now. Ordinary edits
+   *  remain debounced, but minting needs a signed source id before it can emit
+   *  `extracted-from`, and a signed container id after resolving the bracket so
+   *  its `q` citation is not left pending behind a temporary empty node id. */
+  async function flushEditorLocally(path: string, view: EditorView, signer?: Uint8Array): Promise<string> {
+    const file = filesRef.current[path] ?? files[path];
+    if (!file) throw new Error(`Cannot step missing source trace ${path}.`);
+    const content = view.state.doc.toString();
+    if (
+      file.nodeId &&
+      !unsteppedPathSet.has(path) &&
+      flatten(file.runs) === content
+    ) {
+      return file.nodeId;
+    }
+    // Non-throwing field read: a live CodeMirror view can briefly retain the
+    // pre-HMR StateField identity (the same case FileEditor guards throughout
+    // its sync/decorations path). Prefer its live runs, then React's mirrored
+    // runs when they cover this exact buffer, and finally preserve integrity by
+    // attributing the whole current snapshot to the active author.
+    const liveRuns = view.state.field(voiceField, false);
+    const runs = liveRuns && flatten(liveRuns) === content
+      ? liveRuns
+      : flatten(file.runs) === content
+        ? file.runs
+        : [{ voice: authorPubkey, text: content }];
+    const taggedTraces = file.taggedTraces ?? [];
+    const steppedKedits = view.state.field(keditField, false) ?? file.kedits ?? EMPTY_KEDIT_LOG;
+    const kedits = keditLogToArray(steppedKedits);
+    await backendRef.current.writeFile(
+      path,
+      content,
+      file.tags,
+      signer,
+      runs,
+      undefined,
+      taggedTraces.length > 0 ? taggedTraces : undefined,
+      kedits.length > 0 ? kedits : undefined,
+      true,
+    );
+    const nodeId = await backendRef.current.flushFile(path);
+    if (!nodeId) throw new Error(`The local source trace ${path} did not produce a node id.`);
+    seedSteppedRef.current({
+      [path]: { ...file, runs, nodeId },
+    });
+    if (isTauri() && folder) clearPadPath(folder.id, path);
+    setFiles((prev) => {
+      const current = prev[path];
+      if (!current) return prev;
+      // Copy/mint may wait on a relay while the author keeps typing. Advance
+      // only the stepped nucleus and drain exactly the KEdit prefix captured
+      // above; never overwrite newer runs with the source snapshot.
+      const remaining = dropKEditLogPrefix(current.kedits ?? EMPTY_KEDIT_LOG, steppedKedits);
+      const { kedits: _stepped, ...rest } = current;
+      return {
+        ...prev,
+        [path]: {
+          ...rest,
+          nodeId,
+          ...(remaining.length > 0 ? { kedits: remaining } : {}),
+        },
+      };
+    });
+    return nodeId;
+  }
+
+  /** Strike one immutable, single-Step coin without changing the source body.
+   * The caller decides whether to resolve a bracket in the source (the Mint
+   * gesture does; provenance-aware Copy deliberately does not). */
+  async function mintCoinTrace(
+    phrase: string,
+    originNodeId: string,
+    signer?: Uint8Array,
+  ): Promise<{ path: string; nodeId: string; runs: Run[] }> {
+    if (!folder) throw new Error("Cannot mint a coin without an attached press.");
+    const sourceFolderId = folder.id;
+    const taken = new Set([
+      ...Object.keys(filesRef.current),
+      ...pendingPaths.current,
+    ]);
+    const newPath = mintedPath(phrase, new Date(), taken);
+    pendingPaths.current.add(newPath);
+    try {
+      const mintFolderId = await getOrCreateMintFolder(sourceFolderId, signer);
+      const mintMemberName = newPath.slice(`${MINT}/`.length);
+      const coin = await publishHardenedSpan({
+        folderId: mintFolderId,
+        relativePath: mintMemberName,
+        phrase,
+        originNodeId,
+        signer,
+        localOnly: true,
+      });
+      const parsed = JSON.parse(coin.content) as { contentHash?: string };
+      await upsertManifestEntry(
+        mintFolderId,
+        {
+          kind: "file",
+          relativePath: mintMemberName,
+          latestNodeId: coin.id,
+          contentHash: parsed.contentHash ?? "",
+        },
+        signer,
+        { localOnly: true },
+      );
+      const coinVoice = signer ? getPublicKey(signer) : authorPubkey;
+      const runs: Run[] = [{ voice: coinVoice, text: phrase }];
+      saveLocalFile(sourceFolderId, newPath, {
+        content: phrase,
+        tags: [],
+        nodeId: coin.id,
+        runs,
+        voicePubkey: coinVoice,
+      });
+      seedSteppedRef.current({
+        [newPath]: { runs, nodeId: coin.id, tags: [] },
+      });
+      if (folderIdRef.current === sourceFolderId) {
+        setFiles((prev) => ({
+          ...prev,
+          [newPath]: { runs, nodeId: coin.id, tags: [] },
+        }));
+      }
+      return { path: newPath, nodeId: coin.id, runs };
+    } finally {
+      pendingPaths.current.delete(newPath);
+    }
+  }
+
+  /** Mint a selection as a named, immutable trace in the dedicated Mint folder, then
+   *  resolve the source bracket to cite it. Both source checkpoints and the
+   *  new Mint member are stepped only to the home relay. Send remains a later,
+   *  separate reachability gesture.
    *
    *  `from`/`to` are the current selection in `view`. If the selection is
    *  already inside a pending `[[ phrase ]]`, that phrase is used as-is;
    *  otherwise the selection is wrapped first and the just-wrapped phrase is
-   *  used. The new file opens in the adjacent panel (or the same one when only
+   *  used. The new coin opens in the adjacent panel (or the same one when only
    *  a single column is open). */
-  async function zinePhrase(path: string, view: EditorView, from: number, to: number) {
-    if (!folder) return;
-    // Determine the phrase. If the selection is already a pending bracket, use
-    // its text; otherwise wrap the selection and read the wrapped phrase.
+  async function zinePhrase(
+    path: string,
+    view: EditorView,
+    from: number,
+    to: number,
+    stepSigner?: Uint8Array,
+  ): Promise<boolean> {
+    if (!folder || isMint(path) || isOblivion(path)) return false;
+    // Step mints either a loose-text highlight or the entire unresolved bracket
+    // containing the selection. Resolved/cross-boundary selections are not new
+    // mint targets.
     const docText = view.state.doc.toString();
-    const insidePending = findPendingBrackets(docText).find(
-      (b) => b.matchStart <= from && b.matchEnd >= to,
-    );
-    let phrase: string;
-    if (insidePending) {
-      phrase = insidePending.phrase;
-    } else {
-      phrase = docText.slice(from, to);
-      if (!phrase || phrase.includes("[[") || phrase.includes("]]")) return;
-      wrapSelection(view);
+    const targetSelection = findMintSelectionTarget(docText, from, to);
+    if (!targetSelection) return false;
+    const phrase = targetSelection.phrase;
+    if (!targetSelection.bracket) {
+      if (!wrapSelection(view)) return false;
       // No need to capture the wrapped bracket's positions here — after the
       // writeFile await below, we re-find the bracket by phrase (positions may
       // have shifted if the user typed during the await).
     }
 
-    // Slugify the phrase into a sibling filename. Same parent dir as the origin
-    // so the new file sits beside it; .md extension; deduped against current
-    // paths via uniquePath so two sends of the same phrase don't collide.
-    const slug = slugifyFilename(phrase, "span");
-    const parent = parentPath(path);
-    const base = `${slug}.md`;
-    const candidate = parent ? `${parent}/${base}` : base;
-    const newPath = uniquePath(candidate, new Set(Object.keys(files)));
-
-    const signer = secretKeyForVoice(authorPubkey) ?? undefined;
-    // Optimistic empty file so the editor opens immediately, then write + seal.
-    // writeFile writes disk + publishes the kind-4290 node + updates the folder
-    // manifest (the new file becomes a folder member).
-    pendingPaths.current.add(newPath);
-    editFile(newPath, [{ voice: authorPubkey, text: "" }]);
+    const signer = stepSigner ?? secretKeyForVoice(authorPubkey) ?? undefined;
     try {
-      const newFileId = await backendRef.current.writeFile(newPath, phrase, [], signer);
-      // Resolve the bracket in the origin doc to cite the new file's node. The
-      // whole-doc dispatch keeps positions from drifting; liftRuns carries the
-      // change into file.runs and the decoration flips to --resolved.
+      // Pin extraction to the exact source version that contains the selected
+      // phrase. This flush is a no-op when the source is already current.
+      const originNodeId = await flushEditorLocally(path, view, signer);
+      const coin = await mintCoinTrace(phrase, originNodeId, signer);
+
+      // Resolve the bracket in the origin doc to cite the new file's node.
+      // Dispatch only the changed id, so the bracket phrase and surrounding
+      // model prose retain their existing voices.
       const afterWrite = view.state.doc.toString();
       // Bracket positions may have shifted if the user typed during the await;
       // re-find by phrase to be safe.
       const target = findPendingBrackets(afterWrite).find((b) => b.phrase === phrase);
       if (target) {
-        const resolved = resolveBracket(afterWrite, target.matchStart, target.matchEnd, newFileId);
-        view.dispatch({ changes: { from: 0, to: afterWrite.length, insert: resolved } });
+        const resolved = resolveBracket(afterWrite, target.matchStart, target.matchEnd, coin.nodeId);
+        const change = minimalTextChange(afterWrite, resolved);
+        if (change) view.dispatch({ changes: change });
       }
-      // Reflect the new file + its node id into state. The span is authored by
-      // the AUTHOR key (it signs the genesis node above), so attribute its text to
-      // authorPubkey directly so the runs and the signer agree and the sealed
-      // `authors` map is single-voice-faithful rather than mismatched.
-      setFiles((prev) => ({
-        ...prev,
-        [newPath]: { runs: [{ voice: authorPubkey, text: phrase }], nodeId: newFileId, tags: [] },
-      }));
+      // The source's next local checkpoint now carries the paired q edge.
+      await flushEditorLocally(path, view, signer);
       // Open the new file in the panel immediately right of its origin if one
       // exists, else the origin panel itself. The reader sees the new trace
       // alongside its origin. (This reuses an existing neighbor — it does not
@@ -6778,26 +7756,257 @@ function App() {
       const originPanel = panels.findIndex((p) => p.tabs.includes(path));
       const destPanel = originPanel === -1 ? activePanel : originPanel + 1;
       if (destPanel < panels.length) {
-        openInPanel(newPath, destPanel);
+        openInPanel(coin.path, destPanel);
       } else {
-        openInPanel(newPath, Math.max(0, originPanel));
+        openInPanel(coin.path, Math.max(0, originPanel));
       }
+      return true;
     } catch (e) {
-      console.warn(`[zine] publish failed for phrase in ${path}:`, e);
+      console.warn(`[mint] failed for phrase in ${path}:`, e);
+      const originPanel = panels.findIndex((p) => p.tabs.includes(path));
+      setOpStatus(originPanel === -1 ? activePanel : originPanel, "error", e instanceof Error ? e.message : String(e));
       // Leave the bracket pending — the user can retry.
-    } finally {
-      pendingPaths.current.delete(newPath);
+      return false;
     }
   }
 
+  /** Materialize a copied selection as a coin-backed citation. A clean source
+   * reuses its current Step; a dirty source is locally stepped first. Copying
+   * a whole existing coin reuses that coin instead of minting a duplicate. */
+  async function prepareCopiedCoin(
+    path: string,
+    view: EditorView,
+    from: number,
+    to: number,
+    phrase: string,
+  ): Promise<CoinClipboardCitation> {
+    const file = filesRef.current[path];
+    if (!file) throw new Error(`Cannot copy from missing trace ${path}.`);
+    const docText = view.state.doc.toString();
+
+    // A phrase selected inside an existing resolved bracket already has the
+    // strongest possible provenance. Reuse its coin rather than striking an
+    // identical child coin.
+    const existing = findResolvedBrackets(docText).find(
+      (bracket) =>
+        bracket.phrase === phrase &&
+        bracket.matchStart <= from &&
+        bracket.matchEnd >= to,
+    );
+    if (existing) return { phrase, nodeId: existing.nodeId };
+
+    const signer = secretKeyForVoice(authorPubkey) ?? undefined;
+    let originNodeId: string;
+    if (isMint(path)) {
+      if (!file.nodeId) throw new Error("The source coin has no stepped nucleus.");
+      if (from === 0 && to === docText.length) {
+        return { phrase, nodeId: file.nodeId };
+      }
+      originNodeId = file.nodeId;
+    } else {
+      originNodeId = await flushEditorLocally(path, view, signer);
+    }
+
+    const coin = await mintCoinTrace(phrase, originNodeId, signer);
+    void appendToPalette({
+      nodeId: coin.nodeId,
+      text: phrase,
+      originPath: path,
+      mintedAt: Date.now(),
+    }).catch((error) => console.warn("[coin-copy] palette append failed:", error));
+    return { phrase, nodeId: coin.nodeId };
+  }
+
+  /** Upgrade a normal editor Copy into an intra-press coin transfer while
+   * keeping `text/plain` on the system clipboard for every other app. */
+  function copySelectionWithCoin(
+    path: string,
+    view: EditorView,
+    event: ClipboardEvent,
+  ): boolean {
+    if (!folder || replayActiveRef.current || isOblivion(path)) return false;
+    const { from, to } = view.state.selection.main;
+    if (from === to) return false;
+    const phrase = view.state.sliceDoc(from, to);
+    if (!canCoinText(phrase) || !event.clipboardData) return false;
+
+    const ticket = typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const envelope = serializeCoinClipboardEnvelope(ticket);
+    if (!envelope) return false;
+
+    try {
+      event.clipboardData.setData("text/plain", phrase);
+      event.clipboardData.setData(COIN_CLIPBOARD_MIME, envelope);
+    } catch {
+      return false;
+    }
+    event.preventDefault();
+
+    const citation = prepareCopiedCoin(path, view, from, to, phrase);
+    // Attach a rejection observer even if the user never pastes; paste itself
+    // still receives the original promise and degrades to plain text on error.
+    void citation.catch((error) => console.warn("[coin-copy] mint failed:", error));
+    coinClipboardTicketsRef.current.set(ticket, { phrase, citation });
+    // Bound session memory without time-based clipboard invalidation: the
+    // newest 32 provenance copies remain pasteable, older envelopes safely
+    // degrade to their `text/plain` payload.
+    while (coinClipboardTicketsRef.current.size > 32) {
+      const oldest = coinClipboardTicketsRef.current.keys().next().value;
+      if (typeof oldest !== "string") break;
+      coinClipboardTicketsRef.current.delete(oldest);
+    }
+    return true;
+  }
+
+  /** Resolve a clipboard ticket into `[[ phrase | coinId ]]`. Unknown tickets,
+   * text modified by another app, and unsupported custom MIME all fall through
+   * to CodeMirror's native plain-text paste. */
+  function pasteSelectionWithCoin(
+    view: EditorView,
+    event: ClipboardEvent,
+  ): boolean {
+    if (!event.clipboardData) return false;
+    const envelope = parseCoinClipboardEnvelope(
+      event.clipboardData.getData(COIN_CLIPBOARD_MIME),
+    );
+    if (!envelope) return false;
+    const ticket = coinClipboardTicketsRef.current.get(envelope.ticket);
+    const plainText = event.clipboardData.getData("text/plain");
+    if (!ticket || ticket.phrase !== plainText) return false;
+
+    event.preventDefault();
+    const pasteState = view.state;
+    const pasteSelection = pasteState.selection.main;
+    const insert = (text: string) => {
+      if (!view.dom.isConnected) return;
+      // If the document changed while the source Step/coin was landing, honor
+      // the author's current caret instead of overwriting an unrelated range.
+      const selection = view.state === pasteState
+        ? pasteSelection
+        : view.state.selection.main;
+      view.dispatch({
+        changes: { from: selection.from, to: selection.to, insert: text },
+        selection: { anchor: selection.from + text.length },
+        scrollIntoView: true,
+        userEvent: "input.paste",
+      });
+      view.focus();
+    };
+
+    void ticket.citation.then(
+      (citation) => insert(resolvedBracketMarkup(citation.phrase, citation.nodeId)),
+      (error) => {
+        console.warn("[coin-paste] citation unavailable; pasted plain text:", error);
+        insert(plainText);
+      },
+    );
+    return true;
+  }
+
+  // Resolve the right-click surface from the event target and build a sensible
+  // menu of standard ops. The tree (openContextMenu) and tab
+  // (openTabContextMenu) handlers call stopPropagation, so this only reaches
+  // the editor, modal text fields, read-only <pre>, and empty chrome. The
+  // native menu is suppressed everywhere it catches; empty surfaces get no menu.
+  // Clipboard uses document.execCommand for native fields (textarea/input) and
+  // CM6's selection/replace APIs for the editor — the legacy execCommand path
+  // still works inside CodeMirror's contentDOM.
+  function openGlobalContextMenu(e: React.MouseEvent) {
+    // Tree/tab surfaces already handled their own menus + stopPropagation; if we
+    // still see one of their containers, skip (don't double-open).
+    const target = e.target as HTMLElement;
+    // Find a CM6 view whose content contains the target — the editor surface.
+    const cmView = panelViews.current.find(
+      (v) => v && v.contentDOM && v.contentDOM.contains(target),
+    );
+    const isEditableField =
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLInputElement ||
+      target.isContentEditable;
+
+    // Helper: read the current selection text from whatever surface was clicked.
+    function selectedText(): string {
+      if (cmView) {
+        const sel = cmView.state.selection.main;
+        return sel.from !== sel.to ? cmView.state.sliceDoc(sel.from, sel.to) : "";
+      }
+      if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+        return target.value.slice(target.selectionStart ?? 0, target.selectionEnd ?? 0);
+      }
+      const dsel = window.getSelection();
+      return dsel && !dsel.isCollapsed ? dsel.toString() : "";
+    }
+    const hasSel = selectedText().length > 0;
+
+    if (cmView) {
+      // Editor canvas (CodeMirror). Resolved Coins are immutable, so this menu
+      // deliberately contains only ordinary text operations.
+      const items: GlobalCtxItem[] = [
+        { kind: "action", label: "Cut", run: () => document.execCommand("cut"), disabled: !hasSel },
+        { kind: "action", label: "Copy", run: () => document.execCommand("copy"), disabled: !hasSel },
+        { kind: "action", label: "Paste", run: () => document.execCommand("paste") },
+        { kind: "sep" },
+        { kind: "action", label: "Select All", run: () => cmView.dispatch({ selection: { anchor: 0, head: cmView.state.doc.length } }) },
+      ];
+      e.preventDefault();
+      setGlobalCtx({ x: e.clientX, y: e.clientY, items });
+      return;
+    }
+
+    if (isEditableField) {
+      // Modal text fields (AttestModal note, RunModal goal, SamplerPanel inputs,
+      // etc.). Native editing ops via execCommand — the field retains focus.
+      const items: GlobalCtxItem[] = [
+        { kind: "action", label: "Cut", run: () => document.execCommand("cut"), disabled: !hasSel },
+        { kind: "action", label: "Copy", run: () => document.execCommand("copy"), disabled: !hasSel },
+        { kind: "action", label: "Paste", run: () => document.execCommand("paste") },
+        { kind: "sep" },
+        { kind: "action", label: "Select All", run: () => document.execCommand("selectAll") },
+      ];
+      e.preventDefault();
+      setGlobalCtx({ x: e.clientX, y: e.clientY, items });
+      return;
+    }
+
+    // Read-only text: <pre> (PromptInspector, MergePreview) and ListingsView
+    // cards. Copy + Select All on whatever selection the browser made on click.
+    const isReadOnlyText =
+      target.closest("pre, code, .stack-card, article") != null;
+    if (isReadOnlyText) {
+      const items: GlobalCtxItem[] = [
+        { kind: "action", label: "Copy", run: () => document.execCommand("copy"), disabled: !hasSel },
+        { kind: "sep" },
+        { kind: "action", label: "Select All", run: () => document.execCommand("selectAll") },
+      ];
+      e.preventDefault();
+      setGlobalCtx({ x: e.clientX, y: e.clientY, items });
+      return;
+    }
+
+    // Empty chrome (NavRail, Globe, ActionPalette, citation row, app background): suppress
+    // the native menu but render nothing — right-click visibly does nothing.
+    e.preventDefault();
+  }
+
   // Provider catalog (Models view). Labels are the card names from Models —
-  // kept live via ModelsView.onProvidersChange so the topbar dropdown matches
+  // kept live via ModelsView.onProvidersChange so the action-palette dropdown matches
   // renames. Re-read when entering Press in case storage changed elsewhere.
   // Which one ops use is chosen under Press model select (voice-provider-store).
   const [providers, setProviders] = useState<ProviderConfig[]>(() => loadProviders());
   useEffect(() => {
     if (activeView === "editor") setProviders(loadProviders());
   }, [activeView]);
+  // MODEL voice's pinned provider, derived here so ActionPalette's model select takes
+  // it as a prop (same shape as substrateKeyId above) instead of re-reading the
+  // store mid-render. Falls back to the first provider so the dropdown matches
+  // what ops run (resolveVoiceProvider uses the same rule). `voiceProviderTick`
+  // is the re-read signal — a pin change bumps it, re-running this derivation
+  // (mirroring how a substrate switch re-derives substrateKeyId).
+  void voiceProviderTick;
+  const resolvedModelProviderId =
+    providers.find((p) => p.id === getVoiceProvider(modelPubkey))?.id ?? providers[0]?.id ?? "";
 
   /** Set the AUTHOR (typing + Save/send) voice. Persisted per-browser. */
   function chooseAuthorKey(id: string) {
@@ -6824,10 +8033,12 @@ function App() {
     return providers[0] ?? null;
   }
 
-  /** Pin the MODEL model for a voice and re-render so the menu updates. */
-  function selectVoiceProvider(pubkey: string, providerId: string) {
-    setVoiceProvider(pubkey, providerId || null);
-    setVoiceProviderTick((k) => k + 1); // force ModelSelect to re-read the store
+  /** Pin the MODEL model for the MODEL voice and re-render so the menu updates.
+   *  Mirrors chooseModelKey / chooseSubstrateKey: a single id, App already knows
+   *  the voice. The tick re-derives resolvedModelProviderId above (like substrate). */
+  function selectVoiceProvider(providerId: string) {
+    setVoiceProvider(modelPubkey, providerId || null);
+    setVoiceProviderTick((k) => k + 1);
   }
 
   /** Set the per-panel op status (shared by all four ops). The `op` kind is
@@ -6907,8 +8118,7 @@ function App() {
     if (!folder) return "";
     const path = panels[idx]?.active;
     if (!path) return "";
-    const sc = scopeToGather(scopeRef.current);
-    return gatherContextBlock(folder, files, sc, path);
+    return gatherContextBlock(folder, files, scopeRef.current, path, shieldedRef.current);
   }
 
   // Approximate prompt-size estimate for the token indicator beside the LLM
@@ -6937,7 +8147,7 @@ function App() {
     const timer = setTimeout(() => {
       void (async () => {
         try {
-          const block = await gatherContextBlock(folder, files, scopeToGather(scope), path);
+          const block = await gatherContextBlock(folder, files, scope, path, shielded);
           const voicePrompt = getVoicePrompt(modelPubkey) ?? "";
           // The op-specific overhead (op system instruction + seed/source) is
           // small vs. the context block; a flat allowance keeps this honest.
@@ -6953,7 +8163,73 @@ function App() {
       clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [folder, files, panels, activePanel, selection?.path, modelPubkey, scope]);
+  }, [folder, files, panels, activePanel, selection?.path, modelPubkey, scope, shielded]);
+
+  // ─── Prompt inspector ──────────────────────────────────────────────────────
+  // Clicking the token-count indicator opens a modal showing exactly what a
+  // single-shot op would send. `inspectOp` is null when closed; non-null is
+  // the default op to show first (Extend). The inputs + context block are
+  // gathered once on open (against the op-target panel + scope, mirroring what
+  // the live ops gather) and held in state so the modal can switch op tabs
+  // without re-fetching the (memoized) context block.
+  const [inspectOp, setInspectOp] = useState<PromptOpKind | null>(null);
+  const [inspectContext, setInspectContext] = useState("");
+  const [inspectInputs, setInspectInputs] = useState<Partial<Record<PromptOpKind, OpInputs>>>({});
+
+  /** Derive the per-op `OpInputs` from the op-target panel's live editor state,
+   *  the same way the ops themselves do. Extend seeds from the selection or doc
+   *  tail; Settle/Stir use partitionDoc + findCommands + iterBrackets. Reply's
+   *  coins and Receive's limelight log need relay fetches the inspector
+   *  doesn't make, so those ops carry a note instead of fetched content. */
+  function deriveInspectInputs(): Partial<Record<PromptOpKind, OpInputs>> {
+    const idx = opTargetPanel();
+    const path = panels[idx]?.active;
+    const view = panelViews.current[idx];
+    if (!path || !view) return {};
+    const doc = view.state.doc.toString();
+    const sel = view.state.selection.main;
+    const hasSel = sel.from !== sel.to;
+    // Extend: seed from selection, else doc tail (matches extendLLM).
+    const seed = hasSel ? view.state.sliceDoc(sel.from, sel.to) : doc.slice(-4000);
+    // Stir: gather commands + loose prose + anchor count over the selection
+    // (or whole doc), mirroring shakeLLM.
+    const stirText = hasSel ? view.state.sliceDoc(sel.from, sel.to) : doc;
+    const cmds = findCommands(stirText);
+    const stripped = stripRanges(stirText, cmds.map((c) => [c.matchStart, c.matchEnd] as [number, number]));
+    const loose = partitionDoc(stripped).filter((p) => p.kind === "loose").map((p) => p.text).join("\n").trim();
+    const anchorCount = [...iterBrackets(stirText)].length;
+    // Settle condenses each loose segment independently; the preview shows the
+    // first non-empty one as a representative body.
+    const settleLoose = partitionDoc(doc).find((p) => p.kind === "loose" && p.text.trim().length > 0)?.text ?? "";
+    return {
+      extend: { seed, hasSelection: hasSel },
+      settle: { loose: settleLoose },
+      stir: { loose, anchorCount, commands: cmds.map((c) => c.command) },
+      // Reply/Receive bodies are relay-fetched at call time — see inputNotes.
+      reply: { source: doc },
+      receive: {},
+    };
+  }
+
+  /** Open the inspector: gather the context block + derive inputs against the
+   *  op-target panel, then show the modal. Async because the context block's
+   *  directory-log fetch is async (memoized). */
+  async function openInspector() {
+    setInspectInputs(deriveInspectInputs());
+    setInspectContext(await gatherContextForPanel(opTargetPanel()));
+    setInspectOp("extend");
+  }
+
+  /** Per-op notes for inputs the inspector can't derive without a relay fetch.
+   *  Shown inline so the user sees what's missing and why, not an empty box. */
+  const inspectNotes: Partial<Record<PromptOpKind, string>> = {
+    reply:
+      "Coins (citable passages) are fetched from the relay at call time and aren't shown here. " +
+      "The source document above is the focused file's current content.",
+    receive:
+      "The limelight log (panel-occupancy history) is fetched at call time when the folder has one and isn't shown here. " +
+      "The delta log and file contents arrive in the shared context block.",
+  };
 
   /** Begin an op: mark running and arm an AbortController. The op voice is
    *  NOT adopted on the editor facet here — each streamed change instead
@@ -6962,20 +8238,20 @@ function App() {
    *  switch) or restored by a prior op. Returns the controller, or null if
    *  the editor isn't mounted.
    *
-   *  `signer` is the voice the op's release seal should be signed as — the
-   *  MODEL key's secret for an LLM op, so the AI insert seals as that voice
+   *  `signer` is the voice the op's release step should be signed as — the
+   *  MODEL key's secret for an LLM op, so the AI insert steps as that voice
    *  instead of the AUTHOR key the user is typing under. Stashed for
    *  endOp to pass through the gate's catch-up
-   *  seal. The op's pre-stream baseline seal is signed by the AUTHOR key
-   *  separately; this only governs the release seal.
+   *  step. The op's pre-stream baseline step is signed by the AUTHOR key
+   *  separately; this only governs the release step.
    *
-   *  Also arms the seal gate: while the op streams, the debounce seal effect
-   *  is suppressed (see useProvenance.suppressSeal). Each streamed token's
-   *  setFiles would otherwise re-arm the 1500ms seal; a quiet gap mid-stream
-   *  (model thinking, network hiccup) then fires an intermediate seal,
+   *  Also arms the step gate: while the op streams, the debounce step effect
+   *  is suppressed (see useProvenance.suppressStep). Each streamed token's
+   *  setFiles would otherwise re-arm the 1500ms step; a quiet gap mid-stream
+   *  (model thinking, network hiccup) then fires an intermediate step,
    *  publishing a half-finished AI insert — and more tokens publish again,
    *  tripping the relay's per-connection rate-limit. The gate collapses the
-   *  whole op to a single seal, released in endOp. */
+   *  whole op to a single step, released in endOp. */
   function beginOp(
     idx: number,
     signer?: Uint8Array,
@@ -6994,37 +8270,37 @@ function App() {
     }
     setOpStatus(idx, "running", undefined, op);
     opSignerRef.current = signer;
-    sealGateRef.current(true);
+    stepGateRef.current(true);
     const controller = new AbortController();
     summonAbort.current[idx] = controller;
     return { controller };
   }
 
-  /** End an op: clear the controller and release the seal gate. The facet was
+  /** End an op: clear the controller and release the step gate. The facet was
    *  never touched, so there's nothing to restore — terminal status is handled
-   *  by the caller. Releasing the gate fires one catch-up seal per path the
+   *  by the caller. Releasing the gate fires one catch-up step per path the
    *  suppressed window saw touched, signed with the voice beginOp armed, so
-   *  the op's whole output seals as a single delta under the right voice.
+   *  the op's whole output steps as a single delta under the right voice.
    *
    *  Deferred one macrotask so React has committed the op's final setFiles
-   *  before the catch-up seal reads `files`. Without this, endOp's finally
+   *  before the catch-up step reads `files`. Without this, endOp's finally
    *  runs synchronously on await resume — the last token's state is still
-   *  pending — so the catch-up seal would publish partial content, then the
-   *  debounce effect would re-seal the remainder a beat later as the active
-   *  key (scheduleSeal always passes no signer). With the deferral the
-   *  catch-up seal sees complete content and the debounce dedups against it:
-   *  one seal, inject-signed, complete. */
+   *  pending — so the catch-up step would publish partial content, then the
+   *  debounce effect would re-step the remainder a beat later as the active
+   *  key (scheduleStep always passes no signer). With the deferral the
+   *  catch-up step sees complete content and the debounce dedups against it:
+   *  one step, inject-signed, complete. */
   function endOp(idx: number) {
     summonAbort.current[idx] = null;
     const signer = opSignerRef.current;
     opSignerRef.current = undefined;
-    setTimeout(() => sealGateRef.current(false, signer), 0);
+    setTimeout(() => stepGateRef.current(false, signer), 0);
   }
 
   /** §3.7: prepare the LLM-call metadata (rule trace + scope citations + model
-   *  config) and stash it via setPendingLlmMeta, so the op's write-back seal
+   *  config) and stash it via setPendingLlmMeta, so the op's write-back step
    *  (through writeFile → publishEdit) carries it on the action:llm node. Called
-   *  by every LLM op just before its provider call — the seal happens after the
+   *  by every LLM op just before its provider call — the step happens after the
    *  model replies, but the scope is pinned to call time (what was in scope
    *  when the model was invoked), so gathering it here is correct. The scope is
    *  the folder's members' heads + the active file's head + the rule trace id. */
@@ -7038,13 +8314,20 @@ function App() {
     try {
       const manifest = {
         algorithm: "ctx-block-v1",
-        params: { op, folderLabel: folder.label ?? folder.id.slice(0, 8), activePath },
+        params: { op, folderLabel: folder.label ?? DEFAULT_ROOT_LABEL, activePath },
       };
       const injectRule = await getOrCreateRuleTrace(folder.id, manifest);
       const members = await fetchManifest(folder.id);
-      const activeNodeId = activePath ? (files[activePath]?.nodeId ?? null) : null;
+      const effectiveMembers = members.filter(
+        (member) =>
+          pathInEffectiveScopes(scopeRef.current, shieldedRef.current, member.relativePath),
+      );
+      const activeNodeId =
+        activePath && isInScope(scopeRef.current, shieldedRef.current, activePath)
+          ? (files[activePath]?.nodeId ?? null)
+          : null;
       const scopeCitations = [
-        ...members.map((m) => m.latestNodeId).filter((id): id is string => !!id),
+        ...effectiveMembers.map((m) => m.latestNodeId).filter((id): id is string => !!id),
         ...(activeNodeId ? [activeNodeId] : []),
       ].filter((id, i, arr) => arr.indexOf(id) === i);
       setPendingLlmMeta({
@@ -7080,16 +8363,16 @@ function App() {
     const { controller } = started;
     const view = panelViews.current[idx]!;
     // Summoning the model is a deliberate human gesture (a button click), so
-    // the baseline it runs against is sealed first by the AUTHOR key — same path
+    // the baseline it runs against is stepped first by the AUTHOR key — same path
     // as a manual Save. The write-back then lands as its own subsequent node
-    // chained off this baseline (see sealGate / suppressSeal in endOp).
+    // chained off this baseline (see stepGate / suppressStep in endOp).
     {
       const signer = secretKeyForVoice(authorPubkey);
       const path = panels[idx]?.active;
-      if (path && files[path] && signer) await sealNow(path, signer);
+      if (path && files[path] && signer) await stepFile(path, signer);
     }
     // §3.7: pin the call's scope + rule + model config before invoking, so the
-    // write-back seal carries them and a reader can reconstruct the prompt.
+    // write-back step carries them and a reader can reconstruct the prompt.
     await prepareLlmMeta(idx, "extend", provider);
     // With a selection, Extend seeds from the selected text and continues right
     // after it; otherwise it seeds from the end of the document and appends.
@@ -7100,27 +8383,7 @@ function App() {
       : view.state.doc.toString().slice(-4000);
     const messages: ChatMessage[] = withContext(
       await gatherContextForPanel(idx),
-      withVoicePrompt(pubkey, [
-        {
-          role: "system",
-          content:
-            `${SYSTEM_PREAMBLE}\n\n` +
-            "YOUR ROLE — Extend: the continuer. You pick up the document where it " +
-            "leaves off and write ONLY the continuation. The text after the " +
-            "context block is your SEED: " +
-            (hasSel
-              ? "a selected passage. Continue from the end of that passage as if the cursor sat right after it."
-              : "the end of the document. Continue from there.") +
-            " The seed is what the human is asking you to extend — it is NOT a " +
-            "question to answer or a prompt to reply to. Match the seed's " +
-            "voice, tense, register, and formatting. Do not repeat or restate " +
-            "the seed; flow directly onward from its last line. Do not emit " +
-            "brackets unless they already appear in the seed and clearly extend " +
-            "an ongoing citation. No preamble, no acknowledgement, no fences, " +
-            "no quotation marks wrapping the whole response.",
-        },
-        { role: "user", content: seed || "(empty document — begin writing.)" },
-      ]),
+      withVoicePrompt(pubkey, extendMessages(seed, hasSel)),
     );
     const anchor = hasSel ? sel.to : view.state.doc.length;
     // Begin the continuation on its own line: if the char right before the
@@ -7143,7 +8406,7 @@ function App() {
           }
           acc += delta;
           // Clamp to the live doc length: an external sync (relay push, a
-          // concurrent write to this file, or the seal write-back) can swap the
+          // concurrent write to this file, or the step write-back) can swap the
           // doc to a shorter one mid-stream, leaving the captured `anchor`
           // past the end. Without this the dispatch throws
           // "Invalid change range … (in doc of length …)".
@@ -7191,16 +8454,18 @@ function App() {
     const started = beginOp(idx, secretKeyForVoice(pubkey) ?? undefined, "settle");
     if (!started) return;
     const { controller } = started;
-    // Collect candidate files in the scope subtree.
-    const scopePath = scopeRef.current?.kind === "folder" ? (scopeRef.current.path ?? ROOT) : null;
-    if (scopePath == null) {
+    // Collect candidates from the full multi-scope union. De-dupe stays a
+    // folder operation: at least one explicitly scoped folder is required.
+    const scopes = scopeRef.current;
+    if (!scopes.some((item) => item.kind === "folder")) {
       setOpStatus(idx, "error", "De-dupe needs a folder in scope");
       endOp(idx);
       return;
     }
-    const prefix = scopePath === ROOT ? "" : `${scopePath}/`;
     const inScope = Object.entries(files).filter(
-      ([p, s]) => s.kind !== "folder" && (scopePath === ROOT || p.startsWith(prefix)),
+      ([p, s]) =>
+        s.kind !== "folder" &&
+        pathInEffectiveScopes(scopes, shieldedRef.current, p),
     );
     // Group by a normalized content signature: lowercased, whitespace-collapsed
     // first ~240 chars. Exact/near re-scans of the same source share it.
@@ -7227,7 +8492,7 @@ function App() {
         if (controller.signal.aborted) break;
         const merged = await complete(
           provider,
-          SETTLE_DEDUPE_MESSAGES(group),
+          settleDedupeMessages(group),
           { maxTokens: 2048, signal: controller.signal },
         );
         // Keeper = first file; overwrite it with the merge. The rest are deleted.
@@ -7279,11 +8544,11 @@ function App() {
     if (!started) return;
     const { controller } = started;
     const view = panelViews.current[idx]!;
-    // Seal the baseline under the AUTHOR key before the model runs (see extendLLM).
+    // Step the baseline under the AUTHOR key before the model runs (see extendLLM).
     {
       const signer = secretKeyForVoice(authorPubkey);
       const path = panels[idx]?.active;
-      if (path && files[path] && signer) await sealNow(path, signer);
+      if (path && files[path] && signer) await stepFile(path, signer);
     }
     await prepareLlmMeta(idx, "settle", provider);
     try {
@@ -7305,7 +8570,7 @@ function App() {
           rebuilt.push(part.text);
           continue;
         }
-        const condensed = await complete(provider, withContext(ctx, withVoicePrompt(pubkey, SETTLE_MESSAGES(part.text))), {
+        const condensed = await complete(provider, withContext(ctx, withVoicePrompt(pubkey, settleMessages(part.text))), {
           maxTokens: 512,
           signal: controller.signal,
         });
@@ -7346,11 +8611,11 @@ function App() {
     if (!started) return;
     const { controller } = started;
     const view = panelViews.current[idx]!;
-    // Seal the baseline under the AUTHOR key before the model runs (see extendLLM).
+    // Step the baseline under the AUTHOR key before the model runs (see extendLLM).
     {
       const signer = secretKeyForVoice(authorPubkey);
       const path = panels[idx]?.active;
-      if (path && files[path] && signer) await sealNow(path, signer);
+      if (path && files[path] && signer) await stepFile(path, signer);
     }
     await prepareLlmMeta(idx, "stir", provider);
     try {
@@ -7377,7 +8642,7 @@ function App() {
       const ctx = await gatherContextForPanel(idx);
       const reinvented = await complete(
         provider,
-        withContext(ctx, withVoicePrompt(pubkey, SHAKE_MESSAGES(loose, anchorCount, cmds.map((c) => c.command)))),
+        withContext(ctx, withVoicePrompt(pubkey, stirMessages(loose, anchorCount, cmds.map((c) => c.command)))),
         { maxTokens: 1024, signal: controller.signal },
       );
       // Rebuild: reinvented loose prose, with the verbatim bracket anchors
@@ -7403,7 +8668,7 @@ function App() {
   }
 
   /** RESPOND — write an AI response into a NEW sibling doc, citing existing
-   *  minted traces via [[ phrase | nodeId ]], and citing the source itself
+   *  coins via [[ phrase | nodeId ]], and citing the source itself
    *  via `replyingTo` (spec §reply-to delta type) so the reply chain
    *  stays legible from the trace alone. The response is streamed into the
    *  new file's runs as it arrives. Placement: the sibling opens in a fresh
@@ -7411,7 +8676,7 @@ function App() {
    *  that column first so the reply always lands alongside its origin.
    *  The model names the file via a leading `TITLE:` line (see
    *  RESPOND_MESSAGES); we open under a temp path and rebase once the title
-   *  arrives. The TITLE line is stripped from the sealed body. */
+   *  arrives. The TITLE line is stripped from the stepped body. */
   async function replyLLM(idx: number) {
     if (!folder) return;
     // Reply writes into a new file (not the live editor) so there's no facet
@@ -7421,15 +8686,15 @@ function App() {
     if (!provider) return;
     setOpStatus(idx, "running", undefined, "reply");
     // The MODEL voice's secret — signs both the genesis writeFile below and
-    // the release catch-up seal, so the response lands on the relay as the
+    // the release catch-up step, so the response lands on the relay as the
     // MODEL voice, not the keychain's active (AUTHOR) key.
     const signer = secretKeyForVoice(modelVoice) ?? undefined;
-    // Arm the seal gate: per-delta editFile calls would otherwise trigger
-    // intermediate seals (same rate-limit pattern Extend hits). Released in
-    // finally, which fires one catch-up seal for the final content, signed as
+    // Arm the step gate: per-delta editFile calls would otherwise trigger
+    // intermediate steps (same rate-limit pattern Extend hits). Released in
+    // finally, which fires one catch-up step for the final content, signed as
     // the MODEL voice via `signer`.
     opSignerRef.current = signer;
-    sealGateRef.current(true);
+    stepGateRef.current(true);
     const controller = new AbortController();
     summonAbort.current[idx] = controller;
     // Hoisted so the finally block can release the rescan-pending hold even
@@ -7439,12 +8704,12 @@ function App() {
     try {
       const view = panelViews.current[idx];
       const srcRel = panels[idx].active || "";
-      // Seal the source doc under the AUTHOR key before the model runs, so the
+      // Step the source doc under the AUTHOR key before the model runs, so the
       // response is anchored to a signed baseline (see extendLLM). The source
       // is what the model replies to; Reply's own output writes to newPath.
       {
         const signer = secretKeyForVoice(authorPubkey);
-        if (srcRel && files[srcRel] && signer) await sealNow(srcRel, signer);
+        if (srcRel && files[srcRel] && signer) await stepFile(srcRel, signer);
       }
       await prepareLlmMeta(idx, "reply", provider);
       // Reply to just the selected passage when there is one; otherwise the
@@ -7458,7 +8723,7 @@ function App() {
       const sourceText = hasSel
         ? view!.state.sliceDoc(sel!.from, sel!.to)
         : (srcRel && files[srcRel] ? flatten(files[srcRel].runs) : "");
-      // Pull the palette so the model can cite minted traces by nodeId.
+      // Pull the palette so the model can cite coins by nodeId.
       let palette: PaletteItem[] = [];
       try {
         palette = await fetchPalette();
@@ -7467,25 +8732,23 @@ function App() {
       }
       const traces = palette.slice(0, 20).map((p) => `- "${p.text}" (nodeId ${p.nodeId})`).join("\n");
       const ctx = await gatherContextForPanel(idx);
-      const messages = withContext(ctx, withVoicePrompt(modelVoice, RESPOND_MESSAGES(sourceText, traces)));
+      const messages = withContext(ctx, withVoicePrompt(modelVoice, replyMessages(sourceText, traces)));
       // Open under a temporary sibling name; rebase to the LLM TITLE once the
       // first line arrives. Keep the source's directory so the response lands
       // next to its origin (e.g. notes/essay.md -> notes/<title>.md).
       const sourceName = srcRel || "doc.md";
-      // The source's sealed head at the moment Reply runs — pinned into the
+      // The source's stepped head at the moment Reply runs — pinned into the
       // response's own genesis node via `replyingTo` below, so the citation
       // stays honest even if the source is edited further afterward.
       const sourceNodeId = files[srcRel]?.nodeId || undefined;
       const slash = sourceName.lastIndexOf("/");
       const srcDir = slash >= 0 ? sourceName.slice(0, slash + 1) : "";
       const stem = sourceName.replace(/\.md$/, "").split("/").pop() || "doc";
-      // 0-padded date-time prefix (YYYY-MM-DD-HHMM) so reply docs sort
+      // Shared local second-precision prefix (YYYY-MM-DD_HHMMSS) so generated docs sort
       // chronologically and stay timestamped even after the LLM rewrites the
-      // title below. No colons to stay filesystem-safe.
-      const d = new Date();
-      const datePrefix =
-        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` +
-        `-${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}`;
+      // title below. Second precision (not minute) so two replies in the same
+      // minute don't collide on the prefix. No colons to stay filesystem-safe.
+      const datePrefix = formatLocalSecondStamp(new Date());
       newPath = `${srcDir}${datePrefix}-${stem}-reply.md`;
       const taken = new Set(Object.keys(files));
       taken.add(newPath);
@@ -7556,7 +8819,7 @@ function App() {
 
       // Mark this path as pending so a mid-stream rescan (5s interval or window
       // focus) doesn't drop the optimistic file before writeFile persists it —
-      // same protection scheduleSeal gives to user edits. Cleared in finally.
+      // same protection scheduleStep gives to user edits. Cleared in finally.
       pendingPaths.current.add(newPath);
       // Optimistic empty file so the editor opens immediately.
       editFile(newPath, [{ voice: modelVoice, text: "" }]);
@@ -7578,7 +8841,7 @@ function App() {
       });
       const rawFinal = acc || full || "";
       applyReplyText(rawFinal, true);
-      // Persist + seal the new file, citing the source's sealed head via
+      // Persist + step the new file, citing the source's stepped head via
       // `replyingTo` (spec §reply-to delta type) so the reply chain is
       // legible from the trace alone, not just from sibling placement.
       // Signed as the MODEL voice (`signer`) so the genesis node's author is
@@ -7598,15 +8861,15 @@ function App() {
       setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
     } finally {
       summonAbort.current[idx] = null;
-      // Release the seal gate armed on entry. The catch-up seal fires once
+      // Release the step gate armed on entry. The catch-up step fires once
       // for newPath, signed as the MODEL voice; the explicit writeFile above
       // already persisted, so this is de-duped by pushToRelay's content-hash
       // check (no double publish). Deferred one macrotask so React commits the
       // final setFiles first (same rationale as endOp) — otherwise the catch-up
-      // seal reads stale content and the debounce re-seals the tail.
+      // step reads stale content and the debounce re-steps the tail.
       const signer = opSignerRef.current;
       opSignerRef.current = undefined;
-      setTimeout(() => sealGateRef.current(false, signer), 0);
+      setTimeout(() => stepGateRef.current(false, signer), 0);
       // Release the rescan-pending hold once the stream + persist have
       // settled (success or abort/error). Subsequent rescans then reconcile
       // from disk normally.
@@ -7621,7 +8884,7 @@ function App() {
    *  rendered limelight log (panel-occupancy history from focusTimeline, which
    *  lives on the folder's chain but is surfaced to a prompt nowhere else).
    *  Output is an audit doc the user can check, named via the model's `TITLE:`
-   *  line, same convention as Reply. Sealed as the MODEL voice. */
+   *  line, same convention as Reply. Stepped as the MODEL voice. */
   async function receiveLLM(idx: number) {
     if (!folder) return;
     const modelVoice = modelPubkey;
@@ -7630,7 +8893,7 @@ function App() {
     setOpStatus(idx, "running", undefined, "receive");
     const signer = secretKeyForVoice(modelVoice) ?? undefined;
     opSignerRef.current = signer;
-    sealGateRef.current(true);
+    stepGateRef.current(true);
     const controller = new AbortController();
     summonAbort.current[idx] = controller;
     let newPath = "";
@@ -7644,20 +8907,17 @@ function App() {
       let limelightLog = "";
       try {
         const focus: FocusEntry[] = await focusTimeline(folder.id);
-        limelightLog = renderLimelightLog(focus, folder.label ?? folder.id.slice(0, 8));
+        limelightLog = renderLimelightLog(focus, folder.label ?? DEFAULT_ROOT_LABEL);
       } catch {
         /* no focus chain is fine — the persona covers the missing-data case */
       }
       const ctx = await gatherContextForPanel(idx);
-      const messages = withContext(ctx, withVoicePrompt(modelVoice, RECEIVE_MESSAGES(limelightLog)));
+      const messages = withContext(ctx, withVoicePrompt(modelVoice, receiveMessages(limelightLog)));
       const sourceName = srcRel || "doc.md";
       const slash = sourceName.lastIndexOf("/");
       const srcDir = slash >= 0 ? sourceName.slice(0, slash + 1) : "";
       const stem = sourceName.replace(/\.md$/, "").split("/").pop() || "doc";
-      const d = new Date();
-      const datePrefix =
-        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` +
-        `-${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}`;
+      const datePrefix = formatLocalSecondStamp(new Date());
       newPath = `${srcDir}${datePrefix}-${stem}-receive.md`;
       const taken = new Set(Object.keys(files));
       taken.add(newPath);
@@ -7724,7 +8984,7 @@ function App() {
       applyReceiveText(rawFinal, true);
       const finalText = parseReplyOutput(rawFinal, true).body;
       // No `replyingTo` here — Receive observes the folder, it doesn't reply to
-      // a sealed source passage. The genesis node just carries the analysis.
+      // a stepped source passage. The genesis node just carries the analysis.
       try {
         await backendRef.current.writeFile(newPath, finalText, [], signer, undefined, undefined);
       } catch (e) {
@@ -7741,7 +9001,7 @@ function App() {
       summonAbort.current[idx] = null;
       const signer = opSignerRef.current;
       opSignerRef.current = undefined;
-      setTimeout(() => sealGateRef.current(false, signer), 0);
+      setTimeout(() => stepGateRef.current(false, signer), 0);
       if (newPath) pendingPaths.current.delete(newPath);
     }
   }
@@ -7773,8 +9033,8 @@ function App() {
     );
   }
 
-  /** Dispatch a top-bar action to the op-target panel. The LLM ops seal their
-   *  output as the MODEL voice; Save/zine seal as the AUTHOR voice.
+  /** Dispatch a top-bar action to the op-target panel. The LLM ops step their
+   *  output as the MODEL voice; Save/zine step as the AUTHOR voice.
    *
    *  Extend/Settle/Stir stream into the target panel's mounted CodeMirror view
    *  via view.dispatch, so they need that view live AND showing the selected
@@ -7784,9 +9044,23 @@ function App() {
    *  beginOp would surface "no editor mounted for this panel — click the file's
    *  tab first". Instead of making the user click the tab, activate the file as
    *  the panel's active tab here and wait for FileEditor to mount / swap its doc
-   *  before dispatching. Reply/Step/Send/Affirm don't stream into the view
-   *  (Reply writes a sibling file; the rest seal), so they're left as-is. */
+   *  before dispatching. Reply/Step/Send/Attest don't stream into the view
+   *  (Reply writes a sibling file; the rest step), so they're left as-is. */
   async function runOp(idx: number, op: OpKind) {
+    // Mint and Oblivion are read-only: no LLM/content op may write into either
+    // system region. Send is allowed for an immutable Mint coin because it
+    // changes reachability, not content; Attest is also non-mutating.
+    if (op !== "attest") {
+      const target = panels[idx]?.active;
+      if (
+        target &&
+        !isFolderTab(target) &&
+        (isOblivion(target) || (isMint(target) && op !== "send"))
+      ) {
+        setOpStatus(idx, "error", "Mint and Oblivion are read-only — fork or restore into Root first");
+        return;
+      }
+    }
     if (op === "extend" || op === "settle" || op === "stir") {
       const path = selection?.path;
       if (path && !isFolderTab(path) && panels[idx]?.tabs.includes(path)) {
@@ -7821,22 +9095,115 @@ function App() {
     else if (op === "reply") void replyLLM(idx);
     else if (op === "receive") void receiveLLM(idx);
     else if (op === "step" || op === "send") void deliverAsVoice(idx, op);
-    else if (op === "affirm") {
-      // Affirm opens the modal first: the user must pick a geohash + acknowledge
-      // the OTS timestamp before attesting. The modal calls affirmAsVoice on
-      // confirm. Resolves the target from `selection` so a folder selection
-      // (which has no tab) and a foreign folder (cite-and-attest, no seal) both
-      // reach the modal with the right kind + nodeId.
-      if (selection?.kind === "folder") {
+    else if (op === "attest") {
+      // Attest opens the optional note/location modal, then appends a dedicated
+      // endorsement event targeting the selected node. It never steps or
+      // mutates the target's revision chain.
+      const coin = paletteSelectedCoin();
+      if (coin) {
+        const label = coin.phrase ? `Coin: ${coin.phrase}` : `Coin ${coin.nodeId.slice(0, 8)}`;
+        setAttestTarget({ path: label, kind: "coin", nodeId: coin.nodeId });
+      } else if (selection?.kind === "folder") {
         const fp = selection.path ?? ROOT;
         const nodeId = selection.nodeId ?? files[fp]?.nodeId;
-        if (nodeId) setAffirmTarget({ path: fp, kind: "folder", nodeId, foreign: isForeignFolder });
+        if (nodeId) setAttestTarget({ path: fp, kind: "folder", nodeId });
       } else {
         const path = panels[idx]?.active;
         if (path && files[path]?.nodeId) {
-          setAffirmTarget({ path, kind: "file", nodeId: files[path]!.nodeId, foreign: isForeignFolder });
+          setAttestTarget({ path, kind: "file", nodeId: files[path]!.nodeId });
         }
       }
+    }
+    else if (op === "run") {
+      // Run opens the modal first: the user types a goal and picks a root
+      // model. The modal calls back with both on Start. Like attest, the
+      // gesture is two-step (compose → confirm) because it takes freeform input.
+      setRunOpen(true);
+    }
+  }
+
+  /**
+   * Start an agent run from a composed goal + provider. Builds the AgentCtx
+   * from the live app closures (scope, files, providers, nostr secret), picks
+   * a sandbox subfolder under the current scope, and drives runAgentLoop.
+   *
+   * The loop never steps — it writes DRAFT FileState (nodeId "") into the run
+   * subfolder; the per-render files effect mirrors those to the crash pad and
+   * nothing more. The human author's Step is the only thing that freezes them.
+   * Stop reuses the existing per-panel AbortController / op-status surface, so
+   * the Run button re-renders as a stop control while the loop is in flight.
+   */
+  async function startAgentRun(goal: string, providerId: string) {
+    const idx = opTargetPanel();
+    const provider = providers.find((p) => p.id === providerId) ?? null;
+    if (!provider) {
+      setOpStatus(idx, "error", "no provider — add one in Models");
+      return;
+    }
+    setRunOpen(false);
+    setOpStatus(idx, "running", undefined, "run");
+    const controller = new AbortController();
+    summonAbort.current[idx] = controller;
+
+    // Sandbox path: a subfolder under the current scope. If the scope is a
+    // file, place it as a sibling in the file's parent. Leading underscore so
+    // run folders sort away from the manuscript.
+    const scopeSel = scopeRef.current[0];
+    const scopePath = scopeSel?.path ?? "";
+    const parent =
+      scopeSel?.kind === "file" && scopePath.includes("/")
+        ? scopePath.slice(0, scopePath.lastIndexOf("/"))
+        : scopeSel?.kind === "file"
+          ? ""
+          : scopePath;
+    const slug = goal.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "run";
+    const short = Math.random().toString(16).slice(2, 8);
+    const runPath = `${parent ? parent + "/" : ""}_${slug}-${short}`;
+
+    const ctx: AgentCtx = {
+      nostrSecret: loadOrCreateVoice().secretKey,
+      resolveModel: (ref) =>
+        providers.find((p) => p.id === ref || p.label === ref || p.modelId === ref) ?? provider,
+      readFile: (p) => {
+        const f = filesRef.current[p];
+        return f ? flatten(f.runs ?? []) : null;
+      },
+      listFiles: (prefix) =>
+        Object.keys(filesRef.current).filter((p) => !prefix || p.startsWith(prefix)),
+      writeDraft: (path, runs) =>
+        setFilesRef.current((prev) => ({
+          ...prev,
+          [path]: { runs, nodeId: prev[path]?.nodeId ?? "", tags: prev[path]?.tags ?? [] },
+        })),
+      appendDraft: (path, voice, text) =>
+        setFilesRef.current((prev) => {
+          const existing = prev[path];
+          const runs = existing?.runs ?? [];
+          return {
+            ...prev,
+            [path]: {
+              runs: [...runs, { voice, text }],
+              nodeId: existing?.nodeId ?? "",
+              tags: existing?.tags ?? [],
+            },
+          };
+        }),
+      runPath,
+      seedContext: await gatherContextForPanel(idx).catch(() => ""),
+    };
+
+    try {
+      await runAgentLoop(ctx, { goal, model: provider, signal: controller.signal });
+      if (controller.signal.aborted) setOpStatus(idx, "idle");
+      else setOpStatus(idx, "done", undefined, "run");
+    } catch (e) {
+      if (controller.signal.aborted) {
+        setOpStatus(idx, "idle");
+      } else {
+        setOpStatus(idx, "error", e instanceof Error ? e.message : String(e), "run");
+      }
+    } finally {
+      if (summonAbort.current[idx] === controller) summonAbort.current[idx] = null;
     }
   }
 
@@ -7847,7 +9214,7 @@ function App() {
    *  view.dispatch) get a live editor. Only fall back to a panel that holds
    *  the file as a background tab, then to the focused panel. A folder/span
    *  selection has no file tab to match, so it goes straight to the focused
-   *  panel. Clamped to a valid index. The top bar's ACTIONS row calls this to
+   *  panel. Clamped to a valid index. The action palette's ACTIONS row calls this to
    *  point ops at the selected trace. */
   function opTargetPanel(): number {
     const sp = selection?.path;
@@ -7865,14 +9232,95 @@ function App() {
     return Math.min(activePanel, panels.length - 1);
   }
 
-  /** Seal the panel's active file as a deliberate checkpoint, signed as `voice`.
-   *  Step and Send share this path: both force a new checkpoint node (bypassing
-   *  the content-stable dedup that collapses redundant trailing auto-saves) so
-   *  the gesture always mints something — protocol §8: "When a Step does seal,
-   *  it mints a node carrying the snapshot." The difference is reachability:
-   *  Step seals to the home relay only (sovereign by default — nothing leaves
-   *  the machine); Send fans out to all write-enabled external relays (the
-   *  "let this leave my machine" gesture). */
+  /** Derive the AUTHOR primary slot from the focused editor selection. An
+   *  opened Mint trace is always an immutable Coin; otherwise a live range
+   *  wins over an older Coin focus. */
+  function paletteSelectionForAuthor(): PaletteSelectionState {
+    const targetPanel = opTargetPanel();
+    const targetPath = panels[targetPanel]?.active;
+    if (targetPath && isMint(targetPath)) return "coin";
+    if (editorSelection?.panelIdx === targetPanel) {
+      const view = panelViews.current[targetPanel];
+      if (view) {
+        return classifyPaletteSelection(
+          view.state.doc.toString(),
+          editorSelection.from,
+          editorSelection.to,
+        );
+      }
+    }
+    return selection?.kind === "coin" ? "coin" : "none";
+  }
+
+  /** Resolve the selected Coin from either editor markup (Markdown or Preview)
+   *  or a Coin selected elsewhere in the app. A live non-Coin range suppresses
+   *  stale Coin focus from an earlier click. */
+  function paletteSelectedCoin(): { nodeId: string; phrase: string; path: string } | null {
+    const targetPanel = opTargetPanel();
+    if (editorSelection?.panelIdx === targetPanel) {
+      const view = panelViews.current[targetPanel];
+      if (!view) return null;
+      const bracket = findResolvedBrackets(view.state.doc.toString()).find(
+        (candidate) =>
+          candidate.matchStart <= editorSelection.from &&
+          candidate.matchEnd >= editorSelection.to,
+      );
+      if (!bracket) return null;
+      return {
+        nodeId: bracket.nodeId,
+        phrase: bracket.phrase,
+        path: panels[targetPanel]?.active ?? "",
+      };
+    }
+    if (selection?.kind !== "coin" || !selection.nodeId) return null;
+    return {
+      nodeId: selection.nodeId,
+      phrase: selection.phrase ?? "",
+      path: panels[targetPanel]?.active ?? "",
+    };
+  }
+
+  /** Apply the palette's Preserve action only to loose prose. The editor command
+   *  leaves the phrase selected, so the palette immediately advances to the
+   *  pending-bracket state with Mint as its sole passage action. */
+  function preservePaletteSelection(): void {
+    const targetPanel = opTargetPanel();
+    const view = panelViews.current[targetPanel];
+    if (!view) return;
+    const { from, to } = view.state.selection.main;
+    if (classifyPaletteSelection(view.state.doc.toString(), from, to) !== "loose") return;
+    wrapSelectionCommand()(view);
+  }
+
+  /** Use the delivery planner itself for Send's gold cue. This keeps the
+   *  palette honest if the append-and-send policy changes later. */
+  function paletteSendAutoSteps(): boolean {
+    const path = panels[opTargetPanel()]?.active;
+    const file = path ? files[path] : undefined;
+    if (!path || !file || file.kind === "folder" || isMint(path) || isOblivion(path)) {
+      return false;
+    }
+    return planDelivery("send", unsteppedPathSet.has(path), file.nodeId) === "append-and-send";
+  }
+
+  /** A current trace has nothing for Step to record. A missing head remains
+   *  Step-able because the gesture creates the trace's first node. */
+  function paletteStepIsAvailable(): boolean {
+    const path = panels[opTargetPanel()]?.active;
+    const file = path ? files[path] : undefined;
+    if (!path || !file || file.kind === "folder" || isMint(path) || isOblivion(path)) {
+      return false;
+    }
+    return planDelivery("step", unsteppedPathSet.has(path), file.nodeId) !== "unavailable";
+  }
+
+  /** Deliver the panel's active file under the selected stance.
+   *
+   *  Step appends when the trace has pending changes or needs its first node;
+   *  the current palette state is unavailable. A mintable passage uses the same
+   *  primary slot to create a Coin. Send appends a Step only when the working
+   *  state differs from the latest Step; otherwise it distributes that existing
+   *  node. Re-sending is idempotent because relays dedupe by event id. */
   async function deliverAsVoice(idx: number, op: "step" | "send") {
     const pubkey = authorPubkey;
     const path = panels[idx]?.active;
@@ -7882,60 +9330,106 @@ function App() {
       setOpStatus(idx, "error", `no key for voice ${pubkey.slice(0, 8)}…`);
       return;
     }
+    if (op === "step" && !isMint(path) && !isOblivion(path)) {
+      const view = panelViews.current[idx];
+      if (view) {
+        const { from, to } = view.state.selection.main;
+        const paletteState = classifyPaletteSelection(
+          view.state.doc.toString(),
+          from,
+          to,
+        );
+        const mintTarget = findMintSelectionTarget(view.state.doc.toString(), from, to);
+        if (mintTarget) {
+          setOpStatus(idx, "running", undefined, op);
+          const minted = await zinePhrase(path, view, from, to, signer);
+          if (minted) {
+            setOpStatus(idx, "done", undefined, op);
+            flashPanelFn(idx);
+          }
+          return;
+        }
+        if (paletteState === "coin") {
+          setOpStatus(idx, "error", "This passage is already an immutable Coin");
+          return;
+        }
+        if (paletteState === "invalid") {
+          setOpStatus(idx, "error", "Select loose text or one pending [[ bracket ]] to Mint");
+          return;
+        }
+      }
+      if (selection?.kind === "coin") {
+        setOpStatus(idx, "error", "This passage is already an immutable Coin");
+        return;
+      }
+      if (planDelivery("step", unsteppedPathSet.has(path), files[path].nodeId) === "unavailable") {
+        setOpStatus(idx, "error", "No updates since the last Step");
+        return;
+      }
+    }
     setOpStatus(idx, "running", undefined, op);
     try {
-      // Step = localOnly (home relay only); Send = fan out. Both force the
-      // checkpoint so a deliberate seal on unchanged content still mints.
-      const localOnly = op === "step";
-      const sealedId = await sealNow(path, signer, localOnly, true);
-      // §R11.22: distributed anteriority. Step stamps the sealed node id —
-      // the frequent gesture builds the time-distributed process record the
-      // vet reads (protocol/rendezvous.md §3). Strictly additive: the kind-1040
-      // overlay never blocks the gesture. Send takes the short-circuit (§8:
-      // Send touches nothing about time). Fire-and-forget mirrors the old
-      // affirmNode posture; dynamic import avoids a circular module dep.
-      if (sealedId && op === "step") {
-        void import("./attestation.js")
-          .then(({ stampAndPublishAttestation }) =>
-            stampAndPublishAttestation(sealedId, signer, resolveRelayUrl()),
+      if (isMint(path) && op === "step") {
+        throw new Error("Mint coins are immutable; Send the existing trace or fork it into Root");
+      }
+      const plan = isMint(path)
+        ? "send-latest"
+        : planDelivery(op, unsteppedPathSet.has(path), files[path].nodeId);
+      if (plan === "unavailable") {
+        throw new Error("No updates since the last Step");
+      }
+      const createsStep = plan !== "send-latest";
+      let steppedId: string | undefined;
+      if (plan === "append-local-step") {
+        steppedId = await stepFile(path, signer, true, true);
+      } else if (plan === "append-and-send") {
+        // Pending state: append one Step and publish it to every write relay.
+        steppedId = await stepFile(path, signer, false, false);
+      } else if (plan === "send-latest") {
+        // Current state: Send the latest Step without manufacturing another.
+        steppedId = files[path].nodeId;
+        const event = steppedId ? await fetchEventById(steppedId) : null;
+        if (!event) throw new Error("latest Step is unavailable on the home relay");
+        await sendStep(event, signer);
+      }
+      // §R11.22: distributed anteriority. Every newly appended Step stamps.
+      // Sending an unchanged latest Step does not submit another anchor. The
+      // frequent gesture builds the
+      // time-distributed process record the vet reads (rendezvous.md §3).
+      // Strictly additive: the kind-1040 overlay never blocks the gesture.
+      // Fire-and-forget; dynamic import avoids a circular module dep.
+      if (steppedId && createsStep) {
+        void import("./anchor.js")
+          .then(({ submitAnchor }) =>
+            submitAnchor(steppedId, signer, resolveRelayUrl()),
           )
           .catch(() => {
-            // Best-effort: the node is sealed regardless. Calendar/transport
-            // failures log inside stampAndPublishAttestation.
+            // Best-effort: the node is stepped regardless. Calendar/transport
+            // failures log inside submitAnchor.
           });
       }
       setOpStatus(idx, "done", undefined, op);
       flashPanelFn(idx);
     } catch (e) {
-      console.warn(`[deliver] seal failed for ${path} as ${pubkey.slice(0, 8)}…:`, e);
+      console.warn(`[deliver] step failed for ${path} as ${pubkey.slice(0, 8)}…:`, e);
       setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
     }
   }
 
-  /** Affirm: mark the active file's sealed head as the author's published
-   *  position (protocol §8). Available to ALL: on your own zine you seal-first
-   *  (flush pending edits so the cited head is current) then attest; on a
-   *  FOREIGN zine you cite-and-attest (no seal — you can't write their chain,
-   *  and you're attesting their frozen head as-is). A folder affirm cites the
-   *  folder's head nodeId (z=folder); the folder head IS the membership snapshot,
-   *  so no content snapshot is embedded. Opens from the modal after the user
-   *  picks a geohash + acknowledges the timestamp + optionally writes a message. */
-  async function affirmAsVoice(
+  /** Append an immutable endorsement of the selected, already-published node.
+   *  This never Steps pending changes: doing so would silently change the target and could
+   *  attest a fresh local-only checkpoint rather than the node the user read. */
+  async function attestAsVoice(
     path: string,
     geohash?: string,
     message?: string,
-    opts?: { kind?: "file" | "folder"; foreign?: boolean; nodeId?: string },
+    opts?: { kind?: "file" | "folder" | "coin"; nodeId?: string },
   ) {
     const pubkey = authorPubkey;
-    const kind = opts?.kind ?? "file";
-    const foreign = opts?.foreign ?? isForeignFolder;
-    // Resolve the cited nodeId: explicit (folder selection carries it), else the
-    // FileState's chain head. A folder-member FileState carries the subfolder's
-    // genesis as nodeId; a file carries its 4290 head.
     const file = files[path];
     const citedId = opts?.nodeId ?? file?.nodeId;
     if (!citedId) return;
-    // Op-status panel: the panel whose active tab is the affirmed path, else the
+    // Op-status panel: the panel whose active tab is the attested path, else the
     // focused panel (a folder selection may have no tab).
     const idx = panels.findIndex((p) => p.active === path);
     const statusIdx = idx === -1 ? Math.min(activePanel, panels.length - 1) : idx;
@@ -7944,37 +9438,22 @@ function App() {
       setOpStatus(statusIdx, "error", `no key for voice ${pubkey.slice(0, 8)}…`);
       return;
     }
-    setOpStatus(statusIdx, "running", undefined, "affirm");
+    setOpStatus(statusIdx, "running", undefined, "attest");
     try {
-      let headId = citedId;
-      let snapshot = "";
-      if (!foreign && kind === "file") {
-        // Own file: flush pending edits so the cited head is the current buffer.
-        // Force=true mints a checkpoint (Step semantics) even if unchanged.
-        const sealedId = await sealNow(path, signer, true, true);
-        headId = sealedId ?? citedId;
-        snapshot = flatten(file?.runs ?? []);
-      }
-      // Folder affirm: cite-and-go (the folder head IS the membership). No
-      // snapshot prose — contentHash covers the empty snapshot, and the q-cite
-      // carries the real membership state on the cited folder node.
-      const contentHash = snapshot
-        ? await sha256HexLocal(snapshot)
-        : await sha256HexLocal(citedId);
-      await affirmNode(headId, pubkey, {
-        prevEventId: foreign ? null : headId,
-        relativePath: path,
-        folderId: folder?.id ?? "",
-        snapshot,
-        contentHash,
+      // attestNode verifies the target is present on a configured non-loopback
+      // relay, so a home-relay-only Step cannot masquerade as prior Send.
+      await attestNode(citedId, undefined, {
         signer,
-        z: kind,
         ...(message ? { message } : {}),
         ...(geohash ? { geohash } : {}),
       });
+      setAttestationCounts((prev) => ({
+        ...prev,
+        [citedId]: (prev[citedId] ?? 0) + 1,
+      }));
       setOpStatus(statusIdx, "done");
     } catch (e) {
-      console.warn(`[affirm] failed for ${path} as ${pubkey.slice(0, 8)}…:`, e);
+      console.warn(`[attest] failed for ${path} as ${pubkey.slice(0, 8)}…:`, e);
       setOpStatus(statusIdx, "error", e instanceof Error ? e.message : String(e));
     }
   }
@@ -7995,84 +9474,9 @@ function App() {
 
   // --- folder boot ------------------------------------------------------
   //
-  // On mount: if a folder is already attached (remembered in localStorage),
-  // attach via the backend (disk+scan on desktop, relay read on webapp) and
-  // open the first file. If not, show the empty state — the desktop offers a
-  // native folder picker, the webapp offers create-new / join-by-id. Re-runs
-  // when the user picks a new folder (doAttach / attachRef).
-
-  /** Build the `onReconciled` callback for a background desktop reconcile.
-   *  Each reconciled file merges into `files` and re-seeds `lastSealedRef` for
-   *  that path so the debounce effect never re-seals it (the reconcile already
-   *  sealed it as import/external; re-sealing would trip the relay rate-limit).
-   *  Guarded by `folderIdRef` so a folder switch drops a prior folder's late
-   *  results — same posture as `rescan` below.
-   *
-   *  The token starts unbound (`null`) and is bound via `.bind(folderId)` once
-   *  the attach resolves and we know the folder id. Emissions that arrive
-   *  before binding (or after a folder switch) are dropped — correct, since
-   *  `files`/`folderIdRef` aren't ready for them anyway. */
-  function makeOnReconciled(): ReconcileCallback {
-    let token: string | null = null;
-    const fn = (path: string, file: FileState | null) => {
-      if (token === null || folderIdRef.current !== token) return;
-      // Deletion: the reconcile tombstoned a file that's gone from disk. Drop
-      // it from `files` (the skeleton rendered it from the manifest).
-      if (file === null) {
-        setFiles((prev) => {
-          if (!(path in prev)) return prev;
-          const next = { ...prev };
-          delete next[path];
-          return next;
-        });
-        return;
-      }
-      // Skip folder placeholders — the tree already rendered them from the
-      // skeleton; only their nodeId changes (harmless, but re-seeding a folder
-      // entry into lastSealedRef would store empty content for a non-file path).
-      if (file.kind === "folder") {
-        setFiles((prev) => (prev[path]?.nodeId === file.nodeId ? prev : { ...prev, [path]: file }));
-        return;
-      }
-      // Don't clobber a file the user is mid-edit on. If their buffer differs
-      // from the reconciled content, keep their buffer and just adopt the
-      // provenance (nodeId/tags) — mirroring rescan's merge posture.
-      setFiles((prev) => {
-        const existing = prev[path];
-        const keepRuns =
-          existing && existing.runs.length > 0 && flatten(existing.runs) !== flatten(file.runs)
-            ? existing.runs
-            : file.runs;
-        const next: FileState = { ...file, runs: keepRuns };
-        return prev[path] && flatten(prev[path]!.runs) === flatten(next.runs) && prev[path]!.nodeId === next.nodeId
-          ? prev
-          : { ...prev, [path]: next };
-      });
-      // Mark this path already-published so the debounce tick treats it as
-      // clean (the reconcile just sealed it; the editor content matches).
-      seedSealedRef.current({ [path]: file });
-    };
-    // Attach a bind so the caller can set the race-guard token once the folder
-    // id is known (after attach resolves).
-    (fn as ReconcileCallback).bind = (folderId: string) => {
-      token = folderId;
-    };
-    return fn as ReconcileCallback;
-  }
-
-  /** Track an in-flight background reconcile promise and flip `reconciling`
-   *  off when it settles. The caller already kicked off the reconcile by
-   *  passing `onReconciled` to `attach`; this just watches its `reconciled`
-   *  promise and guards against folder switches. */
-  function trackReconcile(reconciled: Promise<void>, startedAtFolderId: string) {
-    setReconciling(true);
-    void reconciled
-      .catch(() => {}) // already logged inside the backend
-      .finally(() => {
-        if (folderIdRef.current !== startedAtFolderId) return;
-        setReconciling(false);
-      });
-  }
+  // On mount: the permanent root is either already known (getRootId seeded
+  // `folder`) or minted on first boot (mintRoot). Either way the backend
+  // re-attaches it (the local/relay arm — pathless), opening the first file.
 
   /** Open the scanned file set in the workspace panels (shared tail of every
    *  attach path). The first file opens in a single panel that fills the row;
@@ -8087,7 +9491,7 @@ function App() {
    *  tab. Folder tabs (`folder://…`) aren't file paths, so they survive as-is. */
   function openScanned(scanned: Record<string, FileState>, folderId: string) {
     const firstPath = Object.keys(scanned).sort()[0] ?? "";
-    const fallback: { panels: PanelState[]; activePanel: number; weights: number[]; tabModes: Record<string, "preview" | "markdown"> } = {
+    const fallback: { panels: PanelState[]; activePanel: number; weights: number[]; tabModes: Record<string, Mode> } = {
       panels: [{ tabs: firstPath ? [firstPath] : [], active: firstPath }],
       activePanel: 0,
       weights: [1],
@@ -8107,265 +9511,63 @@ function App() {
     // switches via its doc-swap effect — onView fires only on mount/unmount, so
     // nulling a slot whose editor is still mounted orphans the live view and
     // beginOp then sees null ("no editor mounted"). This bites the web-app's
-    // double openScanned: webAutoOpen → attachRef calls openScanned, then the
-    // [folder?.id] effect re-attaches and calls openScanned again; the second
-    // pass wiped slots whose FileEditors never remounted. Copy forward by
-    // index; new/extra slots stay null until their editor mounts, and slots
-    // whose panel genuinely disappeared are dropped (their FileEditor unmounts
-    // and onView(null) clears the stray entry harmlessly).
+    // re-attach: the [folder?.id] effect re-attaches and calls openScanned
+    // again; the second pass wiped slots whose FileEditors never remounted.
+    // Copy forward by index; new/extra slots stay null until their editor
+    // mounts, and slots whose panel genuinely disappeared are dropped (their
+    // FileEditor unmounts and onView(null) clears the stray entry harmlessly).
     const prevViews = panelViews.current;
     panelViews.current = layout.panels.map((_, i) => prevViews[i] ?? null);
     summonAbort.current = layout.panels.map(() => null);
     setTabModes(layout.tabModes);
     setActivePanel(layout.activePanel);
-    // Crash-pad restore: if the last session left dirty buffers in the pad
+    // Crash-pad restore: if the last session left unstepped buffers in the pad
     // (app closed/crashed/refreshed mid-edit), overlay them onto the scanned
     // files so the user picks up exactly where they left off. Both platforms
-    // use the pad now (typing never seals — see schedulePad), so both must
+    // use the pad now (typing never steps — see schedulePad), so both must
     // restore from it. The pad wins (it's the newer buffer); a file in the pad
     // but not on disk (newly created, never Stepped) is added fresh. We seed
-    // lastSealedRef from `scanned` (disk/relay truth), NOT the merged set — so
-    // restored files correctly read as dirty (their buffer differs from the
-    // sealed state) and show the dot until Stepped. A file only in the pad
-    // (not scanned) is never seeded → dirty → correct.
+    // lastSteppedRef from `scanned` (disk/relay truth), NOT the merged set — so
+    // restored files correctly read as unstepped (their buffer differs from the
+    // stepped state) and show a count until Stepped. A file only in the pad
+    // (not scanned) is never seeded → unstepped → correct.
     const pad = loadPad(folderId);
     if (pad && Object.keys(pad).length > 0) {
       const merged = { ...scanned };
-      let restored = 0;
       for (const [path, lf] of Object.entries(pad)) {
         merged[path] = mergePadIntoFileState(scanned[path], lf);
-        restored++;
       }
       setFiles(merged);
-      setCrashRestoreCount(restored);
     }
-    // Mark every scanned file as already-sealed so the first debounce tick
+    // Mark every scanned file as already-stepped so the first debounce tick
     // doesn't re-publish the whole folder (these files came from disk/relay
     // already published — their nodeId proves it). This is what stops the boot
     // fanout from tripping the relay rate-limit. Seeded from `scanned` (disk
     // truth) deliberately — see the pad-restore note above.
-    seedSealedRef.current(scanned);
+    seedSteppedRef.current(scanned);
     ready.current = true; // allow the debounce effect to publish subsequent edits
   }
 
-  /** Desktop attach: pick a disk path and scan it. Returns a skeleton
-   *  immediately (disk only) so the press renders fast; the relay reconcile
-   *  runs in the background and merges provenance via `onReconciled`. */
-  async function doAttach(absPath: string) {
-    setBootState("scanning");
-    setBootError(null);
-    try {
-      const onReconciled = makeOnReconciled();
-      const { folder: attached, files: scanned, reconciled } = await attachFolder(absPath, onReconciled);
-      // Bind the callback's guard token now that we know the folder id. Until
-      // this line, emissions are dropped (token is null) — correct, since
-      // files/folderIdRef aren't set yet anyway.
-      onReconciled.bind(attached.id);
-      setFolder(attached);
-      setFiles(scanned);
-      openScanned(scanned, attached.id);
-      setBootState("ready");
-      trackReconcile(reconciled, attached.id);
-    } catch (e) {
-      setBootError(e instanceof Error ? e.message : String(e));
-      setBootState("idle");
-    }
-  }
-
-  /**
-   * Attach via a FolderRef using the active backend. Used by the webapp
-   * (create-new / join-by-id) and as the re-scan path on boot. Records the
-   * folder in the known-folders list and marks it active.
-   */
-  async function attachRef(ref: AttachedFolder) {
-    setBootState("scanning");
-    setBootError(null);
-    try {
-      const { files: scanned } = await backendRef.current.attach(ref);
-      setFolder(ref);
-      setFiles(scanned);
-      openScanned(scanned, ref.id);
-      rememberFolder(ref);
-      setActiveFolder(ref.id);
-      setBootState("ready");
-      // Foreign-folder detection (webapp only): a folder is foreign when its
-      // latest 4292 head is signed by someone other than the active voice. Such
-      // a folder opens read-only until the user forks it. A forked folder
-      // (ref.forkedFrom set) is the user's own — never foreign. Desktop folders
-      // live on disk the user owns, so they're never foreign either.
-      if (!isTauri() && !ref.forkedFrom) {
-        void detectForeignFolder(ref.id).then(setIsForeignFolder);
-      } else {
-        setIsForeignFolder(false);
-      }
-      // Webapp: background relay pull. The editor is already usable from
-      // localStorage (above); this merges in any newer remote content without
-      // blocking. Desktop doesn't need this — its rescan handles disk/relay.
-      if (!isTauri()) {
-        void pullFromRelay(ref.id).then((pull) => {
-          // Clean merges are staged, not applied — surface them for review.
-          // (Conflicts stay surfaced by the activation-driven merge banner.)
-          if (pull.staged.length > 0) {
-            setStagedMerges((prev) => mergeStagedLists(prev, pull.staged));
-          }
-          if (pull.updated.size === 0) return;
-          const fresh = loadLocalFolder(ref.id);
-          if (!fresh) return;
-          setFiles((prev) => {
-            const next = { ...prev };
-            for (const path of pull.updated) {
-              const lf = fresh.files[path];
-              if (!lf) { delete next[path]; continue; }
-              if (pendingPaths.current.has(path)) continue; // don't clobber mid-edit
-              // Carry the per-author run list that `pullFromRelay` already
-              // reconstructed from the chain (author-aware: adopts a node's
-              // `authors` map, falls back to per-node-signer). The earlier form
-              // rebuilt a single activeVoice() run from lf.content here, which
-              // discarded that attribution — the next seal then serialized a
-              // single-voice authors map and every prior author was gone, which
-              // is what made replay collapse to one voice. Validating runs
-              // against content (flatten == lf.content) guards against a stale
-              // sidecar from an out-of-band edit; on mismatch we fall back to a
-              // single run, same as baselineScan. Carry `taggedTraces` from the
-              // relay-pulled local file so a tag-add survives the merge (the
-              // scan re-derives it from the chain head via headTaggedTraces).
-              const pulledRuns =
-                lf.runs && lf.runs.length > 0 && flatten(lf.runs) === lf.content
-                  ? lf.runs
-                  : [{ voice: authorVoice(), text: lf.content }];
-              next[path] = {
-                runs: pulledRuns,
-                nodeId: lf.nodeId,
-                tags: lf.tags,
-                ...(lf.taggedTraces && lf.taggedTraces.length > 0
-                  ? { taggedTraces: lf.taggedTraces }
-                  : {}),
-              };
-            }
-            return next;
-          });
-        });
-      }
-    } catch (e) {
-      setBootError(e instanceof Error ? e.message : String(e));
-      setBootState("idle");
-    }
-  }
-
-  /** Webapp: create a brand-new folder. Local-first — instant, no relay
-   *  round-trip. The relay manifest is created lazily on the first file push
-   *  (or the background pull creates it if needed). */
-  async function webCreateFolder(label?: string) {
-    setBootError(null);
-    // Phase 5: publish genesis first, adopt its event id as the folder identity
-    // (spec §3.1). Replaces the pre-Phase-5 UUID mint. Legacy UUID-keyed
-    // folders in the registry keep working via the #D arm of fetchFolderNodes.
-    const id = await createFolderGenesis();
-    rememberFolder({ id, label: label?.trim() || undefined });
-    await attachRef({ id, label: label?.trim() || undefined });
-  }
-
-  /** Webapp: nuke the current folder and provision a fresh one. The relay is
-   *  append-only — the old folder's chain is immutable and stays under its old
-   *  id, abandoned rather than deleted — so "reset" means minting a brand-new
-   *  folderId (via webCreateFolder) and dropping the old one from the registry.
-   *  attachRef/openScanned rebuild folder/files/panels, but several pieces of
-   *  UI state aren't keyed by folder id and would otherwise carry over
-   *  (selection, replay, citations, the seals modal, collapsed-tree rows) —
-   *  clear them explicitly so the fresh folder starts clean. */
-  async function resetWorkspace() {
-    if (isTauri()) return; // desktop has no relay-folder concept to reset
-    if (folder) forgetFolder(folder.id);
-    setSelection(null);
-    setEditorSelection(null);
-    setCollapsed(new Set());
-    setReplay(null);
-    setPlaying(false);
-    setSealsModal(null);
-    setCitationsByPath({});
-    setCitationHeadByPath({});
-    setTaggedChipByPath({});
-    setInboundByPath({});
-    setInboundHeadByPath({});
-    setEmptyFolders(new Set());
-    setTabCtxMenu(null);
-    await webCreateFolder();
-  }
-
-  /** Factory reset: nuke EVERY zine.* localStorage key and reload. This wipes
-   *  the root binding, crash pads, keychain, relay config, substrate voices,
-   *  models, layout — everything — returning the app to a first-run state.
-   *  Relay chains on the sidecar / remote relays are untouched; only this
-   *  machine's local state is cleared. No undo; the confirm modal gates it. */
-  function factoryReset() {
-    const toRemove: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith("zine.")) toRemove.push(key);
-    }
-    for (const key of toRemove) localStorage.removeItem(key);
-    window.location.reload();
-  }
-
-  /** Webapp: join an existing folder by id (e.g. copied from the desktop). */
-  async function webJoinFolder(id: string) {
-    setBootError(null);
-    const trimmed = id.trim();
-    if (!trimmed) return;
-    try {
-      await attachRef({ id: trimmed, label: findFolder(trimmed)?.label });
-    } catch (e) {
-      setBootError(e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  /** Open a folder from the Stacks index in the press. The index carries only
-   *  a folderId (no disk path), so:
-   *  - Webapp: attach directly from the relay by id (webJoinFolder).
-   *  - Desktop: ask for the disk folder, then bind the relay id to that path
-   *    (attachRef with the explicit id keeps provenance continuous — a fresh
-   *    uuid would fork the folder). Either way, switch to the editor view. */
-  async function openFromStacks(folderId: string) {
+  /** Factory reset is a first-run boundary, not a workspace preference reset.
+   *  Desktop first purges the local sidecar's event store + old peer ACL; only
+   *  after that succeeds do we clear the webview's entire localStorage and
+   *  reload. Clearing `zine.root` makes boot mint a new root genesis, and its
+   *  virtual oblivion region therefore starts empty too. Remote relay copies
+   *  are outside this machine and cannot be recalled. */
+  async function factoryReset() {
+    if (resetBusy) return;
+    setResetBusy(true);
+    setResetError(null);
     try {
       if (isTauri()) {
-        const picked = await chooseFolder();
-        if (!picked) return; // user cancelled
-        await attachRef({ id: folderId, path: picked });
-      } else {
-        await webJoinFolder(folderId);
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("factory_reset");
       }
-      setActiveView("editor");
+      localStorage.clear();
+      window.location.reload();
     } catch (e) {
-      setBootError(e instanceof Error ? e.message : String(e));
-      setBootState("idle");
-    }
-  }
-
-  /** Returns true if the folder's latest 4292 head is signed by someone other
-   *  than the active voice — the read-only/foreign signal. False for folders
-   *  with no published head yet (fresh, local-only — not foreign). */
-  async function detectForeignFolder(folderId: string): Promise<boolean> {
-    const owner = await fetchFolderOwner(folderId);
-    return owner !== null && owner !== authorVoice();
-  }
-
-  /** Fork the currently-attached foreign folder into the user's own namespace.
-   *  Seeds a shallow fork (cites the source's members), then attaches to the
-   *  new fork — which is editable. Untouched members stay cited to the source
-   *  owner until fork-on-write fires on first edit. See protocol §Forking. */
-  async function forkCurrentFolder() {
-    if (!folder || !isForeignFolder) return;
-    setBootError(null);
-    const sourceId = folder.id;
-    const derivedLabel = folder.label ? `${folder.label} (fork)` : `Fork of ${sourceId.slice(0, 8)}`;
-    try {
-      // Phase 5: fork as genesis (destFolderId null) — forkFolder publishes the
-      // fork's genesis node and returns it; its event id becomes the new folder
-      // identity. Replaces the pre-Phase-5 UUID mint.
-      const genesisEvent = await forkFolder(sourceId, null);
-      await attachRef({ id: genesisEvent.id, label: derivedLabel, forkedFrom: sourceId });
-    } catch (e) {
-      setBootError(e instanceof Error ? e.message : String(e));
+      setResetError(e instanceof Error ? e.message : String(e));
+      setResetBusy(false);
     }
   }
 
@@ -8395,9 +9597,9 @@ function App() {
       // Upsert the forked file into the folder manifest so it's discoverable
       // by the tree / listFiles on next scan.
       await upsertManifestEntry(folder.id, {
+        kind: "file",
         relativePath: forkPath,
         latestNodeId: event.id,
-        isDeleted: false,
         contentHash,
       });
       // End replay (restores live state) and re-scan so the fork appears.
@@ -8421,7 +9623,7 @@ function App() {
   /** Branch detection for the active file: scan for incoming forks and sibling
    *  heads. No-op on foreign folders (we don't own the chain) or empty path. */
   async function refreshMergeCandidates(folderId: string, relativePath: string) {
-    if (!relativePath || isForeignFolder) {
+    if (!relativePath) {
       setMergeCandidates([]);
       return;
     }
@@ -8434,8 +9636,8 @@ function App() {
     }
   }
 
-  /** Apply a sealed merge into editor + local store. Shared by no-conflict
-   *  incorporate and the three-way panel's Seal merge. */
+  /** Apply a stepped merge into editor + local store. Shared by no-conflict
+   *  incorporate and the three-way panel's Step merge. */
   async function applyMergedToWorkspace(
     path: string,
     event: Event,
@@ -8476,7 +9678,7 @@ function App() {
         taggedTraces: cur.taggedTraces,
       });
     }
-    seedSealedRef.current({ [path]: nextFile });
+    seedSteppedRef.current({ [path]: nextFile });
     await refreshMergeCandidates(folder!.id, path);
   }
 
@@ -8494,13 +9696,13 @@ function App() {
       // chain-graph artifact (an unStepped checkpoint, or both sides holding
       // identical text). Load the three sides and run the merge: only open
       // the reconcile UI when there are genuine overlapping edits. Otherwise
-      // the three-way merge auto-resolves, so seal it directly.
+      // the three-way merge auto-resolves, so step it directly.
       try {
         const sides = await loadMergeSides(folder.id, path, candidate);
         const merged = threeWayMerge(sides.base, sides.ours, candidate.snapshot);
         const auto = autoMergedText(merged);
         if (merged.clean && auto !== null) {
-          // Auto-resolved — show the diff for review rather than sealing blind.
+          // Auto-resolved — show the diff for review rather than stepping blind.
           setMergePreview({ candidate, path, before: sides.ours, after: auto });
           return;
         }
@@ -8524,9 +9726,9 @@ function App() {
     }
   }
 
-  /** Seal a three-way merge that auto-resolved with no overlapping conflicts.
-   *  Same wiring as the manual seal path, minus the UI state. */
-  async function sealCleanMerge(
+  /** Step a three-way merge that auto-resolved with no overlapping conflicts.
+   *  Same wiring as the manual step path, minus the UI state. */
+  async function stepCleanMerge(
     candidate: MergeCandidate,
     path: string,
     resolvedSnapshot: string,
@@ -8543,15 +9745,15 @@ function App() {
       setMergeError(null);
       setMergePreview(null);
     } catch (e) {
-      console.warn("[merge] sealCleanMerge failed:", e);
+      console.warn("[merge] stepCleanMerge failed:", e);
       setMergeError(e instanceof Error ? e.message : String(e));
     } finally {
       setMergeBusy(false);
     }
   }
 
-  /** Seal from the three-way panel with a resolved snapshot. */
-  async function sealReconciledMerge(resolvedSnapshot: string) {
+  /** Step from the three-way panel with a resolved snapshot. */
+  async function stepReconciledMerge(resolvedSnapshot: string) {
     if (!folder || !mergeSession || mergeBusy) return;
     const { candidate, path } = mergeSession;
     setMergeBusy(true);
@@ -8565,18 +9767,18 @@ function App() {
       setMergeSession(null);
       setMergeError(null);
     } catch (e) {
-      console.warn("[merge] sealReconciledMerge failed:", e);
+      console.warn("[merge] stepReconciledMerge failed:", e);
       setMergeError(e instanceof Error ? e.message : String(e));
     } finally {
       setMergeBusy(false);
     }
   }
 
-  /** Accept a staged background-pull merge: seal the merge node (using the
+  /** Accept a staged background-pull merge: step the merge node (using the
    *  raw ids from the pull, not a MergeCandidate — pull-path merges aren't
    *  fork/sibling candidates), write the merged body to editor + local store,
-   *  and drop the record. Mirrors applyMergedToWorkspace's post-seal sync. */
-  async function sealStagedMerge(staged: StagedMerge) {
+   *  and drop the record. Mirrors applyMergedToWorkspace's post-step sync. */
+  async function stepStagedMerge(staged: StagedMerge) {
     if (!folder || stagedMergeBusy) return;
     setStagedMergeBusy(true);
     setStagedMergeError(null);
@@ -8616,90 +9818,46 @@ function App() {
           taggedTraces: cur.taggedTraces,
         });
       }
-      seedSealedRef.current({ [staged.path]: nextFile });
+      seedSteppedRef.current({ [staged.path]: nextFile });
       setStagedMerges((prev) => prev.filter((m) => m !== staged));
       setStagedMergeView(null);
       await refreshMergeCandidates(folder.id, staged.path);
     } catch (e) {
-      console.warn("[merge] sealStagedMerge failed:", e);
+      console.warn("[merge] stepStagedMerge failed:", e);
       setStagedMergeError(e instanceof Error ? e.message : String(e));
     } finally {
       setStagedMergeBusy(false);
     }
   }
 
-  /**
-   * Webapp boot: open the most recently used folder if there is one, else
-   * provision a fresh one. If the most-recent folder can't be opened (e.g. a
-   * stale desktop folder that was never on the relay, or the relay is
-   * unreachable), fall through to provisioning a new one rather than leaving
-   * the user stuck on a loading/error screen. This is what makes the webapp
-   * "just work" — you always land in the editor.
-   */
-  async function webAutoOpen() {
-    const known = listFolders();
-    const activeId = getActiveFolder();
-    const ref = (activeId && findFolder(activeId)) || known[0];
-    if (ref) {
-      try {
-        const { files: scanned } = await backendRef.current.attach(ref);
-        setFolder(ref);
-        setFiles(scanned);
-        openScanned(scanned, ref.id);
-        rememberFolder(ref);
-        setActiveFolder(ref.id);
-        setBootState("ready");
-        return;
-      } catch {
-        // Stale or unreachable — forget it and provision fresh below.
-        forgetFolder(ref.id);
-      }
-    }
-    await webCreateFolder();
-  }
-
   useEffect(() => {
     if (!folder) {
-      if (isTauri()) {
-        // Desktop: offer a default ($HOME/zine) so a user can start without
-        // the picker.
-        void defaultFolder().then(setDefaultPath);
-      } else {
-        // Webapp: drop straight into the editor. Open the most recent folder
-        // (or provision one on first visit).
-        void webAutoOpen();
-      }
+      // First-ever boot (no root minted yet): mint the permanent root and set
+      // it as the folder. The re-attach body below then opens it. Subsequent
+      // boots find the root via getRootId() (folder state seed) and skip this.
+      void mintRoot().then((id) => setFolder({ id }));
       return;
     }
     let cancelled = false;
     (async () => {
       setBootState("scanning");
       try {
-        // Desktop: boot from the RELAY skeleton only. The trace lives in the
-        // app and is held on the relay; disk is a substrate scanned from /
-        // reified to at an instant, not a continuously-authoritative source.
-        // The first-time attach (attachFolder) is the one acquisition instant
-        // that seeded the chain; every boot after reads the skeleton. No
-        // background disk reconcile runs over it — that path was what let a
-        // stale on-disk read clobber an un-reified buffer.
-        // Webapp: backends reconcile via pullFromRelay; onReconciled is ignored.
-        const scanned = isTauri()
-          ? await bootFromRelay(folder)
-          : (await backendRef.current.attach(folder)).files;
+        // The root is always pathless: it lives on the relay, addressed by its
+        // permanent genesis id. The local arm boots from localStorage
+        // instantly and background-pulls the relay for any newer content. Disk
+        // is never read here — it's touched only by Scan (acquire) and Reify
+        // (emit) gestures, never on boot.
+        const scanned = (await backendRef.current.attach(folder)).files;
         if (cancelled) return;
         setFiles(scanned);
         openScanned(scanned, folder.id);
         setBootState("ready");
       } catch (e) {
         if (cancelled) return;
-        // The attached folder couldn't be re-read on boot (disk path briefly
-        // unreadable — common with cloud-synced / external mounts that haven't
-        // materialized, or the sidecar not yet up; or the relay unreachable on
-        // webapp). Keep the remembered path rather than wiping it, so a
-        // transient failure doesn't force a re-pick on every launch. The
-        // empty state offers a Retry that re-attempts without re-selecting;
-        // the user can still choose another folder if the path is truly gone.
-        setFailedFolder(folder);
+        // The root couldn't be read on boot — almost always a transient
+        // relay/sidecar issue (the sidecar not yet up, or the relay briefly
+        // unreachable). The root id is permanent (zine.root), so this is a
+        // retry, never a re-pick: a reload reopens the same root.
         setBootError(e instanceof Error ? e.message : String(e));
         setBootState("missing");
       }
@@ -8741,45 +9899,33 @@ function App() {
   // silently overwrote edits — that class of bug cannot occur now because
   // nothing has standing to rewrite a held trace between gestures.
 
-  // Window title reflects unsaved buffers: "● zine" when any file is dirty,
-  // plain "zine" otherwise. Desktop-only — on the webapp every edit writes
-  // through, so there's never a dirty window. The dot matches the tab dot.
+  // Window title mirrors the tab badges: total discrete edits waiting for Step,
+  // `+` when only non-text changes are pending, plain "zine" when current.
   useEffect(() => {
     if (!isTauri()) return;
-    document.title = dirtyPaths.size > 0 ? "● zine" : "zine";
-  }, [dirtyPaths]);
+    let total = 0;
+    for (const count of unsteppedEditCounts.values()) total += count;
+    document.title = total > 0 ? `${total} · zine` : unsteppedPathSet.size > 0 ? "+ · zine" : "zine";
+  }, [unsteppedEditCounts, unsteppedPathSet]);
 
-  // NIP-03 attestation upgrade sweep (§8/§R11.20). Affirm seals publish a
-  // *partial* OTS proof immediately; this polls the calendar and republishes
-  // upgraded proofs once the digest lands in a Bitcoin block. 10min matches
-  // Bitcoin's block cadence — tighter polling wastes calendar bandwidth
-  // without improving latency. Desktop-only: the stamp_ots/upgrade_ots
-  // commands are Tauri-hosted (the calendars don't send CORS headers, so a
-  // browser fetch dies). Fire once on mount, then on the interval.
+  // NIP-03 anchor completion sweep (§8/§R11.20). Step keeps its pending OTS
+  // receipt locally; this polls the calendar and publishes a kind-1040 only
+  // once the digest lands in a Bitcoin block. 10min matches Bitcoin's
+  // block cadence — tighter polling wastes calendar bandwidth without
+  // improving latency. Desktop-only: the stamp_ots/upgrade_ots commands are
+  // Tauri-hosted (the calendars don't send CORS headers, so a browser fetch
+  // dies). Fire once on mount, then on the interval.
   useEffect(() => {
     if (!isTauri()) return;
     const run = () =>
-      import("./attestation.js")
-        .then(({ upgradePendingAttestations }) => upgradePendingAttestations())
+      import("./anchor.js")
+        .then(({ upgradePendingAnchors }) => upgradePendingAnchors())
         .catch(() => {
           // best-effort: a calendar failure just means we try again next round
         });
     void run();
     const interval = window.setInterval(run, 10 * 60 * 1000);
     return () => window.clearInterval(interval);
-  }, []);
-
-  // Spaces (Globe) dispatches this when a zine pin is clicked — the Globe stays
-  // decoupled from the shell (no App import), and this listener routes the
-  // folder id through the same openFromStacks path the Stacks cards use.
-  useEffect(() => {
-    const onOpen = (e: globalThis.Event) => {
-      const id = (e as globalThis.CustomEvent<string>).detail;
-      if (typeof id === "string") void openFromStacks(id);
-    };
-    window.addEventListener("zine:open-folder", onOpen);
-    return () => window.removeEventListener("zine:open-folder", onOpen);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Dismiss the tab context menu on a pointer-down outside it, or on Escape —
@@ -8803,21 +9949,6 @@ function App() {
   }, [tabCtxMenu]);
 
 
-  // User chose a folder via the picker. Wrapped so a backend error (Tauri
-  // command missing/failed) surfaces as bootError rather than an unhandled
-  // rejection that looks like "the button did nothing."
-  async function onChooseFolder() {
-    try {
-      const picked = await chooseFolder();
-      if (!picked) return; // user cancelled
-      setFailedFolder(null);
-      await doAttach(picked);
-    } catch (e) {
-      setBootError(e instanceof Error ? e.message : String(e));
-      setBootState("idle");
-    }
-  }
-
   /** Scan: acquire a foreign snapshot from a substrate. The user picks a file
    *  or folder (an external disk path); each scanned file lands as a NEW trace
    *  under the scope-folder. Always additive — scanning the same path twice
@@ -8826,7 +9957,7 @@ function App() {
    *
    *  The picked snapshot is read OUTSIDE the attached root (scan_external does
    *  not confine to root — that's the substrate-acquisition contract). Each
-   *  file is sealed to disk-under-root + the relay, attributed to the SUBSTRATE's
+   *  file is stepped to disk-under-root + the relay, attributed to the SUBSTRATE's
    *  own voice — the substrate is a peer with a keypair, so scanned content is
    *  signed by it, not the authoring key. Desktop-only. */
   async function onScan(kind: "file" | "folder") {
@@ -8847,9 +9978,16 @@ function App() {
     const substrateVoice = getSubstrateVoice(substrate);
     const voice = substrateVoice.publicKey;
     const signer = substrateVoice.secretKey;
-    // Land under the scope-folder. The scope mount's path (or ROOT when the
-    // whole folder is in scope) is the destination prefix.
-    const destFolder = scopeRef.current?.kind === "folder" ? (scopeRef.current.path ?? ROOT) : ROOT;
+    // Land under the primary scope item: inside a folder, beside a file, or at
+    // ROOT when scope is empty. Multi-scope context remains a union, but Scan
+    // needs one deterministic destination.
+    const primaryScope = scopeRef.current[0];
+    const destFolder =
+      primaryScope?.kind === "folder"
+        ? primaryScope.path
+        : primaryScope?.kind === "file"
+          ? parentPath(primaryScope.path)
+          : ROOT;
     const taken = new Set(Object.keys(files));
     const created: { path: string; content: string }[] = [];
     for (const f of scanned) {
@@ -8872,8 +10010,8 @@ function App() {
       }
       return next;
     });
-    // Seal each: writes the file under the attached root (the import lands on
-    // disk under root too, as a free reify-on-import) and seals the relay node,
+    // Step each: writes the file under the attached root (the import lands on
+    // disk under root too, as a free reify-on-import) and steps the relay node,
     // signed by the substrate's key.
     try {
       for (const c of created) {
@@ -8894,34 +10032,27 @@ function App() {
    *  under its relative path. The app keeps its trace; reify serializes a copy
    *  out to a substrate. Desktop-only.
    *
-   *  What gets emitted: the focused file, or — if a folder is in scope — the
-   *  whole scope subtree (every file under it). A file emits as itself; a
-   *  folder emits as its tree, paths relative to the scope root. */
+   *  Every scoped file is emitted; scoped folders expand recursively; shielded
+   *  descendants below each explicit scope root are omitted. */
   async function onReifyOp() {
     if (!folder) return;
     const idx = opTargetPanel();
-    // Resolve the emit set: the focus file, or the scope folder's subtree.
-    const scopePath = scopeRef.current?.kind === "folder" ? (scopeRef.current.path ?? ROOT) : null;
-    let entries: { relativePath: string; content: string }[];
-    if (scopePath != null) {
-      // Folder scope: emit every file under it, paths relative to the scope.
-      const prefix = scopePath === ROOT ? "" : `${scopePath}/`;
-      entries = Object.entries(files)
-        .filter(([p, s]) => s.kind !== "folder" && (scopePath === ROOT || p.startsWith(prefix)))
-        .map(([p, s]) => ({
-          relativePath: scopePath === ROOT ? p : p.slice(prefix.length),
-          content: flatten(s.runs),
-        }));
-    } else {
-      // No folder scope: emit the focused file.
-      const focus = panels[idx]?.active;
-      const fs = focus ? files[focus] : undefined;
-      if (!focus || !fs) {
-        setOpStatus(idx, "error", "Nothing to reify — focus a file or scope a folder");
-        return;
-      }
-      entries = [{ relativePath: focus, content: flatten(fs.runs) }];
-    }
+    // Reify the exact effective-scope union. A sole folder keeps the prior
+    // relative-to-folder output shape; mixed scopes keep workspace-relative
+    // paths so distinct roots cannot collide.
+    const scopes = scopeRef.current;
+    const soleFolder = scopes.length === 1 && scopes[0].kind === "folder" ? scopes[0] : null;
+    const prefix = soleFolder && soleFolder.path !== ROOT ? `${soleFolder.path}/` : "";
+    const entries: { relativePath: string; content: string }[] = Object.entries(files)
+      .filter(
+        ([p, s]) =>
+          s.kind !== "folder" &&
+          pathInEffectiveScopes(scopes, shieldedRef.current, p),
+      )
+      .map(([p, s]) => ({
+        relativePath: soleFolder && soleFolder.path !== ROOT ? p.slice(prefix.length) : p,
+        content: flatten(s.runs),
+      }));
     if (entries.length === 0) {
       setOpStatus(idx, "error", "Scope folder has no files to reify");
       return;
@@ -8949,21 +10080,16 @@ function App() {
 
   // The three "make this the active trace" entry points. Files additionally
   // open into the active panel so the editor can display them; folders and
-  // spans just record the selection (folders are not editors; a minted span
+  // coins just record the selection (folders are not editors; a coin
   // may belong to a file that is already open). The file's kind-4290 nodeId is
   // pulled from its FileState when present so ops can address the nucleus.
   function selectFile(path: string) {
     openInActivePanel(path);
     const nodeId = files[path]?.nodeId;
     setSelection({ kind: "file", path, nodeId });
-    // A deliberate tree-click of a file also mounts it as the scope (stepper
-    // subject + context boundary). Tab focus later never moves scope.
-    setScope({ kind: "file", path, nodeId });
   }
-  /** Focus a file WITHOUT moving scope — for non-tree navigation (scrubbing a
-   *  historical step, following a citation link). `selectFile` is the tree-
-   *  click path and mounts scope; this is the focus-only counterpart that keeps
-   *  the stepper subject sticky while still bringing the file into view. */
+  /** Focus a file without moving scope, for non-tree navigation such as replay
+   *  and citation links. The Sidebar owns tree scope gestures separately. */
   function focusFile(path: string) {
     openInActivePanel(path);
     setSelection({ kind: "file", path, nodeId: files[path]?.nodeId });
@@ -8975,14 +10101,25 @@ function App() {
     // selectFile. Legacy/synthesized folders have no nodeId — undefined is fine.
     const nodeId = files[path]?.nodeId;
     setSelection({ kind: "folder", path, nodeId });
-    // Mounting a folder as scope: the stepper scrubs its timeline and the
-    // context gather recurses its subtree. Root folder path is ROOT ("").
-    setScope({ kind: "folder", path, nodeId });
   }
   function selectSpan(nodeId: string, phrase: string) {
-    setSelection({ kind: "span", nodeId, phrase });
+    setSelection({ kind: "coin", nodeId, phrase });
   }
-  /** Curate a minted span into the palette. Triggered by the copy button on
+  /** Toggle a path's persistent shielded status. A folder excludes its subtree. */
+  function toggleShielded(path: string) {
+    if (!folder) return;
+    setShielded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      saveLocalShielded(folder.id, next);
+      return next;
+    });
+  }
+  /** Curate a coin into the palette. Triggered by the copy button on
    *  a citation chip (Preview mode) — the chip still owns its own clipboard
    *  write (so copy stays a pasteable citation), and this is the "also save for
    *  reuse" side effect. `appendToPalette` is idempotent (deduped by nodeId), so
@@ -9014,9 +10151,8 @@ function App() {
   // actually looking at. Selection is otherwise only set by explicit entry
   // points (sidebar, palette, tab click), so without this it desyncs from focus
   // — fresh boot left selection null (all ops disabled), and clicking into a
-  // background panel left it pointing at a stale/folder trace. This mirrors the
-  // gold-outline effect in Sidebar (which already follows activeTracePath), so
-  // the buttons and the outline now agree.
+  // background panel left it pointing at a stale/folder trace. Scope remains
+  // independently owned by the tree and is untouched by this effect.
   //
   // A span selection (from the palette) is preserved until the focused tab
   // actually changes — selecting a span does not move the focus, so it survives
@@ -9041,67 +10177,36 @@ function App() {
     }
   }, [activePanel, panels, files]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Record selection/panel-mount as a `focus` delta — the replay primitive for
-  // reconstructing a reading session in the press editor (protocol
-  // §FolderTraceNode Content — focus). Debounced so a flurry of clicks collapses
-  // to the resting focus, not one node per click; and deduped against the last
-  // emitted focus so a no-op re-selection (e.g. the nodeId-freshness effect
-  // above re-setting the same file) doesn't spam the chain. Each observation is
-  // routed to the folder that OWNS the focused path (not "the active folder"),
-  // so a file from one folder sitting in a panel never contaminates another
-  // folder's replay. Unowned paths (scratch buffers, stale selections) are
-  // dropped — focus is an observation, never worth blocking the UI (§3.3).
+  // Span focus remains a selection observation for replaying a reading session.
+  // File/folder panel occupancy is
+  // recorded by the transition effect below so switches and every close path
+  // produce paired unmount/mount deltas exactly once.
   useEffect(() => {
-    if (!selection) return;
-    // Build the wire selection. A span's originPath is the file the user was
-    // viewing when they selected the quote — the focused panel's active tab.
-    let focusSel: FocusSelection;
-    if (selection.kind === "file") {
-      focusSel = { kind: "file", path: selection.path ?? "", nodeId: selection.nodeId };
-    } else if (selection.kind === "folder") {
-      focusSel = { kind: "folder", path: selection.path ?? "", nodeId: selection.nodeId };
-    } else {
-      const hostTab = panels[activePanel]?.active ?? "";
-      focusSel = {
-        kind: "span",
-        nodeId: selection.nodeId ?? "",
-        phrase: selection.phrase ?? "",
-        originPath: isFolderTab(hostTab) ? "" : hostTab,
-      };
-    }
-    // Resolve the owner of what's focused. A folder selection IS the target —
-    // it routes to the active folder. A file/span selection routes to whoever
-    // owns the file's path. `activeMounted` builds the single-folder snapshot
-    // today; multi-mount will generalize it at the caller (see focus-routing.ts).
-    const rawFocusPath = selection.kind === "folder"
-      ? null
-      : selection.kind === "file" ? selection.path
-      : focusSel.kind === "span" ? focusSel.originPath
-      : null;
-    const focusPath = rawFocusPath && rawFocusPath.length > 0 ? rawFocusPath : null;
+    if (!selection || selection.kind !== "coin") return;
+    const hostTab = panels[activePanel]?.active ?? "";
+    const focusSel: FocusSelection = {
+      // Legacy wire token retained for existing replay data; product language
+      // and the live SelectionRef call this full trace a coin.
+      kind: "span",
+      nodeId: selection.nodeId ?? "",
+      phrase: selection.phrase ?? "",
+      originPath: isFolderTab(hostTab) ? "" : hostTab,
+    };
+    const focusPath = focusSel.originPath || null;
     const mounted = activeMounted(folder?.id ?? null, Object.keys(files));
-    const owner = focusPath === null
-      ? folderIdRef.current   // folder focus → active folder (or null → dropped)
-      : ownerFolderOf(focusPath, mounted);
-    if (!owner) return;       // unowned → drop (advisory, legal)
-    // Dedupe: skip if identical (by value) to the last focus we published.
+    const owner = focusPath ? ownerFolderOf(focusPath, mounted) : folderIdRef.current;
+    if (!owner) return;
     const key = JSON.stringify({ focusSel, panelIndex: activePanel });
     if (lastFocusKeyRef.current === key) return;
     lastFocusKeyRef.current = key;
-
     const handle = window.setTimeout(() => {
-      // Re-check ownership survived the debounce window: the owner is still the
-      // active folder (for a folder selection) or still owns the path (for a
-      // file/span selection — the file may have been unmounted or the folder
-      // detached during the 1s). Stale → drop, don't write a bogus observation.
-      const stillOwned = focusPath === null
-        ? folderIdRef.current === owner
-        : ownerFolderOf(focusPath, activeMounted(folder?.id ?? null, Object.keys(files))) === owner;
+      const stillOwned = focusPath
+        ? ownerFolderOf(focusPath, activeMounted(folder?.id ?? null, Object.keys(files))) === owner
+        : folderIdRef.current === owner;
       if (!stillOwned) return;
-      // Queue a `focus` observation onto the OWNER's pending buffer; it is
-      // drained onto the next folder seal (§7/§8), so no explicit publish here.
       bufferFocus(owner, {
         type: "focus",
+        op: "mount",
         selection: focusSel,
         panelIndex: activePanel,
         timestamp: Date.now(),
@@ -9110,14 +10215,48 @@ function App() {
     return () => window.clearTimeout(handle);
   }, [selection, activePanel, panels, files, folder]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // §8 session-close checkpoint: when the page unloads, flush any focus
-  // observations still in the buffer (no real seal came along to drain them) as
-  // a dedicated action:focus node. Browsers won't await async work in
-  // beforeunload, so this is best-effort — focus is telemetry, not integrity;
-  // a missed flush just means those observations were never recorded. Fires
-  // once per unload regardless of which folder was prime, on the current one.
-  //
-  // Also (desktop) flush any dirty buffers to the crash pad: the 800ms debounce
+  // Record the editor panels as folder-owned mount state. Comparing the whole
+  // occupancy vector catches every way it can change—tab switch, individual or
+  // bulk close, drag between panels, panel creation, and panel collapse—without
+  // scattering provenance calls through UI handlers.
+  useEffect(() => {
+    const mounted = activeMounted(folder?.id ?? null, Object.keys(files));
+    const next: (PanelOccupancy | null)[] = panels.map((panel) => {
+      const tab = panel.active;
+      if (!tab) return null;
+      if (isFolderTab(tab)) {
+        const path = folderTabPath(tab);
+        const ownerFolderId = folder?.id ?? "";
+        if (!ownerFolderId) return null;
+        const nodeId = path === ROOT ? folder?.id : files[path]?.nodeId;
+        return {
+          key: `folder:${path}`,
+          ownerFolderId,
+          selection: { kind: "folder", path, nodeId },
+        };
+      }
+      const ownerFolderId = ownerFolderOf(tab, mounted);
+      if (!ownerFolderId) return null;
+      return {
+        key: `file:${tab}`,
+        ownerFolderId,
+        selection: { kind: "file", path: tab, nodeId: files[tab]?.nodeId },
+      };
+    });
+    const timestamp = Date.now();
+    for (const transition of occupancyTransitions(panelOccupancyRef.current, next)) {
+      bufferFocus(transition.entry.ownerFolderId, {
+        type: "focus",
+        op: transition.op,
+        selection: transition.entry.selection,
+        panelIndex: transition.panelIndex,
+        timestamp,
+      });
+    }
+    panelOccupancyRef.current = next;
+  }, [panels, files, folder]);
+
+  // On desktop, flush any unstepped buffers to the crash pad: the 800ms debounce
   // could miss the last keystrokes before close, and without this a close/reload
   // mid-edit would lose them. Synchronous localStorage writes land in
   // beforeunload on Chromium/WebView2 (Tauri's webview), so this is reliable
@@ -9125,9 +10264,8 @@ function App() {
   useEffect(() => {
     const handler = () => {
       const fid = folderIdRef.current;
-      if (fid) void flushFocusCheckpoint(fid).catch(() => {});
       if (isTauri() && fid) {
-        for (const path of dirtyPaths) {
+        for (const path of unsteppedPathSet) {
           const f = files[path];
           if (f) {
             mirrorPad(fid, path, {
@@ -9136,6 +10274,7 @@ function App() {
               nodeId: f.nodeId,
               runs: f.runs,
               taggedTraces: f.taggedTraces,
+              kedits: keditLogToArray(f.kedits),
             });
           }
         }
@@ -9160,72 +10299,91 @@ function App() {
   // Lazily resolve the cited traces for each currently-active file — every
   // `q` tag on the file's current head node (bracket quotes + Reply source +
   // tagged zines, all folded into one q-tag set at publish) — into named chips
-  // via `resolveNodeName`. This subsumes the old single reply-to resolution:
+  // with a count of later Steps via `resolveCitationChip`. This subsumes the
+  // old single reply-to resolution:
   // a Reply is one more cited trace, not a special case. Re-resolves only
-  // when the head node id actually moved (a new seal changed the citation
-  // set); `resolveNodeName` itself caches per node id across files, so a trace
-  // cited from many docs resolves once for the session.
+  // when the head node id actually moved (a new step changed the citation
+  // set). Names cache per node id; Step distance deliberately refreshes because
+  // the cited id stays fixed while that trace's head advances.
   useEffect(() => {
     if (!folder) return;
     const activePaths = panels
       .map((p) => p.active)
       .filter((p): p is string => !!p && !isFolderTab(p));
     // A path needs resolution if it's new, or its head node changed since last
-    // resolve. file.nodeId is "" before the first seal this session — skip
+    // resolve. file.nodeId is "" before the first step this session — skip
     // those; there's no head to read citations off yet.
     const pending = [...new Set(activePaths)].filter((p) => {
       const headId = files[p]?.nodeId ?? "";
       if (!headId) return false;
-      return citationHeadByPath[p] !== headId;
+      return (
+        citationHeadByPath[p] !== headId ||
+        citationResolutionByPath[p] !== citationResolutionVersion
+      );
     });
     if (pending.length === 0) return;
     let cancelled = false;
     void (async () => {
       const updates: Record<string, CitationChip[]> = {};
       const headUpdates: Record<string, string> = {};
+      const resolutionUpdates: Record<string, string> = {};
       for (const path of pending) {
         const headId = files[path]?.nodeId ?? "";
         if (!headId) continue;
         try {
           const head = await fetchEventById(headId);
           const targets = head ? eventMeta(head).citationTargets : [];
-          const chips: CitationChip[] = [];
-          for (const nodeId of targets) {
-            const chip = await resolveNodeName(nodeId);
-            if (chip) chips.push(chip);
-          }
+          const chips = (await Promise.all(targets.map(resolveCitationChip))).filter(
+            (chip): chip is CitationChip => chip != null,
+          );
           updates[path] = chips;
           headUpdates[path] = headId;
+          resolutionUpdates[path] = citationResolutionVersion;
         } catch {
           updates[path] = [];
           headUpdates[path] = headId;
+          resolutionUpdates[path] = citationResolutionVersion;
         }
       }
       if (cancelled) return;
       if (Object.keys(updates).length > 0) {
         setCitationsByPath((prev) => ({ ...prev, ...updates }));
         setCitationHeadByPath((prev) => ({ ...prev, ...headUpdates }));
+        setCitationResolutionByPath((prev) => ({ ...prev, ...resolutionUpdates }));
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [panels, folder, files, citationHeadByPath]);
+  }, [
+    panels,
+    folder,
+    files,
+    citationHeadByPath,
+    citationResolutionByPath,
+    citationResolutionVersion,
+  ]);
 
-  // Resolve the tagged traces for each currently-active file — `file.taggedTraces`
-  // (the `tag-add` subset) — into named chips. Unlike `citationsByPath` (which
-  // waits for a head move), this is keyed on the tagged id set itself, so a
-  // just-tagged trace shows in the tag section immediately, before the debounce
-  // seals a new head. Skips paths whose tagged set is already fully resolved.
-  // A tagged trace may be an unpublished local savepoint or a published zine —
-  // both are sealed nodes and resolve uniformly via `resolveNodeName`.
+  // Resolve the live local citation set for each active file: explicit
+  // `taggedTraces` plus body brackets. Unlike `citationsByPath` (which reads the
+  // stepped relay head), this keeps pinned citations visible while the relay is
+  // offline and before the debounce publishes a new head.
+  // A cited trace may be an unpublished local savepoint or a published zine —
+  // both are stepped nodes and resolve uniformly via `resolveCitationChip`.
   useEffect(() => {
     const activePaths = panels
       .map((p) => p.active)
       .filter((p): p is string => !!p && !isFolderTab(p));
     const pending = [...new Set(activePaths)].filter((p) => {
-      const ids = files[p]?.taggedTraces ?? [];
+      const file = files[p];
+      const ids = [
+        ...new Set([
+          ...(file?.taggedTraces ?? []),
+          ...findResolvedBrackets(flatten(file?.runs ?? [])).map((bracket) => bracket.nodeId),
+        ].filter(Boolean)),
+      ];
       const resolved = taggedChipByPath[p] ?? [];
+      if (taggedResolutionByPath[p] !== citationResolutionVersion) return true;
       const want = new Set(ids);
       const have = new Set(resolved.map((c) => c.nodeId));
       // Need work if the sets differ (a tag was added or removed).
@@ -9237,69 +10395,133 @@ function App() {
     let cancelled = false;
     void (async () => {
       const updates: Record<string, CitationChip[]> = {};
+      const resolutionUpdates: Record<string, string> = {};
       for (const path of pending) {
-        const ids = files[path]?.taggedTraces ?? [];
-        const chips: CitationChip[] = [];
-        for (const nodeId of ids) {
-          const chip = await resolveNodeName(nodeId);
-          if (chip) chips.push(chip);
-        }
+        const file = files[path];
+        const ids = [
+          ...new Set([
+            ...(file?.taggedTraces ?? []),
+            ...findResolvedBrackets(flatten(file?.runs ?? [])).map((bracket) => bracket.nodeId),
+          ].filter(Boolean)),
+        ];
+        const chips = (await Promise.all(ids.map(resolveCitationChip))).filter(
+          (chip): chip is CitationChip => chip != null,
+        );
         updates[path] = chips;
+        resolutionUpdates[path] = citationResolutionVersion;
       }
       if (cancelled) return;
       if (Object.keys(updates).length > 0) {
         setTaggedChipByPath((prev) => ({ ...prev, ...updates }));
+        setTaggedResolutionByPath((prev) => ({ ...prev, ...resolutionUpdates }));
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [panels, files, taggedChipByPath]);
+  }, [
+    panels,
+    files,
+    taggedChipByPath,
+    taggedResolutionByPath,
+    citationResolutionVersion,
+  ]);
 
-  // Resolve the inbound tracker for each currently-active file — forks of it,
-  // traces that tag it, traces that cite it (the inverse of the outbound
-  // citation/tag resolution above). Re-resolves only when the head node id
-  // moved: cites/tags pin a specific nucleus, so a new seal can change the
-  // inbound set. findInbound is two chunked reverse lookups (#e for forks, #q
-  // for tags+cites) over the chain — fine for localhost, debounced by the
-  // head-id gate, and never run per keystroke (only on a sealed head move).
+  // Resolve the inbound tracker for each currently-active file. Every relay
+  // observation is keyed by the target's stable identity plus the periodic
+  // citation epoch, because the citing trace can advance while this target's
+  // own head stays fixed. An incomplete observation never replaces verified
+  // data: the row remains visible and is explicitly marked stale/offline.
   useEffect(() => {
     if (!folder) return;
     const activePaths = panels
       .map((p) => p.active)
       .filter((p): p is string => !!p && !isFolderTab(p));
     const pending = [...new Set(activePaths)].filter((p) => {
-      const headId = files[p]?.nodeId ?? "";
+      const file = files[p];
+      const headId = file?.nodeId ?? "";
       if (!headId) return false;
-      return inboundHeadByPath[p] !== headId;
+      const resolutionKey = `${file?.traceId ?? headId}:${headId}:${citationResolutionVersion}`;
+      return inboundResolutionByPath[p] !== resolutionKey;
     });
     if (pending.length === 0) return;
     let cancelled = false;
-      void (async () => {
-        const updates: Record<string, TraceInbound[]> = {};
-        const headUpdates: Record<string, string> = {};
-        for (const path of pending) {
-          // Same coords findMergeCandidates takes (line ~5281): the root folder
-          // id + the slash-joined displayPath. findInbound does the same #F+#D
-          // chain fetch internally, so it accepts the displayPath as-is.
-          try {
-            updates[path] = await findInbound(folder!.id, path);
-            headUpdates[path] = files[path]?.nodeId ?? "";
-          } catch {
-            updates[path] = [];
-            headUpdates[path] = files[path]?.nodeId ?? "";
+    void (async () => {
+      const verifiedUpdates: Record<string, TraceInbound[]> = {};
+      const resolutionUpdates: Record<string, string> = {};
+      const freshnessUpdates: Record<string, InboundFreshness> = {};
+      for (const path of pending) {
+        const file = files[path];
+        const headId = file?.nodeId ?? "";
+        const resolutionKey = `${file?.traceId ?? headId}:${headId}:${citationResolutionVersion}`;
+        resolutionUpdates[path] = resolutionKey;
+        try {
+          const snapshot = await findInboundSnapshot(folder!.id, path, file?.traceId);
+          if (snapshot.complete) {
+            const entries = [...snapshot.entries];
+            // A local Oblivion/restore move runs ahead of its debounced relay Step.
+            // Preserve a previously verified local source while its current
+            // local state still supports the edge: sources in Oblivion stay
+            // cached-but-render-hidden; restored sources reappear immediately
+            // when their body/tag set still cites this pinned nucleus.
+            for (const cached of inboundByPath[path] ?? []) {
+              const localSource = Object.entries(files).find(
+                ([, candidate]) =>
+                  candidate.kind !== "folder" &&
+                  (candidate.traceId ?? candidate.nodeId) ===
+                    (cached.sourceTraceId ?? cached.sourceEventId),
+              );
+              if (!localSource) continue;
+              const [sourcePath, sourceFile] = localSource;
+              const stillSupports =
+                cached.kind === "fork" ||
+                isOblivion(sourcePath) ||
+                (sourceFile.taggedTraces ?? []).includes(cached.fromNodeId) ||
+                findResolvedBrackets(flatten(sourceFile.runs ?? [])).some(
+                  (bracket) => bracket.nodeId === cached.fromNodeId,
+                );
+              if (!stillSupports) continue;
+              const key = `${cached.kind}:${cached.sourceTraceId ?? cached.sourceEventId}:${cached.fromNodeId}`;
+              if (
+                entries.some(
+                  (entry) =>
+                    `${entry.kind}:${entry.sourceTraceId ?? entry.sourceEventId}:${entry.fromNodeId}` ===
+                    key,
+                )
+              ) continue;
+              entries.push(cached);
+            }
+            verifiedUpdates[path] = entries;
+            freshnessUpdates[path] = "fresh";
+          } else {
+            freshnessUpdates[path] = Object.prototype.hasOwnProperty.call(inboundByPath, path)
+              ? "stale"
+              : "unavailable";
           }
+        } catch {
+          freshnessUpdates[path] = Object.prototype.hasOwnProperty.call(inboundByPath, path)
+            ? "stale"
+            : "unavailable";
         }
-      if (cancelled) return;
-      if (Object.keys(updates).length > 0) {
-        setInboundByPath((prev) => ({ ...prev, ...updates }));
-        setInboundHeadByPath((prev) => ({ ...prev, ...headUpdates }));
       }
+      if (cancelled) return;
+      if (Object.keys(verifiedUpdates).length > 0) {
+        setInboundByPath((prev) => ({ ...prev, ...verifiedUpdates }));
+      }
+      setInboundResolutionByPath((prev) => ({ ...prev, ...resolutionUpdates }));
+      setInboundFreshnessByPath((prev) => ({ ...prev, ...freshnessUpdates }));
     })();
     return () => {
       cancelled = true;
     };
-  }, [panels, folder, files, inboundHeadByPath]);
+  }, [
+    panels,
+    folder,
+    files,
+    inboundByPath,
+    inboundResolutionByPath,
+    citationResolutionVersion,
+  ]);
 
   // Resolve names for inbound entries whose `sourceEventId` has no name yet —
   // forks/taggers/citers all surface a node id, and `resolveNodeName` caches per
@@ -9352,49 +10574,83 @@ function App() {
     };
   }, [panels, inboundByPath]);
 
-  /** Fetch a file's full seal chain and open the Seals modal on it.
+  /** Fetch a file's full step chain and open the Steps modal on it.
    *  `pinnedEventId`, when given, seeds the modal's selected index at that
    *  exact node (used by a cited-trace chip) rather than the head. */
-  async function openSeals(relativePath: string, pinnedEventId?: string) {
-    if (!folder) return;
-    const chain = await fetchChain(folder.id, relativePath);
-    if (chain.length === 0) return;
-    setSealsModal({ relativePath, chain, pinnedEventId });
-  }
-
-  /** A cited-trace chip's click handler: resolve the cited node's own path
-   *  (from its `file`/`F` tag, via eventMeta), open that file, and open its
-   *  Seals modal pinned to the exact node this citation points at — which may
-   *  not be the source's current head if it's been edited further since. A
-   *  nameless trace (a minted span) has no `file` path, so there's nothing
+  /** A cited/tagged-trace chip's click handler: resolve the cited node's own
+   *  path (from its `file`/`F` tag, via eventMeta) and open that file in the
+   *  press. The chronological Steps modal that used to open here is gone — the
+   *  step-to-step review now happens in Diff mode while scrubbing the stepper.
+   *  A legacy nameless coin has no `file` path, so there's nothing
    *  to open as a document — the chip is display-only in that case. */
   async function openCitedTrace(nodeId: string) {
+    let traceId: string | null = null;
+    for (const chips of [
+      ...Object.values(citationsByPath),
+      ...Object.values(taggedChipByPath),
+    ]) {
+      const cached = chips.find((chip) => chip.nodeId === nodeId && chip.traceId);
+      if (cached?.traceId) {
+        traceId = cached.traceId;
+        break;
+      }
+    }
+    if (!traceId) {
+      try {
+        traceId = await resolveTraceIdentity(nodeId);
+      } catch {
+        // Fall through to exact-node/path compatibility below.
+      }
+    }
+    const localPath = Object.entries(files).find(
+      ([, file]) =>
+        file.nodeId === nodeId ||
+        (!!traceId && (file.traceId ?? file.nodeId) === traceId),
+    )?.[0];
+    if (localPath) {
+      selectFile(localPath);
+      return;
+    }
+    if (traceId) {
+      try {
+        const resolution = await resolveTraceChain(traceId);
+        if (resolution.status === "resolved") {
+          const head = resolution.chain[resolution.chain.length - 1];
+          const currentPath = head ? eventMeta(head).relativePath : undefined;
+          if (currentPath) {
+            selectFile(currentPath);
+            return;
+          }
+        }
+      } catch {
+        // Legacy exact-node fallback below.
+      }
+    }
     const event = await fetchEventById(nodeId);
     if (!event) return;
     const relativePath = eventMeta(event).relativePath;
     if (!relativePath) return;
     selectFile(relativePath);
-    await openSeals(relativePath, nodeId);
   }
 
-  // --- folder-wide delta replay (seal-to-seal) ---------------------------
+  // --- folder-wide delta replay (step-to-step) ---------------------------
   //
-  // Mounts a single interleaved timeline across every file's seals and steps
+  // Mounts a single interleaved timeline across every file's steps and steps
   // the live editor through historical states. The timeline is "sticky at
   // last": the resting position (`index === last`) is the live, editable
-  // document — new seals while on last append a step and the bar auto-advances
+  // document — new steps while on last append a step and the bar auto-advances
   // to the new last (the follow effect). Stepping back (`index < last`)
   // overrides that one step's file with its reconstructed content (the chain
   // replayed genesis→that node via reconstructUpTo) and freezes it: the user-
   // edit path is inert (the override is a setRunsEffect write `liftRuns`
-  // exempts) and sealNow is gated on `replayActiveRef`, which is true only on a
+  // exempts) and stepFile is gated on `replayActiveRef`, which is true only on a
   // historical step. At most one file is overridden at a time — the active
   // historical step's — so capture/restore is cheap and edits to other files
   // are never disturbed. `endReplay` restores the overridden path (if any).
 
   /** Begin replay for the attached folder. Fetches every FileTraceNode in the
    *  folder, groups by file, fetches each file's chain once, and precomputes
-   *  each seal's reconstructed content so stepping is O(1). Best-effort: a
+   *  each step's reconstructed content so stepping is O(1). Best-effort: a
    *  slow/unreachable relay yields an empty timeline rather than throwing —
    *  auto-bootstrap on folder load must never reject unhandled. */
   async function beginReplay() {
@@ -9416,27 +10672,19 @@ function App() {
       if (list) list.push(event);
       else byPath.set(path, [event]);
     }
-    // Narrow to the scope mount: a file scope shows only that file's seals; a
-    // folder scope shows every seal under its subtree (recursively); the root
-    // folder (path === ROOT) keeps everything — the pre-split behavior. Anything
-    // outside the scope subtree is invisible to the stepper and the context
-    // gather, so a mounted subject is a self-contained timeline.
+    // Narrow to the exact effective-scope union. Shielded descendants inherited
+    // from a broader parent scope are absent unless explicitly scoped.
     const sc = scopeRef.current;
-    if (sc && sc.path && sc.path !== ROOT) {
-      const keep = sc.kind === "file" ? sc.path : sc.path + "/";
-      for (const path of [...byPath.keys()]) {
-        if (sc.kind === "file") {
-          if (path !== keep) byPath.delete(path);
-        } else if (!(path === sc.path || path.startsWith(keep))) {
-          byPath.delete(path);
-        }
+    for (const path of [...byPath.keys()]) {
+      if (!pathInEffectiveScopes(sc, shieldedRef.current, path)) {
+        byPath.delete(path);
       }
-      if (byPath.size === 0) return;
     }
+    if (byPath.size === 0) return;
     // Per file: fetch the genesis→latest chain (authoritative order, never
     // created_at), then for each of that file's events find its index in the
     // chain and reconstruct content up to it. Retain each chain on a ref so
-    // buildPlayTimeline (per-char playback) can expand deltas without refetch.
+    // Keystroke playback can expand the recorded edits without refetching.
     const steps: ReplayStep[] = [];
     const chains: Record<string, Event[]> = {};
     for (const [relativePath, fileEvents] of byPath) {
@@ -9455,7 +10703,7 @@ function App() {
         if (idx === undefined) continue; // event not on the resolved head chain (forked/deleted)
         const meta = eventMeta(event);
         const contentUpToHere = reconstructUpTo(chain, idx);
-        // The footprint of *this seal's* deltas: diff against the previous seal
+        // The footprint of *this step's* deltas: diff against the previous step
         // in chain order (genesis → "" via reconstructUpTo's clamp → the whole
         // imported doc). Computed per-step from the chain so the timeline's
         // file interleaving never crosses files' content. The range is in
@@ -9518,15 +10766,9 @@ function App() {
           // For rename, the affected path is toPath; for add/remove, relativePath.
           const affected = d.type === "rename" ? d.toPath : d.relativePath;
           if (!affected) continue;
-          // Scope-subtree filter (mirror of the file byPath filter above).
+          // Scope-union filter (mirror of the file byPath filter above).
           const sc = scopeRef.current;
-          if (sc && sc.path && sc.path !== ROOT) {
-            const within =
-              sc.kind === "file"
-                ? affected === sc.path
-                : affected === sc.path || affected.startsWith(sc.path + "/");
-            if (!within) continue;
-          }
+          if (!pathInEffectiveScopes(sc, shieldedRef.current, affected)) continue;
           steps.push({
             event,
             relativePath: affected,
@@ -9544,13 +10786,13 @@ function App() {
       console.warn("[replay] fetchFolderNodes failed:", e);
     }
     if (steps.length === 0) return;
-    // Seal-time order, ascending. stable tie-break keeps same-ms seals in
+    // Step-time order, ascending. stable tie-break keeps same-ms steps in
     // their original activity order rather than shuffling them.
-    steps.sort((a, b) => a.meta.sealedAtMs - b.meta.sealedAtMs);
-    // `last` is sticky: the resting position is the most recent seal, which is
+    steps.sort((a, b) => a.meta.steppedAtMs - b.meta.steppedAtMs);
+    // `last` is sticky: the resting position is the most recent step, which is
     // the live editor (no override). Snapshot the live FileState of every path
     // so stepping back into history can capture/restore on demand — `last`
-    // itself shows live content, and new seals while on last advance the bar to
+    // itself shows live content, and new steps while on last advance the bar to
     // the new last automatically (follow effect below).
     const snapshot: Record<string, FileState> = {};
     for (const path of byPath.keys()) {
@@ -9559,7 +10801,7 @@ function App() {
     const last = steps.length - 1;
     setReplay({ steps, index: last, snapshot });
     // Land on `last` without overriding — show the live document. No file is
-    // frozen at entry, so sealing stays enabled and edits flow normally.
+    // frozen at entry, so stepping stays enabled and edits flow normally.
     replayRef.current = { steps, index: last, snapshot };
     replayChainsRef.current = chains;
     setPlaying(false);
@@ -9571,7 +10813,7 @@ function App() {
     // diagnosed without a debugger — if `tiers[0]` is low and `collapsedSigners`
     // is non-empty, the chain's nodes aren't carrying a faithful `authors` map
     // and coloring will collapse to those signers (the unrecoverable case for
-    // already-sealed nodes). High `tiers[0]` with few `voices` means the map
+    // already-stepped nodes). High `tiers[0]` with few `voices` means the map
     // itself is single-voice — the write side lost multi-author runs.
     const dbg = auditAttribution();
     if (dbg) {
@@ -9588,9 +10830,9 @@ function App() {
   /** Advance/seek replay to step `n`. The step's file is shown when `n` points
    *  at a historical step: its reconstructed content overrides `file.runs`
    *  (frozen, read-only-ish — the sync effect writes it as a setRunsEffect run
-   *  that `liftRuns` exempts, and `sealNow` is gated off while on a historical
-   *  step). `n === last` shows the live document: no override, edits and seals
-   *  flow, and the follow effect appends any new seal as a step and re-points
+   *  that `liftRuns` exempts, and `stepFile` is gated off while on a historical
+   *  step). `n === last` shows the live document: no override, edits and steps
+   *  flow, and the follow effect appends any new step as a step and re-points
    *  `last` at it.
    *
    *  Capture/restore is per-path and only ever touches the one file being left
@@ -9636,8 +10878,8 @@ function App() {
       // (per-character attribution keyed by authors[].v) and only falls back to
       // per-node-signer attribution when a node carries no map or one that
       // fails the length-sum integrity check — so stepping colors text by who
-      // actually authored each span when the chain records it. identityForVoice
-      // falls back to a stable hash-bucket color for voices not in the keychain.
+      // actually authored each span when the chain records it. Foreign voices
+      // receive their published identity or a stable per-pubkey fallback.
       // Any real edit after returning to `last` splices in the live voice.
       if (newOverridden) {
         const step = r.steps[clamped];
@@ -9690,124 +10932,136 @@ function App() {
     setPlaying(false);
     setPlayTimeline(null);
     playTimelineRef.current = null;
+    teardownReplayPanels();
   }
 
-  // --- per-character typewriter playback --------------------------------
-  //
-  // Distinct from the seal stepper: play animates every delta one character at
-  // a time, interleaved across files by seal timestamp, so playback looks like
-  // watching the folder being written live. buildPlayTimeline walks each path's
-  // retained chain and expands content deltas into one frame per character,
-  // maintaining a per-path {ch, voice}[] (the same model reconstructRunsFromChain
-  // uses) so each emitted frame's runs carry correct per-author attribution.
-  // A bare snapshot (genesis/import) with no positional deltas is emitted as a
-  // single whole-text frame — it can't be sub-divided. The frame list ends with
-  // a sentinel whose sealIndex points past the last step; the play tick stops
-  // and restores live state when it reaches it.
+  /** Pre-mount involved files into replay-owned panels for kedit playback.
+   *  Existing panels stay in place and usable. Up to REPLAY_PANEL_CAP animation
+   *  columns are appended; extra paths share the last column as real tabs.
+   *  Ownership lives on each panel instead of being inferred from its index, so
+   *  manually closing live or replay tabs cannot corrupt the mapping. */
+  function mountReplayPanels(tl: PlayFrame[]) {
+    // Collect unique paths in first-appearance order.
+    const pathsInOrder: string[] = [];
+    const seen = new Set<string>();
+    for (const f of tl) {
+      if (f.path && !seen.has(f.path)) {
+        seen.add(f.path);
+        pathsInOrder.push(f.path);
+      }
+    }
+    const REPLAY_PANEL_CAP = 3;
+    replayPlaybackPathsRef.current = new Set(pathsInOrder);
+    const available = Math.max(0, MAX_PANELS - panels.length);
+    const mounted = createReplayPanels(
+      pathsInOrder,
+      Math.min(REPLAY_PANEL_CAP, available),
+    ) as PanelState[];
+    if (mounted.length === 0) return;
 
-  /** Build the per-character frame list for playback, interleaved across every
-   *  file's seals by timestamp. Returns null if there's nothing to animate. */
-  function buildPlayTimeline(): PlayFrame[] | null {
+    const firstSpawnAt = panels.length;
+    setPanels([...panels, ...mounted]);
+    setSummonStatus([
+      ...summonStatus,
+      ...mounted.map(() => ({ state: "idle" as const })),
+    ]);
+    panelViews.current = [...panelViews.current, ...mounted.map(() => null)];
+    summonAbort.current = [...summonAbort.current, ...mounted.map(() => null)];
+    setPanelWeights([...panelWeights, ...mounted.map(() => 1)]);
+    setActivePanel(firstSpawnAt);
+  }
+
+  /** Remove only replay-owned panels after playback. Live layout is read at
+   *  teardown time, so manual tab closes and resizes made during replay persist. */
+  function teardownReplayPanels() {
+    replayPlaybackPathsRef.current = null;
+    const live = removeReplayPanels(panels, activePanel);
+    if (live.keptIndices.length === panels.length) return;
+
+    const hasLivePanels = live.panels.length > 0;
+    const nextPanels: PanelState[] = hasLivePanels
+      ? live.panels
+      : [{ tabs: [], active: "" }];
+    const nextStatuses = hasLivePanels
+      ? live.keptIndices.map((i) => summonStatus[i] ?? { state: "idle" as const })
+      : [{ state: "idle" as const }];
+    const nextViews = hasLivePanels
+      ? live.keptIndices.map((i) => panelViews.current[i] ?? null)
+      : [null];
+    const nextAborts = hasLivePanels
+      ? live.keptIndices.map((i) => summonAbort.current[i] ?? null)
+      : [null];
+    let nextWeights = hasLivePanels
+      ? live.keptIndices.map((i) => panelWeights[i] ?? 1)
+      : [1];
+    if (nextPanels.length === 1) nextWeights = [1];
+
+    setPanels(nextPanels);
+    setSummonStatus(nextStatuses);
+    panelViews.current = nextViews;
+    summonAbort.current = nextAborts;
+    setPanelWeights(nextWeights);
+    setTabModes((m) => pruneTabModes(m, nextPanels));
+    setActivePanel(hasLivePanels ? live.activePanel : 0);
+  }
+
+  /** Build a per-keystroke play timeline: one frame per editor transaction, the
+   *  document state after every discrete action (backspace, highlight-delete,
+   *  type-over, undo, redo, IME commit) in the order the author made them.
+   *  Multi-range transactions are grouped by `tx` and applied atomically because
+   *  every member's from/to offsets address the same pre-transaction state.
+   *
+   *  The chains in `replayChainsRef` are already scope-filtered by `beginReplay`,
+   *  so when scope is a single file this produces a single-path timeline (no
+   *  multi-panel spawning needed); a folder scope interleaves every edited file.
+   *  Legacy KEdits without `tx` replay as one-entry transactions. */
+  function buildKeditTimeline(): PlayFrame[] | null {
     const r = replayRef.current;
     if (!r) return null;
     const chains = replayChainsRef.current;
-    // Map each seal (by event id) to its index in `steps`, so a frame can tag
-    // itself with the enclosing sealIndex for pause-snap.
-    const sealIndexByEventId = new Map(r.steps.map((s, i) => [s.event.id, i]));
-    // Flat accumulator; frames carry their path + sealIndex so a cross-path
-    // merge by sealedAtMs (below) can interleave them.
+    const stepIndexByEventId = new Map(r.steps.map((s, i) => [s.event.id, i]));
     const all: PlayFrame[] = [];
     for (const [path, chain] of Object.entries(chains)) {
       const frames: PlayFrame[] = [];
-      // Running char→voice array, mirroring reconstructRunsFromChain's model.
-      let chars: { ch: string; voice: string }[] = [];
+      // Running voiced state, carried across steps within this file (each
+      // step's kedits build on the document state left by the prior step).
+      let runs: Run[] = [];
       for (const event of chain) {
-        const signer = event.pubkey;
-        const sealIndex = sealIndexByEventId.get(event.id);
-        if (sealIndex === undefined) continue; // not a step (e.g. forked-off)
-        const parsed = JSON.parse(event.content) as {
-          snapshot?: string;
-          authors?: unknown;
-          voices?: string[];
-          deltas?: Array<{
-            type?: string;
-            position?: { start: number; end: number };
-            newValue?: string | null;
-            author?: number;
-          }>;
-        };
-        // Tier 1: an `authors` map aligned to snapshot is authoritative — adopt
-        // it wholesale as one frame (per-char breakdown isn't recoverable from
-        // a run map). Matches reconstructRunsFromChain's tier-1 handling.
-        if (typeof parsed.snapshot === "string") {
-          const runs = parseAuthors(parsed.authors, parsed.snapshot);
-          if (runs) {
-            chars = runsToChars(runs);
-            frames.push({ path, sealIndex, runs });
-            continue;
+        const stepIndex = stepIndexByEventId.get(event.id);
+        if (stepIndex === undefined) continue; // not a step (e.g. forked-off)
+        const parsed = JSON.parse(event.content) as { snapshot?: string; kedits?: KEdit[] };
+        const kedits = Array.isArray(parsed.kedits) ? parsed.kedits : [];
+        if (kedits.length > 0) {
+          // Replay each editor transaction. The helper clamps malformed offsets
+          // and applies multi-range changes from high to low so their shared
+          // pre-state coordinates remain valid.
+          for (const transaction of groupKEditsByTransaction(kedits)) {
+            runs = applyKEditTransaction(runs, transaction);
+            frames.push({ path, stepIndex, runs });
           }
-        }
-        const contentDeltas = (parsed.deltas ?? []).filter(
-          (d) => d.position && (d.type === "insert" || d.type === "delete" || d.type === "replace"),
-        );
-        if (contentDeltas.length === 0) {
-          // Bare snapshot (genesis/import) or a tag/reply-only node. If the
-          // snapshot differs from the running text it's a wholesale reset → one
-          // frame attributed to the signer. Otherwise (metadata-only) no frame.
-          if (
-            typeof parsed.snapshot === "string" &&
-            parsed.snapshot !== chars.map((c) => c.ch).join("")
-          ) {
-            chars = [...parsed.snapshot].map((ch) => ({ ch, voice: signer }));
-            frames.push({ path, sealIndex, runs: charsToRuns(chars) });
-          }
-          continue;
-        }
-        // Expand each content delta one character at a time. Per-delta
-        // attribution (§3.3, §3.6): a delta's `author` index resolves through
-        // the node's `voices` table, defaulting to signer — mirrors
-        // reconstructRunsFromChain's Tier-2 handling.
-        const voices = parsed.voices ?? [];
-        for (const d of contentDeltas) {
-          const start = Math.max(0, Math.min(d.position!.start, chars.length));
-          const end = Math.max(start, Math.min(d.position!.end, chars.length));
-          const authorVoice =
-            typeof d.author === "number" && d.author >= 0 && d.author < voices.length
-              ? voices[d.author]
-              : signer;
-          const insertChars = [...(d.newValue ?? "")].map((ch) => ({ ch, voice: authorVoice }));
-          if (insertChars.length === 0 && start === end) continue; // no-op
-          if (insertChars.length > 0) {
-            // Reveal the inserted text one char at a time (typewriter). Each
-            // partial state is a frame.
-            for (let k = 1; k <= insertChars.length; k++) {
-              chars = [...chars.slice(0, start), ...insertChars.slice(0, k), ...chars.slice(end)];
-              frames.push({ path, sealIndex, runs: charsToRuns(chars) });
-            }
-          } else {
-            // Pure delete (no insertion): remove one char at a time from end→start.
-            for (let k = end - 1; k >= start; k--) {
-              chars = [...chars.slice(0, k), ...chars.slice(k + 1)];
-              frames.push({ path, sealIndex, runs: charsToRuns(chars) });
-            }
+        } else if (typeof parsed.snapshot === "string") {
+          // No kedits on this node (pre-kedits chain, forced no-op Step, or a
+          // relay-pulled node with no buffer). Fall back to the snapshot as one
+          // wholesale frame so older chains remain replayable.
+          const snapText = parsed.snapshot;
+          if (snapText !== flatten(runs)) {
+            runs = snapText.length > 0 ? [{ voice: event.pubkey, text: snapText }] : [];
+            frames.push({ path, stepIndex, runs });
           }
         }
       }
       if (frames.length > 0) all.push(...frames);
     }
     if (all.length === 0) return null;
-    // Interleave every path's frames into one list, ordered by the sealedAtMs
-    // of each frame's enclosing seal. Array.prototype.sort is stable in modern
-    // engines, so a path's intra-seal frame order is preserved.
+    // Interleave every path's frames by enclosing-step timestamp; stable sort
+    // preserves intra-step kedit order.
     all.sort((a, b) => {
-      const ta = r.steps[a.sealIndex]?.meta.sealedAtMs ?? 0;
-      const tb = r.steps[b.sealIndex]?.meta.sealedAtMs ?? 0;
+      const ta = r.steps[a.stepIndex]?.meta.steppedAtMs ?? 0;
+      const tb = r.steps[b.stepIndex]?.meta.steppedAtMs ?? 0;
       return ta - tb;
     });
-    // Sentinel: marks live state. The tick stops here and snaps to the last
-    // real frame's seal. sealIndex = steps.length (one past last) so a snap
-    // never accidentally picks it.
-    all.push({ path: "", sealIndex: r.steps.length, runs: [] });
+    // Sentinel used by the playback tick as its stop signal.
+    all.push({ path: "", stepIndex: r.steps.length, runs: [] });
     return all;
   }
 
@@ -9837,9 +11091,31 @@ function App() {
       }
       return { ...prev, [frame.path]: { ...prev[frame.path], runs: frame.runs } };
     });
-    // Focus the frame's file so the typed text is visible.
-    const activePath = panels[activePanel]?.active;
-    if (activePath !== frame.path) focusFile(frame.path);
+    // Focus the frame's file so the typed text is visible. Kedit mode resolves
+    // the replay-owned panel from the CURRENT layout on every frame; closing a
+    // panel therefore cannot leave a stale numeric index behind. If the user
+    // closed that replay tab, respect the close and keep animating offscreen.
+    if (replayPlaybackPathsRef.current) {
+      const panelIdx = panels.findIndex(
+        (panel) => panel.replayOwned && panel.tabs.includes(frame.path),
+      );
+      if (panelIdx >= 0) {
+        if (panels[panelIdx].active !== frame.path) {
+          setPanels((prev) =>
+            mapPanel(prev, panelIdx, (panel) =>
+              panel.tabs.includes(frame.path)
+                ? { ...panel, active: frame.path }
+                : panel,
+            ),
+          );
+        }
+        if (activePanel !== panelIdx) setActivePanel(panelIdx);
+      }
+    } else {
+      // Character mode keeps its original tab-switch behavior.
+      const activePath = panels[activePanel]?.active;
+      if (activePath !== frame.path) focusFile(frame.path);
+    }
     // Persist the refreshed snapshot so a later restore/endReplay can use it.
     replayRef.current = { ...r, snapshot };
   }
@@ -10004,7 +11280,7 @@ function App() {
         const path = uniquePath(target ? `${target}/${suggestedName}` : suggestedName, taken);
         taken.add(path);
         if (files[path]) continue;
-        // Optimistically show the file, then persist to disk + seal a node.
+        // Optimistically show the file, then persist to disk + step a node.
         // eventMeta is in-memory only — it drives the editor's metadata strip
         // and is dropped on reload (the persisted file is clean text).
         setFiles((prev) =>
@@ -10153,24 +11429,6 @@ function App() {
       return { ...p, tabs, active };
     });
     if (next === panels) return;
-    // Record an unmount observation (§3.3 op:unmount): the trace that was in
-    // panel `idx` just left. Route to the path's OWNER — a folder-tab sentinel
-    // has no owner (folder focus is handled on the mount side via selection
-    // kind, not the tab string), so it falls out as null and is dropped. A file
-    // owned by another folder would route there, not to the active folder —
-    // same anti-contamination rule as the mount side. Best-effort, like it.
-    const fid = isFolderTab(path)
-      ? null
-      : ownerFolderOf(path, activeMounted(folder?.id ?? null, Object.keys(files)));
-    if (fid) {
-      bufferFocus(fid, {
-        type: "focus",
-        op: "unmount",
-        selection: { kind: "file", path },
-        panelIndex: idx,
-        timestamp: Date.now(),
-      });
-    }
     commitWithCollapse(next, activePanel);
   }
 
@@ -10209,23 +11467,24 @@ function App() {
     commitWithCollapse(next, activePanel);
   }
 
-  /** Discard a file's unsaved buffer and revert to what's on disk. Desktop-only
-   *  conceptually (the webapp writes through, so nothing is ever dirty): re-reads
+  /** Discard a file's unstepped buffer and revert to what's on disk. Desktop-only
+   *  conceptually (the webapp writes through): re-reads
    *  the disk file, rebuilds a clean single-run FileState, seeds it as the last-
-   *  sealed baseline (so the dirty dot clears), and drops the crash-pad entry.
+   *  stepped baseline (so the unstepped count clears), and drops the crash-pad entry.
    *  A file that exists only in the pad (never Stepped, not on disk) reverts to
    *  empty. Best-effort: a read failure logs and leaves the buffer as-is. */
   async function discardBuffer(path: string) {
     if (!folder) return;
     try {
       const content = await backendRef.current.readFile(path).catch(() => "");
+      const runs = reconcileRunsText(files[path]?.runs ?? [], content, authorVoice());
       const rebuilt: FileState = {
-        runs: content.length === 0 ? [] : [{ voice: authorVoice(), text: content }],
+        runs,
         nodeId: files[path]?.nodeId ?? "",
         tags: [],
       };
       setFiles((prev) => ({ ...prev, [path]: { ...prev[path], ...rebuilt } }));
-      seedSealedRef.current({ [path]: rebuilt });
+      seedSteppedRef.current({ [path]: rebuilt });
       clearPadPath(folder.id, path);
     } catch (e) {
       console.warn(`[discard] failed to revert ${path}:`, e);
@@ -10295,7 +11554,7 @@ function App() {
     });
   }
 
-  function editFile(path: string, runs: Run[]) {
+  function editFile(path: string, runs: Run[], kedits?: KEditLog) {
     setFiles((prev) => ({
       ...prev,
       [path]: {
@@ -10307,16 +11566,20 @@ function App() {
         runs,
         nodeId: prev[path]?.nodeId ?? "",
         tags: prev[path]?.tags ?? [],
+        // Mirror the keystroke log into FileState so stepFile (in a different
+        // scope with no editor view access) can drain it. Cleared after step.
+        ...(kedits && kedits.length > 0 ? { kedits } : {}),
       },
     }));
   }
 
-  // Tagged-trace edits land in FileState.taggedTraces — the protocol's `tag-add`
-  // (a `q` edge with no body bracket). A pure tag-add (content unchanged) still
-  // seals because dirtySealPaths and each backend's no-op gate include the
+  // Explicit citation edits land in FileState.taggedTraces — the protocol's
+  // compatibility name for a `q` edge with no body quote. A pure citation
+  // change (content unchanged) still
+  // steps because unsteppedPaths and each backend's no-op gate include the
   // citation set in their change check.
   // Each id is a sibling file's current head nodeId (resolved from `files`).
-  function editTaggedTraces(path: string, ids: string[]) {
+  function editCitations(path: string, ids: string[]) {
     setFiles((prev) =>
       prev[path]
         ? {
@@ -10355,6 +11618,7 @@ function App() {
 
   function createStart(kind: "file" | "folder", parent = "") {
     setCreateError(null);
+    if (isMint(parent) || isOblivion(parent)) return;
     setCreating({ kind, parent });
     // Make sure the parent folder is expanded so the inline phantom row (the
     // name input) is visible while typing. Includes ROOT: the synthetic root
@@ -10407,12 +11671,18 @@ function App() {
     // typed name. The disk layer (write_text_file / create_folder) already
     // creates intermediate dirs via create_dir_all, so nested paths just work.
     const fullName = parent ? `${parent}/${cleanName}` : cleanName;
+    // Mint and Oblivion are system-managed. Mint receives only the mint
+    // gesture; Oblivion receives only delete-moves and restores.
+    if (isMint(parent) || isMint(fullName) || isOblivion(parent) || isOblivion(fullName)) {
+      setCreateError("Mint and Oblivion are managed by their own gestures.");
+      return;
+    }
 
     setCreating(null);
     setCreateError(null);
 
     if (kind === "file") {
-      const path = fullName.endsWith(".md") ? fullName : `${fullName}.md`;
+      const path = ensureMdExt(fullName);
       if (!files[path]) {
         // Optimistically add an empty file so the editor is immediately
         // usable; the disk write + import node happen via createFile below.
@@ -10457,11 +11727,72 @@ function App() {
     }
   }
 
+  /** Dragging a Coin out of Mint is a copy-by-lineage operation, never a
+   *  reparent. Each successful fork gets a fresh editable genesis in the
+   *  destination, `forked-from` the immutable Mint node; the original remains
+   *  in Mint and every existing citation keeps resolving to it. */
+  async function forkMintedNodes(srcs: string[], destFolder: string) {
+    if (!folder || isMint(destFolder) || isOblivion(destFolder)) return;
+    const signer = secretKeyForVoice(authorPubkey) ?? undefined;
+    const taken = new Set(Object.keys(files));
+    let lastForkPath = "";
+    try {
+      for (const src of srcs) {
+        const source = files[src];
+        if (!source?.nodeId || !isMint(src) || src === MINT) continue;
+        const forkPath = forkPathForMint(src, destFolder, taken);
+        const content = flatten(source.runs);
+        const event = await forkFileFromNode(source.nodeId, folder.id, forkPath, {
+          signer,
+          localOnly: true,
+        });
+        const parsed = JSON.parse(event.content) as { contentHash?: string };
+        await upsertManifestEntry(
+          folder.id,
+          {
+            kind: "file",
+            relativePath: forkPath,
+            latestNodeId: event.id,
+            contentHash: parsed.contentHash ?? "",
+          },
+          signer,
+          { localOnly: true },
+        );
+        const runs: Run[] = content
+          ? [{ voice: authorPubkey, text: content, src: source.nodeId }]
+          : [];
+        saveLocalFile(folder.id, forkPath, {
+          content,
+          tags: [],
+          nodeId: event.id,
+          runs,
+          voicePubkey: authorPubkey,
+        });
+        seedSteppedRef.current({
+          [forkPath]: { runs, nodeId: event.id, tags: [] },
+        });
+        setFiles((prev) => ({
+          ...prev,
+          [forkPath]: { runs, nodeId: event.id, tags: [] },
+        }));
+        taken.add(forkPath);
+        lastForkPath = forkPath;
+      }
+      if (lastForkPath) {
+        openInActivePanel(lastForkPath);
+        setOpStatus(activePanel, "done", "forked coin");
+      }
+    } catch (error) {
+      console.warn("[mint] fork-on-drop failed:", error);
+      setOpStatus(activePanel, "error", error instanceof Error ? error.message : String(error));
+    }
+  }
+
   // Move `src` (file or folder path) into `destFolder` ("" = root). Rewrites
   // every file and empty-folder path under src, plus any open panels and
   // collapsed-folder state, so nothing dangles. Guards against illegal moves
   // a second time (the Sidebar already checks, but this is the trust boundary).
-  // The disk move + provenance (import-at-dest, delete-at-source) happens
+  // The storage move + identity-preserving provenance step happens
   // asynchronously via workspace.movePath.
   // Move one or more sources (files or folders) into `destFolder` ("" = root).
   // A single coherent state pass: a unified rebaser maps every affected path
@@ -10473,6 +11804,11 @@ function App() {
   // carries it) so we never move the same subtree twice.
   function moveNodes(srcs: string[], destFolder: string) {
     if (!folder) return;
+    if (isMint(destFolder)) return;
+    const mintedSources = srcs.filter((src) => isMint(src) && src !== MINT);
+    if (mintedSources.length > 0) void forkMintedNodes(mintedSources, destFolder);
+    srcs = srcs.filter((src) => !isMint(src));
+    if (srcs.length === 0) return;
     // The synthetic root (the mounted folder) can never be a move source.
     // The UI never offers it as draggable, but this is the trust boundary.
     if (srcs.some((s) => s === ROOT)) return;
@@ -10586,7 +11922,7 @@ function App() {
     // Rebase remembered view modes so a moved file keeps the surface it had.
     // (Folder tabs never write a tabModes entry — guarded at the write site.)
     setTabModes((prev) => {
-      const next: Record<string, "preview" | "markdown"> = {};
+      const next: Record<string, Mode> = {};
       for (const [p, mode] of Object.entries(prev)) next[rebaser(p)] = mode;
       return next;
     });
@@ -10599,9 +11935,15 @@ function App() {
       return next;
     });
 
-    // Disk + provenance: import at the new path, tombstone at the old. Carry
-    // each affected file's user tags through (the folder tag updates on its
-    // own, being derived from the new path) so they survive the reparent. Each
+    // Mounts name tree coordinates, so they must follow the identities being
+    // moved. Without this pass the files land in the destination but the gold
+    // mounted rows disappear and scope keeps pointing at paths that no longer
+    // exist. Descendant mounts under a moved folder follow that folder too.
+    setScope((prev) => rebaseMountsAfterMove(prev, movable, destFolder));
+
+    // Storage + provenance: extend each file's existing trace at the new path
+    // and update membership. Carry user tags through so they survive the
+    // reparent. Each
     // top-level source is a separate backend move (movePath already rebases a
     // folder's descendants), so they're independent and tolerate partial
     // failures — a failed move logs and leaves the rest intact.
@@ -10619,14 +11961,56 @@ function App() {
     }
   }
 
-  // Remove one or more paths (files or folders) from local state. For a folder,
-  // every descendant file and empty-folder is dropped too. Any open panel
-  // pointing at a deleted file or inside a deleted folder is cleared to "" so
-  // Panel shows its empty state instead of crashing on a dangling reference. A
-  // path nested beneath another deleted path is a no-op extra (the ancestor
-  // already sweeps it), so this prunes to top-level deletions first and makes a
-  // single coherent pass — same shape as moveNodes.
+  // Apply the Delete gesture to one or more files/folders. Root items move into
+  // Oblivion while Oblivion items are removed permanently, but both outcomes
+  // close every corresponding file/folder tab before mutating the tree.
   function deleteNodes(paths: string[]) {
+    if (!folder) return;
+    // Split by location: deleting something in Root moves it to Oblivion
+    // (not a tombstone — it survives reload and can be dragged back out).
+    // Deleting something already in Oblivion is a real hard delete (emptying
+    // the bin). This keeps the recycle-bin contract: root→oblivion is
+    // reversible, oblivion→nothing is permanent.
+    const inRoot = paths.filter((p) => !isMint(p) && !isOblivion(p) && p !== ROOT && p !== OBLIVION);
+    const inOblivion = paths.filter((p) => isOblivion(p));
+    const fileSet = new Set(Object.keys(files));
+    const folderSet = new Set(emptyFolders);
+    const deleteTargets: DeleteTabTarget[] = [...inRoot, ...inOblivion].map((path) => ({
+      path,
+      isFolder:
+        folderSet.has(path) ||
+        files[path]?.kind === "folder" ||
+        hasChild(fileSet, folderSet, path),
+    }));
+    const nextPanels = closeDeletedTabs(panels, deleteTargets, (tab) =>
+      isFolderTab(tab) ? folderTabPath(tab) : tab,
+    );
+    if (nextPanels !== panels) commitWithCollapse(nextPanels, activePanel);
+
+    if (inRoot.length > 0) {
+      // Move each gesture into its own timestamped folder under Oblivion:
+      // `oblivion/<YYYY-MM-DD_HHMMSS>/<items>`. Solves name collisions (deleting
+      // `draft.md` twice never overwrites the first retained copy) and records when
+      // each deletion happened. Second precision means two gestures in the same
+      // clock-second could collide on the folder name, so a `-N` suffix bumps
+      // until the name is free. The folder is virtual — once every item under
+      // it is restored out, buildTree stops rendering it (no files, no explicit
+      // empty-folder entry), so emptied timestamps vanish on their own.
+      const base = formatLocalSecondStamp(new Date());
+      let stamp = base;
+      let n = 2;
+      const taken = (p: string) =>
+        Object.keys(files).some((f) => f.startsWith(p + "/")) || emptyFolders.has(p);
+      while (taken(`${OBLIVION}/${stamp}`)) stamp = `${base}-${n++}`;
+      moveNodes(inRoot, `${OBLIVION}/${stamp}`);
+    }
+    if (inOblivion.length > 0) hardDelete(inOblivion);
+  }
+
+  /** Permanent delete: tombstone off disk + relay. Used only for items already
+   *  in oblivion (emptying the recycle bin) — root deletions go through
+   *  moveNodes(_, OBLIVION) instead. */
+  function hardDelete(paths: string[]) {
     if (!folder) return;
     const fileSet = new Set(Object.keys(files));
     const folderSet = new Set(emptyFolders);
@@ -10634,7 +12018,7 @@ function App() {
     // The synthetic root (the mounted folder) is never deletable — the UI
     // hides Delete from its context menu, but this is the trust boundary.
     const tops = paths
-      .filter((p) => p !== ROOT)
+      .filter((p) => p !== ROOT && p !== OBLIVION)
       .filter((p) => !paths.some((q) => q !== p && isDescendantOrSelf(q, p)));
     if (tops.length === 0) return;
     // A path is removed iff it is a deleted top-level path itself or a
@@ -10690,34 +12074,12 @@ function App() {
       return next;
     });
 
-    // Close any tabs whose file/folder was deleted, then collapse panels that
-    // emptied as a result. Routed through commitWithCollapse (like closeTab /
-    // moveTab) so an emptied panel is dropped and panelWeights stays length-
-    // locked to the surviving panels — otherwise the lone remaining panel would
-    // share the row with a phantom empty column and not fill the width.
-    const tabUnder = (t: string): boolean =>
-      isFolderTab(t) ? under(folderTabPath(t)) : under(t);
-    const nextPanels = panels.map((panel) => {
-      const oldTabs = panel.tabs;
-      const tabs = oldTabs.filter((t) => !tabUnder(t));
-      // if the active tab was removed, move focus to a surviving neighbor:
-      // the tab now sitting at the old slot, else the one before it.
-      let active = panel.active;
-      if (tabUnder(active)) {
-        const i = Math.max(0, oldTabs.indexOf(active) - 1);
-        active = tabs[i] ?? "";
-      }
-      return { ...panel, tabs, active };
-    });
-    commitWithCollapse(nextPanels, activePanel);
-
     // Drop remembered view modes for the deleted path(s).
     setTabModes((prev) => {
-      const next: Record<string, "preview" | "markdown"> = {};
+      const next: Record<string, Mode> = {};
       for (const [p, mode] of Object.entries(prev)) if (!under(p)) next[p] = mode;
       return next;
     });
-
 
     setCollapsed((prev) => {
       const next = new Set<string>();
@@ -10735,6 +12097,28 @@ function App() {
     }
   }
 
+  /** Relay revocation is intentionally independent of local deletion. The
+   * workspace copy and its Oblivion state are untouched. */
+  async function requestTraceRevocation(path: string): Promise<string> {
+    if (!folder) throw new Error("No zine is attached.");
+    const file = files[path];
+    if (!file || file.kind === "folder" || !file.nodeId) {
+      throw new Error("This trace has no published Step to revoke.");
+    }
+    const traceId = file.traceId ?? (await resolveTraceIdentity(file.nodeId));
+    if (!traceId) throw new Error("The trace identity could not be verified.");
+    const result = await revokeTrace(traceId, "Revoked by the author from zine", {
+      fallback: { folderId: folder.id, relativePath: path },
+    });
+    setCitationRefreshEpoch((epoch) => epoch + 1);
+    const requested = result.requestedNodeIds.length;
+    const skipped = result.skippedNodeIds.length;
+    if (skipped === 0) {
+      return `Relay revocation requested for all ${requested} Step${requested === 1 ? "" : "s"} signed by the current pen. Your local copy was not deleted.`;
+    }
+    return `Relay revocation requested for ${requested} of ${result.totalNodeCount} Steps. ${skipped} Step${skipped === 1 ? " was" : "s were"} signed by other voices and cannot be revoked by the current pen. Your local copy was not deleted.`;
+  }
+
   // Rename `path` (a file or folder) to `newName`, staying in the same parent.
   // Structurally a move with a different destination formula: the parent is
   // kept and only the basename (and, for a folder, every descendant prefix) is
@@ -10747,6 +12131,7 @@ function App() {
   // path rewrite, no disk rename, no provenance delta.
   function renameNode(path: string, newName: string): string | null {
     if (!folder) return null;
+    if (isMint(path) || isOblivion(path)) return "Mint and Oblivion are read-only.";
     const cleanName = newName.trim();
     if (!cleanName) return "Name cannot be empty.";
     if (cleanName.includes("/"))
@@ -10755,16 +12140,11 @@ function App() {
       return `"${cleanName}" isn't a valid name.`;
 
     if (path === ROOT) {
-      // Display label only. Not a tag token — free text (spaces ok), same as
-      // the name given when creating a webapp folder.
-      const current =
-        folder.label ||
-        (folder.path ? basename(folder.path) : folder.id.slice(0, 8));
-      if (cleanName === current) return null; // no-op
-      const updated: AttachedFolder = { ...folder, label: cleanName };
-      setFolder(updated);
-      rememberFolder(updated);
-      saveAttachedFolder(updated);
+      // Renaming the root only changes its cosmetic display label — the id is
+      // permanent, no path/provenance rewrite. Persist it so the rename
+      // survives reload, and update `folder` so the header + tree re-render.
+      setRootLabel(cleanName);
+      setFolder((prev) => (prev ? { ...prev, label: cleanName } : prev));
       return null;
     }
 
@@ -10817,7 +12197,7 @@ function App() {
 
     // Rebase remembered view modes so a renamed file keeps the surface it had.
     setTabModes((prev) => {
-      const next: Record<string, "preview" | "markdown"> = {};
+      const next: Record<string, Mode> = {};
       for (const [p, mode] of Object.entries(prev)) next[rebaser(p)] = mode;
       return next;
     });
@@ -10830,8 +12210,8 @@ function App() {
       return next;
     });
 
-    // Disk rename + provenance (import-at-dest, tombstone-at-source). Carry
-    // each affected file's user tags through, same as moveNode.
+    // Storage rename + an identity-preserving provenance step. Carry each
+    // affected file's user tags through, same as moveNodes.
     const userTagsByPath: Record<string, string[]> = {};
     for (const [p, st] of Object.entries(files)) {
       if (p === path || (isFolderRename && p.startsWith(path + "/"))) {
@@ -10846,12 +12226,14 @@ function App() {
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      // Cmd/Ctrl+S == Step. Saves the active file to disk + force-seals a
-      // checkpoint node signed as the active voice — identical to clicking the
-      // Step button. On desktop this is the one gesture that writes the real
-      // on-disk file; every other dirty buffer lives in the crash pad until
-      // the user Steps it. Bracket-wrapping moved to Cmd+B (it used to share
-      // this key via a selection branch, which made Cmd+S mean two things).
+      // Cmd/Ctrl+S invokes the palette's AUTHOR primary action. With mintable
+      // selected text it mints a new trace and resolves a citation in the source;
+      // resolved or structurally mixed selections stay inert. With no selection
+      // it saves the active file to disk and force-steps a checkpoint node signed
+      // as the active voice — identical to clicking Step. On desktop this is the
+      // gesture that writes the real
+      // on-disk file; every other unstepped buffer lives in the crash pad until
+      // the user Steps it. Cmd+B remains the protection-only bracket gesture.
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
         void deliverAsVoice(activePanel, "step");
@@ -10867,7 +12249,7 @@ function App() {
   );
   // Folder-members (kind: "folder" on FileState) are real folders under nesting
   // (spec §3.2), not just synthesized path prefixes — include them so the tree
-  // and the path-shape inference (hasChild, onRowActivate) treat them as folders.
+  // and path-based mutation helpers treat them as folders.
   const folderPaths = useMemo(
     () => new Set([
       ...emptyFolders,
@@ -10876,22 +12258,21 @@ function App() {
     [emptyFolders, files],
   );
 
-  // The focused panel's active trace path — the file/folder its active tab is
-  // showing. Drives the sidebar's gold "selected" row so clicking a panel or
-  // selecting one of its tabs is reflected in the collection, not only tree-row
-  // clicks. A folder tab (`folder://<relpath>`) maps to the folder's relpath.
+  // The focused panel's active tab mapped back to its directory-tree path. A
+  // folder tab (`folder://<relpath>`) maps to the folder's relpath; null keeps
+  // an empty panel from accidentally marking the synthetic root row.
   const activeTab = panels[activePanel]?.active ?? "";
-  const activeTracePath = isFolderTab(activeTab) ? folderTabPath(activeTab) : activeTab;
+  const focusedTabPath = activeTab
+    ? (isFolderTab(activeTab) ? folderTabPath(activeTab) : activeTab)
+    : null;
 
-  // The mounted folder's display name — shown as the sidebar header and as the
-  // label of the synthetic root node in the tree. Desktop derives it from the
-  // attached path's basename (label is unset on desktop attach); webapp uses
-  // the stored label, falling back to the id prefix.
+  // The root's display name — shown as the sidebar header and as the label of
+  // the synthetic root node in the tree. The root is pathless, so the label is
+  // the only name it has. It defaults to "root" and is user-renameable (the id
+  // stays permanent; only this cosmetic label changes via setRootLabel).
   const rootLabel = useMemo(() => {
     if (!folder) return "Collection";
-    if (folder.label) return folder.label;
-    if (folder.path) return basename(folder.path);
-    return folder.id.slice(0, 8);
+    return folder.label ?? DEFAULT_ROOT_LABEL;
   }, [folder]);
 
   const tree = useMemo(() => {
@@ -10902,25 +12283,28 @@ function App() {
     // old behavior for them.
     const fileEntries = Object.entries(files)
       .filter(([, f]) => f.kind !== "folder")
-      .map(([p]) => ({ path: p, type: "file" as const }));
+      .map(([p, f]) => ({
+        path: p,
+        type: "file" as const,
+        ...(f.nodeId ? { attestations: attestationCounts[f.nodeId] ?? 0 } : {}),
+      }));
     const folderMemberEntries = Object.entries(files)
       .filter(([, f]) => f.kind === "folder")
-      .map(([p]) => ({ path: p, type: "folder" as const }));
-    const entries: { path: string; type: "file" | "folder" }[] = [
+      .map(([p, f]) => ({
+        path: p,
+        type: "folder" as const,
+        ...(f.nodeId ? { attestations: attestationCounts[f.nodeId] ?? 0 } : {}),
+      }));
+    const allEntries: TreeEntry[] = [
       ...fileEntries,
       ...folderMemberEntries,
       ...[...emptyFolders].map((p) => ({ path: p, type: "folder" as const })),
     ];
-    const built = buildTree(entries);
-    // Wrap the built entries under a single synthetic root representing the
-    // mounted folder, so it shows as a visible, selectable top-level node
-    // (path === ROOT). All existing path semantics are unchanged — ROOT is
-    // still "" and every real entry keeps its relpath.
-    return [{ name: rootLabel, path: ROOT, type: "folder", isRoot: true, children: built }] as TreeNode[];
-  }, [files, emptyFolders, rootLabel]);
+    return buildDirectoryTree(allEntries, rootLabel);
+  }, [files, emptyFolders, rootLabel, attestationCounts]);
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" onContextMenu={openGlobalContextMenu}>
       <div className="body" style={{ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}>
         <NavRail
           activeView={activeView}
@@ -10929,30 +12313,12 @@ function App() {
           onToggleExpanded={() => setRailExpanded((v) => !v)}
           theme={theme}
           onToggleTheme={toggleTheme}
-          onResetWorkspace={!isTauri() ? () => setConfirmReset(true) : undefined}
           showOperator={!isTauri() && isStaff()}
         />
         <div className="view-column">
           {activeView !== "editor" && <ViewHeader view={activeView} />}
-          {/* Crash-pad restore banner (desktop): the last session left dirty
-              buffers that were never Stepped. They've been overlaid on the
-              scanned files, so no work is lost — this just tells the user, with
-              a way to dismiss. The dot on each restored tab is the persistent
-              reminder until each is Stepped or Discarded. */}
-          {crashRestoreCount > 0 && (
-            <div className="crash-restore-banner">
-              <span className="crash-restore-text">
-                Restored {crashRestoreCount} unsaved file{crashRestoreCount === 1 ? "" : "s"} from your last session — Step (⌘S) to commit, or Discard to revert.
-              </span>
-              <button
-                type="button"
-                className="crash-restore-dismiss"
-                aria-label="Dismiss"
-                onClick={() => setCrashRestoreCount(0)}
-              >
-                ×
-              </button>
-            </div>
+          {(activeView === "listings" || activeView === "stats" || activeView === "globe") && (
+            <SocialQueryBar query={socialQuery} onChange={setSocialQuery} />
           )}
           {activeView === "editor" ? (
           folder && bootState === "ready" ? (
@@ -10962,7 +12328,11 @@ function App() {
                 tree={tree}
                 collapsed={collapsed}
                 onToggleFolder={toggleFolder}
-                openTabs={panels.flatMap((p) => p.tabs)}
+                focusedTabPath={focusedTabPath}
+                scopes={scope}
+                onScopesChange={setScope}
+                shielded={shielded}
+                onToggleShielded={toggleShielded}
                 onActivateFile={selectFile}
                 onActivateFolder={selectFolder}
                 creating={creating}
@@ -10974,12 +12344,12 @@ function App() {
                 folderPaths={folderPaths}
                 onMove={moveNodes}
                 onDelete={deleteNodes}
+                onRevoke={requestTraceRevocation}
                 onRename={renameNode}
                 folderId={folder?.id ?? null}
                 orchestrationOpen={orchestrationOpen}
                 onToggleOrchestration={() => setOrchestrationOpen((v) => !v)}
                 orchestrationRefreshKey={orchestrationRefreshKey}
-                activeTracePath={activeTracePath}
                 samplerOpen={samplerOpen}
                 onToggleSampler={() => {
                   // The sidebar telescope always targets the attached folder's
@@ -11026,12 +12396,15 @@ function App() {
                 replayStep={replay ? replay.steps[replay.index] ?? null : null}
                 replayIndex={
                   playing && playTimeline && playCursor < playTimeline.length
-                    ? playTimeline[playCursor]?.sealIndex ?? replay?.index ?? 0
+                    ? playTimeline[playCursor]?.stepIndex ?? replay?.index ?? 0
                     : replay?.index ?? 0
                 }
                 replayCount={replay?.steps.length ?? 0}
                 stepTimes={
-                  replay ? replay.steps.map((s) => s.meta.sealedAtMs) : undefined
+                  replay ? replay.steps.map((s) => s.meta.steppedAtMs) : undefined
+                }
+                playFraction={
+                  playing && playTimeline ? stepPlayFraction(playTimeline, playCursor) : 0
                 }
                 playing={playing}
                 playSpeed={playSpeed}
@@ -11040,18 +12413,19 @@ function App() {
                   playing
                 }
                 onStep={(n) => {
-                  // Manual step pauses char-playback and tears down its
-                  // timeline so the stepper lands on a clean seal boundary.
+                  // Manual stepping pauses playback and tears down its
+                  // timeline so the stepper lands on a clean step boundary.
                   setPlaying(false);
                   setPlayTimeline(null);
                   playTimelineRef.current = null;
+                  teardownReplayPanels();
                   replayStepTo(n);
                 }}
                 onTogglePlay={() => {
                   if (!replay) return;
                   if (playing) {
-                    // Pause: tear down the char timeline and snap the seal
-                    // cursor to the last rendered frame's enclosing seal, so
+                    // Pause: tear down the edit timeline and snap the step
+                    // cursor to the last rendered frame's enclosing step, so
                     // the stepper/slider rest where playback stopped.
                     const tl = playTimelineRef.current;
                     const cur = playCursorRef.current;
@@ -11059,15 +12433,22 @@ function App() {
                     setPlaying(false);
                     setPlayTimeline(null);
                     playTimelineRef.current = null;
-                    if (frame && frame.sealIndex < replay.steps.length) {
-                      replayStepTo(frame.sealIndex);
+                    if (frame && frame.stepIndex < replay.steps.length) {
+                      replayStepTo(frame.stepIndex);
                     }
+                    // Remove only the ephemeral replay panels.
+                    teardownReplayPanels();
                   } else {
-                    // Play: build the per-char timeline, render its first frame,
-                    // and start the tick. Always animates the whole folder
-                    // (genesis→live) — resuming mid-char isn't supported.
-                    const tl = buildPlayTimeline();
+                    // Build the keystroke timeline, render its first frame, and
+                    // start the tick. Playback always
+                    // animates the whole scope (genesis→live) — resuming mid-
+                    // edit isn't supported.
+                    const tl = buildKeditTimeline();
                     if (!tl || tl.length <= 1) return; // nothing to animate
+                    // Pre-mount involved files into spawned panels so the tick
+                    // can switch activePanel per-frame (one file per column)
+                    // instead of cramming every file into one panel's tabs.
+                    mountReplayPanels(tl);
                     const first = tl[0];
                     if (first) renderPlayFrame(first, null);
                     playTimelineRef.current = tl;
@@ -11084,7 +12465,10 @@ function App() {
                   })
                 }
                 onOpenFolder={openFolder}
-                onOpenSettings={() => setSettingsOpen(true)}
+                onOpenSettings={() => {
+                  setResetError(null);
+                  setSettingsOpen(true);
+                }}
               />
               {/* Horizontal resize handle for the press: drag to change the
                   collection/palette sidebar width; double-click resets. */}
@@ -11102,24 +12486,6 @@ function App() {
                 onPointerUp={onSidebarResizerPointerUp}
                 onDoubleClick={onSidebarResizerDoubleClick}
               />
-              {/* Foreign-folder banner: the attached folder is owned by someone
-                  else. Edits are gated until the user forks it into their own
-                  namespace. The Fork action seeds a shallow fork (cites the
-                  source's members) and re-attaches to the editable copy. */}
-              {isForeignFolder && (
-                <div className="foreign-banner">
-                  <span className="foreign-banner-text">
-                    You're viewing a folder owned by someone else. Fork it to edit.
-                  </span>
-                  <button
-                    type="button"
-                    className="foreign-banner-fork"
-                    onClick={() => void forkCurrentFolder()}
-                  >
-                    Fork to edit
-                  </button>
-                </div>
-              )}
               {/* Fork-from-snapshot modal: the user tried to edit while viewing
                   a historical replay step. Offer to fork the file trace from
                   that snapshot (spec §3.8), skip to the latest version, or
@@ -11127,9 +12493,9 @@ function App() {
               {forkPrompt && replay && (() => {
                 const step = replay.steps[forkPrompt.stepIndex];
                 if (!step) return null;
-                const d = new Date(step.meta.sealedAtMs);
+                const d = new Date(step.meta.steppedAtMs);
                 const pad = (n: number) => String(n).padStart(2, "0");
-                const when = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+                const when = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
                 return (
                   <div className="confirm-overlay" onClick={() => setForkPrompt(null)}>
                     <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
@@ -11166,7 +12532,7 @@ function App() {
                   busy={mergeBusy}
                   error={mergeError}
                   onCancel={() => setMergeSession(null)}
-                  onConfirm={(resolved) => void sealReconciledMerge(resolved)}
+                  onConfirm={(resolved) => void stepReconciledMerge(resolved)}
                 />
               )}
               {mergePreview && (
@@ -11181,14 +12547,8 @@ function App() {
                     setMergePreview(null);
                     setMergeError(null);
                   }}
-                  onConfirm={() => void sealCleanMerge(mergePreview.candidate, mergePreview.path, mergePreview.after)}
+                  onConfirm={() => void stepCleanMerge(mergePreview.candidate, mergePreview.path, mergePreview.after)}
                 />
-              )}
-              {reconciling && (
-                <div className="reconcile-banner" title="Fetching provenance from the relay in the background">
-                  <span className="press-loading-spinner reconcile-banner-spinner" aria-hidden="true" />
-                  <span>Syncing provenance…</span>
-                </div>
               )}
               {stagedMerges.length > 0 && (
                 <div className="reconcile-banner staged-merges-banner" title="A peer edit merged cleanly with local changes and is waiting for review">
@@ -11223,7 +12583,7 @@ function App() {
                     setStagedMergeView(null);
                     setStagedMergeError(null);
                   }}
-                  onConfirm={() => void sealStagedMerge(stagedMergeView)}
+                  onConfirm={() => void stepStagedMerge(stagedMergeView)}
                 />
               )}
               <main className="workspace">
@@ -11240,6 +12600,45 @@ function App() {
                       (replay !== null &&
                         replay.index < replay.steps.length - 1) ||
                       playing;
+                    const citationReadOnly =
+                      replayActive || isMint(path) || isOblivion(path);
+                    // The single path whose content is currently overridden by
+                    // the replay stepper (null on `last`, on membership steps,
+                    // or when not replaying). The panel showing this path gets
+                    // the provisional/read-only border; its tab gets a marker.
+                    const replayFrozenPath =
+                      replay !== null &&
+                      replay.index < replay.steps.length - 1 &&
+                      !replay.steps[replay.index]?.membership
+                        ? (replay.steps[replay.index]?.relativePath ?? null)
+                        : null;
+                    // Replay-driven diff inputs, computed only when THIS panel's
+                    // file is the one the stepper has frozen. replayStepText is
+                    // the frozen step's snapshot; replayPrevText walks the timeline
+                    // back to the previous content-step of the same file (skipping
+                    // membership steps and other files) so "vs prev" shows what
+                    // this step changed; replayLiveText is the live buffer parked
+                    // in replay.snapshot (file.runs has been overwritten by the
+                    // step snapshot, so flatten(file.runs) is NOT the live text).
+                    // All three are null when not frozen on this path.
+                    const replayFrozenHere = path === replayFrozenPath && replay !== null;
+                    let replayStepText: string | null = null;
+                    let replayPrevText: string | null = null;
+                    let replayLiveText: string | null = null;
+                    if (replayFrozenHere) {
+                      const step = replay.steps[replay.index];
+                      replayStepText = step?.contentUpToHere ?? null;
+                      replayLiveText = replay.snapshot[path]
+                        ? flatten(replay.snapshot[path].runs ?? [])
+                        : flatten(files[path]?.runs ?? []);
+                      for (let i = replay.index - 1; i >= 0; i--) {
+                        const prev = replay.steps[i];
+                        if (prev.membership) continue;
+                        if (prev.relativePath !== path) continue;
+                        replayPrevText = prev.contentUpToHere || null;
+                        break;
+                      }
+                    }
                     return (
                       <Fragment key={idx}>
                         {idx > 0 ? (
@@ -11268,6 +12667,10 @@ function App() {
                             tabs={panel.tabs}
                             activePath={path}
                             file={files[path]}
+                            folderId={folder?.id ?? ""}
+                            replayStepText={replayStepText}
+                            replayPrevText={replayPrevText}
+                            replayLiveText={replayLiveText}
                             active={activePanel === idx}
                             collapsed={collapsed}
                             onFocusPanel={() => setActivePanel(idx)}
@@ -11296,11 +12699,11 @@ function App() {
                             }}
                             onCloseTab={(p) => closeTab(idx, p)}
                             onContextMenuTab={(e, p) => openTabContextMenu(e, idx, p)}
-                            onEdit={(runs) => editFile(path, runs)}
-                            onUntagTrace={(nodeId) => {
-                              if (!path) return;
+                            onEdit={(runs, kedits) => editFile(path, runs, kedits)}
+                            onRemoveCitation={(nodeId) => {
+                              if (!path || citationReadOnly) return;
                               const cur = files[path]?.taggedTraces ?? [];
-                              editTaggedTraces(path, cur.filter((i) => i !== nodeId));
+                              editCitations(path, cur.filter((i) => i !== nodeId));
                             }}
                             // Every panel's view is lifted into panelViews (so each
                             // panel's own Summon can target its editor); the active
@@ -11319,7 +12722,13 @@ function App() {
                               );
                             }}
                             flash={flashPanel === idx}
-                            readOnly={replayActive}
+                            readOnly={citationReadOnly}
+                            // True only for the panel whose active file is the
+                            // replay-stepped (frozen historical) one. Drives the
+                            // provisional/out-of-date border. (The fork action
+                            // itself lives in the AUTHOR row, not on the panel.)
+                            replayFrozen={!!replayFrozenPath && path === replayFrozenPath}
+                            replayMounted={panel.replayOwned === true}
                             voice={authorPubkey}
                             // Folder tabs have no preview/markdown surface; pass
                             // "preview" (ignored by FolderView) and never persist a
@@ -11331,7 +12740,7 @@ function App() {
                             }}
                             voiceAttribution={voiceAttribution}
                             selectedNodeId={
-                              selection?.kind === "span"
+                              selection?.kind === "coin"
                                 ? selection.nodeId ?? ""
                                 : ""
                             }
@@ -11345,11 +12754,17 @@ function App() {
                                 ? replay.steps[replay.index]?.changeRange ?? null
                                 : null
                             }
-                            onSelectSpan={(nodeId, phrase) =>
-                              selectSpan(nodeId, phrase)
-                            }
+                            onSelectSpan={(nodeId, phrase) => {
+                              selectSpan(nodeId, phrase);
+                            }}
                             onCopySpan={(nodeId, phrase) =>
                               copySpan(nodeId, phrase, path)
+                            }
+                            onCopySelection={(view, event) =>
+                              copySelectionWithCoin(path, view, event)
+                            }
+                            onPasteSelection={(view, event) =>
+                              pasteSelectionWithCoin(view, event)
                             }
                             onReplayEditAttempt={() => {
                               // Only surface the fork modal when actually frozen on
@@ -11367,58 +12782,82 @@ function App() {
                             }}
                             citations={isFolderTab(path) ? [] : (citationsByPath[path] ?? [])}
                             taggedChips={isFolderTab(path) ? [] : (taggedChipByPath[path] ?? [])}
-                            inbound={isFolderTab(path) ? [] : (inboundByPath[path] ?? [])}
+                            inbound={
+                              isFolderTab(path)
+                                ? []
+                                : excludeInboundSources(
+                                    inboundByPath[path] ?? [],
+                                    oblivionInboundSourceIds,
+                                  )
+                            }
+                            inboundFreshness={
+                              isFolderTab(path) ? undefined : inboundFreshnessByPath[path]
+                            }
                             onOpenCitation={(nodeId) => {
                               void openCitedTrace(nodeId);
                             }}
                             traceCandidates={traceCandidates}
                             pickerDisabled={
-                              isForeignFolder ||
                               isFolderTab(path) ||
                               !path ||
-                              !files[path]?.nodeId
+                              !files[path]?.nodeId ||
+                              citationReadOnly
                             }
-                            onTagTrace={(nodeId) => {
-                              if (!path) return;
+                            onAddCitation={(nodeId) => {
+                              if (!path || citationReadOnly) return;
                               const cur = files[path]?.taggedTraces ?? [];
                               if (cur.includes(nodeId)) return; // dedupe
-                              editTaggedTraces(path, [...cur, nodeId]);
+                              editCitations(path, [...cur, nodeId]);
                             }}
-                            tagDropAccept={(srcPath) => {
+                            citationDropAccept={(srcPath) => {
                               // Mirror the picker's gate, then reject the
                               // cases that don't apply to a name pick:
-                              // self-drop, unsealed source, already tagged.
+                              // self-drop, unstepped source, already cited.
                               if (
-                                isForeignFolder ||
                                 isFolderTab(path) ||
                                 !path ||
-                                !files[path]?.nodeId
+                                !files[path]?.nodeId ||
+                                citationReadOnly
                               )
                                 return false;
-                              if (srcPath === path) return false; // can't tag self
-                              const srcId = files[srcPath]?.nodeId;
-                              if (!srcId) return false; // source hasn't sealed
+                              if (srcPath === path) return false; // can't cite self
+                              const src = files[srcPath];
+                              if (!src || src.kind === "folder" || !src.nodeId)
+                                return false; // only stepped files and Mint coins
                               const cur = files[path]?.taggedTraces ?? [];
-                              if (cur.includes(srcId)) return false; // already tagged
+                              if (cur.includes(src.nodeId)) return false; // already cited
                               return true;
                             }}
-                            onTagTraceByPath={(srcPath) => {
-                              if (!path) return;
-                              const srcId = files[srcPath]?.nodeId;
-                              if (!srcId) return; // unsealed source — nothing to cite
+                            onAddCitationByPath={(srcPath) => {
+                              if (!path || citationReadOnly) return;
+                              const src = files[srcPath];
+                              if (!src || src.kind === "folder" || !src.nodeId) return;
                               const cur = files[path]?.taggedTraces ?? [];
-                              if (cur.includes(srcId)) return; // dedupe
-                              editTaggedTraces(path, [...cur, srcId]);
+                              if (cur.includes(src.nodeId)) return; // dedupe
+                              editCitations(path, [...cur, src.nodeId]);
                             }}
-                            onOpenSeals={() => {
-                              if (!isFolderTab(path) && path) void openSeals(path);
+                            citationBodyDropMarkup={(srcPath) => {
+                              if (!isMint(srcPath)) return null;
+                              const src = files[srcPath];
+                              if (!src || src.kind === "folder" || !src.nodeId) return null;
+                              return resolvedBracketMarkup(flatten(src.runs), src.nodeId) || null;
                             }}
                             mergeCandidates={mergeCandidates}
                             mergeBusy={mergeBusy}
                             mergeSessionOpen={mergeSession !== null}
                             onIncorporateCandidate={(c) => void incorporateCandidate(c)}
                             mergeError={mergeError}
-                            dirtyPaths={dirtyPaths}
+                            unsteppedPathSet={unsteppedPathSet}
+                            unsteppedEditCounts={unsteppedEditCounts}
+                            tabIsInScope={(tabPath) => {
+                              const tracePath = isFolderTab(tabPath)
+                                ? folderTabPath(tabPath)
+                                : tabPath;
+                              return (
+                                !isOblivion(tracePath) &&
+                                pathInEffectiveScopes(scope, shielded, tracePath)
+                              );
+                            }}
                             draggingTab={draggingTab}
                             dropTargetTab={dropTargetTab}
                             onTabDragStart={(p) => setDraggingTab({ fromPanel: idx, path: p })}
@@ -11527,25 +12966,43 @@ function App() {
                     );
                   })}
                 </div>
-                {editorSelection &&
-                  panelViews.current[editorSelection.panelIdx] &&
-                  panels[editorSelection.panelIdx]?.active &&
-                  !isFolderTab(panels[editorSelection.panelIdx].active) &&
-                  !isForeignFolder && (
-                    <SelectionMenu
-                      view={panelViews.current[editorSelection.panelIdx]!}
-                      onBracket={() => {
-                        const v = panelViews.current[editorSelection.panelIdx]!;
-                        wrapSelection(v);
-                        v.focus();
+                {globalCtx &&
+                  createPortal(
+                    <div
+                      ref={globalCtxRef}
+                      className="ctx-menu"
+                      style={{
+                        left: Math.min(globalCtx.x, window.innerWidth - 160),
+                        top: Math.min(globalCtx.y, window.innerHeight - 200),
                       }}
-                      onZine={() => {
-                        const v = panelViews.current[editorSelection.panelIdx]!;
-                        const p = panels[editorSelection.panelIdx].active;
-                        setEditorSelection(null);
-                        void zinePhrase(p, v, editorSelection.from, editorSelection.to);
-                      }}
-                    />
+                      onContextMenu={(e) => e.preventDefault()}
+                    >
+                      {globalCtx.items.map((item, i) =>
+                        item.kind === "sep" ? (
+                          <div key={i} className="ctx-menu-separator" />
+                        ) : (
+                          <button
+                            key={i}
+                            type="button"
+                            className="ctx-menu-item"
+                            disabled={item.disabled}
+                            onMouseDown={(e) => {
+                              // onMouseDown + preventDefault keeps the clicked
+                              // surface's selection from collapsing before the
+                              // action reads it (matches the old SelectionMenu).
+                              e.preventDefault();
+                            }}
+                            onClick={() => {
+                              setGlobalCtx(null);
+                              item.run();
+                            }}
+                          >
+                            {item.label}
+                          </button>
+                        ),
+                      )}
+                    </div>,
+                    document.body,
                   )}
               </main>
               </div>
@@ -11622,7 +13079,7 @@ function App() {
                       <button
                         type="button"
                         className="ctx-menu-item"
-                        disabled={!dirtyPaths.has(tabCtxMenu.path)}
+                        disabled={!unsteppedPathSet.has(tabCtxMenu.path)}
                         onClick={() => {
                           const { path } = tabCtxMenu;
                           setTabCtxMenu(null);
@@ -11635,15 +13092,15 @@ function App() {
                     document.body,
                   );
                 })()}
-              <TopBar
+              <ActionPalette
                 keys={keys}
                 authorKeyId={authorKeyId}
                 modelKeyId={modelKeyId}
                 onChooseAuthorKey={chooseAuthorKey}
                 onChooseModelKey={chooseModelKey}
                 providers={providers}
-                providerTick={voiceProviderTick}
-                onSelectProvider={(pk, pid) => selectVoiceProvider(pk, pid)}
+                resolvedModelProviderId={resolvedModelProviderId}
+                onSelectProvider={selectVoiceProvider}
                 selection={selection}
                 runningOp={(() => {
                   const s = summonStatus[opTargetPanel()] ?? { state: "idle" };
@@ -11653,10 +13110,12 @@ function App() {
                 onStop={() => stopOp(opTargetPanel())}
                 opStatus={summonStatus[opTargetPanel()] ?? { state: "idle" }}
                 tokenEstimate={tokenEstimate}
-                canAffirm={(() => {
-                  // A folder selection is affirmable if it has a nodeId (its
+                onInspect={() => void openInspector()}
+                canAttest={(() => {
+                  if (paletteSelectedCoin()) return true;
+                  // A folder selection is attestable if it has a nodeId (its
                   // genesis/chain head); a file selection needs its FileState
-                  // nodeId. Foreign folders are affirmable too (cite-and-attest).
+                  // nodeId. Foreign folders are attestable too (cite-and-attest).
                   if (selection?.kind === "folder") {
                     const fp = selection.path ?? ROOT;
                     return !!(selection.nodeId ?? files[fp]?.nodeId);
@@ -11666,14 +13125,21 @@ function App() {
                 })()}
                 targetInScope={(() => {
                   const p = panels[opTargetPanel()]?.active;
-                  return !!p && isInScope(scope, p);
+                  return !!p && isInScope(scope, shielded, p);
                 })()}
+                authorSelectionState={paletteSelectionForAuthor()}
+                sendAutoSteps={paletteSendAutoSteps()}
+                stepAvailable={paletteStepIsAvailable()}
+                onPreserve={preservePaletteSelection}
                 onScopeToTarget={() => {
-                  // Scope the stepper/context to the focused file's parent
-                  // folder, lifting the out-of-scope block on write ops.
+                  // Mount the focused file's parent folder; derived scope and
+                  // stepper/context update from it automatically. A shielded file
+                  // boundary remains shielded until the file itself is mounted.
                   const p = panels[opTargetPanel()]?.active;
                   if (!p) return;
-                  selectFolder(parentPath(p));
+                  const path = parentPath(p);
+                  setScope([{ kind: "folder", path }]);
+                  selectFolder(path);
                 }}
                 substrate={substrate}
                 onChooseSubstrate={chooseSubstrate}
@@ -11681,28 +13147,62 @@ function App() {
                 onChooseSubstrateKey={chooseSubstrateKey}
                 onScan={() => setScanOpen(true)}
                 onReifyOp={() => void onReifyOp()}
+                // The AUTHOR row's Fork action is live only when the op-target
+                // panel is parked on a replay-frozen historical step — the one
+                // way to turn a read-only historical view into an editable trace.
+                replayFrozen={(() => {
+                  const p = panels[opTargetPanel()]?.active;
+                  return (
+                    replay !== null &&
+                    replay.index < replay.steps.length - 1 &&
+                    !replay.steps[replay.index]?.membership &&
+                    !!replay.steps[replay.index]?.relativePath &&
+                    replay.steps[replay.index]!.relativePath === p
+                  );
+                })()}
+                onForkReplay={() => replay && setForkPrompt({ stepIndex: replay.index })}
               />
-              {sealsModal && (
-                <SealsModal
-                  relativePath={sealsModal.relativePath}
-                  chain={sealsModal.chain}
-                  pinnedEventId={sealsModal.pinnedEventId}
-                  onClose={() => setSealsModal(null)}
-                />
-              )}
-              {affirmTarget && (
-                <AffirmModal
-                  path={affirmTarget.path}
-                  onClose={() => setAffirmTarget(null)}
+              {attestTarget && (
+                <AttestModal
+                  path={attestTarget.path}
+                  onClose={() => setAttestTarget(null)}
                   onConfirm={(geohash, message) => {
-                    const t = affirmTarget;
-                    setAffirmTarget(null);
-                    void affirmAsVoice(t.path, geohash, message, {
+                    const t = attestTarget;
+                    setAttestTarget(null);
+                    void attestAsVoice(t.path, geohash, message, {
                       kind: t.kind,
-                      foreign: t.foreign,
                       nodeId: t.nodeId,
                     });
                   }}
+                />
+              )}
+              {runOpen && (
+                <RunModal
+                  providers={providers}
+                  defaultProviderId={
+                    getVoiceProvider(modelPubkey) ?? providers[0]?.id ?? null
+                  }
+                  onClose={() => setRunOpen(false)}
+                  onStart={(goal, providerId) => void startAgentRun(goal, providerId)}
+                />
+              )}
+              {inspectOp && (
+                <PromptInspectorModal
+                  defaultOp={inspectOp}
+                  inputs={inspectInputs}
+                  inputNotes={inspectNotes}
+                  contextBlock={inspectContext}
+                  activeFileStepped={(() => {
+                    const p = panels[opTargetPanel()]?.active;
+                    return !!(p && files[p]?.nodeId);
+                  })()}
+                  voicePrompt={getVoicePrompt(modelPubkey) ?? ""}
+                  modelLabel={(() => {
+                    const p = resolveVoiceProvider(modelPubkey);
+                    return p ? `${p.label || p.protocol} · ${p.modelId}` : null;
+                  })()}
+                  estimateTokens={estimateTokens}
+                  onClose={() => setInspectOp(null)}
                 />
               )}
               {scanOpen && (
@@ -11756,40 +13256,16 @@ function App() {
             <section className="view-placeholder">
               <span className="press-loading-spinner" aria-hidden="true" />
               <p className="view-placeholder-blurb">
-                {isTauri() ? `Reading ${folder.path ?? ""}` : "Reading folder from relay"}
-              </p>
-            </section>
-          ) : !isTauri() ? (
-            // Webapp boot: auto-provisioning or auto-opening a folder. Show a
-            // loading state, never the "open a folder" picker — the user gets
-            // dropped straight into the editor once the folder resolves.
-            <section className="view-placeholder">
-              <span className="press-loading-spinner" aria-hidden="true" />
-              <p className="view-placeholder-blurb">
-                {bootError ?? "Opening your folder on the relay."}
+                Opening your workspace…
               </p>
             </section>
           ) : (
-            <EmptyFolderView
-              onChoose={onChooseFolder}
-              defaultPath={defaultPath}
-              onUseDefault={(p) => void doAttach(p)}
-              failedFolder={failedFolder}
-              onRetry={() => {
-                if (!failedFolder) return;
-                const ref = failedFolder;
-                setFailedFolder(null);
-                setBootError(null);
-                void attachRef(ref).catch((err) => {
-                  // Re-attach still failing — show the picker again with the
-                  // path still remembered so the user can retry once more.
-                  setFailedFolder(ref);
-                  setBootError(err instanceof Error ? err.message : String(err));
-                  setBootState("missing");
-                });
-              }}
-              error={bootError}
-            />
+            <section className="view-placeholder">
+              <span className="press-loading-spinner" aria-hidden="true" />
+              <p className="view-placeholder-blurb">
+                {bootError ?? "Opening your workspace…"}
+              </p>
+            </section>
           )
         ) : activeView === "download" ? (
           <ViewErrorBoundary view="download">
@@ -11813,15 +13289,15 @@ function App() {
           </ViewErrorBoundary>
         ) : activeView === "globe" ? (
           <ViewErrorBoundary view="globe">
-            <GlobeView />
+            <GlobeView query={socialQuery} />
           </ViewErrorBoundary>
         ) : activeView === "listings" ? (
           <ViewErrorBoundary view="listings">
-            <ListingsView onOpenFolder={(id) => void openFromStacks(id)} />
+            <ListingsView query={socialQuery} />
           </ViewErrorBoundary>
         ) : activeView === "stats" ? (
           <ViewErrorBoundary view="stats">
-            <TimesView />
+            <TimesView query={socialQuery} />
           </ViewErrorBoundary>
         ) : activeView === "operator" ? (
           <ViewErrorBoundary view="operator">
@@ -11837,33 +13313,13 @@ function App() {
         </div>
       </div>
       <PinPanel />
-      {confirmReset && (
-        <div className="confirm-overlay" onClick={() => setConfirmReset(false)}>
-          <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
-            <p className="confirm-message">
-              Reset workspace? This clears the current folder and starts a fresh one. The old folder's
-              history stays on the relay under its old id.
-            </p>
-            <div className="confirm-actions">
-              <button type="button" className="confirm-cancel" onClick={() => setConfirmReset(false)}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="confirm-delete"
-                onClick={() => {
-                  setConfirmReset(false);
-                  void resetWorkspace();
-                }}
-              >
-                Reset workspace
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       {settingsOpen && (
-        <div className="confirm-overlay" onClick={() => setSettingsOpen(false)}>
+        <div
+          className="confirm-overlay"
+          onClick={() => {
+            if (!resetBusy) setSettingsOpen(false);
+          }}
+        >
           <div
             className="confirm-dialog settings-dialog"
             onClick={(e) => e.stopPropagation()}
@@ -11872,18 +13328,21 @@ function App() {
             aria-label="Settings"
           >
             <h2 className="settings-heading">Settings</h2>
-            <section className="settings-section">
+            <section className="settings-section" aria-busy={resetBusy}>
               <h3 className="settings-section-heading">Factory reset</h3>
               <p className="settings-section-blurb">
-                Erases every <code>zine.*</code> local key — the root binding, crash pads,
-                keychain, relay config, substrate voices, models, and layout. The app reloads
-                to a first-run state. Relay chains on the sidecar / remote relays are untouched;
-                only this machine's local state is cleared. There is no undo.
+                Erases all local app state, including the root binding, crash pads, keychain,
+                relay config, voices, models, and layout. On desktop it also deletes every event
+                from the local sidecar and resets peer access. The app reloads with a newly minted
+                root and an empty oblivion. Events already sent to remote relays cannot be erased
+                from those relays. There is no undo.
               </p>
+              {resetError && <p className="create-error" role="alert">{resetError}</p>}
               <div className="confirm-actions">
                 <button
                   type="button"
                   className="confirm-cancel"
+                  disabled={resetBusy}
                   onClick={() => setSettingsOpen(false)}
                 >
                   Close
@@ -11891,12 +13350,10 @@ function App() {
                 <button
                   type="button"
                   className="confirm-delete"
-                  onClick={() => {
-                    setSettingsOpen(false);
-                    factoryReset();
-                  }}
+                  disabled={resetBusy}
+                  onClick={() => void factoryReset()}
                 >
-                  Erase everything
+                  {resetBusy ? "Erasing…" : "Erase everything"}
                 </button>
               </div>
             </section>

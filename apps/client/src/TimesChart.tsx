@@ -1,9 +1,10 @@
 /**
  * A dependency-free SVG activity chart for the Times view. Originally a single
  * gold area+line (one total per bucket); now a *stacked* area where each band is
- * one minted trace and a band's thickness in a time slice = how many events
- * sealed in that slice cited that trace. So the stack reads "which minted
- * passages are being interacted with / cited, and when".
+ * one trace and a band's thickness in a time slice = how many social or
+ * lineage relations targeted that trace. The same layers can render as
+ * independent lines for comparison or as contiguous stacked area for total
+ * volume plus composition.
  *
  * Buckets + layers are computed by the caller (TimesView) so this component is
  * purely presentational — give it buckets, layers, and a window and it draws.
@@ -30,7 +31,7 @@ export interface StackBucket {
   label: string;
 }
 
-/** One stacked band: a single minted trace's inbound-citation counts over the
+/** One stacked band: a single trace's inbound-usage counts over the
  *  window. `color` is a CSS color/var set via inline `fill` (presentation
  *  attributes don't resolve var() reliably across browsers). */
 export interface StackLayer {
@@ -55,10 +56,12 @@ export function TimesChart({
   buckets,
   layers,
   window,
+  mode = "stacked",
 }: {
   buckets: StackBucket[];
   layers: StackLayer[];
   window: WindowKey;
+  mode?: "lines" | "stacked";
 }) {
   const n = buckets.length;
   const hasData = layers.length > 0 && layers.some((l) => l.values.some((v) => v > 0));
@@ -70,11 +73,11 @@ export function TimesChart({
         className="times-chart-svg"
         viewBox={`0 0 ${VB_W} ${VB_H}`}
         role="img"
-        aria-label="No minted-trace activity in this window"
+        aria-label="No trace usage in this window"
       >
         <line x1={PAD_L} y1={BASE_Y} x2={VB_W - PAD_R} y2={BASE_Y} className="times-chart-baseline" />
         <text x={VB_W / 2} y={VB_H / 2} className="times-chart-empty">
-          no minted-trace activity in this window
+          no trace usage in this window
         </text>
       </svg>
     );
@@ -87,7 +90,9 @@ export function TimesChart({
     for (let i = 0; i < n; i++) stackSums[i] += layer.values[i] ?? 0;
   }
   const maxSum = Math.max(1, ...stackSums);
-  const yFor = (cum: number) => BASE_Y - (cum / maxSum) * PLOT_H;
+  const maxLine = Math.max(1, ...layers.flatMap((layer) => layer.values));
+  const maxY = mode === "lines" ? maxLine : maxSum;
+  const yFor = (value: number) => BASE_Y - (value / maxY) * PLOT_H;
 
   // Cumulative bottoms/tops per layer per bucket: bottom of layer L = top of
   // L-1. Built bottom-up so the first layer sits on the baseline.
@@ -117,14 +122,26 @@ export function TimesChart({
         className="times-chart-svg"
         viewBox={`0 0 ${VB_W} ${VB_H}`}
         role="img"
-        aria-label={`Activity this bucket: ${stackSums[0]} citations across ${layers.length} trace${layers.length === 1 ? "" : "s"}`}
+        aria-label={`Usage this bucket: ${stackSums[0]} relations across ${layers.length} trace${layers.length === 1 ? "" : "s"}`}
       >
         <line x1={PAD_L} y1={PAD_T} x2={VB_W - PAD_R} y2={PAD_T} className="times-chart-grid" />
         <line x1={PAD_L} y1={BASE_Y} x2={VB_W - PAD_R} y2={BASE_Y} className="times-chart-baseline" />
         <text x={PAD_L} y={PAD_T + 2} className="times-chart-ymax">
-          {maxSum}
+          {maxY}
         </text>
-        {layers.map((layer, l) => (
+        {mode === "lines" ? layers.map((layer) => (
+          <circle
+            key={layer.id}
+            cx={VB_W / 2}
+            cy={yFor(layer.values[0] ?? 0)}
+            r={4}
+            fill={layer.color}
+            stroke="var(--surface-raised)"
+            strokeWidth={1}
+          >
+            <title>{`${layer.name}: ${layer.values[0] ?? 0} use${layer.values[0] === 1 ? "" : "s"}`}</title>
+          </circle>
+        )) : layers.map((layer, l) => (
           <rect
             key={layer.id}
             x={bx}
@@ -136,7 +153,7 @@ export function TimesChart({
             strokeWidth={1}
             vectorEffect="non-scaling-stroke"
           >
-            <title>{`${layer.name}: ${layers[l].values[0]} citation${layers[l].values[0] === 1 ? "" : "s"}`}</title>
+            <title>{`${layer.name}: ${layers[l].values[0]} use${layers[l].values[0] === 1 ? "" : "s"}`}</title>
           </rect>
         ))}
       </svg>
@@ -151,6 +168,9 @@ export function TimesChart({
     for (let i = n - 1; i >= 0; i--) back.push(`L${xAt(i).toFixed(2)},${yFor(bots[l][i]).toFixed(2)}`);
     return `${fwd.join(" ")} ${back.join(" ")} Z`;
   };
+  const linePath = (l: number) => layers[l].values
+    .map((value, i) => `${i === 0 ? "M" : "L"}${xAt(i).toFixed(2)},${yFor(value ?? 0).toFixed(2)}`)
+    .join(" ");
 
   // Per-bucket hit columns carry the tooltip for the whole stack at that slice.
   const colW = PLOT_W / n;
@@ -160,7 +180,7 @@ export function TimesChart({
         ? new Date(buckets[i].startSec * 1000).toLocaleString(undefined, { hour: "numeric", minute: "2-digit" })
         : new Date(buckets[i].startSec * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
     const total = stackSums[i];
-    return `${fmt} · ${total} citation${total === 1 ? "" : "s"}`;
+    return `${fmt} · ${total} relation${total === 1 ? "" : "s"}`;
   };
 
   // Pick ~5 x ticks spread across the series, always including the last.
@@ -177,17 +197,30 @@ export function TimesChart({
       className="times-chart-svg"
       viewBox={`0 0 ${VB_W} ${VB_H}`}
       role="img"
-      aria-label={`Minted-trace activity over ${window}: ${grandTotal} citations across ${layers.length} trace${layers.length === 1 ? "" : "s"}`}
+      aria-label={`Trace usage over ${window}: ${grandTotal} relations across ${layers.length} trace${layers.length === 1 ? "" : "s"}`}
     >
       {/* y max label + faint top rule */}
       <text x={PAD_L} y={PAD_T + 2} className="times-chart-ymax">
-        {maxSum}
+        {maxY}
       </text>
       <line x1={PAD_L} y1={PAD_T} x2={VB_W - PAD_R} y2={PAD_T} className="times-chart-grid" />
       <line x1={PAD_L} y1={BASE_Y} x2={VB_W - PAD_R} y2={BASE_Y} className="times-chart-baseline" />
 
-      {/* one filled band per layer, bottom-most first so later ones stack on top */}
-      {layers.map((layer, l) => (
+      {/* The same values render as independent lines or cumulative bands. */}
+      {layers.map((layer, l) => mode === "lines" ? (
+        <path
+          key={layer.id}
+          d={linePath(l)}
+          fill="none"
+          stroke={layer.color}
+          strokeWidth={2}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
+        >
+          <title>{`${layer.name}: ${layerTotal(l)} use${layerTotal(l) === 1 ? "" : "s"} this window`}</title>
+        </path>
+      ) : (
         <path
           key={layer.id}
           d={layerPath(l)}
@@ -197,7 +230,7 @@ export function TimesChart({
           strokeWidth={0.75}
           vectorEffect="non-scaling-stroke"
         >
-          <title>{`${layer.name}: ${layerTotal(l)} citation${layerTotal(l) === 1 ? "" : "s"} this window`}</title>
+          <title>{`${layer.name}: ${layerTotal(l)} use${layerTotal(l) === 1 ? "" : "s"} this window`}</title>
         </path>
       ))}
 

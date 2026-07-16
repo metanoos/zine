@@ -18,6 +18,16 @@
  * `ctx-block-v1` — old nodes citing `v1` keep reconstructing against `v1`.
  */
 
+import { opRolePreamble } from "./op-prompts.js";
+
+/**
+ * The per-op system prompt now comes from op-prompts.ts (`opRolePreamble`), the
+ * single source shared with the live ops in App.tsx. Before, this file
+ * hand-copied the role preambles with a drift-hazard comment and no test; now
+ * both consumers read the same function, so byte-reconstruction can't silently
+ * diverge from what the press actually sent. `op-prompts.test.ts` locks it.
+ */
+
 /** The manifest carried by a rule trace's body. Names the algorithm + params. */
 export interface InjectManifest {
   /** Algorithm name + version, e.g. "ctx-block-v1". The reader looks this up
@@ -115,41 +125,8 @@ function reconstructCtxBlockV1(input: ReconstructInput): ReconstructedPrompt | n
   const activeContent = activeFile?.snapshot ?? "";
 
   const userPrompt = assembleUserPrompt(op, input.prompt, activeContent, params.activePath!);
-  const systemPrompt = assembleSystemPrompt(op);
+  const systemPrompt = opRolePreamble(op);
   return { systemPrompt, userPrompt };
-}
-
-/** Per-op system prompt: the shared SYSTEM_PREAMBLE + a role-specific tail.
- *  The preamble text is code-defined (not relay-carried) so it reproduces
- *  byte-identically from the binary; the manifest only names the op. */
-function assembleSystemPrompt(op: OpKind): string {
-  // NOTE: these strings must match the inline role preambles in App.tsx.
-  // No test guards against drift between these and App.tsx (they're test
-  // fixtures there); a drift here breaks byte-reconstruction silently. Keep
-  // them in sync by hand, or future work: move the preambles here as the
-  // single source.
-  switch (op) {
-    case "edit":
-      return (
-        "YOUR ROLE — edit. You edit ONE file on the user's behalf. You will be " +
-        "given the file's current full content and an instruction. Reply with " +
-        "ONLY the file's complete new content after applying the instruction — no " +
-        "commentary, no markdown code fences, no explanation. If the instruction " +
-        "does not require changes, return the content unchanged. Spans wrapped in " +
-        "[[ ]] brackets are minted sediment — preserve them verbatim."
-      );
-    case "extend":
-      return (
-        "YOUR ROLE — Extend: the continuer. You pick up the document where it " +
-        "leaves off and write ONLY the continuation."
-      );
-    case "settle":
-      return "YOUR ROLE — Settle: the condenser.";
-    case "stir":
-      return "YOUR ROLE — Stir: the reinventor.";
-    case "reply":
-      return "YOUR ROLE — Reply: the replier.";
-  }
 }
 
 /** Per-op user-prompt body. The shared spine is `ctxBlock + body`; v1 carries

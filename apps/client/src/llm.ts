@@ -12,18 +12,23 @@
  * caller can cancel a streaming response (the user hit Stop).
  *
  * Provider coverage (see models-store.ts presets):
- *   z.ai (Anthropic)  https://api.z.ai/api/anthropic   [glm-4.6]
- *   z.ai (OpenAI)     https://api.z.ai/api/paas/v4     [glm-4.6]
- *   Anthropic         https://api.anthropic.com        [claude-sonnet-4-5]
- *   OpenAI            https://api.openai.com/v1        [gpt-4o]
+ *   z.ai (Anthropic)  https://api.z.ai/api/anthropic   [glm-5.2]
+ *   z.ai (OpenAI)     https://api.z.ai/api/paas/v4     [glm-5.2]
+ *   Anthropic         https://api.anthropic.com        [claude-fable-5]
+ *   OpenAI            https://api.openai.com/v1        [gpt-5.6-sol]
  *   OpenRouter        https://openrouter.ai/api/v1     [router model ids]
- *   Ollama (local)    http://localhost:11434/v1        [local model]
+ *   Ollama (local)    http://localhost:11434/v1        [gpt-oss:20b]
  * Any OpenAI-compatible endpoint (Together, Groq, LM Studio…) works by adding
  * a custom provider — that's the point of the generic shape.
  */
 
 import type { ProviderConfig } from "./models-store.js";
 import { isTauri } from "./identity.js";
+import {
+  anthropicModelOptions,
+  modelSystemInstruction,
+  openAIModelOptions,
+} from "./model-config.js";
 
 /** Chat-role message, normalized across both protocols. The client translates
  *  to the wire format each protocol expects. */
@@ -33,7 +38,7 @@ export interface ChatMessage {
 }
 
 export interface CompleteOptions {
-  /** Max output tokens. Optional — let the provider default apply if unset. */
+  /** Per-operation max-output fallback. A card-level maxTokens value wins. */
   maxTokens?: number;
   /** If set, stream content deltas as they arrive; otherwise resolve full. */
   onDelta?: (textDelta: string) => void;
@@ -51,9 +56,13 @@ export async function complete(
 ): Promise<string> {
   if (!cfg.baseUrl) throw new Error(`provider "${cfg.label}" has no base URL`);
   if (!cfg.modelId) throw new Error(`provider "${cfg.label}" has no model id`);
+  const instruction = modelSystemInstruction(cfg);
+  const configuredMessages: ChatMessage[] = instruction
+    ? [{ role: "system", content: instruction }, ...messages]
+    : messages;
   return cfg.protocol === "anthropic"
-    ? callAnthropic(cfg, messages, opts)
-    : callOpenAI(cfg, messages, opts);
+    ? callAnthropic(cfg, configuredMessages, opts)
+    : callOpenAI(cfg, configuredMessages, opts);
 }
 
 // --- OpenAI Chat Completions -------------------------------------------
@@ -72,7 +81,7 @@ async function callOpenAI(
     model: cfg.modelId,
     messages: messages.map((m) => ({ role: m.role, content: m.content })),
     stream,
-    ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
+    ...openAIModelOptions(cfg, opts.maxTokens),
   });
 
   const text = await doRequest(url, headers, body, stream, opts, "OpenAI");
@@ -92,7 +101,10 @@ async function callAnthropic(
   const url = joinPath(cfg.baseUrl, "v1/messages");
   const stream = !!opts.onDelta;
   // Anthropic separates the system prompt from the message list.
-  const systemMsg = messages.find((m) => m.role === "system")?.content;
+  const systemMsg = messages
+    .filter((m) => m.role === "system")
+    .map((m) => m.content)
+    .join("\n\n");
   const turns = messages
     .filter((m) => m.role !== "system")
     .map((m) => ({ role: m.role, content: m.content }));
@@ -105,7 +117,7 @@ async function callAnthropic(
 
   const body = JSON.stringify({
     model: cfg.modelId,
-    max_tokens: opts.maxTokens ?? 4096,
+    ...anthropicModelOptions(cfg, opts.maxTokens),
     messages: turns,
     ...(systemMsg ? { system: systemMsg } : {}),
     stream,

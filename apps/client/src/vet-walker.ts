@@ -3,7 +3,7 @@
  *
  * The bridge between the wire (kind-4290 TraceNode events on a chain) and the
  * pure vet signals in vet.ts. Walks a chain of events, reads each node's
- * sealedAt + deltas + OTS anchor presence, and produces the CheckpointMeta[]
+ * steppedAt + deltas + OTS anchor presence, and produces the CheckpointMeta[]
  * that vetTrace consumes.
  *
  * Pure — no IO. Takes events as input (already fetched by whatever relay path
@@ -27,13 +27,13 @@ interface BodyEditDelta {
 
 /** Parsed TraceNode content (the JSON payload inside event.content). */
 interface TraceNodeContent {
-  sealedAt?: number;
+  steppedAt?: number;
   deltas?: unknown[];
 }
 
 /** Extract CheckpointMeta[] from a chain of kind-4290 events.
  *
- *  @param chain  The trace's events (any order — sorted by sealedAt internally).
+ *  @param chain  The trace's events (any order — sorted by steppedAt internally).
  *  @param anchoredIds  A Set of event ids that carry a valid OTS anchor
  *                       (kind-1040 proof resolved to a Bitcoin block). The caller
  *                       obtains this by querying their own kind-1040 events.
@@ -41,7 +41,7 @@ interface TraceNodeContent {
  *                       unstamped — the safe default).
  *
  *  Each checkpoint gets:
- *  - sealedAtMs: from eventMeta (sealedAt in content, falling back to created_at)
+ *  - steppedAtMs: from eventMeta (steppedAt in content, falling back to created_at)
  *  - anchored: true if the event's id is in anchoredIds
  *  - charDelta: net chars changed (sum of newValue.length - region length across
  *    body-edit deltas). Positive = insert-heavy, negative = delete-heavy.
@@ -70,7 +70,7 @@ export function checkpointsFromChain(
       // malformed/non-JSON content — no delta info extractable
     }
     return {
-      sealedAtMs: meta.sealedAtMs,
+      steppedAtMs: meta.steppedAtMs,
       anchored: anchoredIds.has(ev.id) || undefined,
       charDelta,
       deltaCount,
@@ -78,7 +78,7 @@ export function checkpointsFromChain(
   });
 
   // Sort oldest-first so timing intervals are chronological.
-  return metas.sort((a, b) => a.sealedAtMs - b.sealedAtMs);
+  return metas.sort((a, b) => a.steppedAtMs - b.steppedAtMs);
 }
 
 /** Type guard for body-edit deltas (insert/delete/replace with position). */

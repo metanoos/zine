@@ -1,19 +1,25 @@
 # Narration Rubric — pre-registered
 
-**Status:** pre-registration, written 2026-07-13, **before** any trace has been
-recorded or any narration output read. The point of committing this to the repo
-now is exactly the one the direction names: writing the rubric first is what
-prevents fitting it to the results.
+**Status:** pre-registered on 2026-07-13, before any trace was selected or
+narration output read. Preserving the original criteria prevents fitting the
+rubric to the results.
 
-**Purpose.** Answer one question with a small, hand-scored A/B:
+**Archive note:** this file preserves the pre-registration and chronological
+record. References to `apps/harness` describe the runner used at the time; that
+package has since been removed. The maintained rendering and preamble code now
+lives under `apps/client/src/`. See the dated record below for the migration
+note and final results.
+
+**Purpose.** Answer one question with a small, hand-scored comparison:
 
 > Does surfacing the `(+N/−M)` char delta (and the `ΔNm/Nh/Nd` interval) on the
 > delta-log line actually suppress the failure class the preamble targets — a
 > bulk insert narrated as gradual composition — or is the preamble's wording
 > inert and the drift returns regardless?
 
-If the effect is real it will be large at small N. If it isn't there, three
-architecture layers are saved and the drift is a prompting problem.
+The expected effect is large enough to appear at small N. If it does not, the
+label is unnecessary and the drift belongs in prompting rather than
+architecture.
 
 ---
 
@@ -191,7 +197,10 @@ is scored bound/unbound for exactly that reason.
 
 ---
 
-## Record (appended as work happens, never back-dated)
+## Chronological record
+
+This section preserves the study as it happened. Later entries may repeat the
+final report because they record decisions made at that point in time.
 
 - 2026-07-13 — rubric pre-registered. No trace recorded yet. No narration read.
   Open: produce one real working session in the press containing a bulk paste
@@ -263,7 +272,7 @@ is scored bound/unbound for exactly that reason.
 - 2026-07-14 — A/B run completed. 5 draws × 2 conditions, glm-5.2 via z.ai's
   Anthropic endpoint (`https://api.z.ai/api/anthropic/v1`). Outputs in
   `research/ab-outputs/`. Full scoring in
-  `research/ab-outputs/SCORING.md`.
+  `research/results.md`.
 
   **Tally:**
 
@@ -300,7 +309,7 @@ is scored bound/unbound for exactly that reason.
 - 2026-07-14 (later) — condition C added to close the B-confound. Condition C
   strips both the labels AND the per-span content payloads, leaving only the
   bare action log (`[#seq] action timestamp path`). 5 draws, same trace, same
-  model. Full scoring in `research/ab-outputs/SCORING.md`.
+  model. Full scoring in `research/results.md`.
 
   **Three-condition dose-response (C1 bound rate):**
 
@@ -345,7 +354,7 @@ is scored bound/unbound for exactly that reason.
   itself from the raw timestamps ("over an hour later," "an hour and a half
   later") — without the `Δ1h` annotation. In no condition does any draw read
   a gap as a mindset shift. Full scoring in
-  `research/c2-outputs/SCORING-C2.md`.
+  `research/results.md` under "Second trace: ambiguous-gap C2 scoring."
 
   **The `Δ` interval label is inert.** It does not suppress a C2 failure
   because there is no C2 failure to suppress — glm-5.2 does not read
@@ -387,6 +396,3 @@ is scored bound/unbound for exactly that reason.
     just magnitude — without it, the model fabricates entirely new content.
     This is the strongest finding across both traces.
   - **No new architecture layer is warranted.** The framework is done.
-
-
-

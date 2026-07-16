@@ -115,7 +115,7 @@ export function DownloadView() {
           <p className="download-hint">
             Builds aren't generated in the container — they're produced per-platform and dropped into
             the server's <code>downloads/</code> directory. See{" "}
-            <code>apps/client/src-tauri/BUILD.md</code>.
+            <code>apps/client/README.md#release-builds</code>.
           </p>
         </div>
       ) : entries.length === 0 ? (

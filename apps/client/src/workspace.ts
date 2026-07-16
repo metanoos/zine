@@ -2,7 +2,7 @@
  * The workspace service: ties a real folder on disk to its nostr provenance
  * records in the local relay. This is the single surface the UI calls; it
  * never lets disk and the relay drift — every mutation writes to disk AND
- * seals a kind-4290 node AND republishes the kind-34290 manifest.
+ * steps a kind-4290 node AND republishes the kind-34290 manifest.
  *
  * Disk is the source of truth for *what exists*; the relay is the source of
  * truth for *how it got there*. On open, `baselineScan` reconciles the two:
@@ -18,15 +18,6 @@
 
 import type { AttachedFolder } from "./registry.js";
 import {
-  clearAttachedFolder,
-  loadAttachedFolder,
-  saveAttachedFolder,
-} from "./registry.js";
-import {
-  saveMount,
-  setActiveMount,
-} from "./mounts.js";
-import {
   createFolderGenesis,
   diffToDeltas,
   eventMeta,
@@ -37,27 +28,26 @@ import {
   headUserTags,
   headTaggedTraces,
   publishEdit,
+  resolveTraceIdentity,
   reconstructFromChain,
   reconstructRunsFromChain,
   removeManifestEntry,
   renameManifestEntry,
   upsertManifestEntry,
   type EventMeta,
+  type KEdit,
   type ManifestFileEntry,
   type SampleEventMeta,
 } from "./provenance.js";
-import { findResolvedBrackets } from "./brackets.js";
+import { findAddedInlineCitations, findResolvedBrackets } from "./brackets.js";
 import { authorVoice } from "./keys-store.js";
 import { getReconcilerVoice } from "./external-voice-store.js";
 import type { Event } from "nostr-tools";
 import type {
-  AttachResult,
   FileState,
-  FolderRef,
   Run,
-  Workspace,
 } from "./workspace-core.js";
-import { flattenRuns } from "./workspace-core.js";
+import { ensureMdExt, flattenRuns } from "./workspace-core.js";
 
 // --- shared editor types ------------------------------------------------
 //
@@ -102,7 +92,7 @@ function runsFromText(text: string): Run[] {
   // voice as a single run. Finer-grained voice attribution happens through
   // subsequent edits, which splice in the editing voice. Resolves to the
   // AUTHOR key's pubkey so the run renders under that key's identity; the
-  // old "alice" string-literal was a label, not a pubkey, and fell into the
+  // old "author-1" string-literal was a label, not a pubkey, and fell into the
   // decoration's hash-bucket fallback (wrong color) — see keys-store.ts
   // authorVoice() and buildVoiceDecorations in App.tsx.
   return text.length === 0 ? [] : [{ voice: authorVoice(), text }];
@@ -123,13 +113,6 @@ function runsFromText(text: string): Run[] {
 // runs, so cross-device sync still collapses to one run — an accepted boundary
 // matching the protocol doc's current scope.
 const ATTRIBUTION_SIDECAR = ".zine/attribution.json";
-
-/** Folder-level tags (the one piece of metadata folders carry — they're
- *  otherwise implicit in file paths) live in a sibling sidecar, keyed by
- *  folder relative path. Same best-effort posture as the attribution sidecar:
- *  `.zine` is gitignored + ignored by the walker, and a read-only or missing
- *  sidecar degrades to "no folder tags". */
-const FOLDER_TAGS_SIDECAR = ".zine/folders.json";
 
 /** Read the whole attribution sidecar. Returns {} on any failure (missing
  *  file, corrupt JSON, or no folder path) — callers fall back to single-run
@@ -167,41 +150,6 @@ async function writeAttribution(root: string | undefined, map: Record<string, Ru
   }
 }
 
-/** Read the folder-tags sidecar. `{}` on any failure — folders simply show no
- *  tags, which is the pre-feature baseline. */
-async function readFolderTagsFile(root: string | undefined): Promise<Record<string, string[]>> {
-  if (!root) return {};
-  try {
-    const raw = await invoke<string>("read_text_file", {
-      root,
-      relativePath: FOLDER_TAGS_SIDECAR,
-    }).catch(() => null);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as Record<string, string[]>;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-/** Persist the folder-tags map. Best-effort and non-fatal, like the
- *  attribution sidecar. */
-async function writeFolderTagsFile(
-  root: string | undefined,
-  tags: Record<string, string[]>,
-): Promise<void> {
-  if (!root) return;
-  try {
-    await invoke<null>("write_text_file", {
-      root,
-      relativePath: FOLDER_TAGS_SIDECAR,
-      contents: JSON.stringify(tags),
-    });
-  } catch {
-    // Non-fatal: folder tags are UI metadata, not provenance.
-  }
-}
-
 // --- attach + baseline --------------------------------------------------
 
 /** Show a native folder picker and return the chosen absolute path, or null
@@ -232,16 +180,6 @@ export async function scanExternal(absPath: string): Promise<ScannedFile[]> {
   return invoke<ScannedFile[]>("scan_external", { absPath });
 }
 
-/** A sensible default folder to offer on first run ($HOME/zine if it exists),
- *  so a user can start without navigating the picker. null if unavailable. */
-export async function defaultFolder(): Promise<string | null> {
-  try {
-    return await invoke<string | null>("attached_folder_default");
-  } catch {
-    return null;
-  }
-}
-
 /** Reify (emit) a set of traces out to a picked destination folder on disk —
  *  the emission instant, the inverse of scan. Each trace's content (reconstructed
  *  from the in-memory runs the app holds) is written to `destRoot` under its
@@ -262,109 +200,6 @@ export async function reifyToDisk(
   }
 }
 
-/** Returns the currently attached folder from localStorage, or null. Does
- *  NOT verify the path still exists on disk — `attach` does that. */
-export function getAttachedFolder(): AttachedFolder | null {
-  return loadAttachedFolder();
-}
-
-/** Forget the currently attached folder (the user wants to pick a different
- *  one). Provenance records stay in the relay; only the local pointer is
- *  cleared. The mounts-registry entry is NOT removed here — detaching only
- *  unbinds the workspace, the mount stays remembered for re-switching. The
- *  active-mount pointer is cleared since nothing is open. */
-export function detachFolder(): void {
-  clearAttachedFolder();
-  setActiveMount(null);
-}
-
-/** Attach (or re-attach) a folder: mint a stable folderId, persist it, and
- *  baseline the folder against the relay. Returns the reconstructed in-memory
- *  file state for the initial sidebar/editor. Throws if the path doesn't
- *  exist or can't be read. */
-export async function attachFolder(
-  absPath: string,
-  onReconciled?: (path: string, file: FileState | null) => void,
-): Promise<{
-  folder: AttachedFolder;
-  files: Record<string, FileState>;
-  reconciled: Promise<void>;
-}> {
-  // Reuse an existing folderId if this path was attached before — its
-  // provenance chain is keyed on the id, so a new id would orphan it.
-  const existing = loadAttachedFolder();
-  if (existing && existing.path === absPath) {
-    // Re-attach: keep the existing id (UUID for legacy, genesis id for new).
-    const folder: AttachedFolder = { id: existing.id, path: absPath };
-    saveAttachedFolder(folder);
-    saveMount(folder);
-    setActiveMount(folder.id);
-    const { files, reconciled } = await attachScan(folder, onReconciled);
-    return { folder, files, reconciled };
-  }
-  // Phase 5: publish genesis first, adopt its event id as the folder identity
-  // (spec §3.1: trace identity IS the genesis node id). This replaces the
-  // pre-Phase-5 UUID mint. Legacy UUID-keyed folders (already in localStorage)
-  // keep their UUIDs and stay findable via the #D arm of fetchFolderNodes.
-  const genesisId = await createFolderGenesis();
-  const folder: AttachedFolder = { id: genesisId, path: absPath };
-  saveAttachedFolder(folder);
-  saveMount(folder);
-  setActiveMount(folder.id);
-
-  const { files, reconciled } = await attachScan(folder, onReconciled);
-  return { folder, files, reconciled };
-}
-
-/**
- * Skeleton-first attach: return a disk-only file set immediately so the press
- * can render, then reconcile against the relay. With `onReconciled`, the
- * reconcile runs in the background and emits each reconciled FileState via the
- * callback; `files` is the skeleton only and `reconciled` resolves when the
- * background pass finishes. Without it, the reconcile runs inline and `files`
- * is the fully-reconciled set (back-compat).
- */
-async function attachScan(
-  folder: AttachedFolder,
-  onReconciled?: (path: string, file: FileState | null) => void,
-): Promise<{ files: Record<string, FileState>; reconciled: Promise<void> }> {
-  if (onReconciled) {
-    const skeleton = await skeletonScan(folder);
-    // Background reconcile: emit per-path; resolve (or reject) when done. The
-    // promise is a completion signal only (Promise<void>), so both branches
-    // resolve to void — the files reach the caller via onReconciled callbacks,
-    // not through this promise.
-    const reconciled = reconcileScan(folder, onReconciled).then(
-      () => {},
-      (e) => console.warn("[workspace] background reconcile failed:", e),
-    );
-    return { files: skeleton, reconciled };
-  }
-  const files = await reconcileScan(folder);
-  return { files, reconciled: Promise.resolve() };
-}
-
-/** Reify an EXISTING chain into a NEW directory. Binds the given genesis id
- *  to `absPath`, persists it as both the workspace's attached folder and a
- *  mounts-registry entry, and baselines — `baselineScan` reconstructs the
- *  manifest + file content from the relay's `#D` chain, so a chain mounted
- *  at a fresh/empty dir materializes its full working tree.
- *
- *  This is the inverse of unmount: the chain was never affected by dropping
- *  the (id, path) binding, so re-pointing it at a new dir just re-reads the
- *  relay. No genesis is minted — the identity is supplied by the caller. */
-export async function reifyMount(
-  genesisId: string,
-  absPath: string,
-): Promise<{ folder: AttachedFolder; files: Record<string, FileState> }> {
-  const folder: AttachedFolder = { id: genesisId, path: absPath };
-  saveAttachedFolder(folder);
-  saveMount(folder);
-  setActiveMount(folder.id);
-  const files = await baselineScan(folder);
-  return { folder, files };
-}
-
 // --- nesting helpers (spec §3.2) ----------------------------------------
 //
 // Under nesting, a folder's subdirectories are themselves folder traces
@@ -375,7 +210,7 @@ export async function reifyMount(
 
 /** Resolve the GENESIS id (the folder's permanent identity, spec §3.1) from any
  *  node id on the folder's chain. A folder member's `latestNodeId` is the
- *  current head (advances on every seal), but the identity that file nodes
+ *  current head (advances on every step), but the identity that file nodes
  *  carry on their `f`/`D` tags is the genesis. Reads the node by id, returns
  *  its `f` tag; for a genesis node (no `f` tag) the input is returned as-is. */
 async function resolveFolderIdentity(nodeId: string): Promise<string> {
@@ -434,7 +269,7 @@ async function createSubfolder(parentFolderId: string, memberName: string): Prom
 /** Refresh the parent's member-entry contentHash for subfolder `memberName`
  *  after the subfolder's own chain advanced (its membership was populated).
  *  Reads the subfolder's latest head, recomputes its canonical-body hash, and
- *  upserts the parent's entry. One folder-node read + one parent re-seal. */
+ *  upserts the parent's entry. One folder-node read + one parent re-step. */
 async function refreshFolderMemberHash(
   parentFolderId: string,
   memberName: string,
@@ -486,9 +321,9 @@ function groupByDir(diskEntries: DirEntry[]): Map<string, DiskChild[]> {
  *
  * Cost: one fetchManifest per directory level + one fetchChain per file — all
  * relay reads, no file I/O. This is the boot critical path; `reconcileScan`
- * runs after it to seal import/edit/delete nodes for any disk drift.
+ * runs after it to step import/edit/delete nodes for any disk drift.
  *
- * Files missing from the manifest (brand-new on disk, never sealed) are
+ * Files missing from the manifest (brand-new on disk, never stepped) are
  * invisible here — they appear when the background reconcile imports them.
  */
 export async function skeletonScan(folder: AttachedFolder): Promise<Record<string, FileState>> {
@@ -497,7 +332,6 @@ export async function skeletonScan(folder: AttachedFolder): Promise<Record<strin
   async function walk(folderId: string, dirPrefix: string): Promise<void> {
     const manifest = await fetchManifest(folderId);
     for (const entry of manifest) {
-      if (entry.isDeleted) continue;
       const childDisplayPath = dirPrefix ? `${dirPrefix}/${entry.relativePath}` : entry.relativePath;
       if (entry.kind === "folder") {
         // Subfolder: record the placeholder and recurse into its manifest.
@@ -518,6 +352,7 @@ export async function skeletonScan(folder: AttachedFolder): Promise<Record<strin
       files[childDisplayPath] = {
         runs,
         nodeId: entry.latestNodeId,
+        ...(chain[0]?.id ? { traceId: chain[0].id } : {}),
         tags: headUserTags(chain),
         ...(taggedTraces.length > 0 ? { taggedTraces } : {}),
       };
@@ -529,31 +364,15 @@ export async function skeletonScan(folder: AttachedFolder): Promise<Record<strin
 }
 
 /**
- * Boot an existing root from the relay skeleton only — zero disk reads. This
- * is the steady-state boot path: the trace lives in the app, the relay holds
- * it, and disk is a substrate scanned from / reified to at an instant rather
- * than a continuously-authoritative source. The first-time attach (via
- * `attachFolder`) is the one acquisition instant that seeds the chain; every
- * boot after reads the skeleton here.
- *
- * `openScanned` overlays the crash pad on top of the returned skeleton, so
- * un-reified edits survive a reload even though the relay only carries sealed
- * nodes.
- */
-export async function bootFromRelay(folder: AttachedFolder): Promise<Record<string, FileState>> {
-  return skeletonScan(folder);
-}
-
-/**
- * Reconcile the folder on disk with the relay's manifest, sealing nodes for
+ * Reconcile the folder on disk with the relay's manifest, stepping nodes for
  * any drift. The reconcile flow (same as the pre-split baselineScan):
  *
- * - file on disk, unknown to manifest → seal an `import` node, upsert entry.
+ * - file on disk, unknown to manifest → step an `import` node, upsert entry.
  * - file on disk, in manifest, content hash unchanged → no node; reconstruct
  *   content from the chain for the editor.
- * - file on disk, in manifest, content changed since last node → seal an
+ * - file on disk, in manifest, content changed since last node → step an
  *   `edit` node (disk is source of truth), upsert entry.
- * - file in manifest, missing from disk → seal a `delete` node, mark deleted.
+ * - file in manifest, missing from disk → step a `delete` node, mark deleted.
  *
  * The hash check keeps the reconcile idempotent: opening the app a second time
  * doesn't republish everything, only what actually changed.
@@ -575,7 +394,7 @@ export async function reconcileScan(
   // attribution, which falls back to a single run.
   const attribution = await readAttribution(folder.path);
   // Disk drift detected here means a process other than the traced editor moved
-  // the machine's state. Such nodes seal under the reconciler voice — a distinct
+  // the machine's state. Such nodes step under the reconciler voice — a distinct
   // per-machine key — never the authoring key, so the authoring key only ever
   // signs changes the editor's own transactions produced (§3.4 `external`, §8).
   const reconciler = getReconcilerVoice();
@@ -663,7 +482,7 @@ export async function reconcileScan(
         // so its genesis is honestly attributed to that voice, not the authoring
         // key. `action: "import"` stays: a brand-new file's first node is
         // genuinely a genesis; the signer is the honest part. (§8)
-        const event = await sealImport(
+        const event = await stepImport(
           folderId,
           memberName,
           content,
@@ -672,14 +491,19 @@ export async function reconcileScan(
           [],
           { signer: reconciler.secretKey },
         );
-        emit(childDisplayPath, { runs: runsFor(childDisplayPath, content), nodeId: event.id, tags: [] });
+        emit(childDisplayPath, {
+          runs: runsFor(childDisplayPath, content),
+          nodeId: event.id,
+          traceId: event.id,
+          tags: [],
+        });
         manifestByName.delete(memberName);
         manifestByName.delete(childDisplayPath);
         continue;
       }
 
-      if (entry.contentHash === contentHash && !entry.isDeleted) {
-        // Unchanged since last seal. On the background path the skeleton already
+      if (entry.contentHash === contentHash) {
+        // Unchanged since last step. On the background path the skeleton already
         // rendered this exact state from the chain, so skip the re-emit (the
         // merge would be a no-op anyway). On the inline path we still need it —
         // no skeleton ran, so this is the first time the caller sees the file.
@@ -693,6 +517,7 @@ export async function reconcileScan(
           emit(childDisplayPath, {
             runs: runsFor(childDisplayPath, reconstructed, chain),
             nodeId: entry.latestNodeId,
+            ...(chain[0]?.id ? { traceId: chain[0].id } : {}),
             tags: headUserTags(chain),
             ...(taggedTraces.length > 0 ? { taggedTraces } : {}),
           });
@@ -702,24 +527,33 @@ export async function reconcileScan(
         continue;
       }
 
-      // Changed on disk (or was marked deleted and reappeared): seal an edit.
-      // The change came from outside the traced editor, so it seals as
+      // Changed on disk (or was marked deleted and reappeared): step an edit.
+      // The change came from outside the traced editor, so it steps as
       // `action: "external"` under the reconciler voice — not the authoring key
       // (§3.4, §8). `authors` is omitted on this path, so reconstruction
       // attributes the bytes to the reconciler's pubkey (Tier-2 signer
       // attribution) rather than the human's voice.
       const priorChain = await fetchChain(folderId, memberName);
       const priorUserTags = headUserTags(priorChain);
-      const event = await sealImport(
+      const event = await stepImport(
         folderId,
         memberName,
         content,
         contentHash,
         entry.latestNodeId,
         priorUserTags,
-        { signer: reconciler.secretKey, action: "external" },
+        {
+          signer: reconciler.secretKey,
+          action: "external",
+          ...(priorChain[0]?.id ? { traceId: priorChain[0].id } : {}),
+        },
       );
-      emit(childDisplayPath, { runs: runsFor(childDisplayPath, content), nodeId: event.id, tags: priorUserTags });
+      emit(childDisplayPath, {
+        runs: runsFor(childDisplayPath, content),
+        nodeId: event.id,
+        ...(priorChain[0]?.id ? { traceId: priorChain[0].id } : {}),
+        tags: priorUserTags,
+      });
       manifestByName.delete(memberName);
       manifestByName.delete(childDisplayPath);
     }
@@ -727,7 +561,6 @@ export async function reconcileScan(
     // Anything left in this folder's manifest has no file on disk → mark deleted.
     // Skip folder-members (they're handled by the recursion, not by disk files).
     for (const [name, entry] of manifestByName) {
-      if (entry.isDeleted) continue;
       if (entry.kind === "folder") continue; // subfolder — not a missing file
       await markDeleted(folderId, entry);
       // On the background path the skeleton still shows this file (it came from
@@ -741,28 +574,16 @@ export async function reconcileScan(
   return files;
 }
 
-/**
- * Back-compat wrapper: skeleton + inline reconcile, returning the full map.
- * Kept so provenance.ts / context-gather.ts imports keep compiling; new boot
- * callers should use skeletonScan + reconcileScan(folder, onReconciled) directly
- * to keep the reconcile off the critical path.
- */
-export async function baselineScan(folder: AttachedFolder): Promise<Record<string, FileState>> {
-  // Skeleton is redundant when reconcile runs inline (it re-reads disk), so skip
-  // it and go straight to the full reconcile — same behavior as pre-split.
-  return reconcileScan(folder);
-}
-
 // --- mutations ----------------------------------------------------------
 //
-// Each mutation writes to disk first (source of truth), then seals a node
+// Each mutation writes to disk first (source of truth), then steps a node
 // and updates the manifest. If the disk write fails, we don't touch the
 // relay — provenance only records what actually landed on disk.
 
-/** Persist `content` to disk and seal an edit/import node for it. Called by
+/** Persist `content` to disk and step an edit/import node for it. Called by
  *  the debounced save path (Cmd-S or 1.5s idle) in the editor. No-op only when
- *  BOTH the content hash and the user tags match the last sealed node — a
- *  tag-only change still seals, so tag edits reach the relay. Returns the new
+ *  BOTH the content hash and the user tags match the last stepped node — a
+ *  tag-only change still steps, so tag edits reach the relay. Returns the new
  *  nodeId, or the existing one if nothing changed. `runs`, when provided, is
  *  the live per-voice attribution to persist to the sidecar so it survives
  *  reload; omit it for callers with no attribution (LLM "reply" path). */
@@ -775,9 +596,11 @@ export async function writeFile(
   runs?: Run[],
   replyingTo?: string,
   taggedTraces?: string[],
+  kedits?: KEdit[],
   localOnly?: boolean,
   force?: boolean,
 ): Promise<string> {
+  relativePath = ensureMdExt(relativePath);
   await invoke<null>("write_text_file", { root: folder.path, relativePath, contents: content });
   // Under nesting (spec §3.2), resolve the leaf folder trace that owns this
   // file. A file at blog/draft.md publishes to the blog subfolder's genesis id
@@ -790,7 +613,7 @@ export async function writeFile(
 
   // Fetch the chain head once: it gives us both the prior content (to diff) and
   // the prior user tags (to detect a tag-only change). Without this, a tag-only
-  // edit would hit the content-hash no-op branch and never seal.
+  // edit would hit the content-hash no-op branch and never step.
   const chain = entry ? await fetchChain(leafFolderId, leafMemberName) : [];
   const prevContent = entry ? reconstructFromChain(chain) : "";
   const prevTags = headUserTags(chain);
@@ -799,7 +622,7 @@ export async function writeFile(
 
   // The next node's q-tags = body brackets + reply source + tagged traces.
   // Compare against the prev head's citations so a pure tag-add (content and
-  // topical tags both unchanged) still seals — otherwise it'd be swallowed by
+  // topical tags both unchanged) still steps — otherwise it'd be swallowed by
   // the content-hash no-op branch.
   const prevCitations = entry ? eventMeta(chain[chain.length - 1]).citationTargets : [];
   const nextCitations = [
@@ -815,29 +638,29 @@ export async function writeFile(
   if (
     entry &&
     entry.contentHash === contentHash &&
-    !entry.isDeleted &&
     tagsUnchanged &&
     citationsUnchanged &&
     !force
   ) {
     nodeId = entry.latestNodeId; // no-op touch
   } else {
-    // Diff against the last sealed content so the node carries a real delta,
+    // Diff against the last stepped content so the node carries a real delta,
     // not a full replacement. When only tags changed (deltas empty, content
-    // identical), still seal so the new `t` tags land on the relay.
+    // identical), still step so the new `t` tags land on the relay.
     const deltas = diffToDeltas(prevContent, content);
     if (deltas.length === 0 && entry && tagsUnchanged && citationsUnchanged && !force) {
       nodeId = entry.latestNodeId;
     } else {
       const event = await publishEdit({
         prevEventId: entry?.latestNodeId ?? null,
+        ...(chain[0]?.id ? { traceId: chain[0].id } : {}),
         relativePath: leafMemberName,
         folderId: leafFolderId,
         // A forced checkpoint with no content change mints a clean `deltas: []`
         // node — the rhythm-layer gesture (§8: "saves are steps"). The
-        // synthesized-insert fallback below is for the tag/citation-only seal
+        // synthesized-insert fallback below is for the tag/citation-only step
         // (where content is identical but metadata changed), not for a forced
-        // no-op seal; a checkpoint that claims the whole body was just
+        // no-op step; a checkpoint that claims the whole body was just
         // inserted would misrepresent the edit rhythm.
         deltas: deltas.length > 0
           ? deltas
@@ -862,10 +685,12 @@ export async function writeFile(
         ...(runs && runs.length > 0 ? { authors: runs } : {}),
         // Cite every minted span this doc contains (spec:189) — one q-tag per
         // resolved `[[ phrase | nodeId ]]`. findResolvedBrackets returns the full
-        // set each seal; publishEdit dedupes by nodeId.
+        // set each step; publishEdit dedupes by nodeId.
         citations: findResolvedBrackets(content).map((b) => b.nodeId),
+        inlineCitations: findAddedInlineCitations(prevContent, content),
         ...(replyingTo ? { replyingTo } : {}),
         ...(taggedTraces && taggedTraces.length > 0 ? { taggedTraces } : {}),
+        ...(kedits && kedits.length > 0 ? { kedits } : {}),
         ...(signer ? { signer } : {}),
         ...(localOnly ? { localOnly: true } : {}),
       });
@@ -873,9 +698,9 @@ export async function writeFile(
       await upsertManifestEntry(
         leafFolderId,
         {
+          kind: "file",
           relativePath: leafMemberName,
           latestNodeId: event.id,
-          isDeleted: false,
           contentHash,
         },
         signer,
@@ -886,7 +711,7 @@ export async function writeFile(
 
   // Persist the voice layer to the sidecar (after content + provenance landed,
   // so a failed save never attributes text that didn't reach disk). Always
-  // refresh — even on a no-op content seal — because the editor may have
+  // refresh — even on a no-op content step — because the editor may have
   // re-attributed text without changing content (rare, but cheap to reflect).
   // Best-effort: a read-only folder degrades to single-run on next load.
   if (runs && runs.length > 0) {
@@ -900,8 +725,9 @@ export async function writeFile(
 
 /** Create a new file (empty) on disk + an import node. Returns its nodeId.
  *  If the file already exists on disk, just opens it (no overwrite). New files
- *  start with no user tags; the folder tag is derived from the path on seal. */
+ *  start with no user tags; the folder tag is derived from the path on step. */
 export async function createFile(folder: AttachedFolder, relativePath: string): Promise<string> {
+  relativePath = ensureMdExt(relativePath);
   const existing = await invoke<string>("read_text_file", {
     root: folder.path,
     relativePath,
@@ -934,7 +760,7 @@ export async function createFolder(folder: AttachedFolder, relativePath: string)
 
 /** Delete a file or folder from disk and record the provenance.
  *
- *  File: seals a `delete` node on the file's own 4290 chain, then removes the
+ *  File: steps a `delete` node on the file's own 4290 chain, then removes the
  *  member from its leaf folder's manifest (spec-clean tombstone — no isDeleted
  *  flag; the chain retains the delete node as history).
  *
@@ -957,10 +783,10 @@ export async function deletePath(
     const { leafFolderId, leafMemberName } = await resolveLeafFolder(folder.id, relativePath);
     // Remove the folder-member from the parent manifest with a `remove` delta.
     // The folder's own chain (and all descendant chains) are untouched — they
-    // persist as history. No delete node is sealed on the folder's chain: a
+    // persist as history. No delete node is stepped on the folder's chain: a
     // folder trace isn't "deleted" as a trace, it leaves its parent's
-    // membership. (markDeleted seals a delete node on a FILE's chain + removes
-    // the manifest entry — wrong for a folder, which has no file chain to seal
+    // membership. (markDeleted steps a delete node on a FILE's chain + removes
+    // the manifest entry — wrong for a folder, which has no file chain to step
     // a delete onto and whose identity is its genesis, not a path.)
     await removeManifestEntry(leafFolderId, leafMemberName);
   } else {
@@ -968,17 +794,17 @@ export async function deletePath(
     const { leafFolderId, leafMemberName } = await resolveLeafFolder(folder.id, relativePath);
     const manifest = await fetchManifest(leafFolderId);
     const entry = manifest.find((m) => m.relativePath === leafMemberName);
-    if (entry && !entry.isDeleted) await markDeleted(leafFolderId, entry);
+    if (entry) await markDeleted(leafFolderId, entry);
   }
 }
 
 /** Move `src` (file or folder relative path) into `destFolder` ("" = root).
- *  Disk move first; provenance-wise a move is modeled as import-at-dest +
- *  remove-at-source.
+ *  Disk move first; provenance-wise a file move extends the same trace at the
+ *  destination address and updates folder membership.
  *
- *  File move: import at the dest leaf folder + tombstone at the source leaf
- *  folder (the file's own 4290 chain gets a delete node; the source manifest
- *  removes the member).
+ *  File move: one new node with `prev` on the existing trace, then a same-parent
+ *  rename delta or cross-parent add/remove membership pair. No replacement
+ *  genesis and no source tombstone.
  *
  *  Folder move (spec §3.3): a folder member's name lives in the PARENT only,
  *  so moving a folder is O(1) at the parent — add the folder-member entry to
@@ -1032,7 +858,7 @@ export async function movePath(
       );
     } else {
       // Cross-folder move: add at dest (preserving kind + genesis + hash), then
-      // remove at source. Two folder-node seals, one per parent.
+      // remove at source. Two folder-node steps, one per parent.
       await upsertManifestEntry(destLeaf.leafFolderId, {
         kind: "folder",
         relativePath: destLeaf.leafMemberName,
@@ -1044,7 +870,13 @@ export async function movePath(
     return;
   }
 
-  // File move (the common case): import at dest + tombstone at source.
+  // File move: extend the SAME trace at its destination coordinate. Path is
+  // structural addressing; identity remains the genesis event id.
+  const srcManifest = await fetchManifest(srcLeaf.leafFolderId);
+  const oldEntry = srcManifest.find((m) => m.relativePath === srcLeaf.leafMemberName);
+  if (!oldEntry) return; // not tracked — reconcile will import it later
+  const sourceChain = await fetchChain(srcLeaf.leafFolderId, srcLeaf.leafMemberName);
+  const traceId = sourceChain[0]?.id ?? await resolveTraceIdentity(oldEntry.latestNodeId);
   const content = await invoke<string>("read_text_file", {
     root: folder.path,
     relativePath: destDisplayPath,
@@ -1052,9 +884,10 @@ export async function movePath(
   const contentHash = await sha256Hex(content);
   const userTags = userTagsByPath[src] ?? [];
 
-  // Import at the destination leaf folder with the single-segment leaf name.
+  // Extend at the destination leaf folder with the single-segment leaf name.
   const event = await publishEdit({
-    prevEventId: null,
+    prevEventId: oldEntry.latestNodeId,
+    ...(traceId ? { traceId } : {}),
     relativePath: destLeaf.leafMemberName,
     folderId: destLeaf.leafFolderId,
     deltas: content.length > 0
@@ -1062,20 +895,25 @@ export async function movePath(
       : [],
     snapshot: content,
     contentHash,
-    action: "import",
+    action: "edit",
     tags: userTags,
   });
-  await upsertManifestEntry(destLeaf.leafFolderId, {
-    relativePath: destLeaf.leafMemberName,
-    latestNodeId: event.id,
-    isDeleted: false,
-    contentHash,
-  });
-
-  // Tombstone at the source leaf folder.
-  const srcManifest = await fetchManifest(srcLeaf.leafFolderId);
-  const oldEntry = srcManifest.find((m) => m.relativePath === srcLeaf.leafMemberName);
-  if (oldEntry && !oldEntry.isDeleted) await markDeleted(srcLeaf.leafFolderId, oldEntry);
+  if (srcLeaf.leafFolderId === destLeaf.leafFolderId) {
+    await renameManifestEntry(
+      srcLeaf.leafFolderId,
+      srcLeaf.leafMemberName,
+      destLeaf.leafMemberName,
+      event.id,
+    );
+  } else {
+    await upsertManifestEntry(destLeaf.leafFolderId, {
+      kind: "file",
+      relativePath: destLeaf.leafMemberName,
+      latestNodeId: event.id,
+      contentHash,
+    });
+    await removeManifestEntry(srcLeaf.leafFolderId, srcLeaf.leafMemberName);
+  }
 }
 
 /** Rename `src` (file or folder) to `newName`, staying in the same parent.
@@ -1121,7 +959,8 @@ export async function renamePath(
     return;
   }
 
-  // File rename (the common case): publish at new name + rename delta.
+  // File rename: publish a new node on the same trace, then move the folder
+  // member address with one rename delta.
   const slash = src.lastIndexOf("/");
   const destDisplayPath = slash === -1 ? newName : src.slice(0, slash + 1) + newName;
   const content = await invoke<string>("read_text_file", {
@@ -1130,9 +969,15 @@ export async function renamePath(
   }).catch(() => "");
   const contentHash = await sha256Hex(content);
   const userTags = userTagsByPath[src] ?? [];
+  const manifest = await fetchManifest(leaf.leafFolderId);
+  const oldEntry = manifest.find((entry) => entry.relativePath === oldName);
+  if (!oldEntry) return;
+  const chain = await fetchChain(leaf.leafFolderId, oldName);
+  const traceId = chain[0]?.id ?? await resolveTraceIdentity(oldEntry.latestNodeId);
 
   const event = await publishEdit({
-    prevEventId: null,
+    prevEventId: oldEntry.latestNodeId,
+    ...(traceId ? { traceId } : {}),
     relativePath: newName,
     folderId: leaf.leafFolderId,
     deltas: content.length > 0
@@ -1140,7 +985,7 @@ export async function renamePath(
       : [],
     snapshot: content,
     contentHash,
-    action: "import",
+    action: "edit",
     tags: userTags,
   });
   // One `rename` folder delta: fromPath → toPath, pointing at the new node.
@@ -1149,17 +994,18 @@ export async function renamePath(
 
 // --- internal helpers ---------------------------------------------------
 
-async function sealImport(
+async function stepImport(
   folderId: string,
   relativePath: string,
   content: string,
   contentHash: string,
   prevEventId: string | null,
   userTags: string[],
-  opts?: { signer?: Uint8Array; action?: string },
+  opts?: { signer?: Uint8Array; action?: string; traceId?: string },
 ) {
   const event = await publishEdit({
     prevEventId,
+    ...(opts?.traceId ? { traceId: opts.traceId } : {}),
     relativePath,
     folderId,
     deltas: content.length > 0
@@ -1174,22 +1020,24 @@ async function sealImport(
     signer: opts?.signer,
   });
   await upsertManifestEntry(folderId, {
+    kind: "file",
     relativePath,
     latestNodeId: event.id,
-    isDeleted: false,
     contentHash,
   });
   return event;
 }
 
 async function markDeleted(folderId: string, entry: ManifestFileEntry): Promise<void> {
+  const traceId = await resolveTraceIdentity(entry.latestNodeId);
   await publishEdit({
     prevEventId: entry.latestNodeId,
+    ...(traceId ? { traceId } : {}),
     relativePath: entry.relativePath,
     folderId,
     deltas: [],
     snapshot: "", // delete has no content snapshot
-    contentHash: entry.contentHash,
+    contentHash: await sha256Hex(""),
     action: "delete",
   });
   // Spec-clean tombstone: drop the member from the folder snapshot via a
@@ -1205,99 +1053,3 @@ function basename(path: string): string {
 
 // Re-export for App.tsx's typing convenience.
 export type { AttachedFolder };
-
-// --- Workspace factory (disk backend) ------------------------------------
-//
-// Binds the standalone functions above into the backend-neutral `Workspace`
-// interface, closing over the attached folder so mutation call sites in
-// App.tsx can drop the `folder` argument. Disk remains the desktop's private
-// mirror; the relay is the sync target via publishToMany (provenance.ts).
-
-/**
- * Create a disk-backed workspace (desktop / Tauri only). The returned object
- * starts unattached; call `attach()` to bind a folder and baseline-scan it.
- */
-export function createDiskWorkspace(): Workspace & { detach(): void } {
-  let folder: AttachedFolder | null = null;
-
-  function requireFolder(): AttachedFolder {
-    if (!folder) {
-      throw new Error("workspace not attached — call attach() first");
-    }
-    return folder;
-  }
-
-  return {
-    get ref(): FolderRef | null {
-      return folder ? { id: folder.id, path: folder.path, label: folder.label } : null;
-    },
-
-    async attach(ref: FolderRef, onReconciled?: (path: string, file: FileState | null) => void): Promise<AttachResult> {
-      if (!ref.path) {
-        throw new Error("disk workspace requires a FolderRef with a path");
-      }
-      // Reuse an existing folderId if this path was attached before — its
-      // provenance chain is keyed on the id, so a new id would orphan it.
-      const existing = loadAttachedFolder();
-      const id = existing && existing.path === ref.path ? existing.id : ref.id;
-      const attached: AttachedFolder = { id, path: ref.path, label: ref.label };
-      saveAttachedFolder(attached);
-      folder = attached;
-      const { files, reconciled } = await attachScan(attached, onReconciled);
-      return { files, reconciled };
-    },
-
-    /** Forget the attached folder (provenance records stay in the relay). */
-    detach(): void {
-      clearAttachedFolder();
-      folder = null;
-    },
-
-    async readFile(relativePath: string): Promise<string> {
-      const f = requireFolder();
-      return invoke<string>("read_text_file", { root: f.path, relativePath });
-    },
-
-    async writeFile(
-      relativePath,
-      content,
-      tags = [],
-      signer?: Uint8Array,
-      runs?: Run[],
-      replyingTo?: string,
-      taggedTraces?: string[],
-      localOnly?: boolean,
-      force?: boolean,
-    ): Promise<string> {
-      return writeFile(requireFolder(), relativePath, content, tags, signer, runs, replyingTo, taggedTraces, localOnly, force);
-    },
-
-    async createFile(relativePath: string): Promise<string> {
-      return createFile(requireFolder(), relativePath);
-    },
-
-    async createFolder(relativePath: string): Promise<void> {
-      return createFolder(requireFolder(), relativePath);
-    },
-
-    async deletePath(relativePath: string, isFolder: boolean): Promise<void> {
-      return deletePath(requireFolder(), relativePath, isFolder);
-    },
-
-    async movePath(src, destFolder, isFolder, tagsByPath = {}): Promise<void> {
-      return movePath(requireFolder(), src, destFolder, isFolder, tagsByPath);
-    },
-
-    async renamePath(src, newName, isFolder, tagsByPath = {}): Promise<void> {
-      return renamePath(requireFolder(), src, newName, isFolder, tagsByPath);
-    },
-
-    async readFolderTags(): Promise<Record<string, string[]>> {
-      return readFolderTagsFile(requireFolder().path);
-    },
-
-    async writeFolderTags(tags: Record<string, string[]>): Promise<void> {
-      return writeFolderTagsFile(requireFolder().path, tags);
-    },
-  };
-}

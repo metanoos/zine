@@ -7,7 +7,7 @@
  * Each key is a card showing its generative visual identity (the label set in
  * that key's font, on that key's bg, in that key's fg) plus its pubkey. This
  * view manages the keychain itself (create, restyle, copy, remove); which key
- * is the AUTHOR or MODEL voice is chosen in the TopBar, not here.
+ * is the AUTHOR or MODEL voice is chosen in the ActionPalette, not here.
  *
  * Async state follows the sampler convention where applicable, but most actions
  * here are synchronous localStorage commits — there's no network round-trip, so
@@ -29,36 +29,24 @@ import {
   rolesForKey,
   saveKeys,
   secretKeyForVoice,
-  setAuthorKeyId,
-  setModelKeyId,
-  setNodeKeyId,
   type KeyEntry,
   type KeyIdentity,
 } from "./keys-store.js";
 import { publishVoiceIdentity } from "./provenance.js";
-import { loadDoors, addDoor, removeDoor } from "./doors-store.js";
+import { loadDoors } from "./doors-store.js";
 
 /** Alpha for the card swatch bg — denser than the editor-run bg (0.13). */
 const CARD_BG_ALPHA = 0.22;
 
-/** The four roles a key can hold. NODE and AUTHOR changes are consequential
- *  (change your .onion / who signs new text) and are gated behind a confirm
- *  modal; MODEL and DOOR are safe to toggle freely. */
+/** The four roles a key can hold, in display order. Role assignment lives at
+ *  the point of use (the ActionPalette or Networking); this view only reports it. */
 type RoleName = "NODE" | "AUTHOR" | "MODEL" | "DOOR";
 const ALL_ROLES: RoleName[] = ["NODE", "AUTHOR", "MODEL", "DOOR"];
-
-/** A pending role change awaiting user confirmation. Null when no modal open. */
-interface PendingRoleChange {
-  keyId: string;
-  role: RoleName;
-  /** The label of the key, for the confirm message. */
-  keyLabel: string;
-}
 
 export function KeysView({
   onKeysChange,
 }: {
-  /** Called whenever the key list or role assignments change, so App re-reads. */
+  /** Called whenever the key list or a key's presentation changes. */
   onKeysChange: (keys: KeyEntry[]) => void;
 }) {
   const [keys, setKeys] = useState<KeyEntry[]>(() => loadKeys());
@@ -72,79 +60,13 @@ export function KeysView({
   // The id of the key being dragged, or null. Held over the duration of a
   // drag-and-drop reorder so a card knows to dim itself while it's the source.
   const [dragId, setDragId] = useState<string | null>(null);
-  // A pending consequential role change awaiting the confirm modal. Null when
-  // no modal is open. MODEL and DOOR toggles don't set this — they're instant.
-  const [pendingRole, setPendingRole] = useState<PendingRoleChange | null>(null);
 
   /** The set of keyIds that are doors — passed to rolesForKey so it can badge
    *  keys without keys-store importing doors-store (which would be a cycle). */
   const doorKeyIds = new Set(doors.map((d) => d.keyId));
 
-  /** Refresh both keys and doors from storage, then notify App. Called after
-   *  any role change so the TopBar selectors and the Networking view stay in
-   *  sync with the new assignments. */
-  function refreshAll() {
-    const nextKeys = loadKeys();
-    setKeys(nextKeys);
-    setDoors(loadDoors());
-    onKeysChange(nextKeys);
-  }
-
-  /** Apply a role change immediately (no confirm). Used for MODEL and DOOR, and
-   *  as the "execute" step after the user confirms a NODE/AUTHOR change. */
-  function applyRoleChange(keyId: string, role: RoleName, assign: boolean) {
-    switch (role) {
-      case "NODE":
-        // Unassigning NODE isn't meaningful (it always falls back to the first
-        // key), so "assign" means "set this key as NODE". We treat toggle-off
-        // as a no-op rather than clearing the slot — there's always an owner.
-        if (assign) setNodeKeyId(keyId);
-        break;
-      case "AUTHOR":
-        if (assign) setAuthorKeyId(keyId);
-        break;
-      case "MODEL":
-        if (assign) setModelKeyId(keyId);
-        break;
-      case "DOOR":
-        if (assign) addDoor(keyId);
-        else {
-          const door = doors.find((d) => d.keyId === keyId);
-          if (door) removeDoor(door.id);
-        }
-        break;
-    }
-    refreshAll();
-  }
-
-  /** Toggle a role on/off. Consequential roles (NODE, AUTHOR) route through the
-   *  confirm modal; MODEL and DOOR are instant. */
-  function toggleRole(keyId: string, role: RoleName, currentlyActive: boolean) {
-    const keyLabel = keys.find((k) => k.id === keyId)?.label ?? "this key";
-    const assign = !currentlyActive;
-    // NODE and AUTHOR reassignment have provenance/reachability consequences —
-    // gate behind the confirm modal.
-    if ((role === "NODE" || role === "AUTHOR") && (currentlyActive || assign)) {
-      // Only show the modal when *assigning* to a different key (reassigning)
-      // or unassigning — both change behavior. First-time assign of NODE/AUTHOR
-      // to a key that has no role is also consequential, so always gate.
-      setPendingRole({ keyId, role, keyLabel });
-      return;
-    }
-    applyRoleChange(keyId, role, assign);
-  }
-
-  /** The confirm message for a pending NODE/AUTHOR change. */
-  function roleWarning(change: PendingRoleChange): string {
-    if (change.role === "NODE") {
-      return `Set "${change.keyLabel}" as the owner key (NODE)? This changes your .onion address — peers must re-share the new address to reach you. Existing zines keep their signatures.`;
-    }
-    // AUTHOR
-    return `Set "${change.keyLabel}" as the author key (AUTHOR)? New text will be signed by this key. Existing zines keep their original signatures.`;
-  }
-
   // Move the key at `from` to `to`, persisting the new order through the same
-  // saveKeys path add/remove use. The keychain's order is what the TopBar pen/
+  // saveKeys path add/remove use. The keychain's order is what the ActionPalette pen/
   // AUTHOR/MODEL selects render in, so a reorder there is reflected on next read.
   function reorderKeys(from: number, to: number) {
     if (from === to || from < 0 || to < 0 || from >= keys.length || to >= keys.length) return;
@@ -170,7 +92,7 @@ export function KeysView({
     }
   }
 
-  // Switching the AUTHOR/MODEL voice is done in the TopBar, not here — this view
+  // Switching the AUTHOR/MODEL voice is done in the ActionPalette, not here — this view
   // only manages the keychain (create/restyle/copy/remove).
 
   function updateLabel(id: string, label: string) {
@@ -215,7 +137,7 @@ export function KeysView({
   }
 
   function handleAdd() {
-    const next = addKey(`Voice ${keys.length + 1}`);
+    const next = addKey();
     setKeys(next);
     onKeysChange(next);
   }
@@ -230,7 +152,7 @@ export function KeysView({
   return (
     <section className="view-placeholder keys-view">
       <p className="view-placeholder-blurb">
-        Nostr keypairs (voices) you sign and attribute text with.
+        Voices are different pens: each has its own visual style and Nostr signature.
       </p>
 
       <div className="keys-list">
@@ -240,6 +162,13 @@ export function KeysView({
           const { fg, bg } = identityColors(k.identity, CARD_BG_ALPHA);
           const npub = keyNpub(k);
           const nsec = keyNsec(k);
+          const roles = rolesForKey(k.id, doorKeyIds);
+          const activeRoles = ALL_ROLES.filter((role) =>
+            role === "NODE" ? roles.node
+            : role === "AUTHOR" ? roles.author
+            : role === "MODEL" ? roles.model
+            : roles.door,
+          );
           return (
             <div
               key={k.id}
@@ -304,38 +233,18 @@ export function KeysView({
                     </button>
                   </div>
                 </div>
-                {/* Role chips — one per role, toggleable. Active roles are
-                    filled; inactive are outlined. NODE/AUTHOR toggles route
-                    through a confirm modal (consequential); MODEL/DOOR are
-                    instant. */}
-                <div className="key-card-roles">
-                  {ALL_ROLES.map((role) => {
-                    const roles = rolesForKey(k.id, doorKeyIds);
-                    const active =
-                      role === "NODE" ? roles.node
-                      : role === "AUTHOR" ? roles.author
-                      : role === "MODEL" ? roles.model
-                      : roles.door;
-                    return (
-                      <button
-                        key={role}
-                        type="button"
-                        className={"role-chip" + (active ? " active" : "")}
-                        title={
-                          role === "NODE"
-                            ? active ? "Active owner key — click to change" : "Set as owner key (changes .onion)"
-                            : role === "AUTHOR"
-                              ? active ? "Active author key — click to change" : "Set as author key"
-                              : role === "MODEL"
-                                ? active ? "Active model key — click to change" : "Set as model key"
-                                : active ? "Active door — click to remove" : "Add as door"
-                        }
-                        onClick={() => toggleRole(k.id, role, active)}
-                      >
-                        {role}
-                      </button>
-                    );
-                  })}
+                {/* Role assignment is read-only here. Author/model are selected
+                    in the ActionPalette; node/door assignments live in Networking. */}
+                <div
+                  className="key-card-roles"
+                  aria-label={`Roles: ${activeRoles.length > 0 ? activeRoles.join(", ") : "none"}`}
+                >
+                  <span className="key-card-roles-label">roles</span>
+                  {activeRoles.length > 0 ? activeRoles.map((role) => (
+                    <span key={role} className="role-chip">{role}</span>
+                  )) : (
+                    <span className="key-card-roles-empty">none</span>
+                  )}
                 </div>
                 <div className="key-value-row">
                   <span className="key-value-label">npub</span>
@@ -422,38 +331,8 @@ export function KeysView({
 
       <button type="button" className="settings-add-btn keys-add" onClick={handleAdd}>
         <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
-        <span>Generate keypair</span>
+        <span>Add voice</span>
       </button>
-
-      {/* Confirm modal for consequential role changes (NODE / AUTHOR). Reuses
-          the confirm-overlay/confirm-dialog classes from App.tsx so the style
-          matches the existing delete-confirm modal. */}
-      {pendingRole && (
-        <div className="confirm-overlay" onClick={() => setPendingRole(null)}>
-          <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
-            <p className="confirm-message">{roleWarning(pendingRole)}</p>
-            <div className="confirm-actions">
-              <button
-                type="button"
-                className="confirm-cancel"
-                onClick={() => setPendingRole(null)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="confirm-delete"
-                onClick={() => {
-                  applyRoleChange(pendingRole.keyId, pendingRole.role, true);
-                  setPendingRole(null);
-                }}
-              >
-                Confirm
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </section>
   );
 }

@@ -3,9 +3,9 @@
  *
  * When a three-way merge auto-resolves with no overlapping conflicts (the
  * divergence is purely structural — unStepped checkpoints, identical text, or
- * non-overlapping edits), we don't seal blindly: this modal shows the diff of
+ * non-overlapping edits), we don't step blindly: this modal shows the diff of
  * what the auto-merge will change before committing it. Mirrors the
- * compose/affirm modal shape.
+ * compose/attest modal shape.
  */
 
 import { useMemo } from "react";
@@ -28,7 +28,7 @@ export interface MergePreviewModalProps {
   path: string;
   /** Current head body (ours). */
   before: string;
-  /** Auto-merged body the seal will write. */
+  /** Auto-merged body the step will write. */
   after: string;
   busy?: boolean;
   error?: string | null;
@@ -67,7 +67,7 @@ export function MergePreviewModal({
                 : candidate.kind === "sibling-head"
                   ? `Sibling branch ${short}`
                   : `Synced edit by ${who}`}
-              {" — no overlapping edits, auto-resolved. Review and seal."}
+              {" — no overlapping edits, auto-resolved. Review and step."}
             </p>
           </div>
           <button
@@ -89,7 +89,7 @@ export function MergePreviewModal({
 
         {!changed && (
           <div className="merge-clean-note">
-            Both sides hold identical text — sealing advances the chain without
+            Both sides hold identical text — stepping advances the chain without
             changing the file body.
           </div>
         )}
@@ -126,7 +126,7 @@ export function MergePreviewModal({
             disabled={busy}
             onClick={onConfirm}
           >
-            {busy ? "Sealing…" : "Seal merge"}
+            {busy ? "Stepping…" : "Step merge"}
           </button>
         </div>
       </div>

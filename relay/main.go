@@ -32,7 +32,16 @@ func main() {
 	host := flag.String("host", "127.0.0.1", "bind address — keep this 127.0.0.1 for the desktop sidecar")
 	port := flag.Int("port", 4869, "port to listen on")
 	dbPath := flag.String("db", defaultDbPath(), "sqlite database path")
+	reset := flag.Bool("reset", false, "delete every local event and reset the desktop access policy, then exit")
 	flag.Parse()
+	if *reset {
+		deleted, err := resetLocalState(*dbPath)
+		if err != nil {
+			log.Fatalf("factory reset failed: %v", err)
+		}
+		log.Printf("factory reset complete: deleted %d local events", deleted)
+		return
+	}
 
 	relay := khatru.NewRelay()
 	relay.Info.Name = "Zine Local Relay"
@@ -42,9 +51,10 @@ func main() {
 	relay.Info.SupportedNIPs = []any{1, 9, 11, 18, 33, 42}
 
 	// Access policy — opt-in. When peers.json exists with an owner, the relay
-	// requires NIP-42 AUTH and gates reads/writes by pubkey (owner = read+write,
-	// peers = read-only). When absent, local mode: localhost is trusted, no AUTH
-	// required. See protocol/transport.md §5 and access-policy.go.
+	// requires NIP-42 AUTH and gates reads/writes by pubkey (owner = relay-policy
+	// write, writers = own-key write, peers = read-only). When absent, local
+	// mode trusts localhost and requires no AUTH. See protocol/transport.md §5
+	// and access-policy.go.
 	policy := NewAccessPolicy(DefaultPeersPath(*dbPath))
 	if policy.Active() {
 		log.Printf("networked mode active (owner=%s, peers=%d, writers=%d) — NIP-42 AUTH required",
@@ -78,7 +88,8 @@ func main() {
 		// (policy inactive) this is a no-op. In networked mode: unauthed or
 		// unknown pubkeys get an AUTH challenge (the "auth-required:" prefix
 		// triggers khatru to send it, handlers.go:309-311); the owner may write,
-		// peers may not (read-only). See transport.md §5.
+		// writers may publish only their own events, and peers are read-only. See
+		// transport.md §5.
 		func(ctx context.Context, ev *nostr.Event) (bool, string) {
 			if !policy.Active() {
 				return false, ""
@@ -107,9 +118,9 @@ func main() {
 		policies.RejectEventsWithBase64Media,
 		// Loopback-exempted 20 events/min, burst 100. On the desktop sidecar the
 		// only loopback client is the owner (and a trusted headless MCP press),
-		// so rate-limiting 127.0.0.1 just trips legitimate folder-seal fan-out:
-		// sealing a folder with nested subdirs (one genesis + file nodes +
-		// membership seals + TraceHead caches per member) bursts past 100 in
+		// so rate-limiting 127.0.0.1 just trips legitimate folder-step fan-out:
+		// stepping a folder with nested subdirs (one genesis + file nodes +
+		// membership steps + TraceHead caches per member) bursts past 100 in
 		// seconds, which surfaced as "publish failed on every relay
 		// (rate-limited: slow down, please)". The AUTH gate above runs first
 		// and rejects peer writes before this limiter is reached, so in
@@ -121,7 +132,7 @@ func main() {
 	)
 	relay.RejectFilter = append(relay.RejectFilter,
 		// Read-side AUTH gate — same shape as the event gate. In networked mode,
-		// unauthed readers get challenged; owner+peers may read.
+		// unauthed readers get challenged; owner, writers, and peers may read.
 		func(ctx context.Context, _ nostr.Filter) (bool, string) {
 			if !policy.Active() {
 				return false, ""
@@ -141,7 +152,7 @@ func main() {
 	relay.RejectCountFilter = append(relay.RejectCountFilter,
 		// Count is a read op — gate it identically to filters so a caller can't
 		// learn aggregate facts (e.g. "how many events on this relay") without
-		// being authed as owner/peer.
+		// being authed as owner, writer, or peer.
 		func(ctx context.Context, _ nostr.Filter) (bool, string) {
 			if !policy.Active() {
 				return false, ""
@@ -188,10 +199,68 @@ func defaultDbPath() string {
 	return filepath.Join(home, ".tracer", "relay.sqlite3")
 }
 
+// resetLocalState is the destructive half of the desktop app's explicit
+// factory reset. It clears the local relay's event store and removes the
+// access-policy files tied to the old browser keychain. The database file is
+// kept in place so an already-running relay process continues using the same
+// SQLite connection and immediately observes the empty table.
+//
+// Remote relays are deliberately out of scope: published Nostr events cannot
+// be recalled from servers this process does not own.
+func resetLocalState(dbPath string) (int64, error) {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		return 0, fmt.Errorf("create relay data directory: %w", err)
+	}
+
+	db := sqlite3.SQLite3Backend{DatabaseURL: dbPath}
+	if err := db.Init(); err != nil {
+		return 0, fmt.Errorf("open relay database: %w", err)
+	}
+	defer db.Close()
+
+	// A previous desktop launch can still own an idle connection to this same
+	// database. Give its short reads time to finish, and overwrite deleted page
+	// content instead of leaving old trace bodies recoverable on the freelist.
+	if _, err := db.Exec("PRAGMA busy_timeout = 10000"); err != nil {
+		return 0, fmt.Errorf("configure reset lock timeout: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA secure_delete = ON"); err != nil {
+		return 0, fmt.Errorf("enable secure deletion: %w", err)
+	}
+	result, err := db.Exec("DELETE FROM event")
+	if err != nil {
+		return 0, fmt.Errorf("delete relay events: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count deleted relay events: %w", err)
+	}
+
+	// The ACL owner is one of the browser keys being erased. Leaving it behind
+	// would make the running relay reject the fresh first-run key. The relay's
+	// access-policy poll notices these removals and returns to local mode.
+	dataDir := filepath.Dir(dbPath)
+	for _, name := range []string{"peers.json", "friends.json"} {
+		path := filepath.Join(dataDir, name)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return deleted, fmt.Errorf("remove %s: %w", path, err)
+		}
+	}
+
+	// Reclaim disk after a large trace history when SQLite can take the lock.
+	// The logical reset already succeeded, so a busy VACUUM is non-fatal.
+	if deleted > 0 {
+		if _, err := db.Exec("VACUUM"); err != nil {
+			log.Printf("factory reset: database cleared but VACUUM skipped: %v", err)
+		}
+	}
+	return deleted, nil
+}
+
 // loopbackExempt wraps an event/filter reject-fn so that connections from
 // 127.0.0.1 / ::1 bypass it. On the desktop sidecar loopback is the owner
 // (plus the trusted headless press), and their legitimate burst fan-out
-// (folder sealing) is what we want to stop rate-limiting — not throttle.
+// (folder stepping) is what we want to stop rate-limiting — not throttle.
 // The real protections (AUTH gate, sqlite store) run independently; this
 // just stops the owner from tripping a cap meant for untrusted remote IPs,
 // which the sidecar never serves in local mode.

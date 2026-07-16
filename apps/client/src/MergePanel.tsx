@@ -2,7 +2,7 @@
  * Three-way merge panel for conflict incorporate (protocol §3.8).
  *
  * Shows auto-resolved regions as context and conflict hunks with
- * ours / theirs / both / base choices. Confirm seals the unilateral merge
+ * ours / theirs / both / base choices. Confirm steps the unilateral merge
  * with the resolved snapshot.
  */
 
@@ -23,7 +23,7 @@ export interface MergePanelProps {
   ours: string;
   path: string;
   busy: boolean;
-  /** Inline failure message from the last seal/incorporate attempt. */
+  /** Inline failure message from the last step/incorporate attempt. */
   error?: string | null;
   onCancel: () => void;
   onConfirm: (resolvedSnapshot: string) => void;
@@ -157,7 +157,7 @@ export function MergePanel({
             disabled={busy}
             onClick={() => onConfirm(resolved)}
           >
-            {busy ? "Sealing…" : "Seal merge"}
+            {busy ? "Stepping…" : "Step merge"}
           </button>
         </div>
       </div>
@@ -170,7 +170,7 @@ export function MergePanel({
 
       {result.clean && (
         <div className="merge-clean-note">
-          No overlapping edits — result combines both sides automatically. Review preview and seal.
+          No overlapping edits — result combines both sides automatically. Review preview and step.
         </div>
       )}
 

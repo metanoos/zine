@@ -1,13 +1,13 @@
 /**
- * §3.7 reconstruction panel: surfaces `reconstructLlmCall` in the Seals modal.
- * When the selected seal is an `action: llm` node, this panel fetches the rule
+ * §3.7 reconstruction panel: surfaces `reconstructLlmCall` in the Steps modal.
+ * When the selected step is an `action: llm` node, this panel fetches the rule
  * manifest + every cited nucleus and rebuilds the { systemPrompt, userPrompt }
  * the producing press assembled at call time — so a reader can see exactly what
  * the model was handed, not just the typed instruction.
  *
  * Degrades visibly: unknown algorithm, unresolvable rule, or missing scope →
  * the panel shows the reason + whatever scope resolved, rather than hiding the
- * failure. A non-LLM seal renders nothing.
+ * failure. A non-LLM step renders nothing.
  */
 
 import { useEffect, useState } from "react";

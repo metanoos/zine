@@ -9,18 +9,19 @@
  * on attach, so no new Tauri IPC is needed and this works equally on the
  * webapp (where `files` is populated from localStorage/the relay).
  *
- * The delta log is now an AGGREGATED DIRECTORY LOG: every direct-child file's
- * kind-4290 chain events PLUS the folder's kind-4292 membership events (add/
- * remove) for that directory, interleaved by sealedAt. File events come from
- * one `fetchChain` per direct child (walked genesis→head so the client can
+ * The delta log is an AGGREGATED SCOPE LOG: every selected file's kind-4290
+ * chain plus matching folder kind-4292 membership events, interleaved by
+ * steppedAt. Folder scopes recursively add descendant files; multiple scopes
+ * form a union; shielded boundaries below each explicit scope root are omitted.
+ * File events come from one
+ * `fetchChain` per included file (walked genesis→head so the client can
  * derive each node's `oldValue` from the prior node's snapshot — it doesn't
  * persist oldValue, spec-compliant); one `fetchFolderNodes` call gets every
- * membership event. Both are filtered to the active file's immediate parent
- * directory (1 level deep).
+ * membership event.
  *
  * Memoization: both fetches are network calls, so the merged log is memoized
- * under a key that includes a FINGERPRINT of the directory's direct children's
- * nodeIds. Any seal/mint/fork that advances a direct child's chain head
+ * under a key that includes the scope set and a fingerprint of included head
+ * nodeIds. Any step/mint/fork that advances an included chain head
  * changes the fingerprint → the next gather refetches automatically. No
  * manual invalidation hooks. Cleared wholesale on folder switch.
  */
@@ -29,6 +30,7 @@ import type { Event } from "nostr-tools";
 import type { FileState, FolderRef } from "./workspace-core.js";
 import { flattenRuns } from "./workspace-core.js";
 import { fetchChain, fetchFolderNodes } from "./provenance.js";
+import { pathInEffectiveScopes, scopeKey, type ScopeRef } from "./scope-model.js";
 import {
   renderContextBlock,
   type ContextEntry,
@@ -53,38 +55,29 @@ export function clearChainMemo(): void {
   logMemo.clear();
 }
 
-/** The scope mount: the file or folder whose subtree bounds the context an LLM
- *  op receives. Distinct from the focused/active file (the write target): the
- *  scope decides HOW MUCH context is gathered; the active file decides WHERE
- *  an op lands and gets the (ACTIVE) emphasis tag. `path === ""` (ROOT) means
- *  the whole attached folder — the pre-scope-split behavior. */
-export interface ScopeRef {
-  kind: "file" | "folder";
-  path: string;
-}
-
 /** Gather and render the canonical context block for an op against `activePath`
- *  (the focused/target file), scoped to `scope`'s subtree. The scope recurses:
- *  a folder scope gathers every descendant file's content + every directory's
- *  membership chain; a file scope treats its parent directory as the root (and
- *  still recurses beneath that, so siblings-and-below all enter context).
+ *  (the focused/target file), scoped to the union of `scopes`. A folder scope
+ *  gathers every descendant file's content + membership chain; a file scope
+ *  gathers only that file.
+ *
+ *  `shielded` is the set of recursive traversal boundaries. A shielded descendant
+ *  of a scoped folder is dropped from the rendered entries and delta log, but
+ *  explicitly selecting that shielded file/folder starts a new inclusion root.
  *
  *  Never throws: if a chain fetch fails, that file's log is simply omitted (the
  *  rest still renders). */
 export async function gatherContextBlock(
   folder: FolderRef,
   files: Record<string, FileState>,
-  scope: ScopeRef,
+  scopes: readonly ScopeRef[],
   activePath: string,
+  shielded: Set<string> = new Set(),
 ): Promise<string> {
-  const entries: ContextEntry[] = entriesFromFiles(files);
-  // Ensure the active file is present even if (pathologically) it isn't in
-  // `files` yet — the renderer tags it (ACTIVE) and shows "(empty)".
-  if (!entries.some((e) => e.relativePath === activePath)) {
-    entries.push({ relativePath: activePath, content: "" });
-  }
+  const entries: ContextEntry[] = entriesFromFiles(files).filter(
+    (e) => pathInEffectiveScopes(scopes, shielded, e.relativePath),
+  );
 
-  const deltaLog = await loadDirectoryLog(folder.id, scope, files);
+  const deltaLog = await loadDirectoryLog(folder.id, scopes, files, shielded);
 
   return renderContextBlock({
     folderLabel: folder.label ?? folder.id.slice(0, 8),
@@ -92,13 +85,6 @@ export async function gatherContextBlock(
     activePath,
     deltaLog,
   });
-}
-
-/** Immediate parent directory of a POSIX relative path. `notes/essay.md` →
- *  `notes`; `essay.md` → `""` (folder root). */
-function parentOf(relativePath: string): string {
-  const slash = relativePath.lastIndexOf("/");
-  return slash < 0 ? "" : relativePath.slice(0, slash);
 }
 
 /** Derive the flat entry list from the in-memory file map. Directories are
@@ -125,22 +111,27 @@ function entriesFromFiles(files: Record<string, FileState>): ContextEntry[] {
   return out;
 }
 
-/** Is `descendant` inside `ancestor`'s subtree (the ancestor itself, or
- *  nested beneath it)? ROOT ("") matches everything — the whole attached
- *  folder. */
-function within(ancestor: string, descendant: string): boolean {
-  if (ancestor === "") return true;
-  if (descendant === ancestor) return true;
-  return descendant.startsWith(ancestor + "/");
+/** Is `path` at or below a raw shielded boundary? Effective scope selection may
+ *  lift a boundary by starting an explicit scope root at or inside it. */
+export function isShielded(shielded: Set<string>, path: string): boolean {
+  if (shielded.size === 0) return false;
+  if (shielded.has("")) return true;
+  if (shielded.has(path)) return true;
+  // Walk ancestor prefixes: `a/b/c.md` → `a/b` → `a`.
+  let slash = path.lastIndexOf("/");
+  while (slash > 0) {
+    if (shielded.has(path.slice(0, slash))) return true;
+    slash = path.lastIndexOf("/", slash - 1);
+  }
+  return false;
 }
 
 /** Build the aggregated directory log for the scope subtree: every descendant
  *  file's chain events (one `fetchChain` per descendant, walked genesis→head so
  *  oldValue is derivable from the prior snapshot) PLUS every directory's folder
  *  membership events (from `fetchFolderNodes`), filtered to descendants of the
- *  scope root, merged and sorted by sealedAt. A file scope roots at the file's
- *  parent directory (siblings-and-below); a folder scope roots at the folder
- *  itself; ROOT means the whole attached folder.
+ *  selected union, merged and sorted by steppedAt. A file scope is exact; a
+ *  folder scope includes its full subtree; ROOT includes the attached folder.
  *
  *  This is the recursive generalization of the pre-scope-split behavior, which
  *  gathered only the active file's immediate parent's direct children (1 level
@@ -150,33 +141,32 @@ function within(ancestor: string, descendant: string): boolean {
  *  memoization via a fingerprint of the subtree's nodeIds. */
 async function loadDirectoryLog(
   folderId: string,
-  scope: ScopeRef,
+  scopes: readonly ScopeRef[],
   files: Record<string, FileState>,
+  shielded: Set<string> = new Set(),
 ): Promise<DeltaLogEntry[]> {
-  // The scope root directory: a file mounts its parent (siblings-and-below); a
-  // folder mounts itself. ROOT ("") = the whole attached folder.
-  const root = scope.kind === "file" ? parentOf(scope.path) : scope.path;
-  // Every descendant file under the scope root. Folder-members (kind: "folder")
-  // are skipped — they have no file chain to fetch, and fetchChain is relpath-
-  // keyed for files, not folder-id-keyed.
+  // Every file in the selected union. Folder-members (kind: "folder") are
+  // skipped — they have no file chain to fetch. Shielded descendants do not
+  // enter the chain fetch unless a scope starts at or inside their boundary.
   const subtree = Object.keys(files).filter(
-    (p) => files[p]?.kind !== "folder" && within(root, p),
+    (p) => files[p]?.kind !== "folder" && pathInEffectiveScopes(scopes, shielded, p),
   );
-  // Fingerprint: sorted (path, nodeId) pairs over the WHOLE subtree. Any seal/
+  // Fingerprint: sorted (path, nodeId) pairs over the WHOLE subtree. Any step/
   // mint/fork on any descendant advances its nodeId, changing the fingerprint
-  // and forcing a refetch. Includes empty-string nodeIds (unsealed-this-
-  // session) so a first seal also invalidates.
+  // and forcing a refetch. Includes empty-string nodeIds (unstepped-this-
+  // session) so a first step also invalidates. Includes the shielded set so a
+  // toggle re-invalidates the cache.
   const fingerprint = subtree
     .sort()
     .map((p) => `${p}:${files[p]?.nodeId ?? ""}`)
     .join("|");
-  const key = `${folderId}|${root}|${fingerprint}`;
+  const key = `${folderId}|${scopeKey(scopes)}|${fingerprint}|${[...shielded].sort().join(",")}`;
 
   const cached = logMemo.get(key);
   if (cached) return cached;
 
   type Merged = {
-    sealedAt: number;
+    steppedAt: number;
     action: string;
     relativePath: string;
     source: "file" | "folder";
@@ -185,8 +175,6 @@ async function loadDirectoryLog(
     deltas: DeltaSpanView[] | undefined;
   };
   const merged: Merged[] = [];
-  const childSet = new Set(subtree);
-
   // File events: walk each descendant's prev-chain in genesis→head order
   // (fetchChain resolves the head and walks `e...prev` back, then reverses —
   // store.ts does the same). Ordering matters here because the client doesn't
@@ -205,16 +193,16 @@ async function loadDirectoryLog(
     for (let i = 0; i < chain.length; i++) {
       const event = chain[i];
       const prevSnapshot = i > 0 ? parsedSnapshot(chain[i - 1]) : "";
-      let sealedAt = (event.created_at ?? 0) * 1000;
+      let steppedAt = (event.created_at ?? 0) * 1000;
       let summary: string | null = null;
       let parsed: {
         deltas?: RawFileDelta[];
         snapshot?: string;
       };
       try {
-        parsed = JSON.parse(event.content) as { sealedAt?: number; summary?: string; deltas?: RawFileDelta[]; snapshot?: string };
-        const full = parsed as { sealedAt?: number; summary?: string };
-        if (typeof full.sealedAt === "number") sealedAt = full.sealedAt;
+        parsed = JSON.parse(event.content) as { steppedAt?: number; summary?: string; deltas?: RawFileDelta[]; snapshot?: string };
+        const full = parsed as { steppedAt?: number; summary?: string };
+        if (typeof full.steppedAt === "number") steppedAt = full.steppedAt;
         if (typeof full.summary === "string") summary = full.summary;
       } catch {
         // non-JSON content — no deltas, fall back to created_at.
@@ -223,7 +211,7 @@ async function loadDirectoryLog(
       const action = event.tags.find((t) => t[0] === "action")?.[1] ?? "edit";
       const spans = fileDeltasToViews(parsed.deltas ?? [], prevSnapshot);
       merged.push({
-        sealedAt,
+        steppedAt,
         action,
         relativePath: rel,
         source: "file",
@@ -234,28 +222,27 @@ async function loadDirectoryLog(
     }
   }
 
-  // Folder membership events: every 4292 node, filtered to those whose delta
-  // touches a file in the scope subtree (childSet). Genesis nodes (no delta)
-  // are dropped.
+  // Folder membership events: every 4292 node whose affected path belongs to
+  // the effective scope union. Genesis nodes (no delta) are dropped.
   try {
     const nodes = await fetchFolderNodes(folderId);
     for (const node of nodes) {
-      let sealedAt = (node.created_at ?? 0) * 1000;
+      let steppedAt = (node.created_at ?? 0) * 1000;
       let delta: { type: string; relativePath: string } | null = null;
       try {
         const parsed = JSON.parse(node.content) as {
-          sealedAt?: number;
+          steppedAt?: number;
           deltas?: { type: string; relativePath: string }[];
         };
-        if (typeof parsed.sealedAt === "number") sealedAt = parsed.sealedAt;
+        if (typeof parsed.steppedAt === "number") steppedAt = parsed.steppedAt;
         delta = parsed.deltas?.[0] ?? null;
       } catch {
         continue;
       }
       if (!delta) continue;
-      if (!childSet.has(delta.relativePath)) continue;
+      if (!pathInEffectiveScopes(scopes, shielded, delta.relativePath)) continue;
       merged.push({
-        sealedAt,
+        steppedAt,
         action: delta.type, // 'add' | 'remove' | 'rename'
         relativePath: delta.relativePath,
         source: "folder",
@@ -268,10 +255,10 @@ async function loadDirectoryLog(
     // No folder chain yet — file events alone are fine.
   }
 
-  // Stable sort by sealedAt (oldest first). Ties keep insertion order, which
+  // Stable sort by steppedAt (oldest first). Ties keep insertion order, which
   // is file-events-then-folder-events — matching publish order (a file node is
-  // sealed before its paired folder-membership node).
-  merged.sort((a, b) => a.sealedAt - b.sealedAt);
+  // stepped before its paired folder-membership node).
+  merged.sort((a, b) => a.steppedAt - b.steppedAt);
   const result: DeltaLogEntry[] = merged.map((m, i) => ({ seq: i + 1, ...m }));
   logMemo.set(key, result);
   return result;

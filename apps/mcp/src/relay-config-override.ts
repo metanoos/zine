@@ -18,7 +18,7 @@
  * home entry against the current `resolveRelayUrl()`).
  *
  * Must be called at the very top of `server.ts`, before any dynamic import of
- * `workspace-relay.ts` / `provenance.ts`.
+ * `workspace-local.ts` / `provenance.ts`.
  */
 export function setHomeRelay(relayUrl: string): void {
   process.env.ZINE_RELAY_URL = relayUrl;

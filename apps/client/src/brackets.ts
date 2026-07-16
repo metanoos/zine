@@ -9,25 +9,23 @@
  * document text, not a decoration-only overlay: a snapshot's inner content is
  * what the reader sees, and the on-disk bytes round-trip through any editor.
  *
- * Authoring: selecting text is non-destructive. A bracket is created only
- * when the author chooses Snapshot (Cmd/Ctrl+S over a selection), which both
- * wraps the phrase in `[[ ]]` and publishes it as a minted trace node.
- * `wrapSelectionCommand` is the shared wrap primitive the Snapshot path calls.
+ * Authoring: selecting text is non-destructive. Cmd/Ctrl+B adds a pending
+ * protection bracket without publishing. Step over a loose highlight wraps and
+ * mints it; Step over a selected pending bracket mints that protected phrase.
+ * `wrapSelectionCommand` is the shared pure-wrap primitive both paths use.
  *
- * Delete resilience (Markdown mode): a delete (Backspace/Delete/type-over)
- * that *fully contains* one or more `[[ … ]]` spans spares them — only the
- * loose text between/around the brackets is removed. The `bracketProtect`
- * filter rewrites such a transaction into gap-deletions so the brackets
- * survive. Edge-overlapping deletes still rupture brackets (consistent with
- * the pin-vs-bracket rupture model documented in App.tsx). In Preview mode
- * this filter is inert — a fully-contained delete there is exactly what a
- * one-keystroke atomic-chip Backspace produces, and it's meant to delete
- * the chip, not spare it.
+ * Delete resilience (both modes): a deletion that *fully contains* one or more
+ * `[[ … ]]` spans spares them — only the loose text between/around the brackets
+ * is removed. The `bracketProtect` filter rewrites such a transaction into
+ * gap-deletions so the brackets survive. Cut and paste/type-over keep normal
+ * editor semantics and remove/replace the complete selection. Edge-overlapping
+ * deletes still rupture brackets. Double-Backspace over one selected bracket
+ * deliberately unwraps it to normal text.
  *
  * The bracketing is LITERAL: the `[[ ]]` characters render as plain document
  * text and stay visible — they are what marks a run as a trace component. The
  * `| nodeId` citation suffix, on the other hand, is hidden from view: the event
- * id is load-bearing in the bytes (the seal path mirrors it as a `q` tag) but
+ * id is load-bearing in the bytes (the step path mirrors it as a `q` tag) but
  * is noise in the prose, and the bracket alone is enough to mark the run. So a
  * resolved `[[ phrase | nodeId ]]` renders as `[[ phrase ]]`. This is a third
  * decoration layer, independent of `voiceField` and `pinField` in App.tsx — per
@@ -41,7 +39,13 @@
  */
 
 import type { Extension, Range, TransactionSpec } from "@codemirror/state";
-import { Compartment, EditorState, Facet, type Transaction } from "@codemirror/state";
+import {
+  Compartment,
+  EditorSelection,
+  EditorState,
+  Facet,
+  type Transaction,
+} from "@codemirror/state";
 import {
   Decoration,
   EditorView,
@@ -61,7 +65,7 @@ const BRACKET_CLOSE = " ]]";
  *  chip widgets. One editable CodeMirror doc serves both — this facet just
  *  switches which decorations `buildBracketDecorations`/`buildCommandDecorations`
  *  emit (see App.tsx's FileEditor for how it's wired to the mode toggle). */
-export type Mode = "preview" | "markdown";
+export type Mode = "preview" | "markdown" | "diff";
 export const modeFacet = Facet.define<Mode, Mode>({ combine: (v) => v[0] ?? "markdown" });
 /** Holds modeFacet so it can be reconfigured live on a mode switch, without
  *  rebuilding the editor's extensions (mirrors voiceCompartment in App.tsx). */
@@ -79,13 +83,17 @@ export const bracketVoiceResolverFacet = Facet.define<BracketVoiceResolver, Brac
   combine: (v) => v[0] ?? (() => ""),
 });
 
-/** The nodeId of the currently-selected minted span, or "" if no span (or a
+/** Voice temporarily isolated from the document legend. Preview citation
+ * phrases read this too, so replaced widgets dim/focus with ordinary runs. */
+export const focusedVoiceFacet = Facet.define<string, string>({ combine: (v) => v[0] ?? "" });
+
+/** The nodeId of the currently-selected coin, or "" if no coin (or a
  *  non-span trace) is selected. Drives the gold ring on the matching bracket in
  *  both Markdown (a `--selected` mark) and Preview (a chip class) modes. */
 export const selectedNodeIdFacet = Facet.define<string, string>({ combine: (v) => v[0] ?? "" });
 
 /** Click a preview-mode citation chip (or a markdown bracket) to make that
- *  minted span the active trace. App.tsx supplies a closure over its
+ *  coin the active trace. App.tsx supplies a closure over its
  *  `selectSpan`. Default no-op. */
 export type SelectSpanHandler = (nodeId: string, phrase: string) => void;
 export const onSelectSpanFacet = Facet.define<SelectSpanHandler, SelectSpanHandler>({
@@ -101,6 +109,12 @@ export type CopySpanHandler = (nodeId: string, phrase: string) => void;
 export const onCopySpanFacet = Facet.define<CopySpanHandler, CopySpanHandler>({
   combine: (v) => v[0] ?? (() => {}),
 });
+
+/** Canonical resolved-citation markup used by copy and drag-to-insert flows. */
+export function resolvedBracketMarkup(phrase: string, nodeId: string): string {
+  const body = phrase.trim();
+  return body && nodeId ? `[[ ${body} | ${nodeId} ]]` : "";
+}
 
 // Inline copy of lucide-react's Copy/Check glyphs (24x24 viewBox, stroke
 // paths) — the widget is built as raw DOM, not JSX, so the icons the app
@@ -142,7 +156,10 @@ class CitationWidget extends WidgetType {
   constructor(
     readonly phrase: string,
     readonly nodeId: string,
+    readonly matchStart: number,
+    readonly matchEnd: number,
     readonly voice: string,
+    readonly focusedVoice: string,
     readonly selected: boolean,
     readonly onSelect: SelectSpanHandler | null,
     readonly onCopy: CopySpanHandler | null,
@@ -153,7 +170,10 @@ class CitationWidget extends WidgetType {
     return (
       other.phrase === this.phrase &&
       other.nodeId === this.nodeId &&
+      other.matchStart === this.matchStart &&
+      other.matchEnd === this.matchEnd &&
       other.voice === this.voice &&
+      other.focusedVoice === this.focusedVoice &&
       other.selected === this.selected &&
       !!other.onSelect === !!this.onSelect &&
       !!other.onCopy === !!this.onCopy
@@ -163,6 +183,8 @@ class CitationWidget extends WidgetType {
     const cite = document.createElement("cite");
     cite.className = "md-cite" + (this.selected ? " md-cite-selected" : "");
     cite.title = this.nodeId || "pending snapshot";
+    cite.dataset.bracketFrom = String(this.matchStart);
+    cite.dataset.bracketTo = String(this.matchEnd);
     // Clicking the chip (anywhere but the copy button) selects this minted
     // span as the active trace — accent-soft outline in the palette. ignoreEvent still
     // lets the copy button keep its own click; a chip without a nodeId can't be
@@ -187,9 +209,12 @@ class CitationWidget extends WidgetType {
     // Empty voice (unknown/unresolved) leaves the phrase in neutral chrome.
     if (this.voice) {
       const { className, style } = voiceSpanStyle(this.voice);
-      // Voice bucket class (voice-0..5) appends; the known-key path returns the
-      // base "voice-span" class, which is a no-op modifier here.
-      phraseSpan.className = `md-cite-phrase ${className}`;
+      const focusClass = this.focusedVoice
+        ? this.voice === this.focusedVoice
+          ? " voice-span--focused"
+          : " voice-span--muted"
+        : "";
+      phraseSpan.className = `md-cite-phrase ${className}${focusClass}`;
       if (style) phraseSpan.setAttribute("style", style);
     }
 
@@ -216,7 +241,7 @@ class CitationWidget extends WidgetType {
       copyBtn.className = "md-cite-copy";
       // Copy the full bracket markup, not just the event id: pasting it into
       // another doc inserts `[[ phrase | nodeId ]]` as real text, and the next
-      // seal's `findResolvedBrackets` pass turns the nodeId into a `q`-citation
+      // step's `findResolvedBrackets` pass turns the nodeId into a `q`-citation
       // edge on that doc's trace node — i.e. the paste installs a reference
       // and the save records the component trace for the insert (spec:189).
       copyBtn.title = "Copy bracket";
@@ -226,7 +251,7 @@ class CitationWidget extends WidgetType {
       copyBtn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        const payload = `[[ ${this.phrase} | ${this.nodeId} ]]`;
+        const payload = resolvedBracketMarkup(this.phrase, this.nodeId);
         navigator.clipboard?.writeText(payload).then(() => {
           copyBtn.replaceChildren(makeIconSvg(CHECK_ICON_PATH));
           setTimeout(() => copyBtn.replaceChildren(makeIconSvg(COPY_ICON_PATH)), 1200);
@@ -287,6 +312,15 @@ interface BracketMatch {
   resolved: boolean; // has a `| nodeId` suffix
 }
 
+export interface BracketRange {
+  phrase: string;
+  matchStart: number;
+  matchEnd: number;
+  phraseStart: number;
+  phraseEnd: number;
+  resolved: boolean;
+}
+
 const BRACKET_RE = /\[\[([\s\S]*?)\]\]/g;
 
 /** Walk the document text, yielding one BracketMatch per `[[ … ]]`. Lazy
@@ -320,12 +354,71 @@ export function* iterBrackets(text: string): Generator<BracketMatch> {
   }
 }
 
+/** Find the complete bracket occurrence at a document position. The pointer
+ *  layer uses the phrase range so one click targets human text without leaking
+ *  `[[ ]]` or the internal node id into copy, Mint, or model operations. */
+export function bracketRangeAt(text: string, position: number): BracketRange | null {
+  for (const b of iterBrackets(text)) {
+    if (position < b.matchStart) break;
+    if (position >= b.matchEnd) continue;
+    return {
+      phrase: text.slice(b.phraseStart, b.phraseEnd),
+      matchStart: b.matchStart,
+      matchEnd: b.matchEnd,
+      phraseStart: b.phraseStart,
+      phraseEnd: b.phraseEnd,
+      resolved: b.resolved,
+    };
+  }
+  return null;
+}
+
+export interface MintSelectionTarget {
+  phrase: string;
+  /** Present when the selection belongs to an unresolved bracket already. */
+  bracket: { matchStart: number; matchEnd: number } | null;
+}
+
+/** Resolve a non-empty editor selection into the passage Step should mint.
+ *
+ *  A selection anywhere inside one pending bracket mints the entire protected
+ *  phrase. A loose-text highlight mints exactly the highlighted bytes. Resolved
+ *  brackets are already minted, and selections that cross bracket boundaries
+ *  are not mintable as one passage. */
+export function findMintSelectionTarget(
+  text: string,
+  from: number,
+  to: number,
+): MintSelectionTarget | null {
+  const start = Math.max(0, Math.min(from, to, text.length));
+  const end = Math.max(start, Math.min(Math.max(from, to), text.length));
+  if (start === end) return null;
+
+  for (const b of iterBrackets(text)) {
+    const containsSelection = b.matchStart <= start && b.matchEnd >= end;
+    if (containsSelection) {
+      if (b.resolved || b.phraseEnd <= b.phraseStart) return null;
+      return {
+        phrase: text.slice(b.phraseStart, b.phraseEnd),
+        bracket: { matchStart: b.matchStart, matchEnd: b.matchEnd },
+      };
+    }
+    const overlapsSelection = b.matchStart < end && b.matchEnd > start;
+    if (overlapsSelection) return null;
+    if (b.matchStart >= end) break;
+  }
+
+  const phrase = text.slice(start, end);
+  if (!phrase || phrase.includes("[[") || phrase.includes("]]")) return null;
+  return { phrase, bracket: null };
+}
+
 /** Build the decoration set. In Markdown mode, the whole `[[ … ]]` run is
  *  tinted with a mark, with one exception: on a resolved bracket, the
  *  ` | nodeId` citation suffix (from the pipe to just before the closing
  *  `]]`) is replaced with an inline 8-char abbrev widget — the full event id
  *  is noise in the prose, but the abbrev (the cited nucleus's `slice(0,8)`)
- *  stays visible so a minted span reads as a token, not as bare brackets.
+ *  stays visible so a coin reads as a token, not as bare brackets.
  *  The full id is carried on the widget's `title` (hover). The `[[`, phrase,
  *  and `]]` stay literal in every case.
  *
@@ -338,6 +431,7 @@ function buildBracketDecorations(view: EditorView): DecorationSet {
   const text = view.state.doc.toString();
   const preview = view.state.facet(modeFacet) === "preview";
   const selectedNodeId = view.state.facet(selectedNodeIdFacet);
+  const focusedVoice = view.state.facet(focusedVoiceFacet);
   const onSelect = view.state.facet(onSelectSpanFacet);
   const onCopy = view.state.facet(onCopySpanFacet);
   const decos: Range<Decoration>[] = [];
@@ -356,7 +450,10 @@ function buildBracketDecorations(view: EditorView): DecorationSet {
           widget: new CitationWidget(
             phrase,
             nodeId,
+            b.matchStart,
+            b.matchEnd,
             voice,
+            focusedVoice,
             selected,
             onSelect ?? null,
             onCopy ?? null,
@@ -401,7 +498,7 @@ function buildBracketDecorations(view: EditorView): DecorationSet {
  *  resolved bracket with an inline `| <8-char>` token — the cited nucleus's
  *  abbrev, never the full id. The full id is carried on the `title` so a hover
  *  still reveals it. Sibling to the Preview-mode `CitationWidget`'s node span;
- *  both render the same `slice(0,8)` abbrev, so a minted span reads as one
+ *  both render the same `slice(0,8)` abbrev, so a coin reads as one
  *  token across modes. */
 class NodeAbbrevWidget extends WidgetType {
   constructor(readonly abbrev: string, readonly fullNodeId: string) {
@@ -458,13 +555,54 @@ const bracketDecorations = ViewPlugin.fromClass(
   { decorations: (v) => v.decorations },
 );
 
-/** The whole span of a Preview-mode citation widget is one cursor-motion/
- *  backspace unit — click lands at an edge, Backspace/Delete removes the
- *  whole `[[ … ]]` occurrence rather than eating into it. In Markdown mode
- *  `bracketDecorations` never emits replace ranges, so this is a no-op. */
+/** The whole span of a Preview-mode citation widget is one cursor-motion unit.
+ *  Deletion still runs through bracketProtect, and explicit unwrapping runs
+ *  through doubleBackspaceUnwrapCommand. In Markdown mode bracketDecorations
+ *  emits no replace ranges, so this facet is a no-op. */
 const bracketAtomicRanges = EditorView.atomicRanges.of(
   (view) => view.plugin(bracketDecorations)?.decorations ?? Decoration.none,
 );
+
+/** Clicking bracketed text selects its complete human phrase, excluding the
+ *  brackets and resolved node id. Preview widgets carry exact source offsets;
+ *  Markdown marks use the clicked document coordinate. Modifier-click keeps
+ *  CodeMirror's normal range-extension behavior. */
+const bracketMouseSelection = EditorView.mouseSelectionStyle.of((view, event) => {
+  if (
+    event.button !== 0 ||
+    event.shiftKey ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.altKey ||
+    !(event.target instanceof Element) ||
+    event.target.closest(".md-cite-copy")
+  ) {
+    return null;
+  }
+
+  const widget = event.target.closest<HTMLElement>("[data-bracket-from][data-bracket-to]");
+  let position = widget ? Number(widget.dataset.bracketFrom) : Number.NaN;
+  if (!Number.isInteger(position)) {
+    if (!event.target.closest(".bracketed-span")) return null;
+    position = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? Number.NaN;
+  }
+  if (!Number.isInteger(position)) return null;
+  const bracket = bracketRangeAt(view.state.doc.toString(), position);
+  if (!bracket) return null;
+  let from = bracket.phraseStart;
+  let to = bracket.phraseEnd;
+
+  return {
+    get: () => EditorSelection.single(from, to),
+    update(update) {
+      if (update.docChanged) {
+        from = update.changes.mapPos(from, 1);
+        to = update.changes.mapPos(to, -1);
+      }
+      return false;
+    },
+  };
+});
 
 /** Wrap the current selection in `[[ ]]`, leaving it pending. This is the pure
  *  wrap primitive: it inserts the markup only and does NOT publish anything.
@@ -502,6 +640,107 @@ export function wrapSelectionCommand(): Command {
   };
 }
 
+/** Remove bracket markup while preserving its visible phrase. A resolved
+ *  bracket also drops its citation suffix, returning the passage to fluid text. */
+export function unwrapBracket(
+  text: string,
+  matchStart: number,
+  matchEnd: number,
+): string {
+  const bracket = bracketRangeAt(text, matchStart);
+  if (!bracket || bracket.matchStart !== matchStart || bracket.matchEnd !== matchEnd) {
+    return text;
+  }
+  return text.slice(0, matchStart) + bracket.phrase + text.slice(matchEnd);
+}
+
+/** Backspace twice over one whole bracket to unwrap it instead of deleting its
+ *  phrase. The first press arms the gesture and leaves the bracket selected;
+ *  the second press within the timeout replaces the occurrence with plain text.
+ *  A cursor immediately after a bracket gets the same two-step behavior: first
+ *  press selects it, second press unwraps it. */
+export function doubleBackspaceUnwrapCommand(
+  now: () => number = Date.now,
+  timeoutMs = 1000,
+): Command {
+  let armed: { from: number; to: number; doc: string; at: number } | null = null;
+  return (view: EditorView): boolean => {
+    const text = view.state.doc.toString();
+    const sel = view.state.selection.main;
+    let bracket: BracketRange | null = null;
+
+    if (sel.from !== sel.to) {
+      const atStart = bracketRangeAt(text, sel.from);
+      if (
+        atStart &&
+        ((atStart.matchStart === sel.from && atStart.matchEnd === sel.to) ||
+          (atStart.phraseStart === sel.from && atStart.phraseEnd === sel.to))
+      ) {
+        bracket = atStart;
+      }
+    } else {
+      for (const candidate of iterBrackets(text)) {
+        if (candidate.matchEnd === sel.head) {
+          bracket = {
+            phrase: text.slice(candidate.phraseStart, candidate.phraseEnd),
+            matchStart: candidate.matchStart,
+            matchEnd: candidate.matchEnd,
+            phraseStart: candidate.phraseStart,
+            phraseEnd: candidate.phraseEnd,
+            resolved: candidate.resolved,
+          };
+          break;
+        }
+        if (candidate.matchEnd > sel.head) break;
+      }
+    }
+
+    if (!bracket) {
+      armed = null;
+      return false;
+    }
+
+    const timestamp = now();
+    const sameBracket =
+      armed !== null &&
+      armed.from === bracket.matchStart &&
+      armed.to === bracket.matchEnd &&
+      armed.doc === text &&
+      timestamp - armed.at <= timeoutMs;
+
+    if (!sameBracket) {
+      armed = {
+        from: bracket.matchStart,
+        to: bracket.matchEnd,
+        doc: text,
+        at: timestamp,
+      };
+      view.dispatch({
+        selection: { anchor: bracket.matchStart, head: bracket.matchEnd },
+        scrollIntoView: true,
+        userEvent: "select",
+      });
+      return true;
+    }
+
+    armed = null;
+    view.dispatch({
+      changes: {
+        from: bracket.matchStart,
+        to: bracket.matchEnd,
+        insert: bracket.phrase,
+      },
+      selection: {
+        anchor: bracket.matchStart,
+        head: bracket.matchStart + bracket.phrase.length,
+      },
+      scrollIntoView: true,
+      userEvent: "delete.backward",
+    });
+    return true;
+  };
+}
+
 /** A `transactionExtender` that makes a delete spare any `[[ … ]]` span it
  *  *fully contains*. A pure deletion spanning `[a, b)` is rewritten into the
  *  gaps between fully-contained brackets within `[a, b)`, so the brackets
@@ -517,17 +756,16 @@ export function wrapSelectionCommand(): Command {
  *  is a single undo entry — matching the app's "one transaction = one undo"
  *  convention. Returns the rewritten transaction, or `[tr]` to pass through.
  *
- *  Markdown mode only: in Preview mode a bracket is a single atomic chip
- *  (see `bracketAtomicRanges`), so a Backspace/Delete at its edge deletes
- *  the whole occurrence in one transaction that *exactly* spans the bracket
- *  — precisely the shape this filter would otherwise "spare" (fully
- *  contained, nothing left over). Sparing it there would silently turn
- *  "delete the chip" into a no-op, so this filter only runs in Markdown
- *  mode, where the same shape means something different: the author
- *  selected/typed-over exactly a bracket's raw text. */
+ *  This runs in both modes. Preview's atomic range may expand an edge-delete to
+ *  the whole chip, which this filter intentionally spares; double-Backspace is
+ *  the explicit unwrap gesture. */
 function bracketProtect(tr: Transaction): TransactionSpec | readonly Transaction[] {
   if (!tr.docChanged) return [tr];
-  if (tr.startState.facet(modeFacet) === "preview") return [tr];
+  // Cut is an explicit move operation: copy the complete selection to the
+  // clipboard, then remove it verbatim. Paste/type-over likewise carries an
+  // insertion and passes through below. Only deletion preserves contained
+  // brackets.
+  if (tr.isUserEvent("delete.cut")) return [tr];
   // Rebuilt change specs for the rewritten transaction (original-doc coords;
   // CM6 applies a multi-change array simultaneously, so positions don't shift).
   const newChanges: { from: number; to: number }[] = [];
@@ -596,7 +834,7 @@ export function findPendingBrackets(text: string): { phrase: string; matchStart:
 /** The list of *resolved* (minted) brackets in `text`, each with its phrase
  *  text and the nodeId it cites. Sibling to `findPendingBrackets`: the citation
  *  is the load-bearing half of minting (spec:189 — the origin doc's cite of
- *  the minted node is mirrored as a top-level `q` tag on its next seal).
+ *  the minted node is mirrored as a top-level `q` tag on its next step).
  *  String-based — works on a snapshot being published, no EditorView needed.
  *
  *  `iterBrackets` yields `resolved: true` for these but doesn't expose the
@@ -625,6 +863,68 @@ export function findResolvedBrackets(text: string): { phrase: string; nodeId: st
   return out;
 }
 
+export interface AddedInlineCitation {
+  sourceEventId: string;
+  newValue: string;
+  positionStart: number;
+  positionEnd: number;
+}
+
+/** Resolve the citation occurrences newly installed between two snapshots.
+ *
+ * The top-level `q` list is cumulative, but an inline cite delta describes the
+ * particular paste/mint gesture that introduced one occurrence. Compare as a
+ * multiset of node ids, preferring exact `(nodeId, phrase)` matches first.
+ * That keeps moving or editing an existing bracket from inventing a new
+ * citation while inserting the same coin twice still records the new
+ * occurrence. Positions address the visible phrase in the new snapshot. */
+export function findAddedInlineCitations(
+  previousText: string,
+  nextText: string,
+): AddedInlineCitation[] {
+  const remainingExact = new Map<string, number>();
+  const remainingByNode = new Map<string, number>();
+  for (const bracket of findResolvedBrackets(previousText)) {
+    const key = `${bracket.nodeId}\u0000${bracket.phrase}`;
+    remainingExact.set(key, (remainingExact.get(key) ?? 0) + 1);
+    remainingByNode.set(bracket.nodeId, (remainingByNode.get(bracket.nodeId) ?? 0) + 1);
+  }
+
+  const unmatched: ReturnType<typeof findResolvedBrackets> = [];
+  for (const bracket of findResolvedBrackets(nextText)) {
+    const key = `${bracket.nodeId}\u0000${bracket.phrase}`;
+    const exactCount = remainingExact.get(key) ?? 0;
+    if (exactCount === 0) {
+      unmatched.push(bracket);
+      continue;
+    }
+    if (exactCount === 1) remainingExact.delete(key);
+    else remainingExact.set(key, exactCount - 1);
+    const nodeCount = remainingByNode.get(bracket.nodeId) ?? 0;
+    if (nodeCount === 1) remainingByNode.delete(bracket.nodeId);
+    else remainingByNode.set(bracket.nodeId, nodeCount - 1);
+  }
+
+  const added: AddedInlineCitation[] = [];
+  for (const bracket of unmatched) {
+    const nodeCount = remainingByNode.get(bracket.nodeId) ?? 0;
+    if (nodeCount > 0) {
+      if (nodeCount === 1) remainingByNode.delete(bracket.nodeId);
+      else remainingByNode.set(bracket.nodeId, nodeCount - 1);
+      continue;
+    }
+    const phraseStart = nextText.indexOf(bracket.phrase, bracket.matchStart);
+    if (phraseStart < bracket.matchStart || phraseStart >= bracket.matchEnd) continue;
+    added.push({
+      sourceEventId: bracket.nodeId,
+      newValue: bracket.phrase,
+      positionStart: phraseStart,
+      positionEnd: phraseStart + bracket.phrase.length,
+    });
+  }
+  return added;
+}
+
 /** Rewrite the bare `[[ phrase ]]` at [matchStart, matchEnd) into a resolved
  *  `[[ phrase | nodeId ]]`. String-based — the caller applies the result to
  *  file.runs and lets FileEditor's setRunsEffect push it into the CM doc. */
@@ -643,7 +943,7 @@ export function resolveBracket(text: string, matchStart: number, matchEnd: numbe
 // A *temp-lived* directive the author drops into the prose, e.g.
 // `((rewrite this tighter))`. Unlike brackets — which are permanent,
 // minted, citable document text — commands are consumed by the Stir op and
-// then removed; they never reach a seal. So the layer is decoration-only: no
+// then removed; they never reach a step. So the layer is decoration-only: no
 // trigger (the author types `(( ))` directly). The `(( ))` characters render
 // literally; a mark just tints the run so the directive reads as transient.
 
@@ -746,14 +1046,15 @@ export function findCommands(text: string): { command: string; matchStart: numbe
  *  `(( ))` (mode-aware — see modeFacet), the atomic-range wiring that makes
  *  Preview-mode chips act as one unit, plus the `bracketProtect` transaction
  *  filter that spares fully-contained brackets from a delete. Wrapping a
- *  selection is opt-in via `wrapSelectionCommand` (called from the selection
- *  menu and Cmd/Ctrl+S in App.tsx), not a side effect of selecting. The caller
+ *  selection is opt-in via `wrapSelectionCommand` (Cmd/Ctrl+B for protection,
+ *  or selected-text Step before minting), not a side effect of selecting. The caller
  *  (App.tsx) is responsible for including `modeCompartment.of(modeFacet.of(mode))`
  *  separately, mirroring how it assembles `voiceCompartment.of(...)`. */
 export function bracketExtensions(): Extension[] {
   return [
     bracketDecorations,
     commandDecorations,
+    bracketMouseSelection,
     bracketAtomicRanges,
     commandAtomicRanges,
     bracketProtectFilter,

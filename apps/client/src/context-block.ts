@@ -80,7 +80,7 @@ export interface DeltaSpanView {
   newValue: string | null;
 }
 
-/** One entry in the directory action log — a sealed node (file or folder),
+/** One entry in the directory action log — a stepped node (file or folder),
  *  summarized. `source` discriminates per-file edit/llm/import actions from
  *  folder-membership add/remove actions; `relativePath` names which doc each
  *  line is about. `deltas` carries the per-span content payload for file
@@ -92,9 +92,9 @@ export interface DeltaLogEntry {
   seq: number;
   action: string;
   /** ms-epoch. */
-  sealedAt: number;
+  steppedAt: number;
   /** Relative path of the doc this action touched. For a file event, the doc
-   *  being edited/imported/sealed; for a folder event, the member that joined
+   *  being edited/imported/stepped; for a folder event, the member that joined
    *  or left the directory. */
   relativePath: string;
   /** Whether this is a per-file action ('file') or a folder-membership action
@@ -122,7 +122,7 @@ export interface ContextBlockInput {
   activePath: string;
   /** Aggregated action log for the active file's immediate parent directory:
    *  every direct-child file's chain plus the folder's membership events for
-   *  that directory, interleaved by sealedAt. Empty array omits the section. */
+   *  that directory, interleaved by steppedAt. Empty array omits the section. */
   deltaLog: DeltaLogEntry[];
   /** Soft char budget for sibling file bodies. Defaults to
    * `DEFAULT_CONTEXT_BUDGET`. Active body + delta log + tree never count. */
@@ -200,9 +200,9 @@ export function renderContextBlock(input: ContextBlockInput): string {
   }
   if (input.deltaLog.length > 0) {
     lines.push("", renderDeltaLogHeader(parentDirectory(input.activePath), input.deltaLog));
-    let prevSealedAt: number | null = null;
+    let prevSteppedAt: number | null = null;
     for (const d of input.deltaLog) {
-      lines.push(renderDeltaLine(d, prevSealedAt, stripLabels));
+      lines.push(renderDeltaLine(d, prevSteppedAt, stripLabels));
       // Per-span content payload, indented under the log line so the model
       // reads the node and its diff as one unit. Empty/absent deltas (genesis,
       // reply-to, tag-add, folder events) render nothing — same as before.
@@ -210,7 +210,7 @@ export function renderContextBlock(input: ContextBlockInput): string {
       if (!stripSpans && d.deltas && d.deltas.length > 0) {
         for (const rendered of renderDeltaSpans(d.deltas)) lines.push(rendered);
       }
-      prevSealedAt = d.sealedAt;
+      prevSteppedAt = d.steppedAt;
     }
   }
   lines.push("", "=== END CONTEXT ===");
@@ -218,7 +218,7 @@ export function renderContextBlock(input: ContextBlockInput): string {
 }
 
 /** One replayable panel-occupancy observation — what the "limelight log" is
- *  built from. Mirrors `FocusEntry` from provenance.ts (sealedAt, op,
+ *  built from. Mirrors `FocusEntry` from provenance.ts (steppedAt, op,
  *  selection, panelIndex) but defined locally so this renderer stays
  *  self-contained, like `DeltaLogEntry` above. The caller adapts from
  *  `FocusEntry[]`; the shapes are structurally identical so TS accepts the
@@ -227,7 +227,7 @@ export function renderContextBlock(input: ContextBlockInput): string {
  *  here rather than importing the discriminated union. */
 export interface LimelightEntry {
   /** ms-epoch, the node's content-level timestamp (chain order). */
-  sealedAt: number;
+  steppedAt: number;
   /** "mount" when present, "unmount" when the panel emptied, undefined for
    *  older focus deltas written before `op` existed (treat as mount). */
   op?: "mount" | "unmount";
@@ -259,13 +259,13 @@ export function renderLimelightLog(
   lines.push(
     `--- limelight log: ${dirLabel} (${entries.length} observations across ${panels.size} ${mountWord}) ---`,
   );
-  let prevSealedAt: number | null = null;
+  let prevSteppedAt: number | null = null;
   let seq = 0;
   for (const e of entries) {
     seq += 1;
-    const ts = formatTimestamp(e.sealedAt);
+    const ts = formatTimestamp(e.steppedAt);
     const interval =
-      prevSealedAt === null ? "     " : formatInterval(e.sealedAt - prevSealedAt).padStart(5);
+      prevSteppedAt === null ? "     " : formatInterval(e.steppedAt - prevSteppedAt).padStart(5);
     // op defaults to "mount" for older entries with no op field.
     const action = (e.op ?? "mount").padEnd(7);
     const panel = `panel ${e.panelIndex}`.padEnd(8);
@@ -274,7 +274,7 @@ export function renderLimelightLog(
         ? `${e.selection.originPath} (span)`
         : e.selection.path;
     lines.push(`[#${seq}] ${action} ${ts}${interval}   ${panel}   ${target}`);
-    prevSealedAt = e.sealedAt;
+    prevSteppedAt = e.steppedAt;
   }
   return lines.join("\n");
 }
@@ -339,14 +339,14 @@ function renderDeltaLogHeader(directory: string, log: DeltaLogEntry[]): string {
   return `--- directory log: ${dirLabel} (${log.length} ${actWord} across ${files.size} ${fileWord}) ---`;
 }
 
-function renderDeltaLine(d: DeltaLogEntry, prevSealedAt: number | null, stripLabels: boolean): string {
-  const ts = formatTimestamp(d.sealedAt);
+function renderDeltaLine(d: DeltaLogEntry, prevSteppedAt: number | null, stripLabels: boolean): string {
+  const ts = formatTimestamp(d.steppedAt);
   // Δ interval: time since the previous action in the merged log. Absent on the
   // first entry. A computed observation about pacing — cite, don't psychologize.
   // Dropped under `stripLabels` (condition B of the narration A/B): the interval
   // is one of the two labels whose effect the rubric isolates.
   const interval =
-    stripLabels || prevSealedAt === null ? '' : formatInterval(d.sealedAt - prevSealedAt).padStart(5);
+    stripLabels || prevSteppedAt === null ? '' : formatInterval(d.steppedAt - prevSteppedAt).padStart(5);
   const tsField = interval ? `${ts}${interval}` : `${ts}     `;
   if (d.source === 'folder') {
     // Membership events: +add / -remove, with a joined/left annotation so the

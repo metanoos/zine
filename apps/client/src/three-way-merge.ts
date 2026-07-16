@@ -6,7 +6,7 @@
  * both-side edits; overlapping different edits become conflict chunks the
  * press resolves by choice (ours / theirs / both / base).
  *
- * Protocol §3.8: the merge snapshot is whatever the owner seals — this module
+ * Protocol §3.8: the merge snapshot is whatever the owner steps — this module
  * only helps build that snapshot. Pure: no I/O.
  */
 
@@ -30,7 +30,7 @@ export interface ThreeWayResult {
   chunks: MergeChunk[];
   /** Number of `conflict` chunks. */
   conflictCount: number;
-  /** True when conflictCount === 0 (safe to seal without UI). */
+  /** True when conflictCount === 0 (safe to step without UI). */
   clean: boolean;
 }
 
@@ -336,7 +336,7 @@ export function autoMergedText(result: ThreeWayResult): string | null {
  *
  *  - noop       — ours and theirs are identical; nothing to do.
  *  - fastforward— we're still at the ancestor (no local edits); theirs wins
- *                 wholesale. No merge node is sealed; the caller overwrites.
+ *                 wholesale. No merge node is stepped; the caller overwrites.
  *  - clean      — both sides changed but diff3 resolves with no conflict.
  *                 `merged` holds the reconciled text; caller stages for review.
  *  - conflict   — overlapping edits; caller must surface a human.

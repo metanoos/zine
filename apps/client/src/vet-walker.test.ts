@@ -46,26 +46,26 @@ test("checkpointsFromChain: empty chain → empty", () => {
   assert.deepEqual(checkpointsFromChain([]), []);
 });
 
-test("checkpointsFromChain: extracts sealedAtMs from content.sealedAt", () => {
-  const ev = nodeEvent("e1", 1000, { sealedAt: 5_000_000 });
+test("checkpointsFromChain: extracts steppedAtMs from content.steppedAt", () => {
+  const ev = nodeEvent("e1", 1000, { steppedAt: 5_000_000 });
   const [cp] = checkpointsFromChain([ev]);
-  assert.equal(cp?.sealedAtMs, 5_000_000);
+  assert.equal(cp?.steppedAtMs, 5_000_000);
 });
 
-test("checkpointsFromChain: falls back to created_at when sealedAt absent", () => {
+test("checkpointsFromChain: falls back to created_at when steppedAt absent", () => {
   const ev = nodeEvent("e1", 7000, {});
   const [cp] = checkpointsFromChain([ev]);
-  assert.equal(cp?.sealedAtMs, 7_000_000); // 7000 sec * 1000
+  assert.equal(cp?.steppedAtMs, 7_000_000); // 7000 sec * 1000
 });
 
 test("checkpointsFromChain: sorts oldest-first", () => {
   const evs = [
-    nodeEvent("e3", 9000, { sealedAt: 9_000_000 }),
-    nodeEvent("e1", 1000, { sealedAt: 1_000_000 }),
-    nodeEvent("e2", 5000, { sealedAt: 5_000_000 }),
+    nodeEvent("e3", 9000, { steppedAt: 9_000_000 }),
+    nodeEvent("e1", 1000, { steppedAt: 1_000_000 }),
+    nodeEvent("e2", 5000, { steppedAt: 5_000_000 }),
   ];
   const cps = checkpointsFromChain(evs);
-  assert.deepEqual(cps.map((c) => c.sealedAtMs), [1_000_000, 5_000_000, 9_000_000]);
+  assert.deepEqual(cps.map((c) => c.steppedAtMs), [1_000_000, 5_000_000, 9_000_000]);
 });
 
 // --- Anchor presence ---------------------------------------------------

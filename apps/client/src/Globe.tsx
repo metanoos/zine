@@ -6,7 +6,20 @@ import {
   geohashLengthForZoom,
   type GeohashBox,
 } from "./geohash.js";
-import { fetchPinsByGeohash, fetchFolderDisplayName, type ZinePin } from "./provenance.js";
+import {
+  fetchPinsByGeohash,
+  fetchFolderDisplayName,
+  fetchFolderIndex,
+  type FolderIndexEntry,
+  type ZinePin,
+} from "./provenance.js";
+import {
+  DEFAULT_SOCIAL_QUERY,
+  authorsForSocialScope,
+  matchesSocialText,
+  socialWindowSince,
+  type SocialQuery,
+} from "./social-query.js";
 
 /**
  * Spaces — zines pinned to geohashes on a spherical map.
@@ -33,9 +46,9 @@ const STYLE_DARK = "https://tiles.openfreemap.org/styles/dark";
 
 const CAMERA_KEY = "zine.globe.camera";
 
-// Floor on how far out you can zoom. Below ~3 the globe shrinks to a marble
-// lost in the viewport; this keeps the planet filling the frame at the widest.
-const MIN_ZOOM = 3;
+// Keep the globe large enough to navigate while still allowing broad
+// whole-world context.
+const MIN_ZOOM = 2;
 const MAX_ZOOM = 18;
 
 interface Camera {
@@ -91,10 +104,43 @@ interface PlottedPin extends ZinePin {
   name: string;
 }
 
-export function GlobeView() {
+export function GlobeView({ query = DEFAULT_SOCIAL_QUERY }: { query?: SocialQuery } = {}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<maplibregl.Marker[]>([]);
+  const queryRef = useRef(query);
+  const eligibilityRef = useRef<Map<string, FolderIndexEntry> | null>(null);
+  const plotPinsRef = useRef<(() => void) | null>(null);
+  const eligibilitySeq = useRef(0);
+
+  // Resolve the non-spatial half of the shared query once per bound change.
+  // Map pans then intersect viewport pins against this cached folder index
+  // instead of repeating a relay-wide scan on every moveend.
+  useEffect(() => {
+    queryRef.current = { ...queryRef.current, text: query.text };
+    plotPinsRef.current?.();
+  }, [query.text]);
+
+  useEffect(() => {
+    queryRef.current = query;
+    eligibilityRef.current = null;
+    const seq = ++eligibilitySeq.current;
+    void (async () => {
+      const authors = await authorsForSocialScope(query.scope);
+      const index = await fetchFolderIndex({
+        since: socialWindowSince(query.window),
+        authors,
+        limit: 2000,
+      });
+      if (seq !== eligibilitySeq.current) return;
+      eligibilityRef.current = index;
+      plotPinsRef.current?.();
+    })().catch(() => {
+      if (seq !== eligibilitySeq.current) return;
+      eligibilityRef.current = new Map();
+      plotPinsRef.current?.();
+    });
+  }, [query.scope, query.window]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -153,6 +199,8 @@ export function GlobeView() {
     // against out-of-order completions overwriting a newer plot.
     let fetchSeq = 0;
     const plotPins = async () => {
+      const eligible = eligibilityRef.current;
+      if (!eligible) return;
       const zoom = map.getZoom();
       const length = geohashLengthForZoom(zoom);
       const bounds = map.getBounds();
@@ -184,23 +232,31 @@ export function GlobeView() {
       const seen = new Set<string>();
       const toPlot: PlottedPin[] = [];
       const nameCache = new Map<string, string>();
-      const folderIds = [...new Set(pins.map((p) => p.folderId))];
+      const scopedPins = pins.filter((pin) => eligible.has(pin.folderId));
+      const folderIds = [...new Set(scopedPins.map((p) => p.folderId))];
       await Promise.all(
         folderIds.map(async (id) => {
           nameCache.set(id, await fetchFolderDisplayName(id).catch(() => id.slice(0, 8)));
         }),
       );
-      for (const pin of pins) {
+      for (const pin of scopedPins) {
         const key = `${pin.folderId}\0${pin.geohash}`;
         if (seen.has(key)) continue;
         seen.add(key);
         const box: GeohashBox = decodeGeohash(pin.geohash);
         if (Number.isNaN(box.lat)) continue;
+        const name = nameCache.get(pin.folderId) ?? pin.folderId.slice(0, 8);
+        const entry = eligible.get(pin.folderId);
+        if (!matchesSocialText(queryRef.current.text, {
+          folderId: pin.folderId,
+          name,
+          tags: entry?.topTags,
+        })) continue;
         toPlot.push({
           ...pin,
           lng: box.lng,
           lat: box.lat,
-          name: nameCache.get(pin.folderId) ?? pin.folderId.slice(0, 8),
+          name,
         });
       }
 
@@ -227,6 +283,9 @@ export function GlobeView() {
           .addTo(map);
         markersRef.current.push(marker);
       }
+    };
+    plotPinsRef.current = () => {
+      void plotPins();
     };
     map.on("moveend", plotPins);
     // Initial plot once the map has a size.
@@ -265,6 +324,7 @@ export function GlobeView() {
       markersRef.current = [];
       map.remove();
       mapRef.current = null;
+      plotPinsRef.current = null;
     };
   }, []);
 

@@ -7,7 +7,7 @@
 // resolver (apps/client/src-tauri/src/lib.rs → resolve_relay_binary) has a
 // monorepo fallback that finds `relay/zine-relay` relative to
 // CARGO_MANIFEST_DIR. That's the path dev uses; `binaries/` is only needed for
-// a production bundle (see apps/client/src-tauri/BUILD.md).
+// a production bundle (see apps/client/README.md, "Release builds").
 //
 // Staleness: if the built binary is newer than every relay source file
 // (*.go + go.mod + go.sum), skip the rebuild — so re-running `npm run dev` is

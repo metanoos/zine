@@ -27,8 +27,8 @@
 /** A single timestamped checkpoint on a trace's save chain. The minimal data
  *  the vet needs — extracted from kind-4290 TraceNodes. */
 export interface CheckpointMeta {
-  /** When the checkpoint was sealed (ms since epoch). */
-  sealedAtMs: number;
+  /** When the checkpoint was stepped (ms since epoch). */
+  steppedAtMs: number;
   /** Does this node carry a valid OTS anchor (kind-1040 proof resolved to a
    *  Bitcoin block)? The anteriority signal. Undefined/unknown = treat as
    *  unstamped (the safe default — unstamped history can't be trusted as past). */
@@ -91,7 +91,7 @@ export function anteriorityScore(checkpoints: CheckpointMeta[]): {
  *  (can't compute intervals). */
 export function timingCV(checkpoints: CheckpointMeta[]): number {
   const times = checkpoints
-    .map((c) => c.sealedAtMs)
+    .map((c) => c.steppedAtMs)
     .filter((t) => typeof t === "number" && t > 0)
     .sort((a, b) => a - b);
   if (times.length < 2) return 0;

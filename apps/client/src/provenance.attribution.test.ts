@@ -3,7 +3,7 @@
  * FileTraceNode and `reconstructRunsFromChain`'s three-tier attribution.
  *
  * The motivating bug: editing attributed text, then reloading, collapsed the
- * whole block to a single voice (the sealing signer) because the protocol
+ * whole block to a single voice (the stepping signer) because the protocol
  * carried one author per node. The `authors` field is the additive fix — a
  * run list aligned to `snapshot` that survives reload anywhere the chain is
  * read. These tests pin the three behaviors that matter:
@@ -193,7 +193,7 @@ test("reconstructRunsFromChain adopts a valid authors map verbatim", () => {
   const chain: FakeEvent[] = [
     {
       id: "n1",
-      pubkey: B, // signer is B (the seal key)
+      pubkey: B, // signer is B (the step key)
       content: nodeContent({
         snapshot,
         authors: [
@@ -357,13 +357,52 @@ test("reconstructRunsFromChain: mixed chain (legacy then authored) snaps at the 
   ]);
 });
 
+test("reconstructRunsFromChain: legacy authors map beats an unannotated body delta", () => {
+  // Nodes written before per-delta attribution carried a complete `authors`
+  // map but no delta-level `author` field or `voices` table. The body delta's
+  // missing author must not default the inserted MODEL text to the step signer
+  // (typically AUTHOR/OPERATOR) and override the older, valid carrier.
+  const chain: FakeEvent[] = [
+    {
+      id: "g1",
+      pubkey: A,
+      content: nodeContent({
+        snapshot: "human ",
+        deltas: [
+          { type: "insert", position: { start: 0, end: 0 }, newValue: "human ", timestamp: 1 },
+        ],
+      }),
+    },
+    {
+      id: "e1",
+      pubkey: A,
+      content: nodeContent({
+        snapshot: "human model",
+        authors: [
+          { v: A, len: 6 },
+          { v: B, len: 5 },
+        ],
+        deltas: [
+          { type: "insert", position: { start: 6, end: 6 }, newValue: "model", timestamp: 2 },
+        ],
+      }),
+    },
+  ];
+
+  assert.deepEqual(reconstructRunsFromChain(chain as never), [
+    { voice: A, text: "human " },
+    { voice: B, text: "model" },
+  ]);
+});
+
 // --- per-delta attribution (§3.3, §3.6 — the voices table + author index) --
 //
 // Body-edit deltas now carry an OPTIONAL `author` index into a node-local
 // `voices` table. Reconstruction's Tier-2 (delta-insert path) resolves each
 // delta's voice through that table, defaulting to the signer when the index is
-// absent, missing, or out of range. Tier-1 (`authors` map) still short-circuits
-// first — these tests pin both the per-delta path and the overlap policy.
+// absent, missing, or out of range. A valid legacy `authors` map short-circuits
+// only when no body delta carries the newer marker — these tests pin both the
+// per-delta path and that overlap policy.
 
 test("attributeDeltas: mono-author delta (signer) leaves authorIndex unset, no voices", () => {
   // A delta whose dominant voice is the signer emits no authorIndex and no
@@ -498,11 +537,10 @@ test("reconstructRunsFromChain: missing voices table with author field degrades 
   assert.deepEqual(runs, [{ voice: A, text: "hi" }]);
 });
 
-test("reconstructRunsFromChain: authors map (Tier 1) wins over per-delta author", () => {
-  // The overlap policy (§R11.21, Option 1): when a node carries BOTH a valid
-  // authors map AND per-delta author indices, authors wins outright. The
-  // per-delta indices are ignored — readers that only know authors keep
-  // working, and src verification stays intact.
+test("reconstructRunsFromChain: per-delta author wins over the secondary authors map", () => {
+  // Protocol §3.6: per-delta attribution is primary. When a node carries both
+  // forms and they disagree, the delta owns the span it covers; `authors` is a
+  // secondary carrier for nodes without body deltas.
   const chain: FakeEvent[] = [
     {
       id: "e1",
@@ -515,18 +553,14 @@ test("reconstructRunsFromChain: authors map (Tier 1) wins over per-delta author"
           { v: B, len: 5 }, // and B wrote "world"
         ],
         deltas: [
-          // Per-delta says B authored the whole insert — but authors overrides.
+          // Per-delta says B authored the whole insert.
           { type: "insert", position: { start: 0, end: 0 }, newValue: "hello world", author: 1, timestamp: 1 },
         ],
       }),
     },
   ];
   const runs = reconstructRunsFromChain(chain as never);
-  // authors map result, NOT the per-delta claim:
-  assert.deepEqual(runs, [
-    { voice: A, text: "hello " },
-    { voice: B, text: "world" },
-  ]);
+  assert.deepEqual(runs, [{ voice: B, text: "hello world" }]);
 });
 
 test("reconstructRunsFromChain: mixed chain — authors on one node, per-delta on next", () => {

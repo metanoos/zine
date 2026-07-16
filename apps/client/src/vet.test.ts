@@ -30,7 +30,7 @@ import {
 /** A checkpoint at time T (hours ago), with optional anchor/delta fields. */
 function cp(hoursAgo: number, opts?: Partial<CheckpointMeta>): CheckpointMeta {
   return {
-    sealedAtMs: Date.now() - hoursAgo * 3600_000,
+    steppedAtMs: Date.now() - hoursAgo * 3600_000,
     ...opts,
   };
 }
@@ -55,7 +55,7 @@ function humanTrace(): CheckpointMeta[] {
 function instantSybil(): CheckpointMeta[] {
   const now = Date.now();
   return Array.from({ length: 10 }, (_, i) => ({
-    sealedAtMs: now - i * 3600_000, // exactly 1h apart — perfectly uniform
+    steppedAtMs: now - i * 3600_000, // exactly 1h apart — perfectly uniform
     anchored: false, // none stamped
     charDelta: 500, // all positive (append-only, no deletions)
     deltaCount: 1, // uniform complexity
@@ -102,7 +102,7 @@ test("timingCV: perfectly uniform intervals → ~0 (sybil tell)", () => {
   // 10 checkpoints exactly 1 hour apart.
   const now = Date.now();
   const cps = Array.from({ length: 10 }, (_, i) => ({
-    sealedAtMs: now - (9 - i) * 3600_000,
+    steppedAtMs: now - (9 - i) * 3600_000,
   }));
   assert.ok(timingCV(cps) < 0.01, `expected ~0, got ${timingCV(cps)}`);
 });
@@ -135,7 +135,7 @@ test("timingScore: short chain penalized regardless of CV", () => {
 test("timingScore: uniform long chain scores low", () => {
   const now = Date.now();
   const cps = Array.from({ length: 10 }, (_, i) => ({
-    sealedAtMs: now - (9 - i) * 3600_000,
+    steppedAtMs: now - (9 - i) * 3600_000,
   }));
   assert.ok(timingScore(cps).score < 0.1);
 });

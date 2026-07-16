@@ -66,11 +66,11 @@ func main() {
 		policies.RejectEventsWithBase64Media,
 		// 20 events/min, burst 100 — matches the sidecar (relay/main.go) and the
 		// filter limiter below. The prior 2/3min burst-10 setting was too tight
-		// for an authoring client: sealing a folder with nested subdirs (genesis
-		// + file nodes + membership seals + TraceHead caches) bursts well past 10
+		// for an authoring client: stepping a folder with nested subdirs (genesis
+		// + file nodes + membership steps + TraceHead caches) bursts well past 10
 		// events in seconds, and the 2/3min refill never recovers within a
 		// session. The sqlite store and the operator ban gate are the real
-		// protections; the burst here is bounded by seal frequency.
+		// protections; the burst here is bounded by step frequency.
 		policies.EventIPRateLimiter(20, time.Minute, 100),
 	)
 	relay.RejectFilter = append(relay.RejectFilter,

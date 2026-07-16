@@ -37,12 +37,19 @@ import {
 } from "./provenance.js";
 import { loadOrCreateVoice } from "./identity.js";
 import { isStaff, relayOperatorPubkeys } from "./operator-store.js";
+import {
+  DEFAULT_SOCIAL_QUERY,
+  authorsForSocialScope,
+  matchesSocialText,
+  socialWindowSince,
+  type SocialQuery,
+} from "./social-query.js";
 
 // --- types ---------------------------------------------------------------
 
 /** One zine rendered as a card. Carries the relay rollup + its resolved display
  *  name. "Promoted" is derived from `entry.citationTotal` (which folds in
- *  affirms — they're `q`-tag citations) rather than the removed alpha signal. */
+ *  attests — they're `q`-tag citations) rather than the removed alpha signal. */
 interface ZineCard {
   entry: FolderIndexEntry;
   /** Resolved display name — manifest's first member filename, else id prefix. */
@@ -63,6 +70,8 @@ interface ResolvedStack {
   title: string;
   zines: ZineCard[];
 }
+
+type StackOrder = "curated" | "activity" | "citations" | "recency" | "voices";
 
 // --- helpers -------------------------------------------------------------
 
@@ -104,18 +113,31 @@ function slugify(title: string): string {
   );
 }
 
+function sortZines<T extends ZineCard>(zines: T[], order: Exclude<StackOrder, "curated">): T[] {
+  return [...zines].sort((a, b) => {
+    if (order === "citations") return b.entry.citationTotal - a.entry.citationTotal || b.entry.lastSeenMs - a.entry.lastSeenMs;
+    if (order === "recency") return b.entry.lastSeenMs - a.entry.lastSeenMs;
+    if (order === "voices") return b.entry.authorPubkeys.size - a.entry.authorPubkeys.size || b.entry.eventCount - a.entry.eventCount;
+    return b.entry.eventCount - a.entry.eventCount || b.entry.lastSeenMs - a.entry.lastSeenMs;
+  });
+}
+
 // --- main view -----------------------------------------------------------
 
 export function ListingsView({
   onOpenFolder,
+  query = DEFAULT_SOCIAL_QUERY,
 }: {
   /** Open this folder in the Press (editor). Undefined hides the affordance. */
   onOpenFolder?: (folderId: string) => void;
+  /** Bounds shared with Times and Spaces by the app shell. */
+  query?: SocialQuery;
 } = {}) {
   const [refreshKey, setRefreshKey] = useState(0);
   const [stacks, setStacks] = useState<ResolvedStack[]>([]);
   const [defs, setDefs] = useState<StackDef[]>([]);
   const [totalZines, setTotalZines] = useState(0);
+  const [order, setOrder] = useState<StackOrder>("curated");
   const [status, setStatus] = useState<{
     state: "idle" | "loading" | "ready" | "error";
     msg?: string;
@@ -129,8 +151,13 @@ export function ListingsView({
     setStatus({ state: "loading" });
     (async () => {
       try {
+        const authors = await authorsForSocialScope(query.scope);
         const [folderIndex, stackDefs, assignments] = await Promise.all([
-          fetchFolderIndex({ limit: 2000 }),
+          fetchFolderIndex({
+            since: socialWindowSince(query.window),
+            authors,
+            limit: 2000,
+          }),
           fetchStackDefs([...teamSet]),
           fetchStackAssignments([...teamSet]),
         ]);
@@ -144,9 +171,11 @@ export function ListingsView({
         for (let i = 0; i < ids.length; i++) {
           const id = ids[i];
           const entry = folderIndex.get(id)!;
+          const name = nameResults[i];
+          if (!matchesSocialText(query.text, { folderId: id, name, tags: entry.topTags })) continue;
           cardByFolder.set(id, {
             entry,
-            name: nameResults[i],
+            name,
           });
         }
         // Build each named section in def order.
@@ -158,13 +187,15 @@ export function ListingsView({
             const rank = effectiveStackRank(assignments, teamSet, def.id, folderId);
             zines.push({ ...card, rank });
           }
-          zines.sort(
-            (a, b) => a.rank - b.rank || b.entry.lastSeenMs - a.entry.lastSeenMs,
-          );
+          if (order === "curated") {
+            zines.sort((a, b) => a.rank - b.rank || b.entry.lastSeenMs - a.entry.lastSeenMs);
+          } else {
+            zines.splice(0, zines.length, ...sortZines(zines, order));
+          }
           return { def, id: def.id, title: def.title, zines };
         });
-        // Unfiled: promoted (cited/affirmed — citationTotal folds affirms) but
-        // assigned to no section.
+        // The trailing stack completes the query result set: curation shapes
+        // grouping, but never hides an otherwise matching zine.
         const assigned = new Set<string>();
         for (const perFolder of assignments.values()) {
           for (const fid of perFolder.keys()) assigned.add(fid);
@@ -172,19 +203,17 @@ export function ListingsView({
         const unfiled: ZineCard[] = [];
         for (const [folderId, card] of cardByFolder) {
           if (assigned.has(folderId)) continue;
-          if (card.entry.citationTotal <= 0) continue; // only promoted zines surface
           unfiled.push(card);
         }
-        unfiled.sort(
-          (a, b) => b.entry.citationTotal - a.entry.citationTotal || b.entry.lastSeenMs - a.entry.lastSeenMs,
-        );
+        const fallbackOrder = order === "curated" ? "activity" : order;
+        unfiled.splice(0, unfiled.length, ...sortZines(unfiled, fallbackOrder));
         if (unfiled.length > 0) {
-          resolved.push({ id: "__unfiled__", title: "Unfiled", zines: unfiled });
+          resolved.push({ id: "__unfiled__", title: "The rest", zines: unfiled });
         }
         if (cancelled) return;
         setStacks(resolved);
         setDefs(stackDefs);
-        setTotalZines([...cardByFolder.values()].filter((c) => c.entry.citationTotal > 0).length);
+        setTotalZines(cardByFolder.size);
         setStatus({ state: "ready" });
       } catch (e) {
         if (cancelled) return;
@@ -197,7 +226,7 @@ export function ListingsView({
     return () => {
       cancelled = true;
     };
-  }, [refreshKey, teamSet]);
+  }, [refreshKey, teamSet, query.scope, query.text, query.window, order]);
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
 
@@ -206,12 +235,22 @@ export function ListingsView({
       <header className="listings-header">
         <div>
           <p className="view-placeholder-blurb">
-            An editorial selection, arranged by you and your curators ·{" "}
+            The list projection of this query, grouped by curator stacks ·{" "}
             <span className="listings-count">
               {totalZines} zine{totalZines === 1 ? "" : "s"}
             </span>
           </p>
         </div>
+        <label className="times-metric stacks-order">
+          <span>order by</span>
+          <select value={order} onChange={(event) => setOrder(event.target.value as StackOrder)}>
+            <option value="curated">curated</option>
+            <option value="activity">activity</option>
+            <option value="citations">citations</option>
+            <option value="recency">recency</option>
+            <option value="voices">voices</option>
+          </select>
+        </label>
         <button
           type="button"
           className={"run-agent-btn listings-refresh" + (status.state === "loading" ? " running" : "")}
@@ -234,7 +273,7 @@ export function ListingsView({
           {defs.length === 0
             ? "No stacks defined yet. " +
               (staff ? "Create one above." : "Check back once the curators file zines.")
-            : "Nothing filed in any stack yet. Promote zines, then assign them here."}
+            : "No zines match the shared query bounds."}
         </p>
       )}
 
@@ -503,7 +542,7 @@ function ZineCardView({
         {shortId(entry.folderId)}
       </span>
       <span className="stack-card-stats">
-        <span>{entry.eventCount} seal{entry.eventCount === 1 ? "" : "s"}</span>
+        <span>{entry.eventCount} step{entry.eventCount === 1 ? "" : "s"}</span>
         {entry.citationTotal > 0 && (
           <span>{entry.citationTotal} cite{entry.citationTotal === 1 ? "" : "s"}</span>
         )}
