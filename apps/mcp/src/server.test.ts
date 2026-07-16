@@ -21,7 +21,12 @@ test("startup rejects an unavailable folder instead of binding an empty cache", 
       "--config",
       config,
     ],
-    { encoding: "utf8", timeout: 5_000 },
+    // Startup intentionally retries a relay that may still be booting. Keep the
+    // process timeout comfortably above that retry budget: under the repository
+    // verifier this test runs beside the client, Go, and Rust suites, and a 5s
+    // wall-clock cap could kill the child just before it emitted the expected
+    // attach diagnostic.
+    { encoding: "utf8", timeout: 15_000 },
   );
 
   assert.equal(result.status, 3, result.stderr || result.error?.message);
