@@ -1,0 +1,28 @@
+# Build artifacts and deps — never copy into the image.
+**/node_modules
+**/dist
+**/target
+**/.turbo
+
+# The committed desktop-sidecar binary is irrelevant to the hosted image.
+relay/zine-relay
+
+# VCS and editor cruft.
+.git
+.gitignore
+.github
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Agent / planning scratch.
+.zcode
+.claude
+
+# Docs that aren't needed at runtime.
+docs
+
+# Don't bake in the mutable runtime volumes (compose mounts these over the
+# COPY, but excluding keeps the build context small).
+data

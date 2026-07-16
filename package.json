@@ -1,0 +1,19 @@
+{
+  "name": "zine",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "An open, BYOK LLM harness for editing files with composable, signed provenance.",
+  "scripts": {
+    "dev": "node scripts/dev.mjs dev",
+    "build": "node scripts/dev.mjs build",
+    "build:relay": "node scripts/build-relay.mjs",
+    "check": "node scripts/verify.mjs check",
+    "verify": "node scripts/verify.mjs verify",
+    "verify:relay": "node scripts/verify-relay.mjs",
+    "doctor": "node scripts/doctor.mjs"
+  },
+  "engines": {
+    "node": ">=20.19"
+  }
+}

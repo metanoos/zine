@@ -1,0 +1,49 @@
+# Local dev / self-host loop for the zine hosted image.
+#
+#   docker compose up --build      # build + serve on http://localhost:8080
+#
+# What you get:
+#   - the website (SPA)             → http://localhost:8080/
+#   - the hosted Nostr relay (ws)   → ws://localhost:8080/relay
+#   - desktop download page         → http://localhost:8080/#download
+#   - download files                → http://localhost:8080/downloads/...
+#   - liveness                      → http://localhost:8080/healthz
+#
+# Volumes:
+#   ./data       → persistent sqlite (relay events)
+#   ./downloads  → drop desktop installers here; the download page picks them
+#                  up on reload without rebuilding the image.
+#
+# For prod, put this behind a TLS-terminating proxy (Caddy/nginx/Cloudflare):
+# an https page must reach the relay over wss://, which the webapp derives
+# from location.origin — no code change needed for the cutover.
+
+services:
+  zine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zine/hosted:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+      - ./downloads:/app/downloads
+    environment:
+      # Override freely; these match the Dockerfile defaults.
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      # Operator bootstrap token. Generate one with `openssl rand -hex 32` and
+      # export it (or put it in a .env file alongside this one — compose loads
+      # .env automatically). Empty/unset → the operator layer is inert
+      # (/operator/bind returns 503, no bans, no curation team). The token is
+      # env-resident for the container's lifetime; binding overwrites the
+      # operator pubkey, so rotating the token + rebinding is the key-recovery
+      # path (no backed-up nsec ever exists).
+      OPERATOR_BOOTSTRAP_TOKEN: "${OPERATOR_BOOTSTRAP_TOKEN:-}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3

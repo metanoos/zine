@@ -24,3 +24,15 @@ yarn-debug.log*
 !.vscode/extensions.json
 .idea
 *.sw?
+
+# --- agent working state (never project files) ---
+.zcode/
+.claude/
+
+# --- local runtime data ---
+data/
+
+# --- ad-hoc client test scripts (not part of the suite) ---
+apps/client/*-test.mjs
+apps/client/ws-test.mjs
+.gstack/

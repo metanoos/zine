@@ -1,0 +1,10 @@
+{
+  "folderId": "eb08489a-7829-47b7-92d0-40c346e756f2",
+  "relativePath": "logos/consciousness.md",
+  "drawsPerCondition": 5,
+  "provider": "anthropic",
+  "model": "glm-5.2",
+  "baseUrl": "https://api.z.ai/api/anthropic/v1",
+  "instruction": "Describe how this document was composed, as a short prose account (4–8 sentences). Walk through the major steps by which the text arrived at its current form, citing the sequence of actions. Do not list every edit — characterize the rhythm and the turning points. Respond with ONLY the prose account, no preamble.",
+  "timestamp": "2026-07-14T04:45:40.208Z"
+}
