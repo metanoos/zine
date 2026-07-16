@@ -447,6 +447,9 @@ export interface PublishEditInput {
    *  top-level `kedits` field in the node content. Absent on nodes stepped
    *  with an empty buffer (e.g. a forced no-op Step). */
   kedits?: KEdit[];
+  /** `action: llm` only — the op-specific instruction/body supplied by the
+   *  press, excluding reconstructable folder context. Required by §3.7. */
+  prompt?: string;
   /** `action: llm` only — the event id of the minted rule-manifest trace
    *  whose body names the expansion algorithm + params (protocol §3.7). Each
    *  LLM step cites its rule so a reader can reconstruct the submitted prompt.
@@ -817,56 +820,52 @@ function buildTTags(userTags: string[]): string[] {
   return out;
 }
 
-/** §3.7 pending LLM metadata. The client's op path steps LLM write-back
- *  through the generic `writeFile` → backend → publishEdit chain, which spans
- *  3 backends + an interface — threading `injectRule`/`scopeCitations`/`llm`
- *  through every signature is high-risk churn. Instead, an LLM op stashes its
- *  metadata here just before its write-back step; publishEdit reads and clears
- *  it. This is a single-slot stash (one pending LLM step at a time) — the ops
- *  are synchronous from step-trigger to publishEdit, so there's no concurrency.
- *  If the stash is set but the next publishEdit turns out NOT to be the LLM op
- *  (e.g. an intervening file save), the metadata is consumed anyway and lost —
- *  acceptable, since the op will set it again on retry, and an LLM op losing
- *  its scope pin degrades to "scope invisible," not corruption. */
-let pendingLlmMeta: {
+export interface LlmStepMeta {
+  prompt: string;
   injectRule: string;
   scopeCitations: string[];
   llm: { model: string; temperature: number | null; maxTokens: number; provider: string };
-} | null = null;
+}
 
-/** Set the pending LLM metadata consumed by the next publishEdit call. Called
- *  by LLM ops just before their write-back step. The action marker (`"llm"`)
- *  must be set on that publishEdit for the metadata to attach — a non-LLM
- *  publishEdit clears the stash without consuming it, so a stray save between
- *  set and step doesn't mislabel a non-LLM node. */
-export function setPendingLlmMeta(meta: {
-  injectRule: string;
-  scopeCitations: string[];
-  llm: { model: string; temperature: number | null; maxTokens: number; provider: string };
-}): void {
-  pendingLlmMeta = meta;
+/** §3.7 metadata waiting for the write-back Step, isolated by destination
+ * path so concurrent panel operations cannot consume one another's call data. */
+const pendingLlmMeta = new Map<string, LlmStepMeta>();
+
+/** Set the metadata consumed by the next publishEdit for this exact path. */
+export function setPendingLlmMeta(relativePath: string, meta: LlmStepMeta): void {
+  pendingLlmMeta.set(relativePath, meta);
+}
+
+export function takePendingLlmMeta(relativePath: string): LlmStepMeta | undefined {
+  const meta = pendingLlmMeta.get(relativePath);
+  pendingLlmMeta.delete(relativePath);
+  return meta;
+}
+
+export function clearPendingLlmMeta(relativePath: string): void {
+  pendingLlmMeta.delete(relativePath);
+}
+
+export function applyPendingLlmMeta(input: PublishEditInput): void {
+  const llmMeta = takePendingLlmMeta(input.relativePath);
+  if (!llmMeta) return;
+  input.action = "llm";
+  input.prompt = llmMeta.prompt;
+  input.injectRule = llmMeta.injectRule;
+  input.scopeCitations = [
+    ...(input.scopeCitations ?? []),
+    ...llmMeta.scopeCitations,
+  ];
+  if (!input.llm) input.llm = llmMeta.llm;
 }
 
 /** Builds, signs, and publishes a kind-4290 FileTraceNode. Returns the signed
  *  event (its `id` is the new node id the caller should track as prevEventId). */
 export async function publishEdit(input: PublishEditInput): Promise<Event> {
-  // §3.7: consume pending LLM metadata. The stash is single-use — clear it
-  // regardless of whether this publishEdit is the LLM op, so a stale stash
-  // never leaks onto a later unrelated step. The stash is set by prepareLlmMeta
-  // (App.tsx) just before the op's write-back step; when present, this IS the
-  // LLM step, so mark the action and attach the metadata. The client's write-
-  // back path defaults action to "edit"; the stash is the signal that this
-  // particular step is an LLM op, so we override action to "llm" here.
-  if (pendingLlmMeta) {
-    input.action = "llm";
-    input.injectRule = pendingLlmMeta.injectRule;
-    input.scopeCitations = [
-      ...(input.scopeCitations ?? []),
-      ...pendingLlmMeta.scopeCitations,
-    ];
-    if (!input.llm) input.llm = pendingLlmMeta.llm;
-    pendingLlmMeta = null;
-  }
+  // §3.7: consume path-keyed, single-use LLM metadata. The client's generic
+  // write-back path defaults to action:edit; this exact-path entry marks the
+  // corresponding Step as action:llm without crossing concurrent panels.
+  applyPendingLlmMeta(input);
   const inlineCitations = await Promise.all(
     (input.inlineCitations ?? []).map(async (citation) => ({
       ...citation,
@@ -1040,6 +1039,7 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
       // `injectRule` is the event id of the minted rule-manifest trace; `llm`
       // records the model/temperature/maxTokens/provider that answered. Both
       // absent on non-LLM nodes (readers treat as "not an LLM call").
+      ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
       ...(input.injectRule ? { injectRule: input.injectRule } : {}),
       ...(input.llm ? { llm: input.llm } : {}),
     }),

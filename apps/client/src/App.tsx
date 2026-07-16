@@ -22,6 +22,7 @@ import {
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdownIndentExtensions } from "./tab-indent.js";
+import { RefCountedStepGate } from "./ref-counted-step-gate.js";
 import {
   sampleRelays,
   hitToDocument,
@@ -49,6 +50,7 @@ import {
   bufferFocus,
   focusTimeline,
   getOrCreateRuleTrace,
+  clearPendingLlmMeta,
   setPendingLlmMeta,
   fetchManifest,
   findMergeCandidates,
@@ -63,6 +65,7 @@ import {
   type CitationChip,
   type MergeCandidate,
   type KEdit,
+  type LlmStepMeta,
   excludeInboundSources,
   findInboundSnapshot,
   resolveTraceChain,
@@ -6130,7 +6133,7 @@ function useProvenance(
   // model thinking, network hiccup) publishes a half-finished insert, then
   // more tokens arrive and publish again, and the relay's per-connection
   // rate-limit (khatru's ApplySaneDefaults) trips: "rate-limited: slow down".
-  const stepSuppressed = useRef(false);
+  const stepSuppressionGate = useRef(new RefCountedStepGate<Uint8Array, LlmStepMeta>());
   const pendingStepPaths = useRef<Set<string>>(new Set());
   // The AUTHOR key's secret, threaded in from App() so the debounced auto-save
   // signs as the AUTHOR key (the ActionPalette AUTHOR control) rather than the hidden
@@ -6174,14 +6177,14 @@ function useProvenance(
   useEffect(() => {
     if (!ready.current || !folder) return;
     // Skip while an LLM op is mid-stream: those per-token state updates must
-    // not trigger intermediate steps (see stepSuppressed). Remember the paths
+    // not trigger intermediate steps (see the ref-counted step gate). Remember the paths
     // so the op's release can step exactly once at the end — the AI insert
     // then lands as a single delta instead of N checkpoints. Only unstepped paths
     // (content/tags changed since last step) are buffered — a re-render that
     // touches `files` for an unrelated reason (nodeId reflection, panel swap)
     // must not drag every bystander file into the catch-up step, or the burst
     // of relay publishes trips the hosted relay's IP rate-limit.
-    if (stepSuppressed.current) {
+    if (stepSuppressionGate.current.suppressed) {
       for (const path of unsteppedPaths(files)) pendingStepPaths.current.add(path);
       return;
     }
@@ -6257,23 +6260,33 @@ function useProvenance(
    *  voice instead of the AUTHOR key the user is typing under. The debounced
    *  auto-save (scheduleStep) separately resolves the AUTHOR key via
    *  authorSignerRef, so a non-op step also signs with the AUTHOR key. */
-  function suppressStep(on: boolean, signer?: Uint8Array) {
+  function suppressStep(
+    on: boolean,
+    signer?: Uint8Array,
+    path?: string,
+    llmMeta?: LlmStepMeta | null,
+  ) {
     if (on) {
-      stepSuppressed.current = true;
+      stepSuppressionGate.current.begin();
       return;
     }
-    stepSuppressed.current = false;
+    const releases = stepSuppressionGate.current.release(path, signer, llmMeta);
+    if (!releases) return;
     // Step everything the suppressed window saw touched. Snapshot first —
     // stepFile is async and may interleave with a new suppression turn.
     const paths = [...pendingStepPaths.current];
     pendingStepPaths.current.clear();
     for (const p of paths) {
+      const release = releases.get(p);
+      const pathSigner = release?.signer;
+      const pathLlmMeta = release?.meta;
       if (isTauri()) {
         // Desktop: the op's output buffers to the crash pad, same as a manual
         // edit — the real file stays clean until the user Steps. Mirroring
         // immediately (no debounce) so a mid-op crash isn't a total loss.
         const f = files[p];
         if (f && folder) {
+          if (pathLlmMeta) setPendingLlmMeta(p, pathLlmMeta);
           mirrorPad(folder.id, p, {
             content: flatten(f.runs),
             tags: f.tags,
@@ -6284,9 +6297,12 @@ function useProvenance(
           });
         }
       } else {
-        void stepFile(p, signer).catch((e) =>
-          console.warn(`[provenance] suppressed-step catch-up failed for ${p}:`, e),
-        );
+        if (pathLlmMeta) setPendingLlmMeta(p, pathLlmMeta);
+        void stepFile(p, pathSigner)
+          .catch((e) =>
+            console.warn(`[provenance] suppressed-step catch-up failed for ${p}:`, e),
+          )
+          .finally(() => clearPendingLlmMeta(p));
       }
     }
   }
@@ -7434,10 +7450,10 @@ function App() {
     });
   }
   const summonAbort = useRef<(AbortController | null)[]>([null]);
-  // The MODEL signer the in-flight op armed in beginOp, stashed so endOp can
-  // hand it to the step gate's catch-up step. Undefined = the AUTHOR key
-  // resolves at step time (manual edits, no op running). See beginOp/endOp.
-  const opSignerRef = useRef<Uint8Array | undefined>(undefined);
+  // Per-panel operation contexts retain each target path and MODEL signer until
+  // the ref-counted gate releases every concurrently streaming panel.
+  const opContextsRef = useRef<Map<number, { path: string; signer?: Uint8Array }>>(new Map());
+  const activeOpPathsRef = useRef<Set<string>>(new Set());
   // When the active panel changes, point the palette's editor handle at the
   // newly-active panel's view. (onView only fires on mount/unmount, so without
   // this the palette would keep targeting the previously-active panel's editor
@@ -8268,8 +8284,18 @@ function App() {
       setOpStatus(idx, "error", "no editor mounted for this panel — click the file's tab first");
       return null;
     }
+    const path = panels[idx]?.active ?? "";
+    if (!path) {
+      setOpStatus(idx, "error", "no file active in this panel");
+      return null;
+    }
+    if (activeOpPathsRef.current.has(path)) {
+      setOpStatus(idx, "error", "another model operation is already writing this file");
+      return null;
+    }
     setOpStatus(idx, "running", undefined, op);
-    opSignerRef.current = signer;
+    activeOpPathsRef.current.add(path);
+    opContextsRef.current.set(idx, { path, signer });
     stepGateRef.current(true);
     const controller = new AbortController();
     summonAbort.current[idx] = controller;
@@ -8290,16 +8316,19 @@ function App() {
    *  key (scheduleStep always passes no signer). With the deferral the
    *  catch-up step sees complete content and the debounce dedups against it:
    *  one step, inject-signed, complete. */
-  function endOp(idx: number) {
+  function endOp(idx: number, llmMeta?: LlmStepMeta | null) {
     summonAbort.current[idx] = null;
-    const signer = opSignerRef.current;
-    opSignerRef.current = undefined;
-    setTimeout(() => stepGateRef.current(false, signer), 0);
+    const context = opContextsRef.current.get(idx);
+    if (!context) return;
+    setTimeout(() => {
+      opContextsRef.current.delete(idx);
+      activeOpPathsRef.current.delete(context.path);
+      stepGateRef.current(false, context.signer, context.path, llmMeta);
+    }, 0);
   }
 
   /** §3.7: prepare the LLM-call metadata (rule trace + scope citations + model
-   *  config) and stash it via setPendingLlmMeta, so the op's write-back step
-   *  (through writeFile → publishEdit) carries it on the action:llm node. Called
+   *  config) for the op's path-keyed write-back Step. Called
    *  by every LLM op just before its provider call — the step happens after the
    *  model replies, but the scope is pinned to call time (what was in scope
    *  when the model was invoked), so gathering it here is correct. The scope is
@@ -8308,8 +8337,10 @@ function App() {
     idx: number,
     op: "extend" | "settle" | "stir" | "reply" | "receive",
     provider: ProviderConfig | null,
-  ): Promise<void> {
-    if (!folder || !provider) return;
+    prompt: string,
+    maxTokens: number,
+  ): Promise<LlmStepMeta | null> {
+    if (!folder || !provider) return null;
     const activePath = panels[idx]?.active ?? "";
     try {
       const manifest = {
@@ -8330,7 +8361,8 @@ function App() {
         ...effectiveMembers.map((m) => m.latestNodeId).filter((id): id is string => !!id),
         ...(activeNodeId ? [activeNodeId] : []),
       ].filter((id, i, arr) => arr.indexOf(id) === i);
-      setPendingLlmMeta({
+      return {
+        prompt,
         injectRule,
         scopeCitations,
         llm: {
@@ -8339,12 +8371,13 @@ function App() {
           // default). NOT 0 — that would claim deterministic decoding. Records
           // the actual value once the ops grow real temperature control.
           temperature: null,
-          maxTokens: 0,
+          maxTokens,
           provider: provider.label || provider.protocol,
         },
-      });
+      };
     } catch {
       /* best-effort — scope pinning is telemetry, never blocks the op */
+      return null;
     }
   }
 
@@ -8361,6 +8394,7 @@ function App() {
     const started = beginOp(idx, secretKeyForVoice(pubkey) ?? undefined, "extend");
     if (!started) return;
     const { controller } = started;
+    let llmMeta: LlmStepMeta | null = null;
     const view = panelViews.current[idx]!;
     // Summoning the model is a deliberate human gesture (a button click), so
     // the baseline it runs against is stepped first by the AUTHOR key — same path
@@ -8371,9 +8405,6 @@ function App() {
       const path = panels[idx]?.active;
       if (path && files[path] && signer) await stepFile(path, signer);
     }
-    // §3.7: pin the call's scope + rule + model config before invoking, so the
-    // write-back step carries them and a reader can reconstruct the prompt.
-    await prepareLlmMeta(idx, "extend", provider);
     // With a selection, Extend seeds from the selected text and continues right
     // after it; otherwise it seeds from the end of the document and appends.
     const sel = view.state.selection.main;
@@ -8385,6 +8416,7 @@ function App() {
       await gatherContextForPanel(idx),
       withVoicePrompt(pubkey, extendMessages(seed, hasSel)),
     );
+    llmMeta = await prepareLlmMeta(idx, "extend", provider, seed, 4096);
     const anchor = hasSel ? sel.to : view.state.doc.length;
     // Begin the continuation on its own line: if the char right before the
     // anchor isn't already a line break (and the anchor isn't the doc start),
@@ -8433,7 +8465,7 @@ function App() {
       }
       setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
     } finally {
-      endOp(idx);
+      endOp(idx, llmMeta);
     }
   }
 
@@ -8543,6 +8575,7 @@ function App() {
     const started = beginOp(idx, secretKeyForVoice(pubkey) ?? undefined, "settle");
     if (!started) return;
     const { controller } = started;
+    let llmMeta: LlmStepMeta | null = null;
     const view = panelViews.current[idx]!;
     // Step the baseline under the AUTHOR key before the model runs (see extendLLM).
     {
@@ -8550,13 +8583,13 @@ function App() {
       const path = panels[idx]?.active;
       if (path && files[path] && signer) await stepFile(path, signer);
     }
-    await prepareLlmMeta(idx, "settle", provider);
     try {
       const sel = view.state.selection.main;
       const hasSel = sel.from !== sel.to;
       const from = hasSel ? sel.from : 0;
       const to = hasSel ? sel.to : view.state.doc.length;
       const text = view.state.sliceDoc(from, to);
+      llmMeta = await prepareLlmMeta(idx, "settle", provider, text, 512);
       const parts = partitionDoc(text);
       const ctx = await gatherContextForPanel(idx);
       // Condense each loose segment independently; brackets pass through.
@@ -8594,7 +8627,7 @@ function App() {
       }
       setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
     } finally {
-      endOp(idx);
+      endOp(idx, llmMeta);
     }
   }
 
@@ -8610,6 +8643,7 @@ function App() {
     const started = beginOp(idx, secretKeyForVoice(pubkey) ?? undefined, "stir");
     if (!started) return;
     const { controller } = started;
+    let llmMeta: LlmStepMeta | null = null;
     const view = panelViews.current[idx]!;
     // Step the baseline under the AUTHOR key before the model runs (see extendLLM).
     {
@@ -8617,13 +8651,13 @@ function App() {
       const path = panels[idx]?.active;
       if (path && files[path] && signer) await stepFile(path, signer);
     }
-    await prepareLlmMeta(idx, "stir", provider);
     try {
       const sel = view.state.selection.main;
       const hasSel = sel.from !== sel.to;
       const from = hasSel ? sel.from : 0;
       const to = hasSel ? sel.to : view.state.doc.length;
       const text = view.state.sliceDoc(from, to);
+      llmMeta = await prepareLlmMeta(idx, "stir", provider, text, 1024);
       // One-step Stir: gather the (( commands )) + loose prose + anchor count,
       // hand them to the model in a single call, then re-weave the verbatim
       // bracket anchors back into the rewrite. Commands are stripped from the
@@ -8663,7 +8697,7 @@ function App() {
       }
       setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
     } finally {
-      endOp(idx);
+      endOp(idx, llmMeta);
     }
   }
 
@@ -8689,18 +8723,13 @@ function App() {
     // the release catch-up step, so the response lands on the relay as the
     // MODEL voice, not the keychain's active (AUTHOR) key.
     const signer = secretKeyForVoice(modelVoice) ?? undefined;
-    // Arm the step gate: per-delta editFile calls would otherwise trigger
-    // intermediate steps (same rate-limit pattern Extend hits). Released in
-    // finally, which fires one catch-up step for the final content, signed as
-    // the MODEL voice via `signer`.
-    opSignerRef.current = signer;
-    stepGateRef.current(true);
     const controller = new AbortController();
     summonAbort.current[idx] = controller;
     // Hoisted so the finally block can release the rescan-pending hold even
     // if we throw before assigning it. May be rebased mid-stream when the
     // model supplies a TITLE.
     let newPath = "";
+    let llmMeta: LlmStepMeta | null = null;
     try {
       const view = panelViews.current[idx];
       const srcRel = panels[idx].active || "";
@@ -8711,7 +8740,6 @@ function App() {
         const signer = secretKeyForVoice(authorPubkey);
         if (srcRel && files[srcRel] && signer) await stepFile(srcRel, signer);
       }
-      await prepareLlmMeta(idx, "reply", provider);
       // Reply to just the selected passage when there is one; otherwise the
       // whole document. The response always lands in a new sibling file.
       // Selection requires the live CM view; the whole-doc case reads from
@@ -8723,6 +8751,7 @@ function App() {
       const sourceText = hasSel
         ? view!.state.sliceDoc(sel!.from, sel!.to)
         : (srcRel && files[srcRel] ? flatten(files[srcRel].runs) : "");
+      llmMeta = await prepareLlmMeta(idx, "reply", provider, sourceText, 1024);
       // Pull the palette so the model can cite coins by nodeId.
       let palette: PaletteItem[] = [];
       try {
@@ -8848,9 +8877,12 @@ function App() {
       // the replying voice, not the AUTHOR default.
       const finalText = parseReplyOutput(rawFinal, true).body;
       try {
+        if (llmMeta) setPendingLlmMeta(newPath, llmMeta);
         await backendRef.current.writeFile(newPath, finalText, [], signer, undefined, sourceNodeId);
       } catch (e) {
         console.warn(`[reply] writeFile failed for ${newPath}:`, e);
+      } finally {
+        clearPendingLlmMeta(newPath);
       }
       setOpStatus(idx, "done");
     } catch (e) {
@@ -8861,15 +8893,6 @@ function App() {
       setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
     } finally {
       summonAbort.current[idx] = null;
-      // Release the step gate armed on entry. The catch-up step fires once
-      // for newPath, signed as the MODEL voice; the explicit writeFile above
-      // already persisted, so this is de-duped by pushToRelay's content-hash
-      // check (no double publish). Deferred one macrotask so React commits the
-      // final setFiles first (same rationale as endOp) — otherwise the catch-up
-      // step reads stale content and the debounce re-steps the tail.
-      const signer = opSignerRef.current;
-      opSignerRef.current = undefined;
-      setTimeout(() => stepGateRef.current(false, signer), 0);
       // Release the rescan-pending hold once the stream + persist have
       // settled (success or abort/error). Subsequent rescans then reconcile
       // from disk normally.
@@ -8892,14 +8915,12 @@ function App() {
     if (!provider) return;
     setOpStatus(idx, "running", undefined, "receive");
     const signer = secretKeyForVoice(modelVoice) ?? undefined;
-    opSignerRef.current = signer;
-    stepGateRef.current(true);
     const controller = new AbortController();
     summonAbort.current[idx] = controller;
     let newPath = "";
+    let llmMeta: LlmStepMeta | null = null;
     try {
       const srcRel = panels[idx].active || "";
-      await prepareLlmMeta(idx, "receive", provider);
       // Pull the folder's focus chain (panel-occupancy history) and render it
       // as the limelight log. focusTimeline never throws; an empty chain (folder
       // predates focus deltas) yields "" and RECEIVE_MESSAGES tells the model
@@ -8911,6 +8932,7 @@ function App() {
       } catch {
         /* no focus chain is fine — the persona covers the missing-data case */
       }
+      llmMeta = await prepareLlmMeta(idx, "receive", provider, limelightLog, 2048);
       const ctx = await gatherContextForPanel(idx);
       const messages = withContext(ctx, withVoicePrompt(modelVoice, receiveMessages(limelightLog)));
       const sourceName = srcRel || "doc.md";
@@ -8986,9 +9008,12 @@ function App() {
       // No `replyingTo` here — Receive observes the folder, it doesn't reply to
       // a stepped source passage. The genesis node just carries the analysis.
       try {
+        if (llmMeta) setPendingLlmMeta(newPath, llmMeta);
         await backendRef.current.writeFile(newPath, finalText, [], signer, undefined, undefined);
       } catch (e) {
         console.warn(`[receive] writeFile failed for ${newPath}:`, e);
+      } finally {
+        clearPendingLlmMeta(newPath);
       }
       setOpStatus(idx, "done");
     } catch (e) {
@@ -8999,9 +9024,6 @@ function App() {
       setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
     } finally {
       summonAbort.current[idx] = null;
-      const signer = opSignerRef.current;
-      opSignerRef.current = undefined;
-      setTimeout(() => stepGateRef.current(false, signer), 0);
       if (newPath) pendingPaths.current.delete(newPath);
     }
   }
