@@ -1,0 +1,108 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  client:
+    name: Client tests and build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.19"
+          cache: npm
+          cache-dependency-path: apps/client/package-lock.json
+      - run: npm ci
+        working-directory: apps/client
+      - run: npm test
+        working-directory: apps/client
+      - run: npm run build
+        working-directory: apps/client
+
+  mcp:
+    name: MCP tests, build, and CLI smoke
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.19"
+          cache: npm
+          cache-dependency-path: |
+            apps/client/package-lock.json
+            apps/mcp/package-lock.json
+      - run: npm ci
+        working-directory: apps/client
+      - run: npm ci
+        working-directory: apps/mcp
+      - run: npm test
+        working-directory: apps/mcp
+
+  relay:
+    name: Relay tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
+      - run: go test ./...
+        working-directory: relay
+
+  rust:
+    name: Rust shell tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Select stable Rust
+        run: |
+          rustup update stable
+          rustup default stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/client/src-tauri/target
+          key: rust-${{ runner.os }}-${{ hashFiles('apps/client/src-tauri/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+      - run: cargo test --locked
+        working-directory: apps/client/src-tauri
+
+  relay-smoke:
+    name: Real-relay protocol smoke
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.19"
+          cache: npm
+          cache-dependency-path: |
+            apps/client/package-lock.json
+            apps/mcp/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
+      - run: npm ci
+        working-directory: apps/client
+      - run: npm ci
+        working-directory: apps/mcp
+      - run: npm run verify:relay
