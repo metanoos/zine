@@ -1035,7 +1035,7 @@ fn resolve_tor_binary(app: &tauri::AppHandle) -> Result<String, String> {
     }
     if let Ok(resource) =
         app.path()
-            .resolve(&format!("binaries/tor{}", EXE_SUFFIX), BaseDirectory::Resource)
+            .resolve(format!("binaries/tor{}", EXE_SUFFIX), BaseDirectory::Resource)
     {
         if resource.exists() {
             // Ensure the exec bit is set (same fixup as the relay binary).
@@ -1148,7 +1148,7 @@ fn read_control_reply<R: BufRead>(
         // Tor control replies: "xyz-text" where xyz is a 3-digit code. If the
         // 4th char is '-', more lines follow; if it's ' ' (space), this is the
         // final line. We collect the text of each line.
-        let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
+        let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.len() >= 4 {
             let code = &trimmed[..3];
             let sep = trimmed.as_bytes()[3] as char;
@@ -1162,6 +1162,34 @@ fn read_control_reply<R: BufRead>(
             }
         }
     }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            spawn_relay,
+            factory_reset,
+            pick_folder,
+            pick_file,
+            scan_external,
+            write_text_file,
+            llm_fetch,
+            stamp_ots,
+            upgrade_ots,
+            spawn_tor,
+            setup_onion,
+            list_peers,
+            set_owner,
+            add_peer,
+            remove_peer,
+            add_writer,
+            remove_writer,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }
 
 #[cfg(test)]
@@ -1230,32 +1258,4 @@ mod tests {
 
         fs::remove_dir_all(dir).expect("remove resolver test directory");
     }
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![
-            spawn_relay,
-            factory_reset,
-            pick_folder,
-            pick_file,
-            scan_external,
-            write_text_file,
-            llm_fetch,
-            stamp_ots,
-            upgrade_ots,
-            spawn_tor,
-            setup_onion,
-            list_peers,
-            set_owner,
-            add_peer,
-            remove_peer,
-            add_writer,
-            remove_writer,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
 }
