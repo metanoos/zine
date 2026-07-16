@@ -168,6 +168,3 @@ export function registerAgentWriter(pubkey: string): "registered" | "already" | 
     return "registered";
   }) ?? "skipped";
 }
-
-/** The path zine-mcp writes, exposed for logging + tests. */
-export const peersPath = PEERS_PATH;

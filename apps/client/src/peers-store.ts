@@ -23,6 +23,8 @@ export interface PeersState {
   owner: string;
   /** Peer pubkeys (read-only access). */
   peers: string[];
+  /** Headless presses allowed to publish events signed as themselves. */
+  writers: string[];
   /** True when an owner is set — the relay requires NIP-42 AUTH. */
   networkedMode: boolean;
 }
@@ -35,7 +37,7 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
 /** Read the current access policy. Returns local-mode state if no peers.json. */
 export async function listPeers(): Promise<PeersState> {
   if (!isTauri()) {
-    return { owner: "", peers: [], networkedMode: false };
+    return { owner: "", peers: [], writers: [], networkedMode: false };
   }
   return invoke<PeersState>("list_peers");
 }
@@ -77,4 +79,16 @@ export async function addPeer(pubkey: string): Promise<PeersState> {
 export async function removePeer(pubkey: string): Promise<PeersState> {
   if (!isTauri()) throw new Error("access-policy management is desktop-only");
   return invoke<PeersState>("remove_peer", { pubkey });
+}
+
+/** Add a headless writer (read+write access, restricted to its own events). */
+export async function addWriter(pubkey: string): Promise<PeersState> {
+  if (!isTauri()) throw new Error("access-policy management is desktop-only");
+  return invoke<PeersState>("add_writer", { pubkey: resolvePubkey(pubkey) });
+}
+
+/** Remove a headless writer. */
+export async function removeWriter(pubkey: string): Promise<PeersState> {
+  if (!isTauri()) throw new Error("access-policy management is desktop-only");
+  return invoke<PeersState>("remove_writer", { pubkey });
 }

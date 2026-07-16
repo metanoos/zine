@@ -7,15 +7,14 @@
  * This is a LOCAL workflow preference, not provenance — which file is pinned
  * where on screen is a property of that machine's UI session, not something to
  * sync to the relay manifest. So it lives in localStorage, keyed by folder id,
- * the same posture as press-model-store.ts / voice-*-store.ts. Tab paths are
+ * the same posture as the voice stores. Tab paths are
  * folder-relative (the same keys local-store.ts uses), so they stay meaningful
  * when restored against the same folder. Paths that no longer exist on disk /
  * relay are pruned at restore time in openScanned rather than here.
  *
- * Mirrors the localStorage-map structure of press-model-store.ts: STORAGE_KEY
- * holds a JSON `{ [folderId]: WorkspaceLayout }` object, with thin load/save
- * helpers. A corrupt or shape-mismatched blob is treated as empty (non-fatal),
- * so a bad entry never blocks boot.
+ * STORAGE_KEY holds a JSON `{ [folderId]: WorkspaceLayout }` object, with thin
+ * load/save helpers. A corrupt or shape-mismatched blob is treated as empty
+ * (non-fatal), so a bad entry never blocks boot.
  */
 
 const STORAGE_KEY = "zine.workspace.layout";
@@ -99,13 +98,5 @@ export function loadWorkspaceLayout(folderId: string): WorkspaceLayout | null {
 export function saveWorkspaceLayout(folderId: string, layout: WorkspaceLayout): void {
   const map = loadMap();
   map[folderId] = layout;
-  saveMap(map);
-}
-
-/** Drop a folder's saved layout (e.g. when the folder itself is forgotten). */
-export function clearWorkspaceLayout(folderId: string): void {
-  const map = loadMap();
-  if (!(folderId in map)) return;
-  delete map[folderId];
   saveMap(map);
 }

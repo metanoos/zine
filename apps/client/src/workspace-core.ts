@@ -541,8 +541,7 @@ export interface Workspace {
    *  delta on the parent carrying the folder's existing genesis id — no new
    *  node, no descendant walk) vs the file path (publish at new name, then
    *  rename delta). Folder names must satisfy the tag-token rule. `tagsByPath`
-   *  carries user tags so file content survives (disk backend reads content
-   *  from disk, not the chain, so it can't recover them). */
+   *  carries user tags so file content survives the move. */
   renamePath(
     src: string,
     newName: string,

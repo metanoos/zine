@@ -1,5 +1,4 @@
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
-import { Relay } from "nostr-tools/relay";
 import type { Event } from "nostr-tools";
 
 /**
@@ -88,43 +87,6 @@ export function resolveRelayUrl(): string {
 /** True when running inside the Tauri desktop shell. */
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
-/**
- * Connects to the primary relay, retrying briefly while the Tauri-spawned
- * sidecar finishes booting. The retry loop tolerates the sidecar's startup
- * latency; the client relies on Tauri to spawn it, not Node.
- */
-export async function connectRelay(maxAttempts = 30): Promise<Relay> {
-  const url = resolveRelayUrl();
-  let lastErr: unknown;
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      return await withTimeout(Relay.connect(url), 4000, `connect ${url}`);
-    } catch (e) {
-      lastErr = e;
-      await delay(150);
-    }
-  }
-  throw new Error(
-    `Could not connect to local relay at ${url} after ${maxAttempts} attempts. ` +
-      `Last error: ${lastErr instanceof Error ? lastErr.message : lastErr}. ` +
-      `Is the Tauri sidecar running?`,
-  );
-}
-
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-    p.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); },
-    );
-  });
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 function bytesToHex(bytes: Uint8Array): string {

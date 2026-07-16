@@ -2,33 +2,23 @@
  * Single source of truth for the per-op LLM message builders.
  *
  * Every single-shot LLM op (Extend / Settle / Stir / Reply / Receive, plus the
- * de-dupe and edit variants) assembles its `messages[]` here. Two consumers
- * read these exact strings:
+ * de-dupe and edit variants) assembles its `messages[]` here. The live actions
+ * and the pre-send prompt inspector read these exact strings:
  *
  *   1. The live ops in App.tsx — `extendLLM` / `settleLLM` / `shakeLLM` /
  *      `respondLLM` / `receiveLLM` build their messages here, then wrap them
  *      with `withVoicePrompt` + `withContext` before calling `complete()`.
- *   2. The provenance reconstructor in inject-algorithms.ts — when a reader
- *      opens a stepped `action: llm` node, `reconstructCtxBlockV1` calls
- *      `opRolePreamble(op)` to reproduce the system prompt.
+ *   2. PromptInspectorModal.tsx — `buildOpMessages()` previews the exact base
+ *      message array before App adds the voice prompt and context block.
  *
- * Before this module existed, the role preambles were hand-copied between
- * App.tsx and inject-algorithms.ts, with an explicit drift-hazard comment and
- * no test. This module is the drift-killer: both consumers import from it, so
- * a change here is the only change. `op-prompts.test.ts` snapshots each
- * preamble and asserts the two consumers agree.
+ * Keeping the strings here prevents the live operation and preview from
+ * drifting. `op-prompts.test.ts` snapshots role tails and variable infixes.
  *
  * On variable infixes: three ops (Extend, Stir, Receive) bake a runtime value
  * into the system prompt itself — Extend's seed-kind sentence depends on
  * whether there's a selection; Stir's anchor line depends on the bracket count;
- * Receive's limelight section depends on whether a log exists. Those values
- * aren't carried in the inject manifest, so the reconstructor can't reproduce
- * them byte-identically (it never could — it degraded for these ops already).
- * `opRolePreamble(op)` returns the preamble composed with DEFAULT inputs (no
- * selection / no anchors / no limelight log): for Settle/Reply/edit that IS the
- * exact live string; for Extend/Stir/Receive it's the closest faithful base,
- * and the live op composes the variable infix on top via the per-op composer.
- * No `${placeholder}` text ever leaks to the reconstructor.
+ * Receive's limelight section depends on whether a log exists. The builders
+ * accept those values explicitly, so both live calls and previews stay honest.
  *
  * What lives here: the per-op system-prompt composers + role preambles, and the
  * op-specific user-body builders. What does NOT live here: the shared
@@ -58,17 +48,10 @@ export const OP_LABELS: Record<OpKind, string> = {
   receive: "Receive",
 };
 
-/** Variant op kinds the reconstructor may be asked to rebuild. `"edit"` is
- *  invoked from a different code path (not an action-palette tab) but shares this
- *  preamble registry. */
-export type ReconstructOpKind = OpKind | "edit";
-
 // ─── per-op system-prompt composers ─────────────────────────────────────────
 //
 // Each composer returns the FULL system prompt (SYSTEM_PREAMBLE + role tail,
-// with any variable infix baked in). The live op calls the composer with real
-// runtime inputs; `opRolePreamble(op)` calls it with defaults for the
-// reconstructor. Both read the same text fragments, so the strings can't drift.
+// with any variable infix baked in). Callers provide the real runtime inputs.
 
 /** The seed-kind sentence baked into Extend's system prompt. */
 function extendSeedKind(hasSelection: boolean): string {
@@ -231,30 +214,6 @@ function composeEditSystem(): string {
   );
 }
 
-/**
- * The role-specific system prompt for an op, composed with DEFAULT inputs
- * (no selection / no anchors / no limelight log). Used by the reconstructor,
- * which doesn't carry those runtime values in the manifest.
- *
- * For Settle / Reply / edit (static preambles) this IS the exact live string.
- * For Extend / Stir / Receive (variable infixes) this is the faithful base;
- * the live op composes the same fragments with real inputs via the composer.
- *
- * Includes the shared `SYSTEM_PREAMBLE` prefix, because that's the full string
- * both the live ops and the reconstructor hand to the provider / display. The
- * `\n\n` join between preamble and role tail is applied here uniformly.
- */
-export function opRolePreamble(op: ReconstructOpKind): string {
-  switch (op) {
-    case "extend": return composeExtendSystem(false);
-    case "settle": return composeSettleSystem();
-    case "stir": return composeStirSystem(0);
-    case "reply": return composeReplySystem();
-    case "receive": return composeReceiveSystem("");
-    case "edit": return composeEditSystem();
-  }
-}
-
 // ─── per-op message builders ────────────────────────────────────────────────
 //
 // Each builder returns the op's `messages[]` with the op-specific system + user
@@ -336,9 +295,8 @@ export function receiveMessages(limelightLog: string): ChatMessage[] {
   ];
 }
 
-/** edit op (invoked from a different code path, not an action-palette tab). Hoisted here
- *  so the reconstructor shares the preamble. The user body is the canonical
- *  file+instruction shape the edit op uses. */
+/** edit op (invoked from a different code path, not an action-palette tab).
+ *  The user body is the canonical file+instruction shape the edit op uses. */
 export function editMessages(path: string, content: string, instruction: string): ChatMessage[] {
   return [
     { role: "system", content: composeEditSystem() },

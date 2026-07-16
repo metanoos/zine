@@ -20,7 +20,7 @@ test("prompt inspector wraps within the tab without horizontal scrolling", () =>
   assert.match(row, /min-width:\s*0\s*;/);
   assert.match(row, /max-width:\s*100%\s*;/);
 
-  const prompt = rule(".prompt-inspector-row .llm-recon-pre");
+  const prompt = rule(".prompt-inspector-row .prompt-inspector-pre");
   assert.match(prompt, /min-width:\s*0\s*;/);
   assert.match(prompt, /max-width:\s*100%\s*;/);
   assert.match(prompt, /overflow-x:\s*hidden\s*;/);

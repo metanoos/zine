@@ -110,11 +110,3 @@ export function removeDoor(id: string): DoorEntry[] {
   saveDoors(next);
   return next;
 }
-
-/** Prune any doors whose keychain key no longer exists. Called after a key is
- *  deleted in keys-store (from the UI, to avoid a keys-store → doors-store
- *  import cycle). Returns the new list and persists if anything changed. */
-export function pruneDanglingDoors(): DoorEntry[] {
-  // loadDoors already prunes; this is the explicit entry point for callers.
-  return loadDoors();
-}

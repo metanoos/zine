@@ -114,14 +114,6 @@ export function encodeGeohash(lat: number, lng: number, length: number): string 
   return out;
 }
 
-/** Longest common prefix of two geohashes. Used to test cell containment: pin
- *  B's cell contains pin A iff A starts with B (B is a coarser prefix). */
-export function commonPrefix(a: string, b: string): string {
-  let i = 0;
-  while (i < a.length && i < b.length && a[i] === b[i]) i++;
-  return a.slice(0, i);
-}
-
 /** Enumerate every geohash cell of `length` that intersects the bbox. Bounded:
  *  at the lengths Spaces renders (2–8), a viewport never yields more than a few
  *  hundred cells. Used to drive a per-cell `#g` fetch for the visible region.

@@ -187,19 +187,6 @@ export function identityFromPubkey(pubkey: string): KeyIdentity {
   return { font: fontCss(font), hue, sat };
 }
 
-/** Kept as a random-identity fallback for any external caller that still wants
- *  a one-off identity not tied to a pubkey. The keychain itself no longer uses
- *  this — identityFromPubkey is the path for all keys. */
-export function generateIdentity(): KeyIdentity {
-  const font = KEYCHAIN_FONTS[Math.floor(Math.random() * KEYCHAIN_FONTS.length)];
-  let hue = Math.floor(Math.random() * 360);
-  while (hue >= GOLD_HUE_MIN && hue <= GOLD_HUE_MAX) {
-    hue = Math.floor(Math.random() * 360);
-  }
-  const sat = 35 + Math.floor(Math.random() * 31); // 35–65
-  return { font: fontCss(font), hue, sat };
-}
-
 /**
  * CSS color rules for a key identity, resolved against the current theme's
  * `--voice-ink-l` lightness token. Returns ready-to-use `hsl()` strings; the
@@ -633,16 +620,6 @@ export async function identityForPubkey(pubkey: string): Promise<KeyIdentity> {
  * the cache and notify subscribers to repaint with the author's declaration. */
 export function identityForDisplayVoice(pubkey: string): KeyIdentity {
   return identityForVoice(pubkey) ?? voiceIdentityCache.get(pubkey) ?? identityFromPubkey(pubkey);
-}
-
-/** Bucket an unknown voice into one of six stable color slots (0–5). Used as
- *  the fallback when a run's voice isn't a known keychain key (sampled /
- *  federated text) so it still gets a deterministic color rather than none.
- *  Kept here so the editor and the preview derive the same bucket. */
-export function hashVoice(voice: string): number {
-  let h = 0;
-  for (let i = 0; i < voice.length; i++) h = (h * 31 + voice.charCodeAt(i)) >>> 0;
-  return h % 6;
 }
 
 /** Resolve a voice to the className + inline style a colored span should

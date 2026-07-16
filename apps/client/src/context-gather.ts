@@ -5,9 +5,9 @@
  * user message.
  *
  * The folder tree and sibling file text come straight from App state
- * (`files: Record<string, FileState>`) — `baselineScan` already populated it
- * on attach, so no new Tauri IPC is needed and this works equally on the
- * webapp (where `files` is populated from localStorage/the relay).
+ * (`files: Record<string, FileState>`) — the active workspace already
+ * populated it from the local store and relay on attach, so no Tauri IPC is
+ * needed and this works equally in the desktop shell and hosted webapp.
  *
  * The delta log is an AGGREGATED SCOPE LOG: every selected file's kind-4290
  * chain plus matching folder kind-4292 membership events, interleaved by

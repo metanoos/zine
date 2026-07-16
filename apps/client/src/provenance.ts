@@ -1315,7 +1315,7 @@ export async function sha256HexLocal(text: string): Promise<string> {
 }
 
 /** Canonicalize quote text for the rendezvous content hash `H`
- *  (protocol/rendezvous.md §1.3). Exact, not fuzzy: NFC normalize, collapse all
+ *  (protocol/rendezvous.md §1.2). Exact, not fuzzy: NFC normalize, collapse all
  *  whitespace runs to a single space, trim. Deliberately NO case-folding — case
  *  can carry meaning ("The" vs "the"), and `H` must stay a single value so the
  *  "hash is the address of the room" property holds. Fuzzy matching is a
@@ -1636,65 +1636,6 @@ export async function fetchLatestEventId(folderId: string, relativePath: string)
   return chain.length > 0 ? chain[chain.length - 1].id : null;
 }
 
-/** Revoke a published zine (the whole folder trace) by publishing a NIP-09
- *  kind-5 deletion request signed by the owner's key. Per spec §10: the owner
- *  MAY revoke their own published nodes; a relay advertising NIP-9 MUST honor
- *  it. This fans out `e` tags for every kind-4290 node in the folder (the
- *  genesis is added explicitly — it carries no `f` tag, since an event cannot
- *  know its own id before signing) plus `a` tags for the replaceable TraceHead
- *  and any owned TraceOpinions. Revocation is advisory across relays and does
- *  not touch the chain (history is retained on the author's machine and
- *  readers' caches); it changes relay *retention* only.
- *
- *  Mirrors the publish shape of `publishTraceHead` (sign with
- *  `finalizeEvent`, fan out via `publishToMany`) and the read shape of
- *  `fetchFolderNodes` (`queryMany` over the read set). */
-export async function revokeZine(
-  folderId: string,
-  reason: string,
-  opts?: { signer?: Uint8Array },
-): Promise<Event> {
-  const signer = opts?.signer ?? loadOrCreateVoice().secretKey;
-  // `getPublicKey` derives the pubkey from the secret so the `a`-tag address
-  // matches the key that signed the target events, even if the caller passed a
-  // non-default signer. `loadOrCreateVoice().publicKey` is the same value for
-  // the default signer.
-  const pubkey = opts?.signer ? getPublicKey(opts.signer) : loadOrCreateVoice().publicKey;
-
-  const readRelays = await getReadRelays();
-
-  // 1. Every kind-4290 node in the folder. `#f` catches every non-genesis node
-  //    (file chains + the folder's own non-genesis nodes). The genesis id
-  //    equals `folderId` (an event can't know its own id before signing, so it
-  //    carries no `f` tag) and is added explicitly.
-  const nodes = await queryMany(readRelays, { kinds: [FILE_TRACE_NODE_KIND], "#f": [folderId] });
-  const eTags: string[][] = nodes.map((n) => ["e", n.id, ""]);
-  if (!eTags.some((t) => t[1] === folderId)) eTags.push(["e", folderId, ""]);
-
-  // 2. Replaceable kinds, deleted by NIP-33 address (`a` tag). TraceHead's `d`
-  //    is the folder id; TraceOpinion's `d` is `x:`/`n:` + subject, so sweep by
-  //    author + kind and emit one `a` per owned opinion.
-  const aTags: string[][] = [["a", `${TRACE_HEAD_KIND}:${pubkey}:${folderId}`]];
-  const opinions = await queryMany(readRelays, {
-    kinds: [TRACE_OPINION_KIND],
-    authors: [pubkey],
-  });
-  for (const op of opinions) {
-    const d = op.tags.find((t) => t[0] === "d")?.[1];
-    if (d) aTags.push(["a", `${TRACE_OPINION_KIND}:${pubkey}:${d}`]);
-  }
-
-  const template: EventTemplate = {
-    kind: 5,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [...eTags, ...aTags],
-    content: reason,
-  };
-  const signed = finalizeEvent(template, signer);
-  await publishToMany(await getWriteRelays(), signed);
-  return signed;
-}
-
 export interface TraceRevocationPlan {
   traceId: string;
   totalNodeCount: number;
@@ -1765,25 +1706,6 @@ export async function revokeTrace(
   const request = finalizeEvent(template, signer);
   await publishToMany(await getWriteRelays(), request);
   return { ...plan, request };
-}
-
-/** Compatibility path-based wrapper. New callers should retain traceId and
- * use revokeTrace so moves do not change the revocation target. */
-export async function revokeFile(
-  folderId: string,
-  relativePath: string,
-  reason: string,
-  opts?: { signer?: Uint8Array },
-): Promise<Event> {
-  const chain = await fetchChain(folderId, relativePath);
-  const traceId = chain[0]?.id;
-  if (!traceId) throw new Error("Cannot revoke an unavailable trace.");
-  return (
-    await revokeTrace(traceId, reason, {
-      signer: opts?.signer,
-      fallback: { folderId, relativePath },
-    })
-  ).request;
 }
 
 // --- folder activity (Times view) ---------------------------------------
@@ -2002,27 +1924,6 @@ export function eventMeta(event: Event): EventMeta {
     steppedAtMs,
     createdAtSec: event.created_at ?? 0,
   };
-}
-
-/** Reads a kind-4290 event's reply citation, if any (spec §3.3: a `cite` delta
- *  with `role: "reply"`) — the stepped node id this document is a reply to,
- *  pinned at the moment the reply was written. Also tolerates the legacy
- *  `type: "reply-to"` shape from events minted before the cite unification.
- *  Returns null for an ordinary edit/import node, a malformed/absent content
- *  body, or when no reply citation is present. Used to render the "replying
- *  to" chip without re-parsing the event's content at every call site. */
-export function respondsTo(event: Event): string | null {
-  try {
-    const parsed = JSON.parse(event.content) as {
-      deltas?: Array<{ type?: string; role?: string; sourceEventId?: string }>;
-    };
-    const entry = parsed.deltas?.find(
-      (d) => d.type === "cite" && d.role === "reply",
-    );
-    return typeof entry?.sourceEventId === "string" ? entry.sourceEventId : null;
-  } catch {
-    return null;
-  }
 }
 
 // --- cited-trace name resolution (for the citation-chip row) -------------
@@ -2997,73 +2898,6 @@ export async function focusTimeline(folderId: string): Promise<FocusEntry[]> {
   return out;
 }
 
-// --- orchestration timeline (folder-level replay) -----------------------
-//
-// The merged folder-orchestration view: every delta on the folder chain
-// (membership add/remove/rename + focus mount/unmount) as one chronological
-// stream, for the replay UI that reconstructs not just file actions but the
-// orchestration of files at the folder level — which traces entered/left, which
-// were renamed, which were mounted in which panel. Built by walking the same
-// chain as focusTimeline/folderTimeline but emitting one entry PER DELTA rather
-// than per node (a node may carry one structural + N flushed focus deltas).
-
-/** One folder-chain delta as an orchestration event. `steppedAt` is the node's
- *  content-level ms timestamp; `action` is the node-level advisory action
- *  (`"edit"`/`"import"` for structural folder Steps); the
- *  `delta` payload is the individual FolderDelta this entry represents. */
-export interface FolderTimelineEntry {
-  steppedAt: number;
-  action: string;
-  delta: FolderDelta;
-}
-
-/** The folder's full chain as one delta-per-entry timeline, oldest-first.
- *  Genesis/import nodes with no delta are dropped — they carry no orchestration
- *  signal. A node with multiple deltas (structural + N flushed focus) yields one
- *  entry per delta, in array order (structural first, then focus in arrival
- *  order). This is the reader the orchestration-replay UI consumes. */
-export async function folderTimelineWithDeltas(folderId: string): Promise<FolderTimelineEntry[]> {
-  const all = await fetchFolderNodes(folderId);
-  const byId = new Map(all.map((e) => [e.id, e]));
-  const head = resolveHead(all);
-  if (!head) return [];
-  const chain: Event[] = [];
-  let cursor: string | undefined = head.id;
-  const guard = new Set<string>();
-  while (cursor && !guard.has(cursor)) {
-    guard.add(cursor);
-    const event = byId.get(cursor);
-    if (!event) break;
-    chain.push(event);
-    cursor = event.tags.find((t) => t[0] === "e" && t[3] === "prev")?.[1];
-  }
-  chain.reverse();
-
-  const out: FolderTimelineEntry[] = [];
-  for (const event of chain) {
-    try {
-      const content = JSON.parse(event.content) as { steppedAt: number; deltas?: FolderDelta[] };
-      const action = event.tags.find((t) => t[0] === "action")?.[1] ?? "import";
-      if (!content.deltas) continue;
-      for (const delta of content.deltas) {
-        out.push({ steppedAt: content.steppedAt, action, delta });
-      }
-    } catch {
-      continue;
-    }
-  }
-  return out;
-}
-
-/** The merged orchestration timeline: every folder-chain delta interleaved with
- *  nothing else (focus deltas are already in the chain's `deltas` arrays, so
- *  this is just folderTimelineWithDeltas — kept as a named entry point so the
- *  replay UI has a single fetch call that reads as "the orchestration stream").
- *  Stable order by steppedAt then array position; ties keep chain order. */
-export async function fetchOrchestrationTimeline(folderId: string): Promise<FolderTimelineEntry[]> {
-  return folderTimelineWithDeltas(folderId);
-}
-
 // --- forking (action: fork) ---------------------------------------------
 //
 // Opening a folder owned by someone else: a shallow fork seeds a new folder
@@ -3402,31 +3236,6 @@ export async function appendToPalette(item: PaletteItem): Promise<void> {
   const current = await fetchPalette();
   if (current.some((i) => i.nodeId === item.nodeId)) return; // idempotent
   await publishPalette([...current, item]);
-}
-
-/** Remove the item with `nodeId` from the palette. The minted node itself is
- *  untouched (it's immutable) — only the curated reference is dropped. */
-export async function removeFromPalette(nodeId: string): Promise<void> {
-  const current = await fetchPalette();
-  await publishPalette(current.filter((i) => i.nodeId !== nodeId));
-}
-
-/** Rename the palette entry for `nodeId` by publishing a fresh kind-34291
- *  event with the item's `label` updated — the "rename tag = a new tag event"
- *  posture, since the palette is NIP-33 replaceable-as-a-whole. The minted
- *  node and its cached `text`/`originPath` are never touched, so the body
- *  stays fixed. An empty `label` clears the field (back to unlabeled). */
-export async function renameInPalette(nodeId: string, label: string): Promise<void> {
-  const current = await fetchPalette();
-  const trimmed = label.trim();
-  const next = current.map((i) =>
-    i.nodeId === nodeId
-      ? trimmed
-        ? { ...i, label: trimmed }
-        : { ...i, label: undefined }
-      : i,
-  );
-  await publishPalette(next);
 }
 
 /** All uncited heads in a prev-graph: events whose id no other event in the
@@ -4998,126 +4807,6 @@ export async function browseTag(
     }
   });
   return { hits: [...merged.values()], errors };
-}
-
-// --- LLM call reconstruction (§3.7 read side) ---------------------------
-//
-// Given an `action: llm` node, reconstruct the { systemPrompt, userPrompt } the
-// producing press assembled, by: reading `injectRule` + `llm` + `prompt` off
-// the node content; fetching the rule manifest trace; fetching every cited
-// nucleus (the q-tagged scope); and running the named algorithm over them.
-// Degrades gracefully — unknown algorithm, missing rule, or unresolvable scope
-// → returns `{ reconstructable: false, reason, scope }` so a reader still sees
-// what was in scope even when the prompt can't be rebuilt.
-
-/** The result of reconstructing an LLM call. On success, `systemPrompt` and
- *  `userPrompt` are byte-identical to what the press handed to the provider. On
- *  degradation, `scope` still lists what was cited (path/nodeId) so the call's
- *  inputs are visible even when the assembly isn't rebuildable. */
-export interface ReconstructedCall {
-  reconstructable: boolean;
-  /** Present iff reconstructable. */
-  systemPrompt?: string;
-  userPrompt?: string;
-  /** The typed instruction (`prompt`), present in both branches. */
-  prompt: string;
-  /** The model configuration that answered, if the node carried `llm`. */
-  llm?: { model: string; temperature: number | null; maxTokens: number; provider: string };
-  /** The manifest the rule trace carried, if resolved. */
-  manifest?: { algorithm: string; params: Record<string, unknown> };
-  /** Why reconstruction degraded, when it did. */
-  reason?: "no-inject-rule" | "rule-unresolvable" | "unknown-algorithm" | "algorithm-failed";
-  /** The cited scope (everything the node q-tags), resolved best-effort. */
-  scope: { nodeId: string; relativePath?: string; action?: string }[];
-}
-
-/** Reconstruct the submitted prompts for an `action: llm` node. Fetches the
- *  rule trace + every cited nucleus across read relays (each is self-sufficient
- *  per §3.9 — one bounded fetch per id). Never throws: any failure degrades.
- *
- *  `node` is the raw kind-4290 LLM event. Returns the reconstruction result;
- *  `reconstructable: false` is a normal outcome (pre-§3.7 nodes, unknown
- *  algorithm, unreachable relay) and carries the scope where possible. */
-export async function reconstructLlmCall(node: Event): Promise<ReconstructedCall> {
-  let parsed: {
-    prompt?: string;
-    injectRule?: string;
-    llm?: { model: string; temperature: number | null; maxTokens: number; provider: string };
-  };
-  try {
-    parsed = JSON.parse(node.content);
-  } catch {
-    return { reconstructable: false, prompt: "", reason: "algorithm-failed", scope: [] };
-  }
-  const prompt = parsed.prompt ?? "";
-  const scopeNodeIds = node.tags.filter((t) => t[0] === "q").map((t) => t[1]);
-
-  // Fetch every cited nucleus best-effort. Each is self-sufficient, so a
-  // missing one degrades rather than breaks — we still reconstruct off the
-  // ones that resolved.
-  const nuclei = new Map<string, { nodeId: string; snapshot: string; relativePath?: string; action?: string }>();
-  const scope: { nodeId: string; relativePath?: string; action?: string }[] = [];
-  for (const id of scopeNodeIds) {
-    const ev = await fetchEventById(id).catch(() => null);
-    if (!ev) {
-      scope.push({ nodeId: id });
-      continue;
-    }
-    let snapshot = "";
-    try {
-      const c = JSON.parse(ev.content) as { snapshot?: string };
-      if (typeof c.snapshot === "string") snapshot = c.snapshot;
-    } catch {
-      /* non-JSON — snapshot stays "" */
-    }
-    const relativePath = ev.tags.find((t) => t[0] === "F")?.[1];
-    const action = ev.tags.find((t) => t[0] === "action")?.[1];
-    nuclei.set(id, { nodeId: id, snapshot, relativePath, action });
-    scope.push({ nodeId: id, relativePath, action });
-  }
-
-  // Resolve the rule manifest trace.
-  if (!parsed.injectRule) {
-    return { reconstructable: false, prompt, llm: parsed.llm, reason: "no-inject-rule", scope };
-  }
-  const ruleEvent = await fetchEventById(parsed.injectRule).catch(() => null);
-  if (!ruleEvent) {
-    return { reconstructable: false, prompt, llm: parsed.llm, reason: "rule-unresolvable", scope };
-  }
-  // The manifest lives in the rule trace's `snapshot` body (the rule trace is
-  // an immutable rule trace whose body IS the manifest JSON). Unwrap: parse the event
-  // content, read `snapshot`, parse THAT as the manifest.
-  let manifest: { algorithm: string; params: Record<string, unknown> };
-  try {
-    const ruleContent = JSON.parse(ruleEvent.content) as { snapshot?: string };
-    manifest = JSON.parse(ruleContent.snapshot ?? "{}") as { algorithm: string; params: Record<string, unknown> };
-  } catch {
-    return { reconstructable: false, prompt, llm: parsed.llm, reason: "rule-unresolvable", scope };
-  }
-  if (!manifest?.algorithm) {
-    return { reconstructable: false, prompt, llm: parsed.llm, manifest, reason: "rule-unresolvable", scope };
-  }
-
-  // Run the named algorithm. Dynamic import avoids pulling the algorithm
-  // registry into every caller of this module (it's only needed on reconstruct).
-  const { ALGORITHMS } = await import("./inject-algorithms.js");
-  const fn = ALGORITHMS[manifest.algorithm];
-  if (!fn) {
-    return { reconstructable: false, prompt, llm: parsed.llm, manifest, reason: "unknown-algorithm", scope };
-  }
-  const result = fn({ prompt, nuclei, manifest });
-  if (!result) {
-    return { reconstructable: false, prompt, llm: parsed.llm, manifest, reason: "algorithm-failed", scope };
-  }
-  return {
-    reconstructable: true,
-    prompt,
-    llm: parsed.llm,
-    manifest,
-    systemPrompt: result.systemPrompt,
-    userPrompt: result.userPrompt,
-    scope,
-  };
 }
 
 export {

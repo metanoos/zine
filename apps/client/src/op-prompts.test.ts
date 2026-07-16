@@ -2,14 +2,10 @@
  * Tests for op-prompts.ts — the single source of truth for per-op LLM message
  * builders. Two things matter here:
  *
- *   1. The preambles don't drift silently. Each `opRolePreamble(op)` is
- *      snapshotted; editing a role tail without updating this file fails loudly.
- *   2. The two consumers (live ops via the builders, reconstructor via
- *      `opRolePreamble`) read the same strings. A drift test asserts the
- *      builder's system message === `opRolePreamble(op)` for the static ops
- *      (settle/reply/edit) — the ones whose system prompt has no runtime
- *      infix. Extend/Stir/Receive compose a variable infix at call time, so
- *      their default-input form is checked against `opRolePreamble` instead.
+ *   1. The role tails don't drift silently; representative strings are
+ *      snapshotted from the actual message builders.
+ *   2. Runtime-dependent infixes and the inspector dispatcher keep matching
+ *      the dedicated builders.
  *
  * Pure string/shape checks — no LLM, no relay, no React. Same convention as the
  * other *.test.ts files (node:test, no external runner).
@@ -19,7 +15,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  opRolePreamble,
   extendMessages,
   settleMessages,
   settleDedupeMessages,
@@ -30,35 +25,44 @@ import {
   buildOpMessages,
   OP_ORDER,
   type OpKind,
-  type ReconstructOpKind,
 } from "./op-prompts.js";
 import { SYSTEM_PREAMBLE } from "./system-preamble.js";
 
-const ALL_OPS: ReconstructOpKind[] = ["extend", "settle", "stir", "reply", "receive", "edit"];
+type AnyOp = OpKind | "edit";
+const ALL_OPS: AnyOp[] = ["extend", "settle", "stir", "reply", "receive", "edit"];
+
+function defaultSystem(op: AnyOp): string {
+  switch (op) {
+    case "extend": return extendMessages("", false)[0].content;
+    case "settle": return settleMessages("")[0].content;
+    case "stir": return stirMessages("", 0, [])[0].content;
+    case "reply": return replyMessages("", "")[0].content;
+    case "receive": return receiveMessages("")[0].content;
+    case "edit": return editMessages("", "", "")[0].content;
+  }
+}
 
 // ─── preamble sanity ────────────────────────────────────────────────────────
 
-test("opRolePreamble: every op yields a non-empty string", () => {
+test("every op yields a non-empty system prompt", () => {
   for (const op of ALL_OPS) {
-    const p = opRolePreamble(op);
+    const p = defaultSystem(op);
     assert.ok(p.length > 0, `${op} preamble is empty`);
   }
 });
 
-test("opRolePreamble: every op includes the shared SYSTEM_PREAMBLE prefix", () => {
-  // The reconstructor displays the FULL system prompt the model received, so
-  // the preamble prefix must be present — not just the role tail.
+test("every op includes the shared SYSTEM_PREAMBLE prefix", () => {
   for (const op of ALL_OPS) {
     assert.ok(
-      opRolePreamble(op).startsWith(SYSTEM_PREAMBLE),
+      defaultSystem(op).startsWith(SYSTEM_PREAMBLE),
       `${op} preamble missing SYSTEM_PREAMBLE prefix`,
     );
   }
 });
 
-test("opRolePreamble: the \\n\\n join separates preamble from role tail exactly once", () => {
+test("the \\n\\n join separates preamble from role tail exactly once", () => {
   for (const op of ALL_OPS) {
-    const p = opRolePreamble(op);
+    const p = defaultSystem(op);
     const joinCount = (p.match(/You operate inside zine[\s\S]*?\n\nYOUR ROLE/) ? 1 : 0)
       + (p.match(/You operate inside zine[\s\S]*?\n\nYou are Receive/) ? 1 : 0);
     assert.ok(joinCount === 1, `${op} preamble join is malformed`);
@@ -68,9 +72,9 @@ test("opRolePreamble: the \\n\\n join separates preamble from role tail exactly 
   }
 });
 
-test("opRolePreamble: each op's role tail carries its distinctive role marker", () => {
+test("each op's role tail carries its distinctive role marker", () => {
   // A cheap, readable fingerprint per op — catches a copy-paste swap.
-  const markers: Record<ReconstructOpKind, string> = {
+  const markers: Record<AnyOp, string> = {
     extend: "YOUR ROLE — Extend: the continuer",
     settle: "YOUR ROLE — Settle: the condenser",
     stir: "YOUR ROLE — Stir: the reinventor",
@@ -80,7 +84,7 @@ test("opRolePreamble: each op's role tail carries its distinctive role marker", 
   };
   for (const op of ALL_OPS) {
     assert.ok(
-      opRolePreamble(op).includes(markers[op]),
+      defaultSystem(op).includes(markers[op]),
       `${op} preamble missing marker "${markers[op]}"`,
     );
   }
@@ -93,8 +97,8 @@ test("opRolePreamble: each op's role tail carries its distinctive role marker", 
 // the test — that's the point. The preamble prefix is excluded so a
 // system-preamble.ts edit doesn't trip every op's snapshot.
 
-test("opRolePreamble: extend tail snapshot", () => {
-  const tail = opRolePreamble("extend").slice(SYSTEM_PREAMBLE.length + 2);
+test("extend system tail snapshot", () => {
+  const tail = defaultSystem("extend").slice(SYSTEM_PREAMBLE.length + 2);
   assert.equal(
     tail,
     "YOUR ROLE — Extend: the continuer. You pick up the document where it " +
@@ -110,57 +114,24 @@ test("opRolePreamble: extend tail snapshot", () => {
   );
 });
 
-test("opRolePreamble: settle tail snapshot", () => {
-  const tail = opRolePreamble("settle").slice(SYSTEM_PREAMBLE.length + 2);
+test("settle system tail snapshot", () => {
+  const tail = defaultSystem("settle").slice(SYSTEM_PREAMBLE.length + 2);
   assert.ok(tail.startsWith("YOUR ROLE — Settle: the condenser."));
   assert.ok(tail.includes("Return ONLY the condensed prose"));
   assert.ok(tail.includes("Settle never creates sediment"));
 });
 
-test("opRolePreamble: reply tail snapshot", () => {
-  const tail = opRolePreamble("reply").slice(SYSTEM_PREAMBLE.length + 2);
+test("reply system tail snapshot", () => {
+  const tail = defaultSystem("reply").slice(SYSTEM_PREAMBLE.length + 2);
   assert.ok(tail.startsWith("YOUR ROLE — Reply: the replier."));
   assert.ok(tail.includes("TITLE: <short descriptive name>"));
   assert.ok(tail.includes("--- available minted traces ---"));
 });
 
-test("opRolePreamble: edit tail snapshot", () => {
-  const tail = opRolePreamble("edit").slice(SYSTEM_PREAMBLE.length + 2);
+test("edit system tail snapshot", () => {
+  const tail = defaultSystem("edit").slice(SYSTEM_PREAMBLE.length + 2);
   assert.ok(tail.startsWith("YOUR ROLE — edit."));
   assert.ok(tail.includes("minted sediment — preserve them verbatim"));
-});
-
-// ─── builder ↔ reconstructor drift test ─────────────────────────────────────
-//
-// The static ops (settle/reply/edit) have no runtime infix in their system
-// prompt, so the builder's system message must equal opRolePreamble(op) exactly.
-// The variable ops (extend/stir/receive) compose an infix at call time; their
-// DEFAULT-input builder form must equal opRolePreamble(op) (which also uses
-// defaults). This is the lock that prevents the two consumers from drifting.
-
-test("drift: settleMessages system === opRolePreamble('settle')", () => {
-  assert.equal(settleMessages("loose")[0].content, opRolePreamble("settle"));
-});
-
-test("drift: replyMessages system === opRolePreamble('reply')", () => {
-  assert.equal(replyMessages("src", "")[0].content, opRolePreamble("reply"));
-});
-
-test("drift: editMessages system === opRolePreamble('edit')", () => {
-  assert.equal(editMessages("p", "c", "i")[0].content, opRolePreamble("edit"));
-});
-
-test("drift: extendMessages(default) system === opRolePreamble('extend')", () => {
-  // No selection → default seed-kind phrasing, matching opRolePreamble's default.
-  assert.equal(extendMessages("seed", false)[0].content, opRolePreamble("extend"));
-});
-
-test("drift: stirMessages(default) system === opRolePreamble('stir')", () => {
-  assert.equal(stirMessages("loose", 0, [])[0].content, opRolePreamble("stir"));
-});
-
-test("drift: receiveMessages(default) system === opRolePreamble('receive')", () => {
-  assert.equal(receiveMessages("")[0].content, opRolePreamble("receive"));
 });
 
 // ─── variable infix behavior ────────────────────────────────────────────────

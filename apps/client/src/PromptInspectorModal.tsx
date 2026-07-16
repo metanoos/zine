@@ -12,10 +12,9 @@
  *   3. user   — the injected context block (=== CONTEXT === … === END CONTEXT ===)
  *   4. user   — the op body (seed / loose prose / source / limelight log)
  *
- * This is the pre-send view that was missing: the provenance reconstructor
- * (LlmReconstructPanel) shows the same shape for a STEPPED past call, but until
- * this modal there was no way to see what an op is ABOUT to send. Both read the
- * same builders (op-prompts.ts), so the preview is faithful by construction.
+ * This is a pre-send view: there is no attempt to rebuild a past call from
+ * incomplete provenance. It reads the same builders as the live operation
+ * (op-prompts.ts), so the preview is faithful by construction.
  *
  * The modal is a pure presentation layer: App.tsx derives the per-op inputs
  * (seed from the editor selection, loose prose via partitionDoc, etc.) and the
@@ -230,12 +229,12 @@ export function PromptInspectorModal({
             <p className="muted">No messages for this op.</p>
           ) : (
             rows.map((r) => (
-              <section className="llm-recon-section prompt-inspector-row" key={r.key}>
-                <span className="llm-recon-label">
+              <section className="prompt-inspector-row" key={r.key}>
+                <span className="prompt-inspector-label">
                   {r.label}
                   {r.hint ? <span className="prompt-inspector-hint"> · {r.hint}</span> : null}
                 </span>
-                <pre className="llm-recon-pre">{r.content || "(empty)"}</pre>
+                <pre className="prompt-inspector-pre">{r.content || "(empty)"}</pre>
               </section>
             ))
           )}

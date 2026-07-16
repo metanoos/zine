@@ -265,45 +265,6 @@ export function saveLocalShielded(folderId: string, paths: Set<string>): void {
   saveLocalFolder({ ...existing, shieldedPaths: [...paths] });
 }
 
-// --- folder discovery ----------------------------------------------------
-
-/** List all locally-known folders (for the switcher), most-recent first. */
-export function listLocalFolders(): FolderRef[] {
-  const out: FolderRef[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (k && k.startsWith(PREFIX)) {
-      const id = k.slice(PREFIX.length);
-      const folder = loadLocalFolder(id);
-      if (folder) out.push({ id: folder.id, label: folder.label });
-    }
-  }
-  // Most-recently-modified last (so [length-1] is the most recent).
-  return out.sort((a, b) => localUpdatedAt(a.id) - localUpdatedAt(b.id));
-}
-
-/** The newest updatedAt across a folder's files (0 if empty/missing). Used as
- *  the MRU fallback for folders with no `lastOpened` stamp (pre-existing
- *  entries created before the stamp was introduced). */
-export function localUpdatedAt(folderId: string): number {
-  const folder = loadLocalFolder(folderId);
-  if (!folder) return 0;
-  let max = 0;
-  for (const f of Object.values(folder.files)) {
-    if (f.updatedAt > max) max = f.updatedAt;
-  }
-  return max;
-}
-
-/** Number of local files a folder has (0 if the record is missing/empty).
- *  Used by the picker's prune heuristic to recognize auto-provisioned folders
- *  that were never written to. */
-export function localFolderFileCount(folderId: string): number {
-  const folder = loadLocalFolder(folderId);
-  if (!folder) return 0;
-  return Object.keys(folder.files).length;
-}
-
 /** Ensure a folder record exists (for create/remember). */
 export function rememberLocalFolder(ref: FolderRef): void {
   const existing = loadLocalFolder(ref.id);
@@ -312,11 +273,6 @@ export function rememberLocalFolder(ref: FolderRef): void {
   } else if (ref.label && existing.label !== ref.label) {
     saveLocalFolder({ ...existing, label: ref.label });
   }
-}
-
-/** Delete a folder's local record entirely. */
-export function forgetLocalFolder(folderId: string): void {
-  localStorage.removeItem(key(folderId));
 }
 
 // --- crash pad (desktop) ------------------------------------------------
@@ -403,14 +359,5 @@ export function clearPadPath(folderId: string, relativePath: string): void {
     }
   } catch {
     // Non-fatal — a stale pad entry just gets overwritten on the next mirror.
-  }
-}
-
-/** Wipe a folder's entire crash pad. Synchronous. */
-export function clearPad(folderId: string): void {
-  try {
-    localStorage.removeItem(padKey(folderId));
-  } catch {
-    // Non-fatal.
   }
 }

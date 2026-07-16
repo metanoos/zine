@@ -458,10 +458,10 @@ function resolvedMode(theme: Theme): "light" | "dark" {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-// The folder the workspace manages lives on real disk now; its identity and
-// absolute path are held in `folder` state (sourced from workspace.ts, which
-// persists them to localStorage). No hardcoded seed content — the sidebar is
-// built entirely from what baselineScan reconstructs at boot.
+// The workspace root is a logical folder trace, identified by `folder.id` and
+// backed locally before relay synchronization. Disk is an explicit Scan/Reify
+// substrate, not the editor's mutation backend. No hardcoded seed content —
+// the sidebar is built from the attached local/relay workspace snapshot.
 
 // --- run/text helpers -------------------------------------------------
 
@@ -1415,13 +1415,6 @@ function Sidebar({
   /** Id of the attached folder. A change (switch/detach) clears the tree
    *  multi-selection so it never refers to paths that no longer exist. */
   folderId: string | null;
-  /** Whether the orchestration-replay section is expanded. §3.3/§8. */
-  orchestrationOpen: boolean;
-  /** Toggle the orchestration-replay section. */
-  onToggleOrchestration: () => void;
-  /** Bumped by App() after a folder-chain mutation so the orchestration panel
-   *  re-fetches its stream. */
-  orchestrationRefreshKey: number;
   /** Open a tree item into a fresh column to the right of the active panel
    *  (the context menu's "Open to side"). A folder opens as a folder tab, a
    *  file as an editor tab; a new column is always spawned. */
@@ -6148,9 +6141,9 @@ function useProvenance(
   // The motivating case is the trailing debounce after an LLM op's catch-up
   // step (see stepFile), but it also collapses any other redundant step.
   const lastSteppedRef = useRef<Map<string, FileStepBaseline>>(new Map());
-  // Step-on-mount hydration flag: once the boot scan has populated `files`,
+  // Step-on-mount hydration flag: once workspace attach has populated `files`,
   // we don't want the first render's debounce effect to re-publish content
-  // that baselineScan already stepped. Cleared by the boot effect in App().
+  // that attach already loaded as current. Cleared by the boot effect in App().
   const ready = useRef(false);
 
   // Spawn the relay sidecar once on mount. Desktop-only: the sidecar is a
@@ -6996,7 +6989,7 @@ function App() {
       !prevFolderSigRef.current.startsWith(paths.join("\n"));
     prevFolderSigRef.current = sig;
     if (!grew) return;
-    setOrchestrationRefreshKey((k) => k + 1);
+    setFolderReplayRefreshKey((k) => k + 1);
   }, [files]);
   // LLM ops suppress steps while streaming and release on finish; indirection
   // via a ref so the async op's finally always calls the latest closure (the
@@ -7399,12 +7392,6 @@ function App() {
     count?: number;
   }>({ state: "idle" });
 
-  // --- orchestration timeline state ----------------------------------------
-  // Collapsible folder-orchestration replay view (entry/exit/rename/selection
-  // over the folder's lifetime). Independent of the content ReplayTransport —
-  // a separate lens on the same folder chain. §3.3/§8.
-  const [orchestrationOpen, setOrchestrationOpen] = useState(false);
-
   // --- tag browser state ---------------------------------------------------
   // A tag always names a zine (protocol §Tagging vs. bracketing). Shares the
   // relay list with the sampler (samplerUrls) rather than duplicating it.
@@ -7466,19 +7453,17 @@ function App() {
   // App so resolvedModelProviderId re-derives and flows down to ActionPalette as a
   // prop — mirroring how a substrate switch re-derives substrateKeyId.
   const [voiceProviderTick, setVoiceProviderTick] = useState(0);
-  // orchestrationRefreshKey bumps when the folder's membership set or any file's
-  // node id changes, so the OrchestrationTimeline panel re-fetches its stream
-  // after a folder-chain mutation (create/move/delete/rename/import). The bump
-  // effect lives near the replay-follow effect below; it only fires on actual
-  // growth, so typing in a file doesn't thrash it.
-  const [orchestrationRefreshKey, setOrchestrationRefreshKey] = useState(0);
+  // Bumped when folder membership or a file head advances. The folder replay
+  // follow effect uses it to discover newly published structural steps while
+  // parked at the live end of the unified ReplayTransport timeline.
+  const [folderReplayRefreshKey, setFolderReplayRefreshKey] = useState(0);
 
   // Follow-newest for FOLDER MEMBERSHIP events: the file-follow effect (above,
   // near the replay state) only sees file nodeIds. A folder's composition
   // history (add/remove/rename, kind 4292) advances on a separate chain with no
   // FileState.nodeId to watch, so without this a folder-scope mount parked on
   // `last` goes silent when a collaborator adds/removes a file — the broken
-  // promise this closes. Piggybacks on `orchestrationRefreshKey` (bumped by the
+  // promise this closes. Piggybacks on `folderReplayRefreshKey` (bumped by the
   // effect above this block): when it bumps while parked on `last`, refetch the
   // folder nodes, walk the chain for structural deltas not already in the
   // timeline, and append them — same merge/sort/advance as the file follow.
@@ -7486,7 +7471,7 @@ function App() {
   // events touching its subtree.
   useEffect(() => {
     if (!replay || !folder) return;
-    if (orchestrationRefreshKey === 0) return; // never bumped yet
+    if (folderReplayRefreshKey === 0) return; // never bumped yet
     const last = replay.steps.length - 1;
     if (replay.index !== last) return;
     let cancelled = false;
@@ -7574,7 +7559,7 @@ function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orchestrationRefreshKey, replay, folder?.id]);
+  }, [folderReplayRefreshKey, replay, folder?.id]);
 
   /** Wrap the active editor's current selection in `[[ ]]` (pending). The menu's
    *  bracket action and Cmd/Ctrl+S-over-a-selection both call this. Pure wrap —
@@ -10757,7 +10742,7 @@ function App() {
       const byId = new Map(folderNodes.map((e) => [e.id, e]));
       // Resolve the uncited head (the event nobody cites as `prev`) and walk
       // prev-pointers back, then reverse: genesis→head so deltas read in publish
-      // order. Same chain-walk as folderTimelineWithDeltas (provenance.ts).
+      // order. This is the folder-chain counterpart to the file chain walk.
       const citedAsPrev = new Set<string>();
       for (const e of folderNodes) {
         const pt = e.tags.find((t) => t[0] === "e" && t[3] === "prev");
@@ -12369,9 +12354,6 @@ function App() {
                 onRevoke={requestTraceRevocation}
                 onRename={renameNode}
                 folderId={folder?.id ?? null}
-                orchestrationOpen={orchestrationOpen}
-                onToggleOrchestration={() => setOrchestrationOpen((v) => !v)}
-                orchestrationRefreshKey={orchestrationRefreshKey}
                 samplerOpen={samplerOpen}
                 onToggleSampler={() => {
                   // The sidebar telescope always targets the attached folder's

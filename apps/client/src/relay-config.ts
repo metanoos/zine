@@ -174,14 +174,3 @@ export function writeRelays(entries: RelayEntry[] = loadRelays()): RelayEntry[] 
 export function readRelays(entries: RelayEntry[] = loadRelays()): RelayEntry[] {
   return entries.filter((e) => e.read);
 }
-
-/**
- * The full set of relay URLs the app should read from, derived from the
- * configured read set. Used by samplers that want one flat URL list. Dedupes
- * via Set. Currently has no live callers but is kept as a convenience.
- */
-export function allReadUrls(): string[] {
-  const urls = new Set<string>();
-  for (const e of readRelays()) urls.add(e.url);
-  return [...urls];
-}

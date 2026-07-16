@@ -199,57 +199,61 @@ async fn factory_reset(app: tauri::AppHandle) -> Result<(), String> {
     run_relay_factory_reset(&bin)
 }
 
-// --- disk backing for the workspace -------------------------------------
+// --- native scan/reify substrate -----------------------------------------
 //
-// The desktop client's source of truth is a real folder on disk; the relay
-// holds provenance. These commands are the only disk surface the webview
-// gets — there's no tauri-plugin-fs exposed to JS. Every path the webview
-// sends is a relative path resolved against `root`, and `resolve_under`
-// rejects anything that escapes the root (absolute paths, `..` traversal),
-// so the webview can't touch files outside the attached folder.
+// The workspace is local-store/relay backed. These commands are the narrow
+// native surface for explicitly scanning from or reifying to disk; there is no
+// tauri-plugin-fs exposed to JS. Every write path is resolved under the folder
+// the user picked, and `resolve_under` rejects absolute paths, traversal, and
+// symlink escapes.
 
 /// Resolve `relative` under `root`, rejecting traversal outside the root.
 fn resolve_under(root: &str, relative: &str) -> Result<PathBuf, String> {
     let root_path = PathBuf::from(root);
-    let joined = if Path::new(relative).is_absolute() {
-        // Treat an absolute path as an error rather than honoring it — the
-        // contract is "relative path under root".
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
         return Err(format!("path must be relative to the folder root: {relative}"));
-    } else {
-        root_path.join(relative)
-    };
-    // canonicalize collapses any `..` segments. If the file doesn't exist
-    // yet (we're about to create it), canonicalize the parent instead and
-    // re-append the file name.
-    let canon = match joined.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            let parent = joined.parent().unwrap_or_else(|| Path::new(""));
-            let file_name = joined.file_name();
-            let parent_canon = parent
-                .canonicalize()
-                .map_err(|e| format!("parent folder does not exist ({}): {}", parent.display(), e))?;
-            match file_name {
-                Some(name) => parent_canon.join(name),
-                None => parent_canon,
-            }
-        }
-    };
-    // Final containment check: the canonical path must start with the
-    // canonical root. This is what actually stops `..` escapes.
+    }
     let root_canon = root_path
         .canonicalize()
         .map_err(|e| format!("root folder does not exist: {}", e))?;
+    let joined = root_canon.join(relative_path);
+
+    // Existing targets are canonicalized directly. For a new nested target,
+    // canonicalize the nearest existing ancestor: this both permits
+    // write_text_file to create several missing parent levels and detects an
+    // existing symlink that points outside the chosen root.
+    let canon = match joined.canonicalize() {
+        Ok(path) => path,
+        Err(_) => {
+            let mut ancestor = joined.as_path();
+            while !ancestor.exists() {
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| format!("could not resolve parent for {relative}"))?;
+            }
+            let ancestor_canon = ancestor
+                .canonicalize()
+                .map_err(|e| format!("resolve {}: {}", ancestor.display(), e))?;
+            if !ancestor_canon.starts_with(&root_canon) {
+                return Err(format!("path escapes the folder root: {}", relative));
+            }
+            joined
+        }
+    };
     if !canon.starts_with(&root_canon) {
         return Err(format!("path escapes the folder root: {}", relative));
     }
     Ok(canon)
-}
-
-#[derive(Serialize)]
-struct DirEntry {
-    relative_path: String,
-    is_dir: bool,
 }
 
 /// Native folder picker. Returns the chosen absolute path, or null if the
@@ -351,6 +355,11 @@ fn scan_walk(dir: &Path, root: &Path, out: &mut Vec<ScannedFile>) -> Result<(), 
         .map_err(|e| format!("failed to read {}: {}", dir.display(), e))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("entry error: {}", e))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if IGNORED_SEGMENTS.iter().any(|segment| *segment == name.as_ref()) {
+            continue;
+        }
         let ft = match entry.file_type() {
             Ok(t) => t,
             Err(_) => continue,
@@ -381,82 +390,6 @@ fn scan_walk(dir: &Path, root: &Path, out: &mut Vec<ScannedFile>) -> Result<(), 
     Ok(())
 }
 
-/// Recursively list a folder, returning relative paths (relative to `root`).
-/// Skips the ignored segments above. Both files AND directories are emitted as
-/// entries — directories carry `is_dir: true` with their own relative path,
-/// then recursion populates their contents.
-///
-/// The client's `baselineScan` (workspace.ts) groups entries by directory and
-/// dispatches on `is_dir`: a directory entry mints a `kind: "folder"` member
-/// with its own genesis and recurses. Returning only files (an earlier shape)
-/// left the `isDir` branch dead and silently dropped every nested file on
-/// attach — empty subdirectories were lost too.
-#[tauri::command]
-fn list_dir(root: String) -> Result<Vec<DirEntry>, String> {
-    let root_path = PathBuf::from(&root);
-    let root_canon = root_path
-        .canonicalize()
-        .map_err(|e| format!("root folder does not exist: {}", e))?;
-    let mut out = Vec::new();
-    walk_dir(&root_canon, &root_canon, &mut out)?;
-    out.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    Ok(out)
-}
-
-fn walk_dir(dir: &Path, root: &Path, out: &mut Vec<DirEntry>) -> Result<(), String> {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) => return Err(format!("failed to read {}: {}", dir.display(), e)),
-    };
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("dir entry error: {}", e))?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if IGNORED_SEGMENTS.iter().any(|seg| *seg == name_str) {
-            continue;
-        }
-        let path = entry.path();
-        let ft = entry
-            .file_type()
-            .map_err(|e| format!("file type error for {}: {}", path.display(), e))?;
-        if ft.is_dir() {
-            let rel = path
-                .strip_prefix(root)
-                .map_err(|e| format!("strip_prefix failed: {}", e))?
-                .to_string_lossy()
-                .into_owned();
-            // Emit the directory itself before recursing, so the client's
-            // baselineScan sees the folder-member and mints its genesis.
-            out.push(DirEntry {
-                relative_path: rel,
-                is_dir: true,
-            });
-            walk_dir(&path, root, out)?;
-        } else if ft.is_file() {
-            let rel = path
-                .strip_prefix(root)
-                .map_err(|e| format!("strip_prefix failed: {}", e))?
-                .to_string_lossy()
-                .into_owned();
-            out.push(DirEntry {
-                relative_path: rel,
-                is_dir: false,
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Read a file as UTF-8 text. Non-UTF8 files (binaries) return an error
-/// rather than garbage — the editor only handles text.
-#[tauri::command]
-fn read_text_file(root: String, relative_path: String) -> Result<String, String> {
-    let abs = resolve_under(&root, &relative_path)?;
-    let bytes = fs::read(&abs).map_err(|e| format!("read {}: {}", abs.display(), e))?;
-    String::from_utf8(bytes)
-        .map_err(|_| format!("{} is not valid UTF-8 (binary files aren't editable)", abs.display()))
-}
-
 /// Write text to a file, creating parent directories as needed.
 #[tauri::command]
 fn write_text_file(root: String, relative_path: String, contents: String) -> Result<(), String> {
@@ -466,144 +399,6 @@ fn write_text_file(root: String, relative_path: String, contents: String) -> Res
             .map_err(|e| format!("create dirs {}: {}", parent.display(), e))?;
     }
     fs::write(&abs, contents).map_err(|e| format!("write {}: {}", abs.display(), e))
-}
-
-/// Delete a file. Folder deletes go through `delete_folder` (recursive).
-#[tauri::command]
-fn delete_file(root: String, relative_path: String) -> Result<(), String> {
-    let abs = resolve_under(&root, &relative_path)?;
-    fs::remove_file(&abs).map_err(|e| format!("delete {}: {}", abs.display(), e))
-}
-
-/// Recursively delete a folder. Refuses to delete the root itself.
-#[tauri::command]
-fn delete_folder(root: String, relative_path: String) -> Result<(), String> {
-    let abs = resolve_under(&root, &relative_path)?;
-    let root_canon = PathBuf::from(&root)
-        .canonicalize()
-        .map_err(|e| format!("root folder does not exist: {}", e))?;
-    if abs == root_canon {
-        return Err("refusing to delete the folder root".into());
-    }
-    fs::remove_dir_all(&abs).map_err(|e| format!("delete {}: {}", abs.display(), e))
-}
-
-/// Create a directory (including parents). No-op if it already exists.
-/// Folders have no provenance node of their own — they're implicit in file
-/// paths.
-#[tauri::command]
-fn create_folder(root: String, relative_path: String) -> Result<(), String> {
-    let abs = resolve_under(&root, &relative_path)?;
-    fs::create_dir_all(&abs).map_err(|e| format!("create {}: {}", abs.display(), e))
-}
-
-/// Move `src_relative` into `dest_folder_relative` ("" = root), keeping the
-/// same basename. Tries a fast rename; falls back to copy+remove for
-/// cross-volume moves. Both src and dest must stay under `root`.
-#[tauri::command]
-fn move_path(root: String, src_relative: String, dest_folder_relative: String) -> Result<(), String> {
-    let src_abs = resolve_under(&root, &src_relative)?;
-    let name = src_abs
-        .file_name()
-        .ok_or_else(|| "source has no file name".to_string())?;
-    let dest_relative = if dest_folder_relative.is_empty() {
-        name.to_string_lossy().into_owned()
-    } else {
-        format!("{}/{}", dest_folder_relative, name.to_string_lossy())
-    };
-    let dest_abs = resolve_under(&root, &dest_relative)?;
-    if dest_abs.exists() {
-        return Err(format!(
-            "destination already exists: {}",
-            dest_abs.display()
-        ));
-    }
-    if let Some(parent) = dest_abs.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("create dest dirs {}: {}", parent.display(), e))?;
-    }
-    match fs::rename(&src_abs, &dest_abs) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            // Cross-device / cross-volume: copy then remove.
-            copy_recursive(&src_abs, &dest_abs)?;
-            if src_abs.is_dir() {
-                fs::remove_dir_all(&src_abs)
-            } else {
-                fs::remove_file(&src_abs)
-            }
-            .map_err(|e| format!("remove old after copy: {}", e))
-        }
-    }
-}
-
-/// Rename `src_relative` (file or folder) to `new_name` within its current
-/// parent. Same rename + cross-volume fallback as `move_path`, just keeping the
-/// parent and swapping only the basename. `new_name` must not be empty or
-/// contain a path separator (the UI guards this too). Rejects if the resolved
-/// destination already exists.
-#[tauri::command]
-fn rename_path(root: String, src_relative: String, new_name: String) -> Result<(), String> {
-    if new_name.is_empty() || new_name == "." || new_name == ".." {
-        return Err(format!("invalid new name: {:?}", new_name));
-    }
-    if new_name.contains('/') || new_name.contains('\\') {
-        return Err("new name must not contain a path separator".to_string());
-    }
-    let src_abs = resolve_under(&root, &src_relative)?;
-    let dest_abs = src_abs
-        .parent()
-        .map(|p| p.join(&new_name))
-        .ok_or_else(|| "source has no parent directory".to_string())?;
-    // dest is src's parent joined with a bare name, so it can't escape the
-    // workspace root (src was already under it, and the name has no separator).
-    if dest_abs.exists() {
-        return Err(format!(
-            "destination already exists: {}",
-            dest_abs.display()
-        ));
-    }
-    match fs::rename(&src_abs, &dest_abs) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            // Cross-device / cross-volume: copy then remove.
-            copy_recursive(&src_abs, &dest_abs)?;
-            if src_abs.is_dir() {
-                fs::remove_dir_all(&src_abs)
-            } else {
-                fs::remove_file(&src_abs)
-            }
-            .map_err(|e| format!("remove old after copy: {}", e))
-        }
-    }
-}
-
-fn copy_recursive(src: &Path, dest: &Path) -> Result<(), String> {
-    if src.is_dir() {
-        fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {}", dest.display(), e))?;
-        for entry in fs::read_dir(src).map_err(|e| format!("readdir {}: {}", src.display(), e))? {
-            let entry = entry.map_err(|e| format!("dir entry: {}", e))?;
-            let entry_name = entry.file_name();
-            copy_recursive(&entry.path(), &dest.join(entry_name))?;
-        }
-        Ok(())
-    } else {
-        fs::copy(src, dest).map_err(|e| format!("copy {} -> {}: {}", src.display(), dest.display(), e))?;
-        Ok(())
-    }
-}
-
-/// A sensible default to offer on first run: `$HOME/zine` if it exists.
-/// Returns null otherwise — the user must pick explicitly.
-#[tauri::command]
-fn attached_folder_default() -> Result<Option<String>, String> {
-    if let Some(home) = dirs_home() {
-        let candidate = home.join("zine");
-        if candidate.is_dir() {
-            return Ok(Some(candidate.to_string_lossy().into_owned()));
-        }
-    }
-    Ok(None)
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -1369,25 +1164,6 @@ fn read_control_reply<R: BufRead>(
     }
 }
 
-/// Derive the onion address from the Nostr secret — but the secret lives in the
-/// webview's localStorage (browser-side identity), not in Rust. So this command
-/// is a thin pass-through: the webview computes the seed + address (onion-key.ts,
-/// pure crypto), and calls this only to verify Tor agrees. The actual derivation
-/// is done in TypeScript so the Nostr secret never crosses the IPC boundary
-/// more than once (as the derived seed, not the raw secret).
-///
-/// In practice the webview calls setup_onion(seedBase64) directly; this command
-/// exists for the "show the address before Tor is running" path (the address is
-/// computable from pure crypto, no Tor needed).
-#[tauri::command]
-async fn derive_onion_address() -> Result<String, String> {
-    Err(
-        "onion derivation is browser-side (onion-key.ts) — the Nostr secret \
-         never enters Rust. Call setup_onion(seedBase64) with the derived seed."
-            .into(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1421,6 +1197,39 @@ mod tests {
         drop(second);
         fs::remove_dir_all(dir).expect("remove lock test directory");
     }
+
+    #[test]
+    fn resolve_under_allows_missing_nested_parents_but_rejects_traversal() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("zine-resolve-under-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create resolver test directory");
+
+        let resolved = resolve_under(
+            dir.to_str().expect("temporary path should be UTF-8"),
+            "nested/deeper/file.md",
+        )
+        .expect("missing parent directories should be creatable");
+        assert_eq!(
+            resolved,
+            dir.canonicalize()
+                .expect("temporary root should canonicalize")
+                .join("nested/deeper/file.md")
+        );
+        assert!(
+            resolve_under(
+                dir.to_str().expect("temporary path should be UTF-8"),
+                "../outside.md",
+            )
+            .is_err(),
+            "parent traversal must be rejected"
+        );
+
+        fs::remove_dir_all(dir).expect("remove resolver test directory");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1434,21 +1243,12 @@ pub fn run() {
             pick_folder,
             pick_file,
             scan_external,
-            list_dir,
-            read_text_file,
             write_text_file,
-            delete_file,
-            delete_folder,
-            create_folder,
-            move_path,
-            rename_path,
-            attached_folder_default,
             llm_fetch,
             stamp_ots,
             upgrade_ots,
             spawn_tor,
             setup_onion,
-            derive_onion_address,
             list_peers,
             set_owner,
             add_peer,

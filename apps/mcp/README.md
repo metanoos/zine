@@ -142,8 +142,8 @@ There are no interactive prompts; the MCP client owns the stdio process.
 
 ```bash
 npm run dev    # run via tsx (transpile-on-the-fly)
-npm run build  # tsc → dist/
-npx tsc --noEmit  # typecheck
+npm test       # build/start smoke tests plus unit tests
+npm run build  # typecheck, then bundle the executable to dist/server.js
 ```
 
 The protocol gestures and workspace behavior come from the shared client

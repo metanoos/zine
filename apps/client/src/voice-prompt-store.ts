@@ -25,19 +25,7 @@ function loadMap(): VoicePromptMap {
   return {};
 }
 
-function saveMap(map: VoicePromptMap): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
-}
-
 /** The custom prompt for a voice, or "" if unset. */
 export function getVoicePrompt(pubkey: string): string {
   return loadMap()[pubkey] ?? "";
-}
-
-/** Set the custom prompt for a voice. Empty string clears it. */
-export function setVoicePrompt(pubkey: string, prompt: string): void {
-  const map = loadMap();
-  if (prompt) map[pubkey] = prompt;
-  else delete map[pubkey];
-  saveMap(map);
 }

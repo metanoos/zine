@@ -16,6 +16,8 @@ import {
   listPeers,
   addPeer,
   removePeer,
+  addWriter,
+  removeWriter,
   setOwner,
   type PeersState,
 } from "./peers-store.js";
@@ -705,9 +707,11 @@ function PeersSection() {
   const [state, setState] = useState<PeersState>({
     owner: "",
     peers: [],
+    writers: [],
     networkedMode: false,
   });
   const [draft, setDraft] = useState("");
+  const [writerDraft, setWriterDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -741,6 +745,27 @@ function PeersSection() {
     setError(null);
     try {
       setState(await removePeer(pubkey));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function onAddWriter() {
+    setError(null);
+    const pk = writerDraft.trim();
+    if (!pk) return;
+    try {
+      setState(await addWriter(pk));
+      setWriterDraft("");
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function onRemoveWriter(pubkey: string) {
+    setError(null);
+    try {
+      setState(await removeWriter(pubkey));
     } catch (e) {
       setError(String(e));
     }
@@ -834,6 +859,50 @@ function PeersSection() {
         <button type="submit" className="settings-add-btn">
           <Plus size={16} strokeWidth={1.75} />
           <span>Add peer</span>
+        </button>
+      </form>
+
+      <h3 className="networking-subsection-title">Headless writers</h3>
+      <p className="networking-section-sub">
+        Agent presses that may read and publish only events signed by their own key.
+      </p>
+      <ul className="peer-list">
+        {state.writers.map((pk) => (
+          <li key={pk} className="settings-row peer-row">
+            <code className="peer-pubkey" title={pk}>
+              {pk.slice(0, 24)}…{pk.slice(-8)}
+            </code>
+            <button
+              type="button"
+              className="peer-delete"
+              title="Remove writer"
+              onClick={() => onRemoveWriter(pk)}
+            >
+              <Trash2 size={16} strokeWidth={1.75} />
+            </button>
+          </li>
+        ))}
+        {state.writers.length === 0 && state.networkedMode && (
+          <li className="peer-empty">No headless writers authorized.</li>
+        )}
+      </ul>
+      <form
+        className="peer-add"
+        onSubmit={(ev) => {
+          ev.preventDefault();
+          onAddWriter();
+        }}
+      >
+        <input
+          className="peer-add-input"
+          type="text"
+          placeholder="Paste the agent’s npub1… or hex pubkey"
+          value={writerDraft}
+          onChange={(ev) => setWriterDraft(ev.target.value)}
+        />
+        <button type="submit" className="settings-add-btn">
+          <Plus size={16} strokeWidth={1.75} />
+          <span>Add writer</span>
         </button>
       </form>
     </div>

@@ -640,20 +640,6 @@ export function wrapSelectionCommand(): Command {
   };
 }
 
-/** Remove bracket markup while preserving its visible phrase. A resolved
- *  bracket also drops its citation suffix, returning the passage to fluid text. */
-export function unwrapBracket(
-  text: string,
-  matchStart: number,
-  matchEnd: number,
-): string {
-  const bracket = bracketRangeAt(text, matchStart);
-  if (!bracket || bracket.matchStart !== matchStart || bracket.matchEnd !== matchEnd) {
-    return text;
-  }
-  return text.slice(0, matchStart) + bracket.phrase + text.slice(matchEnd);
-}
-
 /** Backspace twice over one whole bracket to unwrap it instead of deleting its
  *  phrase. The first press arms the gesture and leaves the bracket selected;
  *  the second press within the timeout replaces the occurrence with plain text.

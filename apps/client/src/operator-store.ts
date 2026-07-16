@@ -39,13 +39,6 @@ const EMPTY: OperatorState = {
 
 let cached: OperatorState | null = null;
 
-/** True when the hosted relay's operator layer is reachable at all. False on
- *  the desktop sidecar (which doesn't serve /operator/*) or before the first
- *  successful fetch. */
-export function hasOperatorState(): boolean {
-  return cached !== null;
-}
-
 /** The last-known operator state — synchronous, from the in-memory cache.
  *  Returns the empty state (no operator) if nothing has been fetched yet, so
  *  callers can treat the unbound case uniformly. */
