@@ -27,6 +27,7 @@
 import {
   diffToDeltas,
   fetchChain,
+  fetchEventById,
   fetchManifest,
   fetchNodeOwner,
   eventMeta,
@@ -96,6 +97,30 @@ export function pendingMoveForPath(
   return { kind: "move", fromPath: inheritedFrom };
 }
 
+/** Finish one explicit Step after its local state has been staged. Relay
+ * failures remain retryable, but never masquerade as a completed checkpoint. */
+export async function completeStagedWrite(
+  publish: () => Promise<string>,
+  scheduleRetry: () => void,
+): Promise<string> {
+  try {
+    return await publish();
+  } catch (error) {
+    scheduleRetry();
+    throw error;
+  }
+}
+
+/** Complete provenance removals before deleting the retryable local copies. */
+export async function completeDeletion(
+  paths: readonly string[],
+  tombstone: (path: string) => Promise<void>,
+  deleteLocal: (path: string) => void,
+): Promise<void> {
+  await Promise.all(paths.map((path) => tombstone(path)));
+  for (const path of paths) deleteLocal(path);
+}
+
 async function sha256Hex(text: string): Promise<string> {
   const data = new TextEncoder().encode(text);
   const hash = await crypto.subtle.digest("SHA-256", data);
@@ -142,7 +167,13 @@ function localToFiles(
   return out;
 }
 
-export function createLocalWorkspace(): Workspace {
+export interface LocalWorkspaceOptions {
+  /** Require an exact folder-genesis fetch during attach. Headless presses use
+   *  this to fail at startup instead of reporting a local cache as connected. */
+  requireRelayOnAttach?: boolean;
+}
+
+export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Workspace {
   let ref: FolderRef | null = null;
 
   function requireId(): string {
@@ -394,9 +425,15 @@ export function createLocalWorkspace(): Workspace {
      */
     async attach(folderRef: FolderRef, _onReconciled?: (path: string, file: FileState | null) => void): Promise<AttachResult> {
       ref = { ...folderRef };
+      if (options.requireRelayOnAttach) {
+        const genesis = await fetchEventById(ref.id);
+        if (!genesis || genesis.kind !== 4290 || eventMeta(genesis).z !== "folder") {
+          throw new Error(`folder genesis ${ref.id} is unavailable on the configured relay`);
+        }
+      }
       rememberLocalFolder(ref);
-      const local = loadLocalFolder(ref.id);
-      const files = local ? localToFiles(local) : {};
+      let local = loadLocalFolder(ref.id);
+      let files = local ? localToFiles(local) : {};
       for (const [path, file] of Object.entries(local?.files ?? {})) {
         // Resume interrupted structural moves and first-time files that were
         // stored locally before their genesis reached the relay (including the
@@ -405,10 +442,16 @@ export function createLocalWorkspace(): Workspace {
           schedulePush(path);
         }
       }
-      // Kick off the background sync — don't await. The editor is already
-      // usable from `files`.
-      void pullFromRelay(ref.id);
-      return { files, reconciled: Promise.resolve() };
+      if (options.requireRelayOnAttach) {
+        await pullFromRelay(ref.id, { strict: true });
+        local = loadLocalFolder(ref.id);
+        files = local ? localToFiles(local) : {};
+        return { files, reconciled: Promise.resolve() };
+      }
+      // The GUI remains local-first and renders immediately, but expose the
+      // real synchronization barrier to callers that choose to observe it.
+      const reconciled = pullFromRelay(ref.id).then(() => undefined);
+      return { files, reconciled };
     },
 
     async readFile(relativePath: string): Promise<string> {
@@ -457,9 +500,14 @@ export function createLocalWorkspace(): Workspace {
         pendingLocalOnly: localOnly || undefined,
         pendingForce: force || undefined,
       });
-      // 2. Background relay push (debounced).
-      schedulePush(relativePath);
-      return prevNodeId;
+      // 2. An explicit write is a completed Step. The old implementation
+      // returned prevNodeId and queued the publish, which made Step/Send point
+      // at stale history. Retain local-first durability by scheduling a retry
+      // if the synchronous relay barrier fails, but surface that failure now.
+      return completeStagedWrite(
+        () => pushToRelay(id, relativePath),
+        () => schedulePush(relativePath),
+      );
     },
 
     async flushFile(relativePath: string): Promise<string> {
@@ -502,11 +550,14 @@ export function createLocalWorkspace(): Workspace {
             (p) => p === relativePath || p.startsWith(relativePath + "/"),
           )
         : [relativePath];
-      for (const p of affected) {
-        deleteLocalFile(id, p);
-        // Relay-side tombstone (best effort).
-        void tombstoneOnRelay(id, p).catch(() => {});
-      }
+      // The gesture is complete only after every signed tombstone and manifest
+      // removal lands. Perform remote work first so a failure leaves the local
+      // copy retryable instead of silently orphaning provenance.
+      await completeDeletion(
+        affected,
+        (path) => tombstoneOnRelay(id, path),
+        (path) => deleteLocalFile(id, path),
+      );
     },
 
     async movePath(src, destFolder, _isFolder, _tagsByPath = {}): Promise<void> {
@@ -610,7 +661,10 @@ export interface PullResult {
  * header. The 5-second "recent local draft" guard from `isLocalNewer` still
  * defers any pull decision for a file mid-edit.
  */
-export async function pullFromRelay(folderId: string): Promise<PullResult> {
+export async function pullFromRelay(
+  folderId: string,
+  options: { strict?: boolean } = {},
+): Promise<PullResult> {
   const result: PullResult = {
     updated: new Set<string>(),
     staged: [],
@@ -619,7 +673,8 @@ export async function pullFromRelay(folderId: string): Promise<PullResult> {
   let manifest: ManifestFileEntry[];
   try {
     manifest = await fetchManifest(folderId);
-  } catch {
+  } catch (error) {
+    if (options.strict) throw error;
     return result; // relay unreachable — fine, local is primary
   }
   const local = loadLocalFolder(folderId);
@@ -688,7 +743,8 @@ export async function pullFromRelay(folderId: string): Promise<PullResult> {
           remoteHeadId,
         );
         result.updated.add(entry.relativePath);
-      } catch {
+      } catch (error) {
+        if (options.strict) throw error;
         // per-file fetch failure — skip, keep local
       }
     }

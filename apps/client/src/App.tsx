@@ -6438,6 +6438,7 @@ function useProvenance(
       return nodeId;
     } catch (e) {
       console.warn(`[provenance] write+publish failed for ${path}:`, e);
+      throw e;
     }
   }
 
@@ -7596,7 +7597,7 @@ function App() {
     const taggedTraces = file.taggedTraces ?? [];
     const steppedKedits = view.state.field(keditField, false) ?? file.kedits ?? EMPTY_KEDIT_LOG;
     const kedits = keditLogToArray(steppedKedits);
-    await backendRef.current.writeFile(
+    const nodeId = await backendRef.current.writeFile(
       path,
       content,
       file.tags,
@@ -7607,7 +7608,6 @@ function App() {
       kedits.length > 0 ? kedits : undefined,
       true,
     );
-    const nodeId = await backendRef.current.flushFile(path);
     if (!nodeId) throw new Error(`The local source trace ${path} did not produce a node id.`);
     seedSteppedRef.current({
       [path]: { ...file, runs, nodeId },

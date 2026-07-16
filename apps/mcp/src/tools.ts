@@ -47,7 +47,7 @@ export function agentVoice() {
 
 /** Build the local-first workspace the headless press binds to. */
 export function createMcpWorkspace(): Workspace {
-  return createLocalWorkspace();
+  return createLocalWorkspace({ requireRelayOnAttach: true });
 }
 
 /** Wrap a JSON-serializable payload as an MCP tool result (single text block). */
