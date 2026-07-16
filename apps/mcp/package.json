@@ -8,10 +8,10 @@
     "zine-mcp": "dist/server.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && esbuild src/server.ts --bundle --platform=node --format=esm --outfile=dist/server.js",
     "dev": "tsx src/server.ts",
     "start": "node dist/server.js",
-    "test": "tsx --test src/*.test.ts"
+    "test": "tsx --test src/*.test.ts && npm run build && node dist/server.js --help"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -20,6 +20,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "esbuild": "~0.28.0",
     "tsx": "^4.23.0",
     "typescript": "~5.8.3"
   }

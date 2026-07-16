@@ -22,7 +22,7 @@
  * same folder) would race — but the desktop client uses browser localStorage
  * (a different store), so in practice the only writer here is this process.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -56,6 +56,9 @@ class NodeLocalStorage implements StorageLike {
       return this.map;
     }
     try {
+      // This file contains the headless press's signing key. Repair files
+      // created by older versions before reading any secret material.
+      chmodSync(this.path, 0o600);
       const raw = readFileSync(this.path, "utf8");
       const parsed = JSON.parse(raw) as unknown;
       this.map =
@@ -74,7 +77,12 @@ class NodeLocalStorage implements StorageLike {
   private flush(): void {
     const dir = dirname(this.path);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(this.path, JSON.stringify(this.map ?? {}, null, 2), "utf8");
+    writeFileSync(this.path, JSON.stringify(this.map ?? {}, null, 2), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    // writeFile's mode only applies on creation. Tighten an existing file too.
+    chmodSync(this.path, 0o600);
   }
 
   getItem(key: string): string | null {

@@ -2,14 +2,50 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fiatjaf/eventstore/sqlite3"
 	"github.com/nbd-wtf/go-nostr"
 )
+
+func TestAccessPolicyPollerActivatesAfterOwnerIsCreated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "peers.json")
+	policy := NewAccessPolicy(path)
+	if policy.Active() {
+		t.Fatal("policy unexpectedly active before peers.json exists")
+	}
+
+	ticks := make(chan time.Time)
+	done := make(chan struct{})
+	go func() {
+		pollAccessPolicy(policy, ticks)
+		close(done)
+	}()
+
+	owner := strings.Repeat("a", 64)
+	raw, err := json.Marshal(PeersFile{Owner: owner})
+	if err != nil {
+		t.Fatalf("encode peers file: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write peers file: %v", err)
+	}
+	ticks <- time.Now()
+	close(ticks)
+	<-done
+
+	if !policy.Active() {
+		t.Fatal("policy did not activate after peers.json owner appeared")
+	}
+	if !policy.IsOwner(owner) {
+		t.Fatal("policy did not load the new owner")
+	}
+}
 
 func TestResetLocalStateClearsEventsAndAccessPolicy(t *testing.T) {
 	dir := t.TempDir()

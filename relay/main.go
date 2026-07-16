@@ -59,16 +59,15 @@ func main() {
 	if policy.Active() {
 		log.Printf("networked mode active (owner=%s, peers=%d, writers=%d) — NIP-42 AUTH required",
 			policy.owner, len(policy.peers), len(policy.writers))
-		// Poll the file every 5s so add/remove-peer takes effect without a
-		// restart. Zero-dep (no fsnotify) — just a stat on a small JSON file.
-		go func() {
-			t := time.NewTicker(5 * time.Second)
-			defer t.Stop()
-			for range t.C {
-				policy.Poll()
-			}
-		}()
 	}
+	// Poll whether or not networked mode is active yet. The owner is normally
+	// written after the desktop sidecar starts, so gating this loop on Active
+	// would leave a first-run relay permissive until its next restart.
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		pollAccessPolicy(policy, t.C)
+	}()
 
 	// Explicit policy set — the same protections ApplySaneDefaults bundles
 	// (base64-media reject, event + filter IP rate limits, no-complex-filters),
@@ -188,6 +187,12 @@ func main() {
 	log.Printf("zine relay listening on ws://%s  (db: %s)", addr, *dbPath)
 	if err := http.ListenAndServe(addr, relay); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func pollAccessPolicy(policy *AccessPolicy, ticks <-chan time.Time) {
+	for range ticks {
+		policy.Poll()
 	}
 }
 
