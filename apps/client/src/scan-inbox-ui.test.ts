@@ -38,8 +38,14 @@ test("the Scan header exposes file and folder intake actions", () => {
 test("Scan intake targets its private folder instead of prompt context", () => {
   assert.match(scanHandler, /planScanIntake\(/);
   assert.match(scanHandler, /getOrCreateScanFolder\(/);
-  assert.match(scanHandler, /folderId: scanFolderId/);
+  assert.match(scanHandler, /const scanTree: LocalFolderTree/);
+  assert.match(scanHandler, /ensureLocalTreeFolderPath\(/);
+  assert.match(scanHandler, /localTreeFolderCoordinate\(scanTree, c\.path\)/);
+  assert.match(scanHandler, /relativePath: coordinate\.relativePath/);
+  assert.match(scanHandler, /folderId: coordinate\.folderId/);
+  assert.match(scanHandler, /propagateLocalTreeFolderHead\(/);
   assert.match(scanHandler, /localOnly: true/);
+  assert.doesNotMatch(scanHandler, /c\.path\.slice\(`\$\{SCAN\}\//);
   assert.doesNotMatch(scanHandler, /scopeRef|primaryScope|destFolder/);
   assert.doesNotMatch(scanHandler, /backendRef\.current\.writeFile/);
   assert.doesNotMatch(appSource, /Scan (?:File|Folder):[^\n]*under the scope/);
@@ -48,7 +54,8 @@ test("Scan intake targets its private folder instead of prompt context", () => {
 test("Scan entries are read-only and adopt into Root by lineage", () => {
   assert.match(appSource, /isMint\(path\) \|\| isScan\(path\) \|\| isOblivion\(path\)/);
   assert.match(appSource, /async function adoptScannedNodes\(/);
-  assert.match(appSource, /forkFileFromNode\(source\.nodeId, sourceRootId, destPath/);
+  assert.match(appSource, /forkFileIntoLocalTree\([\s\S]*?source\.nodeId,[\s\S]*?destPath/);
+  assert.match(appSource, /withPersistedFolderStates\(prev, sourceRootId\)/);
   assert.match(appSource, /Adopt into Root/);
 });
 

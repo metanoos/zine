@@ -29,7 +29,6 @@ import {
   appendToPalette,
   fetchPalette,
   rankSampleHits,
-  forkFileFromNode,
   upsertManifestEntry,
   resolveTagCandidates,
   browseTag,
@@ -255,7 +254,12 @@ import {
 } from "./reify.js";
 import {
   createLocalWorkspace,
+  ensureLocalTreeFolderPath,
+  forkFileIntoLocalTree,
   folderWriteSigner,
+  localTreeFolderCoordinate,
+  propagateLocalTreeFolderHead,
+  type LocalFolderTree,
   type StagedMerge,
 } from "./workspace-local.js";
 import { loadLocalFolder, saveLocalFile, mirrorPad, clearPadPath, loadPad, loadLocalShielded, saveLocalShielded, type LocalFile } from "./local-store.js";
@@ -842,6 +846,32 @@ function basename(path: string): string {
 function parentPath(path: string): string {
   const i = path.lastIndexOf("/");
   return i === -1 ? ROOT : path.slice(0, i);
+}
+
+/** Merge folder-trace placeholders written by recursive tree operations back
+ * into the live path-indexed UI state. File paths already imply their visual
+ * ancestors, but explicit folder states retain each folder's replay identity. */
+function withPersistedFolderStates(
+  current: Record<string, FileState>,
+  rootId: string,
+  subtree = ROOT,
+): Record<string, FileState> {
+  const local = loadLocalFolder(rootId);
+  if (!local) return current;
+  const next = { ...current };
+  for (const [path, entry] of Object.entries(local.files)) {
+    if (entry.kind !== "folder") continue;
+    if (subtree && path !== subtree && !path.startsWith(`${subtree}/`)) continue;
+    next[path] = {
+      kind: "folder",
+      runs: [],
+      nodeId: entry.nodeId,
+      ...(entry.traceId ? { traceId: entry.traceId } : {}),
+      tags: [],
+      updatedAt: entry.updatedAt,
+    };
+  }
+  return next;
 }
 
 /** Effective scope is the one context mount with shielded traversal boundaries. */
@@ -7812,6 +7842,7 @@ function App() {
     const lesson = planModelContextLesson(currentBodies);
     const signer = secretKeyForVoice(authorPubkey);
     if (!signer) throw new Error("Unlock the AUTHOR key before creating the MODEL lesson");
+    await backendRef.current.createFolder(lesson.folderPath);
     const staged: Record<string, FileState> = {};
     for (const artifact of lesson.artifacts) {
       const existing = filesRef.current[artifact.path];
@@ -11582,21 +11613,17 @@ function App() {
     const forkPath = `${step.relativePath}#fork-${shortId}`;
     setBootError(null);
     try {
+      const signer = secretKeyForVoice(authorPubkey);
+      if (!signer) throw new Error(`no key for voice ${formatPubkey(authorPubkey)}`);
       // Mint the fork: new file trace, genesis under our key, snapshot verbatim
       // from the historical node. forked-from = the step's event id.
-      const event = await forkFileFromNode(step.event.id, folder.id, forkPath);
-      // The forked node's contentHash is in its content JSON (same as the
-      // source's — the snapshot is verbatim). Extract it for the manifest entry.
-      const parsed = JSON.parse(event.content) as { contentHash?: string };
-      const contentHash = parsed.contentHash ?? "";
-      // Upsert the forked file into the folder manifest so it's discoverable
-      // by the tree / listFiles on next scan.
-      await upsertManifestEntry(folder.id, {
-        kind: "file",
-        relativePath: forkPath,
-        latestNodeId: event.id,
-        contentHash,
-      });
+      await forkFileIntoLocalTree(
+        { storageRootId: folder.id, folderId: folder.id, storagePath: ROOT },
+        step.event.id,
+        forkPath,
+        signer,
+        { localOnly: true },
+      );
       // End replay (restores live state) and re-scan so the fork appears.
       endReplay();
       const { files: scanned } = await backendRef.current.attach(folder);
@@ -12006,14 +12033,30 @@ function App() {
       if (!scanOwner) throw new Error("cannot verify the Scan folder owner");
       const folderSigner = folderWriteSigner(scanOwner, rootSigner);
       if (!folderSigner) throw new Error("the Scan folder owner key is unavailable");
+      const scanTree: LocalFolderTree = {
+        storageRootId: sourceRootId,
+        folderId: scanFolderId,
+        storagePath: SCAN,
+      };
       for (const c of created) {
-        const relativePath = c.path.slice(`${SCAN}/`.length);
+        await ensureLocalTreeFolderPath(
+          scanTree,
+          parentPath(c.path),
+          folderSigner,
+          { localOnly: true },
+        );
+        const coordinate = localTreeFolderCoordinate(scanTree, c.path);
+        const directFolderOwner = await fetchFolderOwner(coordinate.folderId);
+        const directFolderSigner = folderWriteSigner(directFolderOwner, folderSigner);
+        if (!directFolderSigner) {
+          throw new Error(`the Scan subfolder owner key is unavailable for ${c.path}`);
+        }
         const contentHash = await sha256HexLocal(c.content);
         const runs: Run[] = c.content ? [{ voice, text: c.content }] : [];
         const event = await publishEdit({
           prevEventId: null,
-          relativePath,
-          folderId: scanFolderId,
+          relativePath: coordinate.relativePath,
+          folderId: coordinate.folderId,
           deltas: diffToDeltas("", c.content),
           snapshot: c.content,
           contentHash,
@@ -12022,16 +12065,24 @@ function App() {
           signer,
           localOnly: true,
         });
-        await upsertManifestEntry(
-          scanFolderId,
+        const folderHead = await upsertManifestEntry(
+          coordinate.folderId,
           {
             kind: "file",
-            relativePath,
+            relativePath: coordinate.relativePath,
             latestNodeId: event.id,
             contentHash,
           },
-          folderSigner,
+          directFolderSigner,
           { localOnly: true },
+        );
+        await propagateLocalTreeFolderHead(
+          scanTree,
+          coordinate.folderPath,
+          coordinate.folderId,
+          folderHead,
+          directFolderSigner,
+          true,
         );
         saveLocalFile(sourceRootId, c.path, {
           content: c.content,
@@ -12052,6 +12103,7 @@ function App() {
           }));
         }
       }
+      setFiles((prev) => withPersistedFolderStates(prev, sourceRootId, SCAN));
       // Open the first imported file in the active panel.
       if (created.length > 0) openInActivePanel(created[0].path);
       setOpStatus(idx, "done", `${created.length} scanned`, "scan");
@@ -14154,7 +14206,16 @@ function App() {
    *  in Mint and every existing citation keeps resolving to it. */
   async function forkMintedNodes(srcs: string[], destFolder: string) {
     if (!folder || isMint(destFolder) || isScan(destFolder) || isOblivion(destFolder)) return;
-    const signer = secretKeyForVoice(authorPubkey) ?? undefined;
+    const signer = secretKeyForVoice(authorPubkey);
+    if (!signer) {
+      setOpStatus(activePanel, "error", `no key for voice ${formatPubkey(authorPubkey)}`, "fork");
+      return;
+    }
+    const rootTree: LocalFolderTree = {
+      storageRootId: folder.id,
+      folderId: folder.id,
+      storagePath: ROOT,
+    };
     const taken = new Set(Object.keys(files));
     let lastForkPath = "";
     try {
@@ -14163,19 +14224,10 @@ function App() {
         if (!source?.nodeId || !isMint(src) || src === MINT) continue;
         const forkPath = forkPathForMint(src, destFolder, taken);
         const content = flatten(source.runs);
-        const event = await forkFileFromNode(source.nodeId, folder.id, forkPath, {
-          signer,
-          localOnly: true,
-        });
-        const parsed = JSON.parse(event.content) as { contentHash?: string };
-        await upsertManifestEntry(
-          folder.id,
-          {
-            kind: "file",
-            relativePath: forkPath,
-            latestNodeId: event.id,
-            contentHash: parsed.contentHash ?? "",
-          },
+        const event = await forkFileIntoLocalTree(
+          rootTree,
+          source.nodeId,
+          forkPath,
           signer,
           { localOnly: true },
         );
@@ -14193,7 +14245,7 @@ function App() {
           [forkPath]: { runs, nodeId: event.id, tags: [] },
         });
         setFiles((prev) => ({
-          ...prev,
+          ...withPersistedFolderStates(prev, folder.id),
           [forkPath]: { runs, nodeId: event.id, tags: [] },
         }));
         taken.add(forkPath);
@@ -14225,6 +14277,11 @@ function App() {
       return;
     }
     const sourceRootId = folder.id;
+    const rootTree: LocalFolderTree = {
+      storageRootId: sourceRootId,
+      folderId: sourceRootId,
+      storagePath: ROOT,
+    };
     const topSources = srcs.filter(
       (path) =>
         isScan(path) &&
@@ -14233,10 +14290,6 @@ function App() {
     );
     let lastForkPath = "";
     try {
-      const rootOwner = await fetchFolderOwner(sourceRootId);
-      if (!rootOwner) throw new Error("cannot verify the Root owner for scan adoption");
-      const folderSigner = folderWriteSigner(rootOwner, signer);
-      if (!folderSigner) throw new Error("the Root owner key is unavailable for scan adoption");
       for (const src of topSources) {
         const descendants = Object.entries(filesRef.current)
           .filter(([path, file]) =>
@@ -14263,20 +14316,11 @@ function App() {
             ? destinationRoot + sourcePath.slice(src.length)
             : destinationRoot;
           const content = flatten(source.runs);
-          const event = await forkFileFromNode(source.nodeId, sourceRootId, destPath, {
+          const event = await forkFileIntoLocalTree(
+            rootTree,
+            source.nodeId,
+            destPath,
             signer,
-            localOnly: true,
-          });
-          const parsed = JSON.parse(event.content) as { contentHash?: string };
-          await upsertManifestEntry(
-            sourceRootId,
-            {
-              kind: "file",
-              relativePath: destPath,
-              latestNodeId: event.id,
-              contentHash: parsed.contentHash ?? "",
-            },
-            folderSigner,
             { localOnly: true },
           );
           const runs: Run[] = content
@@ -14293,7 +14337,7 @@ function App() {
             [destPath]: { runs, nodeId: event.id, tags: [] },
           });
           setFiles((prev) => ({
-            ...prev,
+            ...withPersistedFolderStates(prev, sourceRootId),
             [destPath]: { runs, nodeId: event.id, tags: [] },
           }));
           lastForkPath = destPath;

@@ -93,18 +93,43 @@ export interface LocalFolderCoordinate {
   relativePath: string;
 }
 
-/** Resolve a flat local-storage path to the direct folder trace that owns its
- * final segment. Local storage remains path-indexed for instant UI reads; wire
- * membership is recursive and therefore always uses a single-segment name. */
-export function localFolderCoordinate(
-  rootId: string,
+/** One path-indexed local view over a recursive folder-trace tree. Root uses
+ *  an empty `storagePath`; private system regions such as Scan use their
+ *  synthetic UI path while retaining an independent folder identity. */
+export interface LocalFolderTree {
+  storageRootId: string;
+  folderId: string;
+  storagePath: string;
+}
+
+function isPathInsideTree(tree: LocalFolderTree, path: string): boolean {
+  return tree.storagePath === "" ||
+    path === tree.storagePath ||
+    path.startsWith(`${tree.storagePath}/`);
+}
+
+/** Resolve a path inside any local recursive tree to the direct folder trace
+ * that owns its final segment. This keeps system-region paths out of Root's
+ * manifest while still giving every wire-level member a single-segment name. */
+export function localTreeFolderCoordinate(
+  tree: LocalFolderTree,
   storagePath: string,
 ): LocalFolderCoordinate {
-  const folderPath = dirname(storagePath);
-  if (!folderPath) {
-    return { folderId: rootId, folderPath: "", relativePath: storagePath };
+  if (!isPathInsideTree(tree, storagePath) || storagePath === tree.storagePath) {
+    throw new Error(`path ${storagePath} is not a member inside ${tree.storagePath || "Root"}`);
   }
-  const folder = loadLocalFolder(rootId)?.files[folderPath];
+  const folderPath = dirname(storagePath);
+  if (folderPath === tree.storagePath) {
+    return {
+      folderId: tree.folderId,
+      folderPath,
+      relativePath: basename(storagePath),
+    };
+  }
+  if (!isPathInsideTree(tree, folderPath)) {
+    throw new Error(`path ${storagePath} escapes ${tree.storagePath || "Root"}`);
+  }
+  const folder = loadLocalFolder(tree.storageRootId)?.files[folderPath];
   const folderId = folder?.traceId ?? folder?.nodeId;
   if (folder?.kind !== "folder" || !folderId) {
     throw new Error(`cannot resolve containing folder trace for ${storagePath}`);
@@ -114,6 +139,19 @@ export function localFolderCoordinate(
     folderPath,
     relativePath: basename(storagePath),
   };
+}
+
+/** Resolve a flat local-storage path to the direct folder trace that owns its
+ * final segment. Local storage remains path-indexed for instant UI reads; wire
+ * membership is recursive and therefore always uses a single-segment name. */
+export function localFolderCoordinate(
+  rootId: string,
+  storagePath: string,
+): LocalFolderCoordinate {
+  return localTreeFolderCoordinate(
+    { storageRootId: rootId, folderId: rootId, storagePath: "" },
+    storagePath,
+  );
 }
 
 function folderNodeContentHash(event: import("nostr-tools").Event): string {
@@ -126,6 +164,23 @@ function folderNodeContentHash(event: import("nostr-tools").Event): string {
     // Fall through to the invariant error below.
   }
   throw new Error(`folder Step ${event.id} has no valid content hash`);
+}
+
+export function folderTraceIdentityFromNode(
+  event: import("nostr-tools").Event | null,
+): string | null {
+  const reificationTags = event?.tags.filter((tag) => tag[0] === "z") ?? [];
+  if (
+    !event ||
+    event.kind !== 4290 ||
+    reificationTags.length !== 1 ||
+    reificationTags[0]?.[1] !== "folder"
+  ) return null;
+  const folderIds = event.tags.filter((tag) => tag[0] === "f");
+  if (folderIds.length === 1 && folderIds[0]?.[1]) return folderIds[0][1];
+  if (folderIds.length > 0) return null;
+  const hasPrev = event.tags.some((tag) => tag[0] === "e" && tag[3] === "prev");
+  return hasPrev ? null : event.id;
 }
 
 /** Classify a local path move while retaining the original relay coordinate
@@ -311,6 +366,212 @@ export function folderWriteSigner(
   return secretKeyForVoice(folderOwner);
 }
 
+function rememberLocalTreeFolderHead(
+  tree: LocalFolderTree,
+  folderPath: string,
+  folderId: string,
+  head: import("nostr-tools").Event,
+): void {
+  if (folderPath === tree.storagePath) return;
+  const existing = loadLocalFolder(tree.storageRootId)?.files[folderPath];
+  saveLocalFile(tree.storageRootId, folderPath, {
+    kind: "folder",
+    content: "",
+    tags: [],
+    nodeId: head.id,
+    traceId: existing?.traceId ?? folderId,
+  });
+}
+
+/** Bubble one changed folder snapshot to the root of its local tree. For Root
+ *  that boundary is the install root itself; for Scan it is the private Scan
+ *  folder, so Scan can never become an accidental member of Root. */
+export async function propagateLocalTreeFolderHead(
+  tree: LocalFolderTree,
+  changedFolderPath: string,
+  changedFolderId: string,
+  changedHead: import("nostr-tools").Event,
+  signer: Uint8Array,
+  localOnly?: boolean,
+): Promise<void> {
+  if (!isPathInsideTree(tree, changedFolderPath)) {
+    throw new Error(
+      `folder ${changedFolderPath} escapes ${tree.storagePath || "Root"}`,
+    );
+  }
+  let folderPath = changedFolderPath;
+  let folderId = changedFolderId;
+  let head = changedHead;
+  rememberLocalTreeFolderHead(tree, folderPath, folderId, head);
+
+  while (folderPath !== tree.storagePath) {
+    const childName = basename(folderPath);
+    const parentPath = dirname(folderPath);
+    const parentId = parentPath === tree.storagePath
+      ? tree.folderId
+      : localTreeFolderCoordinate(tree, `${parentPath}/_`).folderId;
+    const parentOwner = await fetchFolderOwner(parentId);
+    const parentSigner = folderWriteSigner(parentOwner, signer);
+    if (!parentSigner) {
+      throw new Error(`cannot update ancestor folder ${parentId}; its owner key is unavailable`);
+    }
+    head = await upsertManifestEntry(
+      parentId,
+      {
+        kind: "folder",
+        relativePath: childName,
+        latestNodeId: head.id,
+        contentHash: folderNodeContentHash(head),
+      },
+      parentSigner,
+      { localOnly },
+    );
+    folderPath = parentPath;
+    folderId = parentId;
+    rememberLocalTreeFolderHead(tree, folderPath, folderId, head);
+  }
+}
+
+/** Ensure that every segment of `folderPath` has its own folder trace. Existing
+ *  relay membership wins over a stale/missing local placeholder, which also
+ *  makes a scan resumable after a crash between the signed parent update and
+ *  local cache persistence. */
+export async function ensureLocalTreeFolderPath(
+  tree: LocalFolderTree,
+  folderPath: string,
+  signer: Uint8Array,
+  opts?: { localOnly?: boolean },
+): Promise<{ folderId: string; folderPath: string }> {
+  if (!isPathInsideTree(tree, folderPath)) {
+    throw new Error(`folder ${folderPath} escapes ${tree.storagePath || "Root"}`);
+  }
+  if (folderPath === tree.storagePath) {
+    return { folderId: tree.folderId, folderPath };
+  }
+
+  const suffix = tree.storagePath
+    ? folderPath.slice(tree.storagePath.length + 1)
+    : folderPath;
+  const segments = suffix.split("/").filter(Boolean);
+  let currentId = tree.folderId;
+  let currentPath = tree.storagePath;
+
+  for (const segment of segments) {
+    const nextPath = currentPath ? `${currentPath}/${segment}` : segment;
+    const manifest = await fetchManifest(currentId);
+    const existing = manifest.find(
+      (entry) => entry.kind === "folder" && entry.relativePath === segment,
+    );
+    if (existing) {
+      const local = loadLocalFolder(tree.storageRootId)?.files[nextPath];
+      const traceId = folderTraceIdentityFromNode(
+        await fetchEventById(existing.latestNodeId),
+      ) ?? (local?.kind === "folder" ? local.traceId ?? null : null);
+      if (!traceId) {
+        throw new Error(`cannot resolve folder identity for ${nextPath}`);
+      }
+      saveLocalFile(tree.storageRootId, nextPath, {
+        kind: "folder",
+        content: "",
+        tags: [],
+        nodeId: existing.latestNodeId,
+        traceId,
+      });
+      currentId = traceId;
+      currentPath = nextPath;
+      continue;
+    }
+
+    const currentOwner = await fetchFolderOwner(currentId);
+    const currentSigner = folderWriteSigner(currentOwner, signer);
+    if (!currentSigner) {
+      throw new Error(`cannot create a folder through foreign folder ${currentId}`);
+    }
+    const genesisId = await createFolderGenesis({
+      signer: currentSigner,
+      localOnly: opts?.localOnly,
+    });
+    const currentHead = await upsertManifestEntry(
+      currentId,
+      {
+        kind: "folder",
+        relativePath: segment,
+        latestNodeId: genesisId,
+        contentHash: await sha256Hex("[]"),
+      },
+      currentSigner,
+      { localOnly: opts?.localOnly },
+    );
+    await propagateLocalTreeFolderHead(
+      tree,
+      currentPath,
+      currentId,
+      currentHead,
+      currentSigner,
+      opts?.localOnly,
+    );
+    saveLocalFile(tree.storageRootId, nextPath, {
+      kind: "folder",
+      content: "",
+      tags: [],
+      nodeId: genesisId,
+      traceId: genesisId,
+    });
+    currentId = genesisId;
+    currentPath = nextPath;
+  }
+
+  return { folderId: currentId, folderPath: currentPath };
+}
+
+/** Fork one exact source node into a path-indexed local tree, creating real
+ *  recursive parent folders and bubbling every changed folder head. */
+export async function forkFileIntoLocalTree(
+  tree: LocalFolderTree,
+  sourceNodeId: string,
+  storagePath: string,
+  signer: Uint8Array,
+  opts?: { localOnly?: boolean },
+): Promise<import("nostr-tools").Event> {
+  await ensureLocalTreeFolderPath(tree, dirname(storagePath), signer, opts);
+  const coordinate = localTreeFolderCoordinate(tree, storagePath);
+  const owner = await fetchFolderOwner(coordinate.folderId);
+  const manifestSigner = folderWriteSigner(owner, signer);
+  if (!manifestSigner) {
+    throw new Error(`cannot fork into foreign folder ${coordinate.folderId}`);
+  }
+  const event = await forkFileFromNode(
+    sourceNodeId,
+    coordinate.folderId,
+    coordinate.relativePath,
+    { signer, localOnly: opts?.localOnly },
+  );
+  const parsed = JSON.parse(event.content) as { contentHash?: unknown };
+  if (typeof parsed.contentHash !== "string") {
+    throw new Error(`fork ${event.id} has no content hash`);
+  }
+  const folderHead = await upsertManifestEntry(
+    coordinate.folderId,
+    {
+      kind: "file",
+      relativePath: coordinate.relativePath,
+      latestNodeId: event.id,
+      contentHash: parsed.contentHash,
+    },
+    manifestSigner,
+    { localOnly: opts?.localOnly },
+  );
+  await propagateLocalTreeFolderHead(
+    tree,
+    coordinate.folderPath,
+    coordinate.folderId,
+    folderHead,
+    manifestSigner,
+    opts?.localOnly,
+  );
+  return event;
+}
+
 /** Read the previous Step's citation set only after its immutable history has
  *  been recovered. Continuing from an unknown prior snapshot would create a
  *  dishonest full-document delta, so an unavailable prior node fails with a
@@ -382,23 +643,6 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     );
   }
 
-  function rememberFolderHead(
-    rootId: string,
-    folderPath: string,
-    folderId: string,
-    head: import("nostr-tools").Event,
-  ): void {
-    if (!folderPath) return;
-    const existing = loadLocalFolder(rootId)?.files[folderPath];
-    saveLocalFile(rootId, folderPath, {
-      kind: "folder",
-      content: "",
-      tags: [],
-      nodeId: head.id,
-      traceId: existing?.traceId ?? folderId,
-    });
-  }
-
   /** Bubble one changed direct folder snapshot through its ancestors. Each
    * parent stores the child's newest folder nucleus and canonical body hash;
    * the recursive projection therefore stays reconstructable from Root. */
@@ -410,37 +654,14 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     signer: Uint8Array,
     localOnly?: boolean,
   ): Promise<void> {
-    let folderPath = changedFolderPath;
-    let folderId = changedFolderId;
-    let head = changedHead;
-    rememberFolderHead(rootId, folderPath, folderId, head);
-
-    while (folderPath) {
-      const childName = basename(folderPath);
-      const parentPath = dirname(folderPath);
-      const parentId = parentPath
-        ? localFolderCoordinate(rootId, `${parentPath}/_`).folderId
-        : rootId;
-      const parentOwner = await fetchFolderOwner(parentId);
-      const parentSigner = folderWriteSigner(parentOwner, signer);
-      if (!parentSigner) {
-        throw new Error(`cannot update ancestor folder ${parentId}; its owner key is unavailable`);
-      }
-      head = await upsertManifestEntry(
-        parentId,
-        {
-          kind: "folder",
-          relativePath: childName,
-          latestNodeId: head.id,
-          contentHash: folderNodeContentHash(head),
-        },
-        parentSigner,
-        { localOnly },
-      );
-      folderPath = parentPath;
-      folderId = parentId;
-      rememberFolderHead(rootId, folderPath, folderId, head);
-    }
+    await propagateLocalTreeFolderHead(
+      { storageRootId: rootId, folderId: rootId, storagePath: "" },
+      changedFolderPath,
+      changedFolderId,
+      changedHead,
+      signer,
+      localOnly,
+    );
   }
 
   async function pushToRelay(rootId: string, storagePath: string): Promise<string> {

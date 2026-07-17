@@ -38,6 +38,13 @@ The hosted browser surface is deliberately read-only and model-free: it cannot
 sign, Send, Attest, or execute MODEL actions until the deferred encrypted
 browser vault exists.
 
+Nested paths are stored as recursive folder traces, not slash-joined file
+names. Scanning a source tree preserves its directory hierarchy inside the
+private Scan folder, and adopting or forking a file into Root creates any
+missing destination folders and updates each ancestor manifest. Recursive
+fork-on-write through an already-foreign folder remains the separate deferred
+case documented below.
+
 ## Agent run recipes
 
 The MODEL row's **Run** action supports one-off goals and browser-local saved

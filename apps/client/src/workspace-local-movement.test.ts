@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import type { Event } from "nostr-tools";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 
 // @ts-expect-error minimal localStorage shim for signer-resolution coverage
@@ -24,8 +25,10 @@ import {
   completeBackgroundPush,
   completeStagedWrite,
   completedEmptyGenesisBootstrapHead,
+  folderTraceIdentityFromNode,
   folderWriteSigner,
   localFolderCoordinate,
+  localTreeFolderCoordinate,
   localFileSigner,
   ownershipDisposition,
   pendingMoveForPath,
@@ -67,6 +70,75 @@ test("flat local paths resolve to direct recursive folder coordinates", () => {
     folderPath: "projects/drafts",
     relativePath: "idea.md",
   });
+});
+
+test("private Scan paths resolve inside their own recursive folder tree", () => {
+  localStorage.clear();
+  saveLocalFile("root", "scan/project", {
+    kind: "folder",
+    content: "",
+    tags: [],
+    nodeId: "project-head",
+    traceId: "project-genesis",
+  });
+  saveLocalFile("root", "scan/project/src", {
+    kind: "folder",
+    content: "",
+    tags: [],
+    nodeId: "src-head",
+    traceId: "src-genesis",
+  });
+
+  const scanTree = {
+    storageRootId: "root",
+    folderId: "scan-genesis",
+    storagePath: "scan",
+  };
+  assert.deepEqual(localTreeFolderCoordinate(scanTree, "scan/readme.md"), {
+    folderId: "scan-genesis",
+    folderPath: "scan",
+    relativePath: "readme.md",
+  });
+  assert.deepEqual(
+    localTreeFolderCoordinate(scanTree, "scan/project/src/main-ts.md"),
+    {
+      folderId: "src-genesis",
+      folderPath: "scan/project/src",
+      relativePath: "main-ts.md",
+    },
+  );
+  assert.throws(
+    () => localTreeFolderCoordinate(scanTree, "outside/main.md"),
+    /not a member inside scan/,
+  );
+});
+
+test("folder heads recover their recursive trace identity without file-chain resolution", () => {
+  const event = (id: string, tags: string[][]): Event => ({
+    id,
+    kind: 4290,
+    pubkey: "owner",
+    created_at: 1,
+    content: "{}",
+    sig: "",
+    tags,
+  });
+  assert.equal(
+    folderTraceIdentityFromNode(event("folder-genesis", [["z", "folder"]])),
+    "folder-genesis",
+  );
+  assert.equal(
+    folderTraceIdentityFromNode(event("folder-head", [
+      ["z", "folder"],
+      ["f", "folder-genesis"],
+      ["e", "folder-genesis", "", "prev"],
+    ])),
+    "folder-genesis",
+  );
+  assert.equal(
+    folderTraceIdentityFromNode(event("file-head", [["z", "file"]])),
+    null,
+  );
 });
 
 test("active to Oblivion retains the active relay coordinate", () => {
