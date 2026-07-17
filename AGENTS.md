@@ -10,6 +10,11 @@
   - `protocol`: wire-format, transport, and provenance specifications.
 - Preserve unrelated work in this frequently dirty worktree. Do not rewrite or
   clean up files outside the requested change.
+- Treat the live working tree as authoritative, not `HEAD` or the latest commit.
+  Before editing, inspect current status and diffs and reread the affected files
+  so uncommitted parallel progress can be preserved, reused, or reconciled.
+  Recheck affected files before handoff when parallel work may still be landing;
+  never overwrite a concurrent change merely because it is uncommitted.
 
 ## Verification
 
