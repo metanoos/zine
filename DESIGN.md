@@ -152,7 +152,7 @@ transport hierarchy, or visual skin. Preserve Zine's existing layout.
   Hyperlegible, IBM Plex Mono, and JetBrains Mono. Big Shoulders Display is
   chrome-only and must not be assigned to paragraph voices.
 - **Loading:** The current client loads the curated families through the Google
-  Fonts imports in `apps/client/src/App.css`. Keep all loaded families declared
+  Fonts imports in `apps/client/src/app/App.css`. Keep all loaded families declared
   together so voice text does not flash into an unintended identity.
 
 ### Type scale

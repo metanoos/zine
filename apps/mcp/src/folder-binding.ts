@@ -13,7 +13,7 @@ import {
   eventMeta,
   fetchEventById,
   forkFolder,
-} from "../../client/src/provenance.js";
+} from "../../client/src/provenance/provenance.js";
 
 const FORK_PREFIX = "zine.mcp.folder-fork.";
 const ROOT_KEY = "zine.mcp.root";

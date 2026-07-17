@@ -163,7 +163,7 @@ async function main(): Promise<void> {
   // Steps 4 & 5: dynamic imports ensure shared modules see storage and the
   // local home. Replace, rather than append to, the external set so reusing a
   // config file cannot silently retain a stale publication destination.
-  const { replaceExternalRelays } = await import("../../client/src/relay-config.js");
+  const { replaceExternalRelays } = await import("../../client/src/networking/relay-config.js");
   replaceExternalRelays(args.publishRelays);
   const {
     createMcpWorkspace,
@@ -173,8 +173,8 @@ async function main(): Promise<void> {
   } = await import("./tools.js");
   const { resolveWorkspaceBinding } = await import("./folder-binding.js");
   const { registerAgentWriter } = await import("./register-writer.js");
-  const { flushLocalEventOutbox } = await import("../../client/src/provenance.js");
-  const { pendingLocalEventCount } = await import("../../client/src/event-outbox.js");
+  const { flushLocalEventOutbox } = await import("../../client/src/provenance/provenance.js");
+  const { pendingLocalEventCount } = await import("../../client/src/provenance/event-outbox.js");
 
   // Seed the agent voice key, then auto-register it as a writer on the local
   // relay BEFORE attach(). Networked-mode relays reject unregistered writers;

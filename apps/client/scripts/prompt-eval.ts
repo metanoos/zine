@@ -12,16 +12,16 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-import { complete, type ChatMessage } from "../src/llm.js";
+import { complete, type ChatMessage } from "../src/ai/llm.js";
 import {
   applyOpPromptLayers,
   assembleOpMessages,
   buildOpMessages,
   type OpInputs,
   type OpKind,
-} from "../src/op-prompts.js";
-import type { OpLensId } from "../src/op-lenses.js";
-import type { ProviderConfig } from "../src/models-store.js";
+} from "../src/ai/op-prompts.js";
+import type { OpLensId } from "../src/ai/op-lenses.js";
+import type { ProviderConfig } from "../src/ai/models-store.js";
 
 type Condition = "role-only" | "current" | "contract+lens";
 

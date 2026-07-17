@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import type { KEdit } from "../../client/src/provenance.js";
+import type { KEdit } from "../../client/src/provenance/provenance.js";
 
 import { installNodeStorage } from "../src/storage-node.js";
 import { setHomeRelay } from "../src/relay-config-override.js";
@@ -27,10 +27,10 @@ setHomeRelay(homeRelayUrl);
 async function main(): Promise<void> {
   // Dynamic imports are load-bearing: relay URL and localStorage must be
   // installed before the shared browser modules evaluate under Node.
-  const { loadOrCreateVoice } = await import("../../client/src/identity.js");
-  const { nodeVoice } = await import("../../client/src/keys-store.js");
+  const { loadOrCreateVoice } = await import("../../client/src/identity/identity.js");
+  const { nodeVoice } = await import("../../client/src/identity/keys-store.js");
   const { initializeMcpKeySession } = await import("../src/tools.js");
-  const { replaceExternalRelays } = await import("../../client/src/relay-config.js");
+  const { replaceExternalRelays } = await import("../../client/src/networking/relay-config.js");
   const {
     attestNode,
     coinOriginFromEvent,
@@ -47,18 +47,18 @@ async function main(): Promise<void> {
     sendStep,
     sha256HexLocal,
     upsertManifestEntry,
-  } = await import("../../client/src/provenance.js");
+  } = await import("../../client/src/provenance/provenance.js");
   const {
     enqueueLocalEvent,
     pendingLocalEventCount,
-  } = await import("../../client/src/event-outbox.js");
+  } = await import("../../client/src/provenance/event-outbox.js");
   const { resolveFolderBinding, resolveWorkspaceBinding } = await import("../src/folder-binding.js");
   const { finalizeEvent, getPublicKey, verifyEvent } = await import("nostr-tools/pure");
   const { Relay } = await import("nostr-tools/relay");
   const {
     synthesizeKEditTransition,
     validateKEditTransition,
-  } = await import("../../client/src/workspace-core.js");
+  } = await import("../../client/src/workspace/workspace-core.js");
 
   const voice = loadOrCreateVoice();
   await initializeMcpKeySession(voice);

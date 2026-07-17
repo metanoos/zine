@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "tsx --test src/*.test.ts",
+    "test": "tsx --test src/**/*.test.ts",
     "eval:prompts": "tsx scripts/prompt-eval.ts"
   },
   "dependencies": {

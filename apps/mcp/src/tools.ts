@@ -35,9 +35,9 @@ import {
   sendHistoricalStep,
   sha256HexLocal,
   upsertManifestEntry,
-} from "../../client/src/provenance.js";
-import { createLocalWorkspace } from "../../client/src/workspace-local.js";
-import { loadOrCreateVoice, type Voice } from "../../client/src/identity.js";
+} from "../../client/src/provenance/provenance.js";
+import { createLocalWorkspace } from "../../client/src/workspace/workspace-local.js";
+import { loadOrCreateVoice, type Voice } from "../../client/src/identity/identity.js";
 import {
   identityFromPubkey,
   keySecretRef,
@@ -45,26 +45,26 @@ import {
   setAuthorKeyId,
   setModelKeyId,
   setNodeKeyId,
-} from "../../client/src/keys-store.js";
+} from "../../client/src/identity/keys-store.js";
 import {
   MemorySecretStore,
   putSecret,
   unlockSecretSession,
-} from "../../client/src/secret-store.js";
-import type { Workspace } from "../../client/src/workspace-core.js";
-import { getOrCreateMintFolder } from "../../client/src/root.js";
-import { MINT, mintedPath } from "../../client/src/generated-paths.js";
-import { saveLocalFile } from "../../client/src/local-store.js";
-import { pendingLocalEventCount } from "../../client/src/event-outbox.js";
+} from "../../client/src/identity/secret-store.js";
+import type { Workspace } from "../../client/src/workspace/workspace-core.js";
+import { getOrCreateMintFolder } from "../../client/src/workspace/root.js";
+import { MINT, mintedPath } from "../../client/src/workspace/generated-paths.js";
+import { saveLocalFile } from "../../client/src/workspace/local-store.js";
+import { pendingLocalEventCount } from "../../client/src/provenance/event-outbox.js";
 import {
   encodeTraceLocator,
   type TraceLocator,
-} from "../../client/src/trace-locator.js";
+} from "../../client/src/provenance/trace-locator.js";
 import {
   inspectFileTraceNucleus,
   verifyFileTraceChain,
   type TraceConformanceVerdict,
-} from "../../client/src/trace-conformance.js";
+} from "../../client/src/provenance/trace-conformance.js";
 
 /** The headless press's signing key. Seeded on first call, persisted via the
  *  localStorage shim into the selected profile. Distinct from the desktop app's

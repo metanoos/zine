@@ -1,7 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App";
-import { SecurityBootstrap } from "./SecurityBootstrap";
+import App from "./app/App";
+import { SecurityBootstrap } from "./app/SecurityBootstrap";
 
 // Resolve theme before React mounts so the first paint already matches the
 // user's choice (no flash). "auto" follows prefers-color-scheme; light/dark
