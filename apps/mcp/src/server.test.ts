@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,11 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import type { Event } from "nostr-tools";
+import { verifyEvent } from "nostr-tools/pure";
+
+import type { KEdit } from "../../client/src/provenance/provenance.js";
+import { validateKEditTransition } from "../../client/src/workspace/workspace-core.js";
 
 function jsonToolResult(result: unknown): Record<string, unknown> {
   const content = (result as { content?: unknown }).content;
@@ -19,6 +24,10 @@ function jsonToolResult(result: unknown): Record<string, unknown> {
   );
   assert.ok(block, "tool returned no JSON text block");
   return JSON.parse(block.text) as Record<string, unknown>;
+}
+
+function canonicalEvent(event: Event): Event {
+  return JSON.parse(JSON.stringify(event)) as Event;
 }
 
 async function connectOfflineServer(config: string, fakeHome: string) {
@@ -141,6 +150,13 @@ test("cold headless profile mints one Root and Steps exact events while the rela
   const first = await connectOfflineServer(config, home);
   let rootId: string;
   let ownerPubkey: string;
+  const contents = [
+    "offline signed Step\n",
+    "offline signed Step with a non-genesis edit 🙂\n",
+    "offline signed Step with a non-genesis edit 🙂\n",
+  ];
+  const nodeIds: string[] = [];
+  const rawEvents: Event[] = [];
   try {
     const info = jsonToolResult(await first.client.callTool({
       name: "zine_workspace_info",
@@ -152,46 +168,102 @@ test("cold headless profile mints one Root and Steps exact events while the rela
     assert.match(ownerPubkey, /^[0-9a-f]{64}$/);
     assert.equal(info.profile, "offline-test");
 
-    const stepped = jsonToolResult(await first.client.callTool({
-      name: "zine_step",
-      arguments: { relativePath: "result.md", content: "offline signed Step\n" },
+    for (const content of contents) {
+      const stepped = jsonToolResult(await first.client.callTool({
+        name: "zine_step",
+        arguments: { relativePath: "result.md", content },
+      }));
+      const nodeId = String(stepped.nodeId);
+      assert.match(nodeId, /^[0-9a-f]{64}$/);
+      assert.equal(stepped.sent, false);
+      assert.ok(Number(stepped.pendingLocalEvents) >= 1);
+      nodeIds.push(nodeId);
+    }
+    assert.equal(new Set(nodeIds).size, contents.length, "every explicit Step must mint one node");
+
+    const history = jsonToolResult(await first.client.callTool({
+      name: "zine_get_history",
+      arguments: { relativePath: "result.md" },
     }));
-    const nodeId = String(stepped.nodeId);
-    assert.match(nodeId, /^[0-9a-f]{64}$/);
-    assert.equal(stepped.sent, false);
-    assert.ok(Number(stepped.pendingLocalEvents) >= 1);
+    assert.equal((history.conformance as { status?: string }).status, "full");
+    const historyRows = history.history as Array<{
+      nodeId: string;
+      payload: { snapshot?: string; kedits?: KEdit[] };
+      event: Event;
+    }>;
+    assert.deepEqual(historyRows.map((row) => row.nodeId), nodeIds);
+
+    let previousSnapshot = "";
+    for (let index = 0; index < historyRows.length; index += 1) {
+      const row = historyRows[index]!;
+      const expectedSnapshot = contents[index]!;
+      assert.equal(row.payload.snapshot, expectedSnapshot);
+      assert.ok(Array.isArray(row.payload.kedits), `Step ${index} is missing kedits`);
+      assert.equal(
+        validateKEditTransition(previousSnapshot, expectedSnapshot, row.payload.kedits!).valid,
+        true,
+        `Step ${index} KEdits do not replay its signed transition`,
+      );
+      assert.equal(verifyEvent(canonicalEvent(row.event)), true, `Step ${index} signature is invalid`);
+      assert.equal(row.event.id, nodeIds[index]);
+      assert.equal(row.event.pubkey, ownerPubkey);
+      if (previousSnapshot === expectedSnapshot) {
+        assert.deepEqual(row.payload.kedits, [], "unchanged Step must carry kedits: []");
+      } else {
+        assert.equal(row.payload.kedits!.length, 1, "headless change must be one atomic KEdit");
+        const edit = row.payload.kedits![0]!;
+        assert.ok(Number.isSafeInteger(edit.tx) && edit.tx >= 0, "invalid transaction id");
+        assert.ok(Number.isSafeInteger(edit.t) && edit.t >= 0, "invalid transaction timestamp");
+        assert.equal(edit.voice, ownerPubkey, "KEdit voice must be the profile signer");
+        assert.match(edit.voice, /^[0-9a-f]{64}$/);
+        assert.ok(Number.isSafeInteger(edit.from) && edit.from >= 0, "invalid KEdit start");
+        assert.ok(Number.isSafeInteger(edit.to) && edit.to >= edit.from, "invalid KEdit end");
+        assert.ok(edit.op === "ins" || edit.op === "del" || edit.op === "repl");
+        assert.equal(typeof edit.text, "string");
+      }
+      rawEvents.push(canonicalEvent(row.event));
+      previousSnapshot = expectedSnapshot;
+    }
 
     const node = jsonToolResult(await first.client.callTool({
       name: "zine_get_node",
-      arguments: { nodeId },
+      arguments: { nodeId: nodeIds[2] },
     }));
-    const event = node.event as Record<string, unknown>;
-    assert.equal(event.id, nodeId);
-    assert.equal(event.pubkey, ownerPubkey);
-    const payload = node.payload as {
-      snapshot?: string;
-      kedits?: { op?: string; from?: number; to?: number; text?: string; voice?: string; tx?: number }[];
-    };
-    assert.equal(payload.snapshot, "offline signed Step\n");
-    assert.deepEqual(payload.kedits?.map(({ op, from, to, text, voice, tx }) => ({
-      op, from, to, text, voice, tx,
-    })), [{
-      op: "ins",
-      from: 0,
-      to: 0,
-      text: "offline signed Step\n",
-      voice: ownerPubkey,
-      tx: 0,
-    }]);
+    assert.deepEqual(node.event, rawEvents[2], "node read must expose the canonical raw event");
     assert.equal(
       (node.conformance as { status?: string } | undefined)?.status,
       "full",
     );
     assert.equal(node.historyComplete, true);
-    assert.equal(typeof event.sig, "string");
+
+    const handoff = jsonToolResult(await first.client.callTool({
+      name: "zine_get_handoff",
+      arguments: { relativePath: "result.md" },
+    }));
+    const locator = handoff.locator as Record<string, unknown>;
+    assert.equal(handoff.sent, false);
+    assert.equal(locator.rootId, rootId);
+    assert.equal(locator.traceId, nodeIds[0]);
+    assert.equal(locator.nodeId, nodeIds[2]);
+    assert.equal(locator.relativePath, "result.md");
+    assert.equal(locator.ownerPubkey, ownerPubkey);
+    assert.match(String(handoff.encoded), /^zine-trace:/);
   } finally {
     await first.client.close();
     await first.transport.close();
+  }
+
+  const stored = JSON.parse(readFileSync(config, "utf8")) as Record<string, string>;
+  const outbox = JSON.parse(stored["zine.pending-trace-events"] ?? "[]") as Array<{
+    event: Event;
+  }>;
+  const queuedById = new Map(outbox.map((record) => [record.event.id, record.event]));
+  for (const event of rawEvents) {
+    assert.deepEqual(
+      queuedById.get(event.id),
+      event,
+      `offline profile did not retain exact signed event ${event.id}`,
+    );
   }
 
   const second = await connectOfflineServer(config, home);
@@ -202,6 +274,15 @@ test("cold headless profile mints one Root and Steps exact events while the rela
     }));
     assert.equal(info.rootId, rootId);
     assert.equal(info.ownerPubkey, ownerPubkey);
+
+    const history = jsonToolResult(await second.client.callTool({
+      name: "zine_get_history",
+      arguments: { relativePath: "result.md" },
+    }));
+    const historyRows = history.history as Array<{ nodeId: string; event: Event }>;
+    assert.deepEqual(historyRows.map((row) => row.nodeId), nodeIds);
+    assert.deepEqual(historyRows.map((row) => row.event), rawEvents);
+    assert.equal((history.conformance as { status?: string }).status, "full");
   } finally {
     await second.client.close();
     await second.transport.close();
