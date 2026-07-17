@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "description": "A headless zine press: exposes zine's trace-provenance gestures (Step / Send / Attest / Mint / Cite) as MCP tools, so any LLM harness writes through zine and every edit becomes a signed, traced, citable kind-4290 node.",
+  "files": [
+    "dist/server.js",
+    "README.md"
+  ],
   "engines": {
     "node": ">=24 <25"
   },
@@ -11,22 +15,24 @@
     "zine-mcp": "dist/server.js"
   },
   "scripts": {
-    "build": "tsc && esbuild src/server.ts --bundle --platform=node --format=esm --outfile=dist/server.js",
+    "build": "tsc -p tsconfig.build.json && node scripts/build.mjs",
     "dev": "tsx src/server.ts",
+    "prepack": "npm run build",
     "start": "node dist/server.js",
-    "test": "tsx --test src/*.test.ts && npm run build && node dist/server.js --help",
+    "test": "tsx --test src/*.test.ts && npm run test:package",
+    "test:package": "node scripts/package-smoke.mjs",
     "test:relay": "tsc -p tsconfig.integration.json && tsx integration/relay-smoke.ts"
   },
-  "dependencies": {
-    "@zine/protocol": "file:../../packages/protocol",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "nostr-tools": "^2.23.9",
-    "zod": "^3.25.0"
-  },
   "devDependencies": {
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.6",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^24.0.0",
+    "diff": "^9.0.0",
     "esbuild": "~0.28.0",
+    "nostr-tools": "^2.23.9",
     "tsx": "^4.23.0",
-    "typescript": "~5.8.3"
+    "typescript": "~5.8.3",
+    "zod": "^3.25.0"
   }
 }

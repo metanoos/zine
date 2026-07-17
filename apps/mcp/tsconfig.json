@@ -4,6 +4,15 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@zine/protocol": ["../../packages/protocol/src/index.ts"],
+      "@codemirror/state": ["node_modules/@codemirror/state/dist/index.js"],
+      "@codemirror/view": ["node_modules/@codemirror/view/dist/index.js"],
+      "diff": ["node_modules/diff/libesm/index.js"],
+      "nostr-tools": ["node_modules/nostr-tools/lib/esm/index.js"],
+      "nostr-tools/*": ["node_modules/nostr-tools/lib/esm/*.js"]
+    },
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
