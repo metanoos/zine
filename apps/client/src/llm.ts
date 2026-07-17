@@ -22,7 +22,7 @@
  * a custom provider — that's the point of the generic shape.
  */
 
-import type { ProviderConfig } from "./models-store.js";
+import { providerCredential, type ProviderConfig } from "./models-store.js";
 import { isTauri } from "./identity.js";
 import {
   anthropicModelOptions,
@@ -76,6 +76,21 @@ export async function complete(
     : callOpenAI(cfg, configuredMessages, opts);
 }
 
+/** Fixed workspace-free connectivity probe used by Models onboarding. */
+export async function probeProvider(
+  cfg: ProviderConfig,
+  signal?: AbortSignal,
+): Promise<string> {
+  const messages: ChatMessage[] = [{
+    role: "user",
+    content: "Connection probe. Reply with exactly: ok",
+  }];
+  const opts: CompleteOptions = { maxTokens: 8, signal };
+  return cfg.protocol === "anthropic"
+    ? callAnthropic(cfg, messages, opts)
+    : callOpenAI(cfg, messages, opts);
+}
+
 // --- OpenAI Chat Completions -------------------------------------------
 
 async function callOpenAI(
@@ -86,7 +101,8 @@ async function callOpenAI(
   const url = joinPath(cfg.baseUrl, "chat/completions");
   const stream = !!opts.onDelta;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (cfg.apiKey) headers["Authorization"] = `Bearer ${cfg.apiKey}`;
+  const apiKey = providerCredential(cfg);
+  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
 
   const body = JSON.stringify({
     model: cfg.modelId,
@@ -124,7 +140,8 @@ async function callAnthropic(
     "Content-Type": "application/json",
     "anthropic-version": "2023-06-01",
   };
-  if (cfg.apiKey) headers["x-api-key"] = cfg.apiKey;
+  const apiKey = providerCredential(cfg);
+  if (apiKey) headers["x-api-key"] = apiKey;
 
   const body = JSON.stringify({
     model: cfg.modelId,
@@ -336,7 +353,9 @@ function joinPath(base: string, path: string): string {
  *  unreliable), so this only intercepts z.ai URLs. */
 function devProxyUrl(url: string): string {
   if (isTauri()) return url;
-  if (!import.meta.env.DEV) return url;
+  // Vite injects `import.meta.env` in the browser build; direct Node test
+  // execution leaves it undefined.
+  if (!import.meta.env?.DEV) return url;
   if (!url.startsWith("https://api.z.ai/")) return url;
   const path = url.slice("https://api.z.ai".length); // keep leading slash
   return `/llm/zai${path}`;

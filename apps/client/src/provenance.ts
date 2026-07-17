@@ -12,7 +12,7 @@ import {
 } from "./relay-config.js";
 import type { Run } from "./workspace-core.js";
 import { flattenRuns, dominantVoiceInRegion } from "./workspace-core.js";
-import { nodeSecretKey } from "./keys-store.js";
+import { authorSecretKey, nodeSecretKey } from "./keys-store.js";
 import {
   enqueueLocalEvent,
   pendingLocalEventById,
@@ -44,6 +44,14 @@ const TRACE_ATTESTATION_KIND = 4294;
 /** Spec §4: TraceHead — parameterized replaceable head-pointer cache. `d` =
  *  trace identity, content `{ head }`, written on every step. */
 const TRACE_HEAD_KIND = 34290;
+
+function authoringVoice(): { secretKey: Uint8Array; publicKey: string } {
+  const secretKey = authorSecretKey();
+  if (secretKey) return { secretKey, publicKey: getPublicKey(secretKey) };
+  // Headless/Node compatibility: those runtimes still install an in-memory
+  // authoring session and may not use the desktop key-profile bootstrap.
+  return loadOrCreateVoice();
+}
 
 /** The trace-provenance kinds. Used to decide whether a sampled event is
  *  zine/trace-compatible (renders as a body) or foreign (renders with a "not a
@@ -630,7 +638,7 @@ async function connectWithAuth(url: string): Promise<Relay> {
     // the owner record, so networked mode honors whichever key the user designated
     // as the machine identity. Falls back to the legacy voice when the keychain
     // can't resolve a node key (headless/Node press, tests).
-    const secret = nodeSecretKey() ?? loadOrCreateVoice().secretKey;
+    const secret = nodeSecretKey() ?? authoringVoice().secretKey;
     const signed = finalizeEvent(evt, secret) as unknown as
       Awaited<ReturnType<NonNullable<Relay["onauth"]>>>;
     // Resolve the ready promise once the signed AUTH event is produced.
@@ -927,7 +935,7 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   }
   // Sign as the override signer when provided (per-voice Send/zine), else the
   // keychain's manual (pen) key — the posture used by background Steps.
-  const signer = input.signer ?? loadOrCreateVoice().secretKey;
+  const signer = input.signer ?? authoringVoice().secretKey;
   const steppedAt = Date.now();
 
   const tags: string[][] = [
@@ -1205,7 +1213,7 @@ export async function sendStep(event: Event, signer?: Uint8Array): Promise<void>
       await publishTraceHead(
         traceId,
         event.id,
-        signer ?? loadOrCreateVoice().secretKey,
+        signer ?? authoringVoice().secretKey,
         relays,
       );
     }
@@ -1366,7 +1374,7 @@ export async function attestNode(
       `cannot attest ${citedNodeId}: target signer does not match the supplied pubkey`,
     );
   }
-  const signer = input.signer ?? loadOrCreateVoice().secretKey;
+  const signer = input.signer ?? authoringVoice().secretKey;
   const template = buildAttestationTemplate(citedNodeId, target.pubkey, {
     createdAtSec: Math.floor(Date.now() / 1000),
     ...(input.message ? { message: input.message } : {}),
@@ -1416,7 +1424,7 @@ export async function publishCoin(input: {
     }
   }
 
-  const signer = input.signer ?? loadOrCreateVoice().secretKey;
+  const signer = input.signer ?? authoringVoice().secretKey;
   const contentHash = await sha256HexLocal(input.phrase);
   return publishEdit({
     prevEventId: null,
@@ -1910,7 +1918,7 @@ export async function revokeTrace(
     fallback?: { folderId: string; relativePath: string };
   },
 ): Promise<TraceRevocationResult> {
-  const signer = opts?.signer ?? loadOrCreateVoice().secretKey;
+  const signer = opts?.signer ?? authoringVoice().secretKey;
   const signerPubkey = getPublicKey(signer);
   const resolution = await resolveTraceChain(traceId, opts?.fallback);
   if (resolution.status !== "resolved") {
@@ -2675,7 +2683,7 @@ async function publishFolderNode(
     localOnly?: boolean;
   },
 ): Promise<Event> {
-  const key = opts.signer ?? loadOrCreateVoice().secretKey;
+  const key = opts.signer ?? authoringVoice().secretKey;
   const steppedAt = Date.now();
   // §8: drain any focus observations buffered since the last folder step and
   // append them to this node's deltas. The structural delta (if any) stays
@@ -3420,7 +3428,7 @@ export interface PaletteItem {
 /** Read the current palette for the active voice. Empty if none published. */
 export async function fetchPalette(): Promise<PaletteItem[]> {
   const relays = await getReadRelays();
-  const voice = loadOrCreateVoice();
+  const voice = authoringVoice();
   const event = await queryLatestMany(relays, { kinds: [TRACE_OPINION_KIND], "#d": [voice.publicKey] });
   if (!event) return [];
   const parsed = JSON.parse(event.content) as { items: PaletteItem[] };
@@ -3432,7 +3440,7 @@ export async function fetchPalette(): Promise<PaletteItem[]> {
  *  in the same wall-clock second must still order deterministically. */
 export async function publishPalette(items: PaletteItem[]): Promise<Event> {
   const relays = await getWriteRelays();
-  const voice = loadOrCreateVoice();
+  const voice = authoringVoice();
   const previous = await fetchPaletteEvent(voice.publicKey);
   const createdAt = Math.max(Math.floor(Date.now() / 1000), (previous?.created_at ?? 0) + 1);
 
@@ -4233,7 +4241,7 @@ export interface StackDef {
  *  — NIP-33 replaceable-as-a-whole). */
 export async function publishStackDefs(defs: StackDef[]): Promise<Event> {
   const relays = await getWriteRelays();
-  const signer = loadOrCreateVoice();
+  const signer = authoringVoice();
   const steppedAt = Date.now();
   const template: EventTemplate = {
     kind: TRACE_OPINION_KIND,
@@ -4316,7 +4324,7 @@ export async function publishStackAssignment(input: {
   signer?: Uint8Array;
 }): Promise<Event> {
   const relays = await getWriteRelays();
-  const signer = input.signer ?? loadOrCreateVoice().secretKey;
+  const signer = input.signer ?? authoringVoice().secretKey;
   const steppedAt = Date.now();
   const template: EventTemplate = {
     kind: TRACE_OPINION_KIND,

@@ -13,6 +13,30 @@ use tauri::{ipc::Channel, Manager, path::BaseDirectory};
 use base64::Engine;
 
 static RELAY_SPAWNED: AtomicBool = AtomicBool::new(false);
+const SECRET_VAULT_FILENAME: &str = "zine-secrets.hold";
+const SECRET_SALT_FILENAME: &str = "zine-secrets.salt";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretVaultStatus {
+    vault_exists: bool,
+}
+
+fn secret_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_local_data_dir()
+        .map_err(|error| format!("could not resolve secure-vault directory: {error}"))
+}
+
+/// Report whether this install already has a Stronghold snapshot. The path is
+/// deliberately kept native; JavaScript only needs create-vs-unlock wording.
+#[tauri::command]
+fn secret_vault_status(app: tauri::AppHandle) -> Result<SecretVaultStatus, String> {
+    let data_dir = secret_data_dir(&app)?;
+    Ok(SecretVaultStatus {
+        vault_exists: data_dir.join(SECRET_VAULT_FILENAME).is_file(),
+    })
+}
 
 // Segments skipped when walking an attached folder — non-content noise that
 // should never become a trace node (VCS, deps, build artifacts, OS cruft).
@@ -1169,7 +1193,20 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let data_dir = secret_data_dir(app.handle())
+                .map_err(std::io::Error::other)?;
+            fs::create_dir_all(&data_dir)?;
+            app.handle().plugin(
+                tauri_plugin_stronghold::Builder::with_argon2(
+                    &data_dir.join(SECRET_SALT_FILENAME),
+                )
+                .build(),
+            )?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            secret_vault_status,
             spawn_relay,
             factory_reset,
             pick_folder,

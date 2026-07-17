@@ -52,6 +52,7 @@ globalThis.fetch = async (url: string, init: any) => {
 globalThis.window = {};
 
 import { completeWithTools, type AgentMsg, type ToolSpec } from "./agent-llm.js";
+import { putSecret } from "./secret-store.js";
 
 const OPENAI_CFG = {
   id: "p1",
@@ -59,7 +60,8 @@ const OPENAI_CFG = {
   protocol: "openai" as const,
   baseUrl: "https://openai.example.com",
   modelId: "gpt-test",
-  apiKey: "sk-test",
+  credentialRef: "model:test:openai",
+  credentialConfigured: true,
 };
 const ANTH_CFG = {
   id: "p2",
@@ -67,8 +69,12 @@ const ANTH_CFG = {
   protocol: "anthropic" as const,
   baseUrl: "https://anthropic.example.com",
   modelId: "claude-test",
-  apiKey: "sk-ant-test",
+  credentialRef: "model:test:anthropic",
+  credentialConfigured: true,
 };
+
+await putSecret(OPENAI_CFG.credentialRef, new TextEncoder().encode("sk-test"));
+await putSecret(ANTH_CFG.credentialRef, new TextEncoder().encode("sk-ant-test"));
 
 const TOOLS: ToolSpec[] = [
   { name: "write_file", description: "write a file", parameters: { type: "object" } },

@@ -1,5 +1,6 @@
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import type { Event } from "nostr-tools";
+import { canSignWithSecrets } from "./secret-store.js";
 
 /**
  * Browser-side signing identity for the desktop client.
@@ -26,6 +27,9 @@ let cached: Voice | null = null;
 
 /** Returns the browser voice, generating+persisting one on first use. */
 export function loadOrCreateVoice(): Voice {
+  if (!canSignWithSecrets() || isTauri()) {
+    throw new Error("Signing identity is unavailable until the desktop vault is unlocked");
+  }
   if (cached) return cached;
   const existing = localStorage.getItem(STORAGE_KEY);
   if (existing) {

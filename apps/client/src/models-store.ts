@@ -6,15 +6,17 @@
  * Models view only renders cards the user chose to add, so the surface starts
  * empty instead of stacked with unused preset stubs.
  *
- * SECURITY POSTURE: the API key is stored in localStorage as plaintext, the
- * same way `identity.ts` stores the app's Nostr secret key (the only other
- * secret in the client). This is a deliberate, documented choice: routing
- * *only* the LLM key through OS keychain would protect a throwaway credential
- * better than the app's own signing key — an odd asymmetry. The right move is
- * to move *both* secrets to a keychain layer together, as a separate
- * hardening pass. Until then, both live in localStorage, consistent and
- * honest about the limitation: any same-origin JS can read them.
+ * SECURITY POSTURE: provider cards are public configuration only. Credentials
+ * resolve through an opaque `credentialRef` in the unlocked SecretStore and
+ * are materialized only at the transport boundary.
  */
+
+import {
+  canUseModelSecrets,
+  deleteSecret,
+  getSecretCached,
+  putSecret,
+} from "./secret-store.js";
 
 export type ProviderProtocol = "openai" | "anthropic";
 
@@ -44,7 +46,8 @@ export interface ProviderConfig {
   protocol: ProviderProtocol;
   baseUrl: string;
   modelId: string;
-  apiKey: string;
+  credentialRef: string;
+  credentialConfigured?: boolean;
   /** Optional generation controls. Missing means provider/model default, which
    *  keeps old saved cards backward-compatible and unsupported models usable. */
   reasoningEffort?: ReasoningEffort;
@@ -63,6 +66,12 @@ export interface ProviderConfig {
 }
 
 const STORAGE_KEY = "zine.models";
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+export function providerCredentialRef(id: string): string {
+  return `model:provider:${id}:api-key`;
+}
 
 /** A preset offered as a starting point when adding a provider. The `slug`
  *  is recorded on the created entry (as `preset`) so each preset can be
@@ -140,7 +149,15 @@ export function loadProviders(): ProviderConfig[] {
     raw = [];
   }
   if (!Array.isArray(raw)) raw = [];
-  return raw;
+  return raw.map((provider) => {
+    const legacy = provider as ProviderConfig & { apiKey?: string };
+    const { apiKey: plaintext, ...profile } = legacy;
+    return {
+      ...profile,
+      credentialRef: profile.credentialRef || providerCredentialRef(profile.id),
+      credentialConfigured: profile.credentialConfigured ?? Boolean(plaintext),
+    };
+  });
 }
 
 /** Presets not yet represented in the saved list — what the "add provider"
@@ -152,19 +169,27 @@ export function availablePresets(existing: ProviderConfig[] = loadProviders()): 
 
 /** Persist the provider list. */
 export function saveProviders(providers: ProviderConfig[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(providers));
+  const profiles = providers.map((provider) => {
+    const { apiKey: _plaintext, ...profile } = provider as ProviderConfig & {
+      apiKey?: string;
+    };
+    return profile;
+  });
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
 }
 
 /** Add a blank custom provider. Returns the new full list. */
 export function addProvider(label?: string): ProviderConfig[] {
   const providers = loadProviders();
+  const id = `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const entry: ProviderConfig = {
-    id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id,
     label: label || "Custom",
     protocol: "openai",
     baseUrl: "",
     modelId: "",
-    apiKey: "",
+    credentialRef: providerCredentialRef(id),
+    credentialConfigured: false,
   };
   const next = [...providers, entry];
   saveProviders(next);
@@ -176,13 +201,15 @@ export function addProvider(label?: string): ProviderConfig[] {
  *  by the user after this — editable and deletable like any custom one. */
 export function addProviderFromPreset(preset: ProviderPreset): ProviderConfig[] {
   const providers = loadProviders();
+  const id = `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const entry: ProviderConfig = {
-    id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id,
     label: preset.label,
     protocol: preset.protocol,
     baseUrl: preset.baseUrl,
     modelId: preset.modelId,
-    apiKey: "",
+    credentialRef: providerCredentialRef(id),
+    credentialConfigured: false,
     preset: preset.slug,
   };
   const next = [...providers, entry];
@@ -195,8 +222,14 @@ export function addProviderFromPreset(preset: ProviderPreset): ProviderConfig[] 
  *  is chosen under Press → MODEL (voice-provider-store), not here. */
 export function removeProvider(id: string): ProviderConfig[] {
   const providers = loadProviders();
+  const removed = providers.find((provider) => provider.id === id);
   const next = providers.filter((p) => p.id !== id);
   saveProviders(next);
+  if (removed) {
+    void deleteSecret(removed.credentialRef).catch((error) => {
+      console.error(`[models] could not delete ${removed.credentialRef}:`, error);
+    });
+  }
   return next;
 }
 
@@ -207,4 +240,31 @@ export function patchProvider(id: string, patch: Partial<Omit<ProviderConfig, "i
   const next = providers.map((p) => (p.id === id ? { ...p, ...patch } : p));
   saveProviders(next);
   return next;
+}
+
+/** Resolve a short-lived credential string immediately before transport. */
+export function providerCredential(provider: ProviderConfig): string {
+  if (!canUseModelSecrets()) {
+    throw new Error("MODEL operations are unavailable in this read-only press");
+  }
+  const secret = getSecretCached(provider.credentialRef);
+  if (!secret) {
+    if (!provider.credentialConfigured) return "";
+    throw new Error(`Credential unavailable for ${provider.label}`);
+  }
+  return decoder.decode(secret);
+}
+
+/** Store/clear a credential without ever adding it to React card state. */
+export async function setProviderCredential(
+  id: string,
+  value: string,
+): Promise<ProviderConfig[]> {
+  const providers = loadProviders();
+  const provider = providers.find((entry) => entry.id === id);
+  if (!provider) return providers;
+  const credential = value.trim();
+  if (credential) await putSecret(provider.credentialRef, encoder.encode(credential));
+  else await deleteSecret(provider.credentialRef);
+  return patchProvider(id, { credentialConfigured: Boolean(credential) });
 }

@@ -24,7 +24,7 @@ const SECOND_FOREIGN = "c".repeat(64);
 const localKey: KeyEntry = {
   id: "local",
   label: "Alice",
-  secretHex: "1".repeat(64),
+  secretRef: "nostr:key:local",
   pubkey: LOCAL,
   identity: { font: "serif", hue: 120, sat: 45 },
   createdAt: 1,

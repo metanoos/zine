@@ -21,13 +21,15 @@ import {
   setOwner,
   type PeersState,
 } from "./peers-store.js";
-import { deriveOnionAddress, onionAddressForKey } from "./onion-key.js";
+import { deriveOnionAddress, onionAddressForSecret } from "./onion-key.js";
 import {
   loadKeys,
   getNodeKeyId,
   setNodeKeyId,
   nodeVoice,
   getNodeKey,
+  nodeSecretKey,
+  secretKeyForVoice,
   type KeyEntry,
 } from "./keys-store.js";
 import {
@@ -404,7 +406,7 @@ function NodeSection() {
     try {
       const ownerKey = getNodeKey();
       const { address } = ownerKey
-        ? deriveOnionAddress(ownerKey.secretHex)
+        ? deriveOnionAddress(nodeSecretKey() ?? undefined)
         : deriveOnionAddress();
       setOnionAddress(address);
     } catch {
@@ -416,10 +418,10 @@ function NodeSection() {
    *  crypto-derived one. Returns the address on success, throws on mismatch. */
   async function registerOnion(
     invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>,
-    secretHex: string,
+    secret: Uint8Array,
     expected: string,
   ): Promise<string> {
-    const { seedBase64 } = onionAddressForKey(secretHex);
+    const { seedBase64 } = onionAddressForSecret(secret);
     const reported = (await invoke("setup_onion", { seedBase64 })) as string;
     if (reported !== expected) {
       throw new Error(
@@ -443,7 +445,7 @@ function NodeSection() {
     try {
       const ownerKey = getNodeKey();
       const { address } = ownerKey
-        ? deriveOnionAddress(ownerKey.secretHex)
+        ? deriveOnionAddress(nodeSecretKey() ?? undefined)
         : deriveOnionAddress();
       setOnionAddress(address);
     } catch {
@@ -475,13 +477,17 @@ function NodeSection() {
       const ownerKey = getNodeKey();
       if (!ownerKey) throw new Error("no owner key set");
       const live: string[] = [];
-      live.push(await registerOnion(invoke, ownerKey.secretHex, onionAddress ?? ""));
+      const ownerSecret = secretKeyForVoice(ownerKey.pubkey);
+      if (!ownerSecret) throw new Error("owner key is locked");
+      live.push(await registerOnion(invoke, ownerSecret, onionAddress ?? ""));
       const doorErrors: string[] = [];
       for (const door of doors) {
         const key = keys.find((k) => k.id === door.keyId);
         if (!key) continue;
         try {
-          live.push(await registerOnion(invoke, key.secretHex, door.address));
+          const secret = secretKeyForVoice(key.pubkey);
+          if (!secret) throw new Error(`${key.label} is locked`);
+          live.push(await registerOnion(invoke, secret, door.address));
         } catch (e) {
           doorErrors.push(`${key.label}: ${String(e)}`);
         }
@@ -513,7 +519,9 @@ function NodeSection() {
       if (key && door) {
         try {
           const { invoke } = await import("@tauri-apps/api/core");
-          const addr = await registerOnion(invoke, key.secretHex, door.address);
+          const secret = secretKeyForVoice(key.pubkey);
+          if (!secret) throw new Error(`${key.label} is locked`);
+          const addr = await registerOnion(invoke, secret, door.address);
           setTorStatus({
             kind: "live",
             addresses: [...torStatus.addresses, addr],

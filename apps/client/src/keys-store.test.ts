@@ -36,6 +36,9 @@ test("fresh keychains keep voices first and infrastructure identities at the tai
     keys.map((key) => key.identity).sort((a, b) => a.hue - b.hue),
     [...DEFAULT_VOICE_PALETTE].sort((a, b) => a.hue - b.hue),
   );
+  const persisted = store.get("zine.keys") ?? "";
+  assert.doesNotMatch(persisted, /secretHex/);
+  assert.match(persisted, /secretRef/);
 });
 
 test("fresh-install colors are shuffled without mutating the ROYGBIV palette", () => {

@@ -85,15 +85,14 @@ test("onionAddressForKey: hex secret → same address as pure derivation", () =>
 });
 
 /**
- * deriveOnionAddress(secretHex) derives the owner key's onion from a passed-in
- * hex secret (the caller resolves the owner key from the keychain). It must
+ * deriveOnionAddress(secret) derives the owner key's onion from passed bytes.
+ * The caller resolves them from the secure key session. It must
  * agree with the pure functions over the same secret — catches any drift in the
  * hex→seed→address wiring. The no-arg fallback path (legacy single voice) is
  * exercised separately.
  */
 test("deriveOnionAddress: passed secret matches pure derivation", () => {
-  const katHex = toHex(KAT_SECRET);
-  const got = deriveOnionAddress(katHex);
+  const got = deriveOnionAddress(KAT_SECRET);
   const expected = onionAddressFromSeed(deriveOnionSeed(KAT_SECRET));
   assert.equal(got.address, expected, "passed-secret address must match pure derivation");
 });

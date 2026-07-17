@@ -169,6 +169,7 @@ import {
   identityForPubkey,
   loadKeys,
   authorVoice,
+  modelSecretKey,
   secretKeyForVoice,
   subscribeVoiceIdentities,
   voiceSpanStyle,
@@ -222,7 +223,8 @@ import {
   type Workspace,
 } from "./workspace-core.js";
 import { getPublicKey } from "nostr-tools/pure";
-import { isTauri, loadOrCreateVoice, resolveRelayUrl } from "./identity.js";
+import { isTauri, resolveRelayUrl } from "./identity.js";
+import { canSignWithSecrets } from "./secret-store.js";
 import {
   getOrCreateMintFolder,
   getRootId,
@@ -9471,8 +9473,12 @@ function App() {
     const short = Math.random().toString(16).slice(2, 8);
     const runPath = `${parent ? parent + "/" : ""}_${slug}-${short}`;
     const runId = `run-${startedAtMs.toString(36)}-${short}`;
-    const identity = loadOrCreateVoice();
-    const modelVoice = ensureModelVoice(identity.secretKey, provider.modelId, provider.label);
+    const modelRootSecret = modelSecretKey();
+    if (!modelRootSecret) {
+      setOpStatus(idx, "error", "unlock a MODEL signing key before running");
+      return;
+    }
+    const modelVoice = ensureModelVoice(modelRootSecret, provider.modelId, provider.label);
     const runWorkspace = folder;
     const runShielded = new Set(shieldedRef.current);
     const isRunPath = (path: string) => path === runPath || path.startsWith(`${runPath}/`);
@@ -9481,7 +9487,7 @@ function App() {
       isRunPath(path) || pathInEffectiveScopes(runScopes, runShielded, path);
 
     const ctx: AgentCtx = {
-      nostrSecret: identity.secretKey,
+      nostrSecret: modelRootSecret,
       resolveModel: (ref) =>
         providers.find((p) => p.id === ref || p.label === ref || p.modelId === ref) ?? provider,
       readFile: (p) => {
@@ -10428,7 +10434,7 @@ function App() {
       if (cancelled) return;
       if (st) {
         setOperatorState(st);
-        if (!st.operator) setOperatorSetup("boot");
+        if (!st.operator && canSignWithSecrets()) setOperatorSetup("boot");
       }
     })();
     return () => {

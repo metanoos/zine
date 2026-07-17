@@ -8081,3 +8081,29 @@ html[data-theme="light"] .editor-host {
   gap: 0.6rem;
   margin-top: 0.4rem;
 }
+
+/* App is not mounted until desktop secret material is unlocked. */
+.security-bootstrap {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  color: var(--text, #e8e1d5);
+  background: var(--bg, #161514);
+}
+
+.security-bootstrap-card {
+  width: min(440px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 28px;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  background: color-mix(in srgb, var(--bg, #161514) 92%, white 8%);
+}
+
+.security-bootstrap-card h1,
+.security-bootstrap-card p { margin: 0; }
+.security-bootstrap-card label { display: grid; gap: 6px; }
+.security-bootstrap-card input { width: 100%; box-sizing: border-box; }
+.security-bootstrap-kicker { color: var(--accent, #c49a3a); letter-spacing: .16em; }
+.security-bootstrap-error { color: var(--danger, #d86f61); }

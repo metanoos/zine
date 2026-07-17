@@ -14,6 +14,7 @@ import {
   addProviderFromPreset,
   loadProviders,
   patchProvider,
+  setProviderCredential,
 } from "./models-store.js";
 
 test("built-in providers default to current strong models", () => {
@@ -71,4 +72,16 @@ test("generation options round-trip while legacy cards remain valid", () => {
   assert.equal(saved.temperature, 0.4);
   assert.equal(saved.maxTokens, 8192);
   assert.equal(saved.instructions, "Prefer small, reviewable patches.");
+});
+
+test("provider credentials never enter the serialized card profile", async () => {
+  store.clear();
+  const preset = PROVIDER_PRESETS.find((candidate) => candidate.slug === "anthropic");
+  assert.ok(preset);
+  const [created] = addProviderFromPreset(preset);
+  await setProviderCredential(created.id, "sk-never-serialize");
+
+  const persisted = store.get("zine.models") ?? "";
+  assert.doesNotMatch(persisted, /sk-never-serialize|apiKey/);
+  assert.match(persisted, /credentialRef/);
 });

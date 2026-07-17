@@ -30,14 +30,16 @@ import {
   patchProvider,
   removeProvider,
   saveProviders,
+  setProviderCredential,
   type ModelPersonality,
   type ModelVerbosity,
   type ProviderConfig,
   type ProviderProtocol,
   type ReasoningEffort,
 } from "./models-store.js";
-import { complete } from "./llm.js";
+import { probeProvider } from "./llm.js";
 import { isAnthropicEffort } from "./model-config.js";
+import { canUseModelSecrets } from "./secret-store.js";
 
 type TestState = Record<string, { state: "idle" | "testing" | "ok" | "error"; msg?: string }>;
 
@@ -62,6 +64,7 @@ export function ModelsView({
   const [providers, setProviders] = useState<ProviderConfig[]>(() => loadProviders());
   const [test, setTest] = useState<TestState>({});
   const [addOpen, setAddOpen] = useState(false);
+  const [credentialDrafts, setCredentialDrafts] = useState<Record<string, string>>({});
   // The id of the provider being dragged, or null. Held over the duration of a
   // drag-and-drop reorder so a card knows to dim itself while it's the source.
   const [dragId, setDragId] = useState<string | null>(null);
@@ -95,6 +98,18 @@ export function ModelsView({
     onProvidersChange?.(next);
   }
 
+  async function commitCredential(id: string): Promise<void> {
+    if (!(id in credentialDrafts)) return;
+    const next = await setProviderCredential(id, credentialDrafts[id] ?? "");
+    setProviders(next);
+    onProvidersChange?.(next);
+    setCredentialDrafts((current) => {
+      const copy = { ...current };
+      delete copy[id];
+      return copy;
+    });
+  }
+
   async function runTest(cfg: ProviderConfig) {
     if (!cfg.baseUrl || !cfg.modelId) {
       setTest((t) => ({ ...t, [cfg.id]: { state: "error", msg: "set base URL + model first" } }));
@@ -102,11 +117,8 @@ export function ModelsView({
     }
     setTest((t) => ({ ...t, [cfg.id]: { state: "testing" } }));
     try {
-      const reply = await complete(
-        cfg,
-        [{ role: "user", content: "Reply with the single word: ok" }],
-        { maxTokens: 8 },
-      );
+      await commitCredential(cfg.id);
+      const reply = await probeProvider(cfg);
       setTest((t) => ({
         ...t,
         [cfg.id]: { state: "ok", msg: reply ? reply.slice(0, 60) : "(empty reply)" },
@@ -137,6 +149,16 @@ export function ModelsView({
       document.removeEventListener("keydown", onKey);
     };
   }, [addOpen]);
+
+  if (!canUseModelSecrets()) {
+    return (
+      <section className="view-placeholder models-view">
+        <p className="view-placeholder-blurb">
+          This hosted press is model-free. MODEL providers are available only in an unlocked desktop vault.
+        </p>
+      </section>
+    );
+  }
 
   return (
     <section className="view-placeholder models-view">
@@ -240,9 +262,17 @@ export function ModelsView({
                   <span>api key</span>
                   <input
                     type="password"
-                    value={p.apiKey}
-                    onChange={(e) => updateField(p.id, { apiKey: e.target.value })}
-                    placeholder={isLocal ? "(not required)" : "sk-…"}
+                    value={credentialDrafts[p.id] ?? ""}
+                    onChange={(e) => setCredentialDrafts((current) => ({
+                      ...current,
+                      [p.id]: e.target.value,
+                    }))}
+                    onBlur={() => void commitCredential(p.id)}
+                    placeholder={
+                      p.credentialConfigured
+                        ? "stored securely — type to replace"
+                        : isLocal ? "(not required)" : "sk-…"
+                    }
                     spellCheck={false}
                     autoComplete="off"
                   />

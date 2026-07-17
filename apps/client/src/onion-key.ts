@@ -96,14 +96,20 @@ export function expandedKeyFromSeed(seed: Uint8Array): Uint8Array {
  * The expanded key (base64) is what gets passed to Tor's control port via
  * `ADD_ONION ED25519-V3:<base64>`.
  */
-export function onionAddressForKey(secretHex: string): { address: string; seedBase64: string } {
-  const seed = deriveOnionSeed(hexToBytes(secretHex));
+export function onionAddressForSecret(secret: Uint8Array): { address: string; seedBase64: string } {
+  const seed = deriveOnionSeed(secret);
   const expanded = expandedKeyFromSeed(seed);
   return {
     address: onionAddressFromSeed(seed),
     // Tor expects the 64-byte expanded key (seed || pubkey), not just the seed.
     seedBase64: bytesToBase64(expanded),
   };
+}
+
+/** Backward-compatible pure hex adapter used by protocol vectors and callers
+ * that already hold an explicitly imported test key. App profiles never do. */
+export function onionAddressForKey(secretHex: string): { address: string; seedBase64: string } {
+  return onionAddressForSecret(hexToBytes(secretHex));
 }
 
 /**
@@ -118,12 +124,12 @@ export function onionAddressForKey(secretHex: string): { address: string; seedBa
  * The expanded key (base64) is what gets passed to Tor's control port via
  * `ADD_ONION ED25519-V3:<base64>`.
  */
-export function deriveOnionAddress(ownerSecretHex?: string): { address: string; seedBase64: string } {
+export function deriveOnionAddress(ownerSecret?: Uint8Array): { address: string; seedBase64: string } {
   // No secret passed — use the legacy single voice (headless/Node/tests).
-  if (!ownerSecretHex) {
-    return onionAddressForKey(bytesToHex(loadOrCreateVoice().secretKey));
+  if (!ownerSecret) {
+    return onionAddressForSecret(loadOrCreateVoice().secretKey);
   }
-  return onionAddressForKey(ownerSecretHex);
+  return onionAddressForSecret(ownerSecret);
 }
 
 // --- base32 (RFC 4648, lowercase, no padding) ----------------------------
@@ -158,12 +164,6 @@ function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   return out;
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  let hex = "";
-  for (const b of bytes) hex += b.toString(16).padStart(2, "0");
-  return hex;
 }
 
 function asciiBytes(s: string): Uint8Array {

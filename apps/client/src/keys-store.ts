@@ -14,16 +14,20 @@
  * on both light and dark themes (lightness comes from a `--voice-ink-l` token
  * set per theme, see App.css).
  *
- * SECURITY POSTURE: secret key material lives in localStorage as hex, exactly
- * as `identity.ts` already stored it pre-keychain. Routing only these secrets
- * through OS keychain would create the same asymmetry `models-store.ts` calls
- * out — better to move every secret (Nostr + LLM) to a keychain layer together,
- * as a later hardening pass. Until then, consistent and honest about the limit.
+ * SECURITY POSTURE: this module persists only public profiles. `secretRef` is
+ * an opaque handle into the unlocked SecretStore session; raw signing bytes
+ * never enter the JSON profile written to localStorage.
  */
 
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { npubEncode, nsecEncode } from "nostr-tools/nip19";
 import { fetchVoiceIdentity } from "./provenance.js";
+import {
+  canSignWithSecrets,
+  deleteSecret,
+  getSecretCached,
+  putSecret,
+} from "./secret-store.js";
 
 export interface KeyIdentity {
   /** CSS font-family value (e.g. `"Newsreader", serif`). */
@@ -38,8 +42,8 @@ export interface KeyEntry {
   /** Stable id so edits survive reordering; builtins carry stable ids. */
   id: string;
   label: string;
-  /** Hex secret (32 bytes → 64 hex chars). */
-  secretHex: string;
+  /** Opaque reference to the 32-byte signing secret in SecretStore. */
+  secretRef: string;
   /** Derived npub-less hex pubkey (32 bytes → 64 hex chars). */
   pubkey: string;
   identity: KeyIdentity;
@@ -60,6 +64,16 @@ const IDENTITY_SCHEMA = 1;
 const ACTIVE_KEY = "zine.keys.active";
 /** The pre-keychain single-voice secret slot, migrated into the first key. */
 const LEGACY_SECRET_KEY = "zine.voice.secretHex";
+
+export function keySecretRef(id: string): string {
+  return `nostr:key:${id}`;
+}
+
+function stageKeySecret(ref: string, secret: Uint8Array): void {
+  void putSecret(ref, secret).catch((error) => {
+    console.error(`[keys] could not persist ${ref}:`, error);
+  });
+}
 
 /**
  * Curated font pool for identity generation — readable body faces across the
@@ -215,7 +229,16 @@ export function keyNpub(k: KeyEntry): string {
 
 /** The key's secret key as an nsec (`nsec1…`). */
 export function keyNsec(k: KeyEntry): string {
-  return nsecEncode(hexToBytes(k.secretHex));
+  const secret = getSecretCached(k.secretRef);
+  if (!secret) throw new Error(`Private key unavailable for ${k.label}`);
+  return nsecEncode(secret);
+}
+
+/** Resolve raw hex only for an explicit, confirmed export gesture. */
+export function keySecretHex(k: KeyEntry): string {
+  const secret = getSecretCached(k.secretRef);
+  if (!secret) throw new Error(`Private key unavailable for ${k.label}`);
+  return bytesToHex(secret);
 }
 
 function newId(): string {
@@ -241,10 +264,13 @@ function entryFromSecret(
 ): KeyEntry {
   const secretKey = hexToBytes(secretHex);
   const pubkey = getPublicKey(secretKey);
+  const id = builtin ? "builtin-voice-1" : newId();
+  const secretRef = keySecretRef(id);
+  stageKeySecret(secretRef, secretKey);
   return {
-    id: builtin ? "builtin-voice-1" : newId(),
+    id,
     label,
-    secretHex,
+    secretRef,
     pubkey,
     identity: identity ?? identityFromPubkey(pubkey),
     schemaVersion: IDENTITY_SCHEMA,
@@ -291,6 +317,11 @@ function seedIfEmpty(): void {
       // Corrupt blob — fall through and reseed.
     }
   }
+
+  // Hosted/browser builds are readers until they have an encrypted vault.
+  // Never manufacture a plaintext identity merely because a reader view asks
+  // for the public key list.
+  if (!canSignWithSecrets()) return;
 
   // --- Legacy migration: absorb the old single-key slot as the builtin key,
   //     and assign it to every role so existing behavior is unchanged. ---
@@ -364,7 +395,67 @@ export function loadKeys(): KeyEntry[] {
  *  already refuses to empty the list, and seedIfEmpty repairs a wiped slot
  *  on the next load.) */
 export function saveKeys(keys: KeyEntry[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(keys));
+  const publicProfiles = keys.map((key) => {
+    const { secretHex: _legacySecret, ...profile } = key as KeyEntry & {
+      secretHex?: string;
+    };
+    return profile;
+  });
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(publicProfiles));
+}
+
+/**
+ * Desktop bootstrap invariant: every persisted profile resolves from the
+ * already-unlocked vault, or a fresh profile set is durably created before App
+ * renders. Legacy plaintext is handled by `migrateLegacySecrets` first.
+ */
+export async function initializeKeyStoreForAuthoring(): Promise<KeyEntry[]> {
+  const stored = localStorage.getItem(STORAGE_KEY);
+  if (stored) {
+    const parsed = JSON.parse(stored) as Array<KeyEntry & { secretHex?: string }>;
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      for (const key of parsed) {
+        if (key.secretHex || !key.secretRef || !getSecretCached(key.secretRef)) {
+          throw new Error(`Secure key material is unavailable for ${key.label || key.id}`);
+        }
+      }
+      return loadKeys();
+    }
+  }
+
+  const palette = shuffledDefaultVoicePalette();
+  const specs: Array<[string, KeyIdentity]> = [
+    ["voice-1", palette[0]],
+    ["voice-2", palette[1]],
+    ["voice-3", palette[2]],
+    ["voice-4", palette[3]],
+    ["voice-5", palette[4]],
+    ["node-1", palette[5]],
+    ["external-1", palette[6]],
+  ];
+  const profiles: KeyEntry[] = [];
+  for (const [label, identity] of specs) {
+    const secret = generateSecretKey();
+    const pubkey = getPublicKey(secret);
+    const id = newId();
+    const secretRef = keySecretRef(id);
+    await putSecret(secretRef, secret);
+    profiles.push({
+      id,
+      label,
+      secretRef,
+      pubkey,
+      identity,
+      schemaVersion: IDENTITY_SCHEMA,
+      createdAt: Date.now(),
+    });
+  }
+  saveKeys(profiles);
+  const node = profiles.find((key) => key.label === "node-1")!;
+  localStorage.setItem(NODE_ROLE_KEY, node.id);
+  localStorage.setItem(AUTHOR_ROLE_KEY, profiles[0].id);
+  localStorage.setItem(MODEL_ROLE_KEY, profiles[2].id);
+  return profiles;
 }
 
 /** The id of the active key, or null. Falls back to the first key if unset. */
@@ -519,7 +610,18 @@ export function nodeVoice(): string {
  *  when the keychain is empty, which seedIfEmpty() prevents. */
 export function nodeSecretKey(): Uint8Array | null {
   const entry = getNodeKey();
-  return entry ? hexToBytes(entry.secretHex) : null;
+  return entry ? getSecretCached(entry.secretRef) : null;
+}
+
+export function authorSecretKey(): Uint8Array | null {
+  const entry = getAuthorKey();
+  return entry ? getSecretCached(entry.secretRef) : null;
+}
+
+export function modelSecretKey(): Uint8Array | null {
+  const id = getModelKeyId();
+  const entry = id ? loadKeys().find((key) => key.id === id) : null;
+  return entry ? getSecretCached(entry.secretRef) : null;
 }
 
 /** Set the NODE key by id. Changing it means the machine's .onion address and
@@ -641,7 +743,7 @@ export function voiceSpanStyle(voice: string): { className: string; style?: stri
  *  rather than the active keychain key. */
 export function secretKeyForVoice(pubkey: string): Uint8Array | null {
   const entry = loadKeys().find((k) => k.pubkey === pubkey);
-  return entry ? hexToBytes(entry.secretHex) : null;
+  return entry ? getSecretCached(entry.secretRef) : null;
 }
 
 /** Generate a new keypair with a fresh identity and append it. An omitted label
@@ -651,10 +753,13 @@ export function addKey(label?: string): KeyEntry[] {
   const keys = loadKeys();
   const secretKey = generateSecretKey();
   const pubkey = getPublicKey(secretKey);
+  const id = newId();
+  const secretRef = keySecretRef(id);
+  stageKeySecret(secretRef, secretKey);
   const entry: KeyEntry = {
-    id: newId(),
+    id,
     label: label || nextVoiceLabel(keys),
-    secretHex: bytesToHex(secretKey),
+    secretRef,
     pubkey,
     identity: identityFromPubkey(pubkey),
     schemaVersion: IDENTITY_SCHEMA,
@@ -673,8 +778,14 @@ export function addKey(label?: string): KeyEntry[] {
 export function removeKey(id: string): KeyEntry[] {
   const keys = loadKeys();
   if (keys.length <= 1) return keys; // never empty the keychain
+  const removed = keys.find((key) => key.id === id);
   const next = keys.filter((k) => k.id !== id);
   saveKeys(next);
+  if (removed) {
+    void deleteSecret(removed.secretRef).catch((error) => {
+      console.error(`[keys] could not delete ${removed.secretRef}:`, error);
+    });
+  }
   const fallback = next[0]?.id ?? null;
   // Reassign any role that pointed at the deleted key. The legacy
   // `zine.keys.active` slot is also repointed for backward-compat with any
