@@ -23,6 +23,8 @@
  */
 
 import { providerCredential, type ProviderConfig } from "./models-store.js";
+import { providerProfileFingerprint } from "./provider-fingerprint.js";
+import type { PreparedOperation } from "./prepared-operation.js";
 import { isTauri } from "./identity.js";
 import {
   anthropicModelOptions,
@@ -74,6 +76,25 @@ export async function complete(
   return cfg.protocol === "anthropic"
     ? callAnthropic(cfg, configuredMessages, opts)
     : callOpenAI(cfg, configuredMessages, opts);
+}
+
+/** Execute already-approved bytes. This boundary resolves the credential and
+ * selects a protocol, but it never gathers context or rebuilds messages. */
+export async function completePrepared(
+  prepared: PreparedOperation,
+  cfg: ProviderConfig,
+  opts: CompleteOptions = {},
+): Promise<string> {
+  if (
+    cfg.id !== prepared.providerId ||
+    providerProfileFingerprint(cfg) !== prepared.providerFingerprint
+  ) {
+    throw new Error("Provider configuration changed after prompt approval");
+  }
+  const messages = prepared.messages.map((message) => ({ ...message }));
+  return cfg.protocol === "anthropic"
+    ? callAnthropic(cfg, messages, opts)
+    : callOpenAI(cfg, messages, opts);
 }
 
 /** Fixed workspace-free connectivity probe used by Models onboarding. */
