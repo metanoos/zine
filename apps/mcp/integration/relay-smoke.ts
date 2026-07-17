@@ -1,4 +1,11 @@
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import type { Event, Filter } from "nostr-tools";
+
 import type { KEdit } from "../../client/src/provenance/provenance.js";
 
 import { installNodeStorage } from "../src/storage-node.js";
@@ -20,9 +27,27 @@ if (!homeRelay || !configPath || !expectedAgent || !expectedRelayOwner || !relay
 }
 const homeRelayUrl = homeRelay;
 const ownerSecretHex = relayOwnerSecretHex;
+const stateConfigPath = configPath;
 
-installNodeStorage(configPath);
+installNodeStorage(stateConfigPath);
 setHomeRelay(homeRelayUrl);
+
+function jsonToolResult(result: unknown): Record<string, unknown> {
+  const content = (result as { content?: unknown }).content;
+  assert.ok(Array.isArray(content), "tool returned no content array");
+  const block = content.find(
+    (item: unknown): item is { type: "text"; text: string } =>
+      !!item && typeof item === "object" &&
+      (item as { type?: unknown }).type === "text" &&
+      typeof (item as { text?: unknown }).text === "string",
+  );
+  assert.ok(block, "tool returned no JSON text block");
+  return JSON.parse(block.text) as Record<string, unknown>;
+}
+
+function canonicalEvent(event: Event): Event {
+  return JSON.parse(JSON.stringify(event)) as Event;
+}
 
 async function main(): Promise<void> {
   // Dynamic imports are load-bearing: relay URL and localStorage must be
@@ -49,8 +74,8 @@ async function main(): Promise<void> {
     upsertManifestEntry,
   } = await import("../../client/src/provenance/provenance.js");
   const {
-    enqueueLocalEvent,
     pendingLocalEventCount,
+    pendingLocalEvents,
   } = await import("../../client/src/provenance/event-outbox.js");
   const { resolveFolderBinding, resolveWorkspaceBinding } = await import("../src/folder-binding.js");
   const { finalizeEvent, getPublicKey, verifyEvent } = await import("nostr-tools/pure");
@@ -59,6 +84,46 @@ async function main(): Promise<void> {
     synthesizeKEditTransition,
     validateKEditTransition,
   } = await import("../../client/src/workspace/workspace-core.js");
+
+  const queryRelay = async (
+    url: string,
+    filter: Filter,
+    signer: Uint8Array,
+  ): Promise<Event[]> => {
+    const relay = new Relay(url);
+    relay.onauth = async (template) => finalizeEvent(template, signer) as never;
+    await relay.connect();
+    try {
+      const attempt = () => new Promise<{ events: Event[]; closeReason: string }>((resolve) => {
+        const events: Event[] = [];
+        const sub = relay.subscribe([filter], {
+          onevent: (event) => events.push(canonicalEvent(event)),
+          oneose: () => sub.close(),
+        });
+        const timer = setTimeout(() => sub.close("timeout"), 4_000);
+        sub.onclose = (reason) => {
+          clearTimeout(timer);
+          resolve({ events, closeReason: reason });
+        };
+      });
+      const first = await attempt();
+      if (!first.closeReason.startsWith("auth-required:") || !relay.onauth) {
+        return first.events;
+      }
+      for (let retry = 0; retry < 5; retry += 1) {
+        try {
+          await relay.auth(relay.onauth);
+          return (await attempt()).events;
+        } catch (error) {
+          if (!String(error).includes("no challenge was received")) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 25 * (retry + 1)));
+        }
+      }
+      throw new Error(`relay authentication did not complete for ${url}`);
+    } finally {
+      relay.close();
+    }
+  };
 
   const voice = loadOrCreateVoice();
   await initializeMcpKeySession(voice);
@@ -76,35 +141,70 @@ async function main(): Promise<void> {
   assert.equal(reopenedRoot.folderId, automaticRoot.folderId);
   assert.equal(reopenedRoot.reused, true);
 
-  // Exercise the delayed-delivery path independently of the normal online
-  // publisher: an exact signed event already in the durable outbox must be
-  // flushed unchanged and then become queryable from the real home relay.
-  const queuedSnapshot = "durable outbox relay probe\n";
-  const queuedHash = await sha256HexLocal(queuedSnapshot);
-  const queuedAt = Date.now();
-  const queuedProbe = finalizeEvent({
-    kind: 4290,
-    created_at: Math.floor(queuedAt / 1_000),
-    tags: [
-      ["z", "file"],
-      ["F", "outbox-probe.md"],
-      ["f", automaticRoot.folderId],
-      ["action", "import"],
-      ["x", queuedHash],
-    ],
-    content: JSON.stringify({
-      steppedAt: queuedAt,
-      snapshot: queuedSnapshot,
-      contentHash: queuedHash,
-      deltas: diffToDeltas("", queuedSnapshot),
-    }),
-  }, voice.secretKey);
-  enqueueLocalEvent(queuedProbe);
-  assert.equal(pendingLocalEventCount(), 1);
+  // Take a real file Step while home is unavailable. The publisher must first
+  // retain the finalized event locally, then a later flush must deliver those
+  // byte-identical signed fields rather than regenerate another event.
+  const queuedSnapshots = [
+    "durable outbox relay probe\n",
+    "durable outbox relay probe, second exact Step\n",
+  ];
+  const queuedHash = await sha256HexLocal(queuedSnapshots[0]!);
+  setHomeRelay("ws://127.0.0.1:1");
+  const queuedGenesis = await publishEdit({
+    prevEventId: null,
+    previousSnapshot: "",
+    relativePath: "outbox-probe.md",
+    folderId: automaticRoot.folderId,
+    deltas: diffToDeltas("", queuedSnapshots[0]!),
+    snapshot: queuedSnapshots[0]!,
+    contentHash: queuedHash,
+    action: "import",
+    signer: voice.secretKey,
+    localOnly: true,
+    kedits: synthesizeKEditTransition("", queuedSnapshots[0]!, voice.publicKey),
+  });
+  const queuedSecondHash = await sha256HexLocal(queuedSnapshots[1]!);
+  const queuedSecond = await publishEdit({
+    prevEventId: queuedGenesis.id,
+    previousSnapshot: queuedSnapshots[0]!,
+    traceId: queuedGenesis.id,
+    relativePath: "outbox-probe.md",
+    folderId: automaticRoot.folderId,
+    deltas: diffToDeltas(queuedSnapshots[0]!, queuedSnapshots[1]!),
+    snapshot: queuedSnapshots[1]!,
+    contentHash: queuedSecondHash,
+    action: "edit",
+    signer: voice.secretKey,
+    localOnly: true,
+    kedits: synthesizeKEditTransition(queuedSnapshots[0]!, queuedSnapshots[1]!, voice.publicKey),
+  });
+  const queuedEvents = [queuedGenesis, queuedSecond].map(canonicalEvent);
+  assert.equal(pendingLocalEventCount(), 2);
+  assert.deepEqual(
+    pendingLocalEvents().map((record) => canonicalEvent(record.event)),
+    queuedEvents,
+    "offline outbox changed signed bytes or insertion order",
+  );
+  setHomeRelay(homeRelayUrl);
   const flushed = await flushLocalEventOutbox();
-  assert.equal(flushed.published, 1);
+  assert.equal(flushed.published, 2);
   assert.equal(flushed.pending, 0);
-  assert.equal((await fetchEventById(queuedProbe.id))?.id, queuedProbe.id);
+  const flushedEvents = await queryRelay(
+    homeRelayUrl,
+    { ids: queuedEvents.map((event) => event.id) },
+    voice.secretKey,
+  );
+  const flushedById = new Map(flushedEvents.map((event) => [event.id, event]));
+  assert.deepEqual(
+    queuedEvents.map((event) => flushedById.get(event.id)),
+    queuedEvents,
+    "home relay did not receive the exact queued signed events",
+  );
+  assert.deepEqual(
+    (await fetchChain(automaticRoot.folderId, "outbox-probe.md")).map((event) => event.id),
+    queuedEvents.map((event) => event.id),
+    "home relay did not preserve the queued prev-chain order",
+  );
 
   // Seed a human/relay-owner folder, then exercise the MCP onboarding rule:
   // the distinct agent must create and persist its own shallow folder fork.
@@ -334,6 +434,162 @@ async function main(): Promise<void> {
   assert.equal(currentManifest[0]?.contentHash, thirdHash);
 
   if (externalRelay) {
+    // Drive the actual stdio MCP surface against both real relays. Two private
+    // Steps establish ancestry; changed-state Send must append one valid Step,
+    // return its exact locator, and publish only that immutable node.
+    const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const tsx = join(packageRoot, "node_modules", ".bin", "tsx");
+    const serverConfig = `${stateConfigPath}.stdio-server`;
+    writeFileSync(serverConfig, JSON.stringify({
+      "zine.headless.voice.secretHex": Buffer.from(voice.secretKey).toString("hex"),
+    }), { mode: 0o600 });
+    const serverEnv = Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    );
+    serverEnv.HOME = dirname(stateConfigPath);
+    const transport = new StdioClientTransport({
+      command: tsx,
+      args: [
+        join(packageRoot, "src", "server.ts"),
+        "--profile",
+        "relay-contract",
+        "--home-relay",
+        homeRelayUrl,
+        "--publish-relay",
+        externalRelay,
+        "--config",
+        serverConfig,
+      ],
+      env: serverEnv,
+      stderr: "pipe",
+    });
+    const client = new Client({ name: "zine-relay-contract", version: "1.0.0" });
+    await client.connect(transport);
+    try {
+      const info = jsonToolResult(await client.callTool({
+        name: "zine_workspace_info",
+        arguments: {},
+      }));
+      const exactRootId = String(info.rootId);
+      assert.match(exactRootId, /^[0-9a-f]{64}$/);
+      assert.equal(info.ownerPubkey, voice.publicKey);
+
+      const exactPath = "exact-handoff.md";
+      const exactSnapshots = [
+        "private genesis\n",
+        "private follow-up\n",
+        "selected public handoff\n",
+      ];
+      const privateGenesis = jsonToolResult(await client.callTool({
+        name: "zine_step",
+        arguments: { relativePath: exactPath, content: exactSnapshots[0] },
+      }));
+      const privateFollowUp = jsonToolResult(await client.callTool({
+        name: "zine_step",
+        arguments: { relativePath: exactPath, content: exactSnapshots[1] },
+      }));
+      const sent = jsonToolResult(await client.callTool({
+        name: "zine_send",
+        arguments: { relativePath: exactPath, content: exactSnapshots[2] },
+      }));
+      const exactNodeIds = [
+        String(privateGenesis.nodeId),
+        String(privateFollowUp.nodeId),
+        String(sent.nodeId),
+      ];
+      assert.equal(new Set(exactNodeIds).size, 3);
+      assert.equal(sent.sent, true);
+
+      const resent = jsonToolResult(await client.callTool({
+        name: "zine_send",
+        arguments: { relativePath: exactPath, content: exactSnapshots[2] },
+      }));
+      assert.equal(resent.nodeId, sent.nodeId, "unchanged Send must reuse the selected Step");
+
+      const history = jsonToolResult(await client.callTool({
+        name: "zine_get_history",
+        arguments: { relativePath: exactPath },
+      }));
+      assert.equal((history.conformance as { status?: string }).status, "full");
+      const rows = history.history as Array<{
+        nodeId: string;
+        payload: { snapshot?: string; kedits?: KEdit[] };
+        event: Event;
+      }>;
+      assert.deepEqual(rows.map((row) => row.nodeId), exactNodeIds);
+      let priorSnapshot = "";
+      for (let index = 0; index < rows.length; index += 1) {
+        const row = rows[index]!;
+        const snapshot = exactSnapshots[index]!;
+        assert.equal(row.payload.snapshot, snapshot);
+        assert.ok(Array.isArray(row.payload.kedits));
+        assert.equal(
+          validateKEditTransition(priorSnapshot, snapshot, row.payload.kedits!).valid,
+          true,
+        );
+        assert.equal(row.payload.kedits!.length, 1, "each changed MCP write is one KEdit");
+        assert.equal(row.payload.kedits![0]!.voice, voice.publicKey);
+        assert.equal(verifyEvent(canonicalEvent(row.event)), true);
+        priorSnapshot = snapshot;
+      }
+
+      const node = jsonToolResult(await client.callTool({
+        name: "zine_get_node",
+        arguments: { nodeId: sent.nodeId },
+      }));
+      assert.equal(node.nodeId, sent.nodeId);
+      assert.deepEqual(node.event, canonicalEvent(rows[2]!.event));
+      assert.equal((node.conformance as { status?: string }).status, "full");
+      assert.equal(node.historyComplete, true);
+
+      const handoff = jsonToolResult(await client.callTool({
+        name: "zine_get_handoff",
+        arguments: { relativePath: exactPath },
+      }));
+      assert.equal(handoff.sent, true);
+      assert.deepEqual(handoff.locator, sent.locator);
+      assert.equal(handoff.encoded, sent.encoded);
+      const locator = handoff.locator as Record<string, unknown>;
+      assert.equal(locator.rootId, exactRootId);
+      assert.equal(locator.traceId, exactNodeIds[0]);
+      assert.equal(locator.nodeId, exactNodeIds[2]);
+      assert.equal(locator.relativePath, exactPath);
+      assert.equal(locator.ownerPubkey, voice.publicKey);
+
+      const externallyVisible = await queryRelay(
+        externalRelay,
+        { ids: exactNodeIds },
+        voice.secretKey,
+      );
+      assert.deepEqual(
+        externallyVisible.map((event) => event.id),
+        [exactNodeIds[2]],
+        "Send leaked private ancestry to the publication relay",
+      );
+      assert.deepEqual(externallyVisible[0], node.event);
+      const rootScoped = await queryRelay(
+        externalRelay,
+        { kinds: [4290], "#f": [exactRootId] },
+        voice.secretKey,
+      );
+      assert.deepEqual(
+        rootScoped.map((event) => event.id),
+        [exactNodeIds[2]],
+        "Send published another Root member or folder artifact",
+      );
+      const externalHeads = await queryRelay(
+        externalRelay,
+        { kinds: [34290], "#d": [exactNodeIds[0]!] },
+        voice.secretKey,
+      );
+      assert.deepEqual(externalHeads, [], "MCP Send must not publish mutable TraceHead metadata");
+    } finally {
+      await client.close();
+      await transport.close();
+    }
+
     const counts = await fetchAttestationCounts([first.id]);
     assert.equal(counts.get(first.id), 1, "Attest was not durably queryable");
   }
