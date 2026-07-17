@@ -155,3 +155,76 @@ update security, and three-platform support responsibilities.
 **Deferred:** 2026-07-17
 **Depends on:** Stable macOS dogfood bundle, versioning and update policy,
 reproducible relay and adapter sidecars, security review, and release ownership.
+
+## Mobile and private sync
+
+### Multi-device mobile press RFC and security program
+
+**What:** Design and separately review a native phone press with device-local
+signing and encryption keys, stable logical ownership, enrollment/revocation,
+offline branch reconciliation, independent recovery authorities, and P2P-first
+encrypted private sync.
+
+**Why:** Phone note capture is valuable, but safely unifying work owned across
+devices requires a trust and recovery model far beyond the single-owner,
+single-signer desktop proof. Moving desktop keys to the phone would create the
+wrong security boundary; inventing the multi-device wire model inside the
+desktop slice would make it difficult to revise.
+
+**Context:** The desktop schema keeps an explicit extension seam: the proof
+requires `ownerId === signerPubkey`, while a later unequal relation must carry
+exact authorization evidence understood by the reader. The mobile program
+owns root manifests, device grants, separate signing/encryption capabilities,
+revocation, recovery epochs, contested offline siblings, native phone storage,
+direct/LAN/hole-punched/circuit-relayed delivery, and encrypted
+store-and-forward fallback. The detailed RFC remains in the project planning
+archive until that program is promoted into repository scope.
+
+**Pros:** Preserves mobile note-taking and local-first ownership without moving
+private keys between devices; gives the high-risk trust model an explicit
+security gate and independent test program.
+
+**Cons:** Mobile capture remains unavailable until the desktop lifecycle is
+proven; the full program adds cryptography, recovery UX, networking, native
+storage, conflict review, and substantial support burden.
+
+**Effort:** XL
+**Priority:** P2 after desktop proof
+**Deferred:** 2026-07-17
+**Depends on:** Stable schema-2 desktop events, `press.sqlite3`, purpose-specific
+native capabilities, fixed cross-language conformance corpus, real demand
+evidence, and a dedicated threat-model/protocol review.
+
+## Storage durability
+
+### Transparent event-body compression and deduplication
+
+**What:** Add content-addressed snapshot chunks, transparent compression,
+garbage collection, backup, integrity audit, corruption recovery, and exact
+signed-event reconstruction for local and hosted event stores.
+
+**Why:** Every conforming trace Step carries a complete snapshot, so cumulative
+task storage grows quadratically. Storing each immutable event once avoids
+accidental duplication but does not remove the protocol's inherent physical
+history cost.
+
+**Context:** The desktop proof uses ordinary single-copy SQLite with measured
+event/task warning budgets, database/WAL instrumentation, and explicit
+compaction/reply choices. The storage design must be chosen from a real dogfood
+corpus and must reconstruct byte-identical signed events. It cannot reduce the
+size of an individual Nostr event or websocket message; wire limits remain a
+separate product constraint.
+
+**Pros:** Reduces local and hosted-relay physical storage while preserving
+immutable event identity and self-contained wire semantics.
+
+**Cons:** Creates a custom storage layer with migration, reference counting,
+garbage-collection, corruption, backup, and recovery risks; implementing it
+before corpus measurements would lock in speculative chunk boundaries.
+
+**Effort:** XL
+**Priority:** P1 before public release
+**Deferred:** 2026-07-17
+**Depends on:** Stable schema-2 encoding, measured dogfood database growth,
+event-size budgets, exact reconstruction/signature tests, corruption fixtures,
+and the public-release decision.
