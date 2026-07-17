@@ -40,6 +40,11 @@ The [headless MCP press](apps/mcp/README.md) lets an MCP-capable agent write
 through Zine under its own key. The [desktop press](apps/client/README.md) is
 the reference authoring and review experience.
 
+Each named headless profile owns one permanent Root; no source folder or live
+relay is required. Offline Steps persist as exact signed events and synchronize
+to the loopback home later. LLMs consume the raw trace directly, while a Send
+can return a locator for the desktop to verify and render for a human.
+
 Read the [documentation hub](docs/README.md), or go directly to the
 [product wedge](docs/PRODUCT.md), [protocol tour](docs/PROTOCOL.md),
 [evidence ledger](docs/EVIDENCE.md), [product roadmap](docs/ROADMAP.md), and
