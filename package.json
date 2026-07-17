@@ -8,6 +8,7 @@
     "dev": "node scripts/dev.mjs dev",
     "build": "node scripts/dev.mjs build",
     "build:relay": "node scripts/build-relay.mjs",
+    "dogfood:macos": "node scripts/dogfood-macos.mjs",
     "check": "node scripts/verify.mjs check",
     "verify": "node scripts/verify.mjs verify",
     "verify:relay": "node scripts/verify-relay.mjs",

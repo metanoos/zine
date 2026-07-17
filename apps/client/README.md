@@ -115,117 +115,69 @@ work is tracked in [FORK-ON-WRITE.md](FORK-ON-WRITE.md).
 
 ## Release builds
 
-The desktop app bundles a prebuilt `zine-relay` binary as a Tauri resource.
-Users therefore need neither a repository checkout nor a separate relay
-runtime. Build the relay for the target platform, then build the Tauri bundle.
-
-> Tauri cannot produce all three platform installers from one host. Build each
-> target on a matching machine or CI runner.
-
-### Prerequisites
-
-- Go ≥ 1.25 to build the relay
-- Node 24 LTS for the Tauri frontend
-- Rust stable plus the Tauri prerequisites for your platform:
-  - **macOS:** Xcode CLI tools. `xcode-select --install`
-  - **Windows:** WebView2 plus MSVC build tools
-  - **Linux:** `webkit2gtk-4.1`, `libgtk-3`, `libappindicator`, `librsvg`
-    (see [the Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/))
-
-### 1. Build the relay into the bundle resource path
-
-From the repository root, for your current platform:
+The current release target is a local macOS dogfood bundle, not a public
+release. From a clean checkout on the Mac that will run the app:
 
 ```sh
-cd relay
-go build -o ../apps/client/src-tauri/binaries/zine-relay .
-cd ..
+npm run dogfood:macos
 ```
 
-This creates `apps/client/src-tauri/binaries/zine-relay`, the path declared in
-`tauri.conf.json` under `bundle.resources`. The Tauri build script checks that
-the path exists, so step 2 fails loudly if you skip this.
+The command checks macOS and current-machine architecture, Node 24 LTS, npm,
+Go 1.25 or newer with CGO, Rust/Cargo, and the Xcode CLI tools before it builds
+anything. It runs locked `npm ci` when client dependencies are absent or stale;
+it never installs system tools. Install Xcode's tools with
+`xcode-select --install` and use the upstream Node, Go, and Rust installers if
+a prerequisite check tells you one is missing.
 
-> **Target architecture matters:** the relay uses a CGO-backed SQLite driver,
-> so `GOOS` and `GOARCH` alone are not a complete cross-compilation setup.
-> Build the relay on the same platform and architecture as the Tauri bundle,
-> or provide an appropriate cross C toolchain.
+The relay is always rebuilt directly from the current `relay/` Go sources into
+the exact Tauri resource path. The command records source and binary SHA-256
+provenance, proves the thin Mach-O architecture matches the host, then invokes
+the existing production `tauri build` for the macOS app and DMG. Afterward it
+inspects both copies of the app and fails if identity/version, executable mode,
+architecture, the bounded relay help probe, signature structure, or the
+unsafe-content scan is wrong.
 
-### 1b. Source the Tor binary for networked reachability
+All outputs are ignored build artifacts:
 
-Tor is an optional sidecar, needed only for inbound peer reachability over
-onion services (see `protocol/transport.md`). In local mode, with no
-`peers.json`, the app works without it. The repository's `binaries/tor` is an
-intentional failing placeholder; replace it with a real executable before
-testing a networked bundle.
+```text
+apps/client/src-tauri/binaries/zine-relay
+apps/client/src-tauri/target/dogfood/relay-provenance.json
+apps/client/src-tauri/target/dogfood/report.json
+apps/client/src-tauri/target/dogfood/<rust-target>/release/bundle/macos/client.app
+apps/client/src-tauri/target/dogfood/<rust-target>/release/bundle/dmg/*.dmg
+```
 
-| Platform | Local bundle smoke-test source |
-|---|---|
-| **macOS** | `brew install tor && cp "$(which tor)" apps/client/src-tauri/binaries/tor` |
-| **Linux** | `apt install tor && cp "$(which tor)" apps/client/src-tauri/binaries/tor` |
-| **Windows** | Download the [Tor Expert Bundle](https://www.torproject.org/download/tor/), then place `tor.exe` at `apps/client/src-tauri/binaries/tor.exe` |
+Temporary DMG mount state is removed after inspection. The command does not
+delete the normal Tauri target directory or any user-supplied artifact.
 
-These copy commands work for a local smoke test; they do not prove that the
-Tor executable is portable. A release bundle must include its required
-dynamic libraries and adjacent runtime files. Test the installed artifact on
-a clean machine before publishing it.
+### Install and open
 
-> **Develop without bundling:** install Tor system-wide and set
-> `TRACER_TOR_BIN` to its path. `resolve_tor_binary` in
-> `src-tauri/src/lib.rs` also checks `PATH`, so a plain `brew install tor` may
-> work without an environment variable.
-
-> **Missing Tor is non-fatal:** `spawn_tor` returns an error if no binary is
-> found, but the app continues without onion reachability. Peers cannot reach
-> you, while local authoring and clearnet publishing keep working.
-
-### 2. Build the Tauri bundle
-
-From `apps/client`:
+Open the generated DMG and drag `client.app` to Applications, or open the
+verified app in place:
 
 ```sh
-cd apps/client
-npm ci
-npm run tauri build
+open apps/client/src-tauri/target/dogfood/*/release/bundle/macos/client.app
 ```
 
-Output lands in `apps/client/src-tauri/target/release/bundle/`:
+This bundle uses a Tauri
+[ad-hoc signature](https://v2.tauri.app/distribute/sign/macos/#ad-hoc-signing)
+(`-`), with no Apple signing certificate, and is not notarized. macOS may
+require Control-click → **Open**, or approval in System Settings → Privacy &
+Security, on first launch. It is suitable only for dogfood on the current
+machine and architecture.
 
-| Platform | Artifact |
-|---|---|
-| macOS | `bundle/dmg/*.dmg` plus `.app.tar.gz` |
-| Windows | `bundle/msi/*.msi` and/or `nsis/*.exe` |
-| Linux | `bundle/appimage/*.AppImage`, `bundle/deb/*.deb` |
+Tor is deliberately not bundled or claimed. Local authoring and clearnet relay
+publishing work without it; inbound onion reachability does not. Developers can
+still test a system Tor install with `TRACER_TOR_BIN`, but packaging a portable
+Tor runtime is separate release work.
 
-### 3. Publish to the download page
+### Explicit non-goals
 
-Copy the artifacts into the hosted image's `downloads/` directory, the volume
-mounted at `/app/downloads` in `docker-compose.yml`:
+- No Developer ID signing, notarization, publishing, registry action, or copy
+  into `downloads/`.
+- No public release workflow or GitHub release.
+- No clean-machine Windows/Linux matrix or cross-compilation.
+- No MCP package artifact; `zine-mcp` packaging is owned separately.
 
-```sh
-cp apps/client/src-tauri/target/release/bundle/dmg/*.dmg downloads/
-cp apps/client/src-tauri/target/release/bundle/msi/*.msi downloads/
-cp apps/client/src-tauri/target/release/bundle/appimage/*.AppImage downloads/
-```
-
-The server scans `downloads/` on every request to
-`/downloads/manifest.json`, so the Download page sees the new build on reload.
-No server rebuild or registry is involved.
-
-### Artifact naming
-
-The Download page infers platform and architecture from the filename. Tauri's
-default output already matches. If you rename an artifact, retain these
-substrings:
-
-- **macOS:** `.dmg` or `.app.tar.gz`
-- **Windows:** `.msi` or `.exe`
-- **Linux:** `.AppImage`, `.deb`, or `.rpm`
-- **Architecture:** `aarch64`/`arm64` for arm64;
-  `x86_64`/`x64`/`amd64` for x64
-
-### CI status
-
-There is no release matrix yet. The intended GitHub Actions matrix uses
-`macos-latest`, `windows-latest`, and `ubuntu-22.04`, runs steps 1 and 2 on
-each platform, uploads the artifacts, and copies them into `downloads/`.
+Signed and notarized public macOS releases and the Windows/Linux matrix remain
+deferred roadmap work.

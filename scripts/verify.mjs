@@ -22,6 +22,7 @@ if (mode !== "check" && mode !== "verify") {
 const checks = [
   { label: "protocol package tests", command: npm, args: ["test"], cwd: join(repoRoot, "packages", "protocol") },
   { label: "dev automation tests", command: process.execPath, args: ["--test", join(repoRoot, "scripts", "dependency-state.test.mjs")], cwd: repoRoot },
+  { label: "dogfood tooling tests", command: process.execPath, args: ["--test", join(repoRoot, "scripts", "dogfood-macos.test.mjs")], cwd: repoRoot },
   { label: "client typecheck", command: npm, args: ["run", "typecheck"], cwd: join(repoRoot, "apps", "client") },
   { label: "client tests", command: npm, args: ["test"], cwd: join(repoRoot, "apps", "client") },
   { label: "MCP tests/build/smoke", command: npm, args: ["test"], cwd: join(repoRoot, "apps", "mcp") },
