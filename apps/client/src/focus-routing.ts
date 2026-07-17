@@ -44,7 +44,7 @@ export function ownerFolderOf(path: string, mounted: MountedFolder[]): string | 
  *  folder's `files` map keys. This is the shape every call site uses today
  *  (one mounted folder); multi-mount will generalize this caller-side, not
  *  here. Extracted so the shape lives in one place. */
-export function activeMounted(folderId: string | null, paths: Iterable<string>): MountedFolder[] {
+export function activeMounted(folderId: string | null | undefined, paths: Iterable<string>): MountedFolder[] {
   if (!folderId) return [];
   return [{ folderId, members: new Set(paths) }];
 }

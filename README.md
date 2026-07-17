@@ -82,12 +82,12 @@ git clone https://github.com/metanoos/zine.git && cd zine
 npm run dev
 ```
 
-The script checks prerequisites, builds the relay sidecar, installs client
-dependencies when needed, and launches the Tauri app. Later runs skip the
-relay build when its sources have not changed.
+The script checks prerequisites, builds the relay sidecar, synchronizes client
+dependencies when the npm manifests change, and launches the Tauri app. Later
+runs skip current dependencies and relay builds.
 
 **Prerequisites:** [Go](https://go.dev/dl/) >= 1.25,
-[Node](https://nodejs.org/) >= 20.19, and [Rust](https://rustup.rs/) stable. On
+[Node 24 LTS](https://nodejs.org/), and [Rust](https://rustup.rs/) stable. On
 macOS run `xcode-select --install` first; for other platforms see the
 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
 
@@ -173,7 +173,7 @@ enough for provenance, storage, or networking changes.
 
 ```sh
 npm run doctor         # prerequisites and local artifact diagnostics
-npm run check          # client, MCP, relay, and Rust tests in parallel
+npm run check          # dev scripts, client types/tests, MCP, relay, and Rust
 npm run verify         # check + client build + isolated real-relay smoke
 npm run verify:relay   # Step/Send/Attest/Mint/Cite against temporary relays
 ```

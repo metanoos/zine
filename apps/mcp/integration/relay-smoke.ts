@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 
 import { installNodeStorage } from "../src/storage-node.js";
-import { installNodeWebSocket } from "../src/websocket-node.js";
 import { setHomeRelay } from "../src/relay-config-override.js";
 
 const homeRelay = process.env.ZINE_TEST_HOME_RELAY_URL;
@@ -14,7 +13,6 @@ if (!homeRelay || !configPath || !expectedOwner) {
 }
 
 installNodeStorage(configPath);
-installNodeWebSocket();
 setHomeRelay(homeRelay);
 
 async function main(): Promise<void> {

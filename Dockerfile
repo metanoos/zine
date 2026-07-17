@@ -10,7 +10,7 @@
 # is mounted or COPYd into /app/downloads.
 
 # --- stage 1: webapp ------------------------------------------------------
-FROM node:20-alpine AS web-build
+FROM node:24-alpine AS web-build
 WORKDIR /build
 # Copy lockfile + manifest first for layer caching.
 COPY apps/client/package.json apps/client/package-lock.json ./apps/client/

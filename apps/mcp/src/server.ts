@@ -10,12 +10,12 @@
  *
  * Lifecycle:
  *   1. Parse argv (--folder, --relay, --config).
- *   2. Install the Node localStorage and WebSocket shims so shared browser
- *      modules can persist the agent voice and connect to relays on Node 20.
+ *   2. Install the Node localStorage shim so shared browser modules can
+ *      persist the agent voice. Node 24 supplies the WebSocket runtime.
  *   3. Pin the home relay via ZINE_RELAY_URL (relay-config-override.ts) so
  *      identity.ts::resolveRelayUrl() returns the operator's --relay.
  *   4. Dynamic-import the workspace AFTER steps 2+3 — the shared modules read
- *      localStorage / resolveRelayUrl at module-eval time, so the shims must
+ *      localStorage / resolveRelayUrl at module-eval time, so setup must
  *      be in place first. A static import would evaluate before main() runs.
  *   5. Attach the relay workspace to --folder, register tools, run stdio.
  *
@@ -26,7 +26,6 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { installNodeStorage } from "./storage-node.js";
-import { installNodeWebSocket } from "./websocket-node.js";
 import { setHomeRelay } from "./relay-config-override.js";
 
 interface Args {
@@ -95,15 +94,14 @@ async function main(): Promise<void> {
   // user omit --relay entirely (the common case); self-hosters override.
   if (!args.relay) args.relay = "ws://127.0.0.1:4869";
 
-  // Steps 2 & 3: install shims BEFORE importing the shared client modules.
+  // Steps 2 & 3: install storage BEFORE importing the shared client modules.
   // The order matters: setHomeRelay only writes an env var, while the Node
-  // installers only provide browser globals. None imports the client, but the
-  // dynamic workspace import below does and must see both shims already.
+  // storage installer only provides a browser global. Neither helper imports
+  // the client, but the dynamic workspace import below must see both settings.
   installNodeStorage(args.config);
-  installNodeWebSocket();
   setHomeRelay(args.relay);
 
-  // Step 4: dynamic import so the shared modules evaluate against the shims.
+  // Step 4: dynamic import so shared modules evaluate against storage and relay config.
   const { createMcpWorkspace, registerTools, agentVoice } = await import("./tools.js");
   const { registerAgentWriter } = await import("./register-writer.js");
 

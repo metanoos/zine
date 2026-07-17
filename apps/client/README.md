@@ -111,7 +111,7 @@ runtime. Build the relay for the target platform, then build the Tauri bundle.
 ### Prerequisites
 
 - Go ≥ 1.25 to build the relay
-- Node ≥ 20.19 for the Tauri frontend
+- Node 24 LTS for the Tauri frontend
 - Rust stable plus the Tauri prerequisites for your platform:
   - **macOS:** Xcode CLI tools. `xcode-select --install`
   - **Windows:** WebView2 plus MSVC build tools

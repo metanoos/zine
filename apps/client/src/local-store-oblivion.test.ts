@@ -5,7 +5,6 @@ import { loadLocalFolder } from "./local-store.js";
 
 const storage = new Map<string, string>();
 
-// @ts-expect-error minimal localStorage shim for the persistence migration
 globalThis.localStorage = {
   get length() {
     return storage.size;

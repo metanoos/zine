@@ -21,10 +21,9 @@
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src"],
-  // Tests import node:test / node:assert and use Buffer; they're typechecked +
-  // run by `npm test` (tsx --test), not by the build's tsc gate. Excluding them
-  // here keeps `npm run build` (tsc && vite build) focused on app code and lets
-  // tests lean on Node globals without polluting the browser/Tauri target.
+  // Tests import Node globals and target a newer runtime. `npm run typecheck`
+  // checks them through tsconfig.test.json; excluding them here keeps the app
+  // build's browser/Tauri compiler environment focused.
   "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

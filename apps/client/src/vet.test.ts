@@ -120,7 +120,8 @@ test("timingCV: < 2 checkpoints → 0", () => {
 });
 
 test("timingCV: identical timestamps → 0 (uniform edge case)", () => {
-  const cps = [cp(0), cp(0), cp(0)];
+  const now = Date.now();
+  const cps = Array.from({ length: 3 }, () => ({ steppedAtMs: now }));
   assert.equal(timingCV(cps), 0);
 });
 

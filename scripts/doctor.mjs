@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isRelayFresh } from "./build-relay.mjs";
+import { dependenciesCurrent } from "./dependency-state.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const problems = [];
@@ -30,21 +31,26 @@ function atLeast(actual, required) {
   return true;
 }
 
-function requiredVersion(label, command, args, minimum) {
+function requiredVersion(label, command, args, minimum, maximumExclusive = null) {
   const raw = capture(command, args);
   if (!raw) {
     problems.push(`${label} is missing`);
     return;
   }
   const actual = versionTuple(raw);
-  if (!actual || !atLeast(actual, minimum)) {
-    problems.push(`${label} ${actual?.join(".") ?? raw} is below ${minimum.join(".")}`);
+  if (
+    !actual ||
+    !atLeast(actual, minimum) ||
+    (maximumExclusive && atLeast(actual, maximumExclusive))
+  ) {
+    const required = maximumExclusive ? `${minimum[0]}.x LTS` : `≥ ${minimum.join(".")}`;
+    problems.push(`${label} ${actual?.join(".") ?? raw} is unsupported (need ${required})`);
     return;
   }
   console.log(`✓ ${label}: ${raw.split("\n")[0]}`);
 }
 
-requiredVersion("Node", process.execPath, ["--version"], [20, 19]);
+requiredVersion("Node", process.execPath, ["--version"], [24, 0], [25, 0]);
 requiredVersion("npm", process.platform === "win32" ? "npm.cmd" : "npm", ["--version"], [0, 0]);
 requiredVersion("Go", "go", ["version"], [1, 25]);
 
@@ -52,12 +58,14 @@ const cargo = capture("cargo", ["--version"]);
 if (cargo) console.log(`✓ Rust: ${cargo}`);
 else problems.push("Rust (cargo) is missing");
 
-for (const [label, relativePath] of [
-  ["client dependencies", "apps/client/node_modules"],
-  ["MCP dependencies", "apps/mcp/node_modules"],
-]) {
-  if (existsSync(join(repoRoot, relativePath))) console.log(`✓ ${label}: installed`);
-  else warnings.push(`${label} are not installed (run npm ci in that package)`);
+const clientDir = join(repoRoot, "apps", "client");
+if (dependenciesCurrent(clientDir)) console.log("✓ client dependencies: installed and current");
+else warnings.push("client dependencies are missing or stale (npm run dev repairs them)");
+
+if (existsSync(join(repoRoot, "apps", "mcp", "node_modules"))) {
+  console.log("✓ MCP dependencies: installed");
+} else {
+  warnings.push("MCP dependencies are not installed (run npm ci in apps/mcp)");
 }
 
 if (isRelayFresh()) console.log("✓ relay binary: built and current");
