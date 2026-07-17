@@ -8,6 +8,7 @@ import {
   paletteStatusMessage,
   paletteStatusRow,
 } from "./palette.js";
+import { BUILTIN_AI_PALETTE_REGISTRY } from "../ai/palette-registry.js";
 
 const appSource = readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8");
 const cssSource = readFileSync(new URL("../app/App.css", import.meta.url), "utf8");
@@ -215,18 +216,35 @@ test("an empty model catalog keeps the model selector visible", () => {
   assert.match(appSource, /<div className="action-palette-model-cell">\s*<ModelProviderSelect/);
   assert.match(appSource, /label=\{selected \? providerLabel\(selected\) : "Choose a model…"\}/);
   assert.match(appSource, /disabled: providers\.length === 0/);
-  assert.match(appSource, /MODEL_ALIASES = \["AI", "ASSISTANT", "AUTOMATIC", "AUTOMATON", "LLM"\]/);
-  assert.match(appSource, /localStorage\.setItem\(MODEL_LABEL_KEY, next\)/);
+  assert.deepEqual(
+    BUILTIN_AI_PALETTE_REGISTRY[0].label.aliases,
+    ["AI", "ASSISTANT", "AUTOMATIC", "AUTOMATON", "LLM"],
+  );
+  assert.equal(BUILTIN_AI_PALETTE_REGISTRY[0].label.storageKey, "zine.modelLabel");
+  assert.match(appSource, /localStorage\.setItem\(AI_PALETTE_ROW\.label\.storageKey, next\)/);
   assert.match(appSource, /Configure a model in Models to use AI operations/);
   assert.doesNotMatch(appSource, /onOpenModels|onAddModel|Add a model…|NO MODEL/);
   assert.doesNotMatch(cssSource, /action-palette-model-empty/);
 });
 
+test("the AI row keeps voice pins with first-provider fallback", () => {
+  assert.match(
+    appSource,
+    /providers\.find\(\(p\) => p\.id === getVoiceProvider\(modelPubkey\)\)\?\.id \?\? providers\[0\]\?\.id \?\? ""/,
+  );
+  assert.match(appSource, /setVoiceProvider\(modelPubkey, providerId \|\| null\)/);
+});
+
 test("cosmetic row-label cyclers concisely explain that they do not change behavior", () => {
   assert.equal(
     (appSource.match(/title="Click to update label in view; no effect on behavior"/g) ?? []).length,
-    3,
+    2,
   );
+  assert.equal(
+    BUILTIN_AI_PALETTE_REGISTRY[0].label.rerollTitle,
+    "Click to update label in view; no effect on behavior",
+  );
+  assert.match(appSource, /title=\{AI_PALETTE_ROW\.label\.rerollTitle\}/);
   assert.doesNotMatch(appSource, /Click to update label in view[^"\n]*Current:/);
 });
 

@@ -222,6 +222,10 @@ import { contentFingerprint } from "../ai/context-snapshot.js";
 import { providerProfileFingerprint } from "../ai/provider-fingerprint.js";
 import type { RecoverableModelResult } from "../ai/model-operation-executor.js";
 import { ModelOperationController } from "../ai/model-operation-controller.js";
+import {
+  resolveAiPaletteRegistry,
+  type AiPaletteActionId,
+} from "../ai/palette-registry.js";
 import { canSignWithSecrets } from "../identity/secret-store.js";
 import { resetLocalApp } from "./factory-reset.js";
 import { captureKEditTransaction } from "../provenance/kedit-capture.js";
@@ -687,10 +691,10 @@ function isValidTagToken(name: string): boolean {
   return TAG_TOKEN_RE.test(name);
 }
 
-// The four action-palette LLM operations. With a non-empty editor selection, each
+// The action-palette LLM operations. With a non-empty editor selection, each
 // acts on just the selected text (continuing/condensing/reinventing/replying
 // to that range in place); with no selection, each acts on the whole document.
-export type OpKind = "extend" | "settle" | "stir" | "reply" | "analyze" | "step" | "send" | "attest" | "run";
+export type OpKind = AiPaletteActionId | "step" | "send" | "attest";
 
 /** Split flat doc text into preserved bracket spans (`[[ … ]]`, kept verbatim)
  *  and the loose prose between them. The substrate for Settle (condense loose)
@@ -5371,14 +5375,7 @@ function isOpKind(op?: PaletteStatusOp): op is OpKind {
   return op !== undefined && op !== "scan" && op !== "reify" && op !== "fork";
 }
 
-const VOICE_OPS: { op: OpKind; label: string; title: string; cls: string }[] = [
-  { op: "analyze", label: "Analyze", title: "Analyze the writing process from exact trace, Step, and limelight evidence into a cited review", cls: "op-analyze" },
-  { op: "reply", label: "Reply", title: "Write a response into a new doc in the other pane, citing traces", cls: "op-reply" },
-  { op: "extend", label: "Extend", title: "Append an AI continuation to this file", cls: "op-extend" },
-  { op: "stir", label: "Stir", title: "Reinvent loose prose, run (( commands )), preserve [[ anchors ]]", cls: "op-stir" },
-  { op: "settle", label: "Settle", title: "File: condense loose prose, keep brackets. Folder: de-dupe near-duplicate scans into one", cls: "op-settle" },
-  { op: "run", label: "Run", title: "Start an agent run — research and draft in a new subfolder under the current scope", cls: "op-run" },
-];
+const AI_PALETTE_ROW = resolveAiPaletteRegistry()[0];
 
 // Author ops (Step or Mint / Send / Attest) live in the palette's AUTHOR row
 // but are not LLM ops — they step, mint, send, or attest the trace, signed as
@@ -5434,12 +5431,8 @@ function rollAuthorAlias(excluding: string): string {
   return others[Math.floor(Math.random() * others.length)];
 }
 
-// The unconfigured MODEL row has the same small naming affordance as AUTHOR.
-// Once a provider exists, its actual card label replaces this generic alias.
-const MODEL_LABEL_KEY = "zine.modelLabel";
-const MODEL_ALIASES = ["AI", "ASSISTANT", "AUTOMATIC", "AUTOMATON", "LLM"] as const;
-function rollModelAlias(excluding: string): string {
-  const others = MODEL_ALIASES.filter((alias) => alias !== excluding);
+function rollAlias(aliases: readonly string[], excluding: string): string {
+  const others = aliases.filter((alias) => alias !== excluding);
   return others[Math.floor(Math.random() * others.length)];
 }
 
@@ -5956,8 +5949,10 @@ function ActionPalette({
     return stored && (AUTHOR_ALIASES as readonly string[]).includes(stored) ? stored : "AUTHOR";
   });
   const [modelAlias, setModelAlias] = useState<string>(() => {
-    const stored = localStorage.getItem(MODEL_LABEL_KEY);
-    return stored && (MODEL_ALIASES as readonly string[]).includes(stored) ? stored : "AI";
+    const stored = localStorage.getItem(AI_PALETTE_ROW.label.storageKey);
+    return stored && AI_PALETTE_ROW.label.aliases.includes(stored)
+      ? stored
+      : AI_PALETTE_ROW.label.defaultLabel;
   });
 
   // --- ACTIONS gating ---------------------------------------------------
@@ -6110,10 +6105,10 @@ function ActionPalette({
         <button
           type="button"
           className="action-palette-label action-palette-label-clickable"
-          title="Click to update label in view; no effect on behavior"
+          title={AI_PALETTE_ROW.label.rerollTitle}
           onClick={() => {
-            const next = rollModelAlias(modelAlias);
-            localStorage.setItem(MODEL_LABEL_KEY, next);
+            const next = rollAlias(AI_PALETTE_ROW.label.aliases, modelAlias);
+            localStorage.setItem(AI_PALETTE_ROW.label.storageKey, next);
             setModelAlias(next);
           }}
         >
@@ -6123,44 +6118,46 @@ function ActionPalette({
           keys={keys}
           selectedId={modelKeyId}
           onSelect={onChooseModelKey}
-          ariaLabel="AI voice"
+          ariaLabel={AI_PALETTE_ROW.voice.ariaLabel}
         />
         <div className="action-palette-actions">
-          <div className="action-palette-model-cell">
-            <ModelProviderSelect
-              providers={providers}
-              selectedId={resolvedModelProviderId}
-              onSelect={onSelectProvider}
-            />
-          </div>
-          {VOICE_OPS.map((v) => {
-            const isRunning = runningOp === v.op;
+          {AI_PALETTE_ROW.providerSelection.capability === "voice-pinned" && (
+            <div className="action-palette-model-cell">
+              <ModelProviderSelect
+                providers={providers}
+                selectedId={resolvedModelProviderId}
+                onSelect={onSelectProvider}
+              />
+            </div>
+          )}
+          {AI_PALETTE_ROW.actions.map((action) => {
+            const isRunning = runningOp === action.id;
             // extend/stir/settle write INTO the existing file, so they obey the
             // focus-∈-scope invariant (must not mutate content whose chain isn't
             // in context). analyze/reply/run create NEW docs/subfolders (analysis /
             // citing doc / agent run), so they're gated by kind only, not by scope.
-            const createsDoc = v.op === "analyze" || v.op === "reply" || v.op === "run";
+            const createsDoc = action.id === "analyze" || action.id === "reply" || action.id === "run";
             const mutatesTarget = !createsDoc;
-            const baseGate = v.op === "analyze" ? allowTextOps : mutatesTarget ? scopedText : scopedReply;
+            const baseGate = action.id === "analyze" ? allowTextOps : mutatesTarget ? scopedText : scopedReply;
             const enabled =
               isRunning ||
               (!runningOp && hasProviders && baseGate);
             return (
               <button
-                key={v.op}
+                key={action.id}
                 type="button"
-                className={`action-palette-action ${v.cls}${isRunning ? " running" : ""}`}
+                className={`action-palette-action ${action.className}${isRunning ? " running" : ""}`}
                 disabled={!enabled}
                 title={
                   isRunning
-                    ? `${v.label} — running, click to stop`
+                    ? `${action.label} — running, click to stop`
                     : !hasProviders
                       ? "Configure a model in Models to use AI operations"
-                      : v.title
+                      : action.title
                 }
-                onClick={() => (isRunning ? onStop() : onOp(v.op))}
+                onClick={() => (isRunning ? onStop() : onOp(action.id))}
               >
-                {v.label}
+                {action.label}
               </button>
             );
           })}
