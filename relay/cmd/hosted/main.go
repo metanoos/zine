@@ -108,10 +108,7 @@ func main() {
 	relay.RejectEvent = append(
 		[]func(ctx context.Context, event *nostr.Event) (bool, string){
 			func(_ context.Context, ev *nostr.Event) (bool, string) {
-				if ops.IsBanned(ev.PubKey) {
-					return true, "banned: this pubkey is banned from this relay"
-				}
-				return false, ""
+				return rejectBannedEvent(ops, ev)
 			},
 		},
 		relay.RejectEvent...,
@@ -148,6 +145,13 @@ func main() {
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func rejectBannedEvent(ops *OperatorStore, ev *nostr.Event) (bool, string) {
+	if ops.IsBanned(ev.PubKey) {
+		return true, "banned: this pubkey is banned from this relay"
+	}
+	return false, ""
 }
 
 // --- SPA file server with history fallback --------------------------------
@@ -205,13 +209,22 @@ func (d *downloadServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Guard against traversal: http.FileServer already cleans, but we're
-	// mounted via StripPrefix so re-confirm the cleaned path stays in root.
-	cleaned := filepath.Clean(r.URL.Path)
-	if strings.Contains(cleaned, "..") {
+	// mounted via StripPrefix so reject explicit parent-directory segments.
+	// A substring check would also reject safe names such as release..dmg.
+	if hasParentTraversal(r.URL.Path) {
 		http.NotFound(w, r)
 		return
 	}
 	http.FileServer(http.Dir(d.root)).ServeHTTP(w, r)
+}
+
+func hasParentTraversal(path string) bool {
+	for _, segment := range strings.Split(path, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *downloadServer) writeManifest(w http.ResponseWriter, r *http.Request) {
