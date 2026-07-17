@@ -210,6 +210,39 @@ test("rejects a bundle whose target indexes exceed the global reference budget",
   assert.equal(result.targets[1]?.recomputedConformance, null);
 });
 
+test("rejects duplicate target event ids before trace conformance", async () => {
+  const event = await fileNode("", "bounded duplicate");
+  const target = await makeTarget("duplicate.md", [event], {
+    eventIds: Array.from({ length: 10_000 }, () => event.id),
+  });
+  const subtle = crypto.subtle;
+  const originalDigest = subtle.digest;
+  let digestCalls = 0;
+  subtle.digest = ((algorithm: AlgorithmIdentifier, data: BufferSource) => {
+    digestCalls += 1;
+    return originalDigest.call(subtle, algorithm, data);
+  }) as SubtleCrypto["digest"];
+
+  try {
+    const result = await verifyReifyTraceBundle(
+      makeBundle([target], [event]),
+      { "duplicate.md": "bounded duplicate" },
+    );
+
+    assert.equal(result.valid, false);
+    assert.equal(
+      issueCodes(result).filter((code) => code === "duplicate-indexed-event-id").length,
+      1,
+    );
+    assert.deepEqual(result.targets[0]?.eventIds, [event.id]);
+    assert.equal(result.targets[0]?.recomputedConformance, null);
+    assert.equal(result.targets[0]?.materializedFile.status, "match-unverified");
+    assert.equal(digestCalls, 1);
+  } finally {
+    subtle.digest = originalDigest;
+  }
+});
+
 test("malformed containers and unsupported versions fail closed without throwing", async () => {
   const cases: { name: string; input: unknown; code: string }[] = [
     { name: "null", input: null, code: "invalid-container" },

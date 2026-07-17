@@ -461,6 +461,7 @@ async function verifyReifyTraceBundleInternal(
     }
     if (parseEventIds && rawEventIds !== null) {
       const seenIds = new Set<string>();
+      let duplicateIssueReported = false;
       for (let eventIndex = 0; eventIndex < rawEventIds.length; eventIndex += 1) {
         const eventId = rawEventIds[eventIndex];
         if (!isCanonicalId(eventId)) {
@@ -468,10 +469,15 @@ async function verifyReifyTraceBundleInternal(
           targetIssue("invalid-indexed-event-id", "target eventIds contains a non-canonical event id");
           continue;
         }
-        eventIds.push(eventId);
         if (seenIds.has(eventId)) {
-          targetIssue("duplicate-indexed-event-id", "target eventIds contains a duplicate event id");
+          eventIndexUsable = false;
+          if (!duplicateIssueReported) {
+            duplicateIssueReported = true;
+            targetIssue("duplicate-indexed-event-id", "target eventIds contains a duplicate event id");
+          }
+          continue;
         }
+        eventIds.push(eventId);
         seenIds.add(eventId);
       }
     }
@@ -833,6 +839,7 @@ async function verifyReifyTraceBundleInternal(
           const cryptographicallyBound =
             matchesSnapshot &&
             matchesSignedContentHash &&
+            recomputedConformance !== null &&
             recomputedConformance?.status !== "invalid";
           materializedFile = {
             status: matchesSnapshot
