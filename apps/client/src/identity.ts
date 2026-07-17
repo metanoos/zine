@@ -41,6 +41,26 @@ export function loadOrCreateVoice(): Voice {
   return cached;
 }
 
+/** Resolve the pre-keychain browser voice only when it already owns
+ * `publicKey`. Unlike `loadOrCreateVoice`, this lookup never creates a key as
+ * a side effect. That matters when deciding whether a folder is genuinely
+ * foreign: probing an unknown owner must not manufacture another identity.
+ *
+ * Fresh keychain profiles briefly minted Root with this legacy voice before
+ * later writes switched to the AUTHOR key. Keeping this narrow recovery path
+ * lets those profiles continue their existing folder chain without treating
+ * a locally held signing key as foreign. */
+export function legacySecretKeyForVoice(publicKey: string): Uint8Array | null {
+  const existing = localStorage.getItem(STORAGE_KEY);
+  if (!existing || !/^[0-9a-fA-F]{64}$/.test(existing)) return null;
+  try {
+    const secretKey = hexToBytes(existing);
+    return getPublicKey(secretKey) === publicKey ? secretKey : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The local sidecar relay that the desktop app spawns. Always 127.0.0.1; only
  * the desktop ever uses this as a write target. Kept as a constant because
@@ -66,7 +86,7 @@ export const LOCAL_RELAY_URL = "ws://127.0.0.1:4869";
  * the "where do I connect first" answer.
  */
 export function resolveRelayUrl(): string {
-  // Node (zine-mcp headless press): the `--relay` arg is exported here as
+  // Node (zine-mcp headless press): the `--home-relay` arg is exported here as
   // ZINE_RELAY_URL by apps/mcp before any shared module loads. Checked first
   // so the headless press pins its home relay without `import.meta.env`
   // (Vite-only) or `window`/`location` (browser-only). Unset in the browser

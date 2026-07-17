@@ -4,10 +4,22 @@ import type { Filter } from "nostr-tools";
 import { Relay } from "nostr-tools/relay";
 
 import { loadOrCreateVoice, resolveRelayUrl } from "./identity.js";
-import { writeRelays, readRelays } from "./relay-config.js";
+import {
+  isLoopbackRelayUrl,
+  publicationRelays,
+  readRelays,
+  writeRelays,
+} from "./relay-config.js";
 import type { Run } from "./workspace-core.js";
 import { flattenRuns, dominantVoiceInRegion } from "./workspace-core.js";
 import { nodeSecretKey } from "./keys-store.js";
+import {
+  enqueueLocalEvent,
+  pendingLocalEventById,
+  pendingLocalEvents,
+  pendingLocalEventsMatching,
+  removeLocalEvent,
+} from "./event-outbox.js";
 
 /**
  * Bridge between the editor and the local relay. Publishes and fetches the
@@ -121,6 +133,26 @@ export interface KEdit {
    *  `op`/`from`/`to`/`text` still carry the replayable document mutation. */
   intent?: KEditIntent;
 }
+
+/** How an immutable Coin entered the Mint. The content envelope is the
+ * durable Coin discriminator: extracted Coins additionally retain a queryable
+ * `extracted-from` edge, while direct Coins intentionally have no source
+ * claim. */
+export interface DirectCoinOrigin {
+  kind: "direct";
+}
+
+export interface ExtractedCoinOrigin {
+  kind: "extracted";
+  /** Exact source nucleus whose snapshot contained the coined bytes. */
+  sourceNodeId: string;
+  /** SHA-256 of that source node's complete snapshot. */
+  sourceContentHash: string;
+  /** UTF-16 range of the Coin body inside the source snapshot. */
+  range: { start: number; end: number };
+}
+
+export type CoinOrigin = DirectCoinOrigin | ExtractedCoinOrigin;
 
 /**
  * Minimal common-prefix/suffix diff. Returns the deltas that turn `oldText`
@@ -411,11 +443,10 @@ export interface PublishEditInput {
    *  by this chain's owner only — parent authors neither co-sign nor approve.
    *  Callers set `action: "merge"` when these are present. */
   mergeParents?: string[];
-  /** Extraction lineage (spec §3.8, REQUIRED on minted-span nodes): the exact
-   *  origin node-version the span was pulled out of. Emits
-   *  `["e", extractedFrom, "", "extracted-from"]`. Absent on whole-file genesis
-   *  imports and every non-minting path. */
-  extractedFrom?: string;
+  /** Coin discriminator and origin receipt (spec §3.8). Extracted Coins emit
+   *  the queryable `extracted-from` edge in addition to this content envelope;
+   *  direct Coins carry no source edge. Absent on every mutable file trace. */
+  coinOrigin?: CoinOrigin;
   /** Body hash for the `x` tag (spec §3.1: REQUIRED on minted-span nodes and
    *  folder nodes, OPTIONAL on named file nodes — an open question). When set,
    *  emits `["x", bodyHashTag]`, enabling `#x` content-identity queries that
@@ -630,6 +661,7 @@ async function connectWithAuth(url: string): Promise<Relay> {
 // and 429s. Coalescing means one Relay.connect per round, no matter how many
 // callers are waiting on the same URL.
 const retryingCache = new Map<string, Promise<Relay | null>>();
+const relayUnavailableUntil = new Map<string, number>();
 
 /**
  * Connect with a short retry loop — the desktop sidecar can take a moment to
@@ -641,6 +673,7 @@ const retryingCache = new Map<string, Promise<Relay | null>>();
  * callers can't re-synchronize their rounds into another burst.
  */
 async function getRelayRetrying(url: string, maxAttempts = 5): Promise<Relay | null> {
+  if ((relayUnavailableUntil.get(url) ?? 0) > Date.now()) return null;
   const existing = retryingCache.get(url);
   if (existing) return existing;
   const p = (async (): Promise<Relay | null> => {
@@ -648,7 +681,9 @@ async function getRelayRetrying(url: string, maxAttempts = 5): Promise<Relay | n
       let lastErr: unknown;
       for (let i = 0; i < maxAttempts; i++) {
         try {
-          return await getRelay(url);
+          const relay = await getRelay(url);
+          relayUnavailableUntil.delete(url);
+          return relay;
         } catch (e) {
           lastErr = e;
           // Backoff + jitter: the jitter de-syncs staggered callers so their
@@ -660,6 +695,7 @@ async function getRelayRetrying(url: string, maxAttempts = 5): Promise<Relay | n
         }
       }
       console.warn(`could not connect to relay ${url}:`, lastErr);
+      relayUnavailableUntil.set(url, Date.now() + 5_000);
       return null;
     } finally {
       retryingCache.delete(url);
@@ -677,6 +713,18 @@ export async function getWriteRelays(): Promise<Relay[]> {
     if (out.some((r) => r.url === url)) continue;
     const r = await getRelayRetrying(url);
     if (r) out.push(r);
+  }
+  return out;
+}
+
+/** Connect to each configured destination that crosses the machine boundary. */
+export async function getPublicationRelays(): Promise<Relay[]> {
+  const urls = publicationRelays().map((entry) => entry.url);
+  const out: Relay[] = [];
+  for (const url of urls) {
+    if (out.some((relay) => relay.url === url)) continue;
+    const relay = await getRelayRetrying(url);
+    if (relay) out.push(relay);
   }
   return out;
 }
@@ -726,9 +774,7 @@ async function publishWithAuth(relay: Relay, event: Event): Promise<string> {
  */
 export async function publishToMany(relays: Relay[], event: Event): Promise<void> {
   if (relays.length === 0) {
-    throw new Error(
-      "no relays available to publish to — enable write on at least one relay (the home relay is off)",
-    );
+    throw new Error("no relays available to publish to");
   }
   const results = await Promise.allSettled(relays.map((r) => publishWithAuth(r, event)));
   const ok = results.some((r) => r.status === "fulfilled");
@@ -879,7 +925,6 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   if (inlineCitations.length > 0 && (!input.action || input.action === "edit")) {
     input.action = "cite";
   }
-  const relays = await getWriteRelays();
   // Sign as the override signer when provided (per-voice Send/zine), else the
   // keychain's manual (pen) key — the posture used by background Steps.
   const signer = input.signer ?? loadOrCreateVoice().secretKey;
@@ -918,11 +963,12 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
       tags.push(["e", parentId, "", "merge-parent"]);
     }
   }
-  // Extraction lineage (spec §3.8: REQUIRED on minted-span nodes): the exact
-  // origin node-version the span was pulled out of. The origin doc's own cite
-  // (the `q` tag on its next step) flows the other direction; this records the
-  // extraction fan-out so a reader can find every span minted from one source.
-  if (input.extractedFrom) tags.push(["e", input.extractedFrom, "", "extracted-from"]);
+  // Extraction lineage remains a queryable tag for extracted Coins. Direct
+  // Coins deliberately omit it: the signer minted these exact bytes without
+  // claiming they came from another node.
+  if (input.coinOrigin?.kind === "extracted") {
+    tags.push(["e", input.coinOrigin.sourceNodeId, "", "extracted-from"]);
+  }
   // Body hash (spec §3.1: REQUIRED on minted-span nodes). Enables `#x`
   // content-identity queries. Named files omit it (spec open question — opting
   // out of cross-folder copy detection for byte-identical files).
@@ -1025,6 +1071,11 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
       ],
       snapshot: input.snapshot,
       contentHash: input.contentHash,
+      // Explicit discriminator shared by direct and extracted Coins. Readers
+      // no longer have to infer "Coin" solely from an extraction edge.
+      ...(input.coinOrigin
+        ? { coin: { version: 1, origin: input.coinOrigin } }
+        : {}),
       // Per-character attribution, validated against snapshot above. Absent on
       // nodes whose caller had no run list (genesis from plain text, deletes,
       // or the legacy signer-only path) — readers fall back to per-node-signer.
@@ -1052,15 +1103,21 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   // node instead of creating another checkpoint.
   let publishedRelays: Relay[];
   if (input.localOnly) {
+    // localStorage is the first durability boundary. Queue the exact signed
+    // event before touching the relay so an offline Step can return a stable id
+    // and later synchronization publishes those same bytes rather than minting
+    // a sibling replacement.
+    enqueueLocalEvent(signed);
     const homeUrl = resolveRelayUrl();
-    const homeRelay = await getRelayRetrying(homeUrl);
+    const homeRelay = await getRelayRetrying(homeUrl, 1);
     if (homeRelay) {
-      await publishWithAuth(homeRelay, signed);
-      publishedRelays = [homeRelay];
+      await flushLocalEventOutboxThrough(homeRelay);
+      publishedRelays = pendingLocalEventById(signed.id) ? [] : [homeRelay];
     } else {
       publishedRelays = [];
     }
   } else {
+    const relays = await getWriteRelays();
     await publishToMany(relays, signed);
     publishedRelays = relays;
   }
@@ -1072,9 +1129,9 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   // prev-chain stays authoritative.
   const traceIdentity = input.traceId ?? (input.prevEventId ? null : signed.id);
   // Coins are immutable one-node traces; §4 needs no mutable head cache for
-  // them. A fork promoted from a coin has `forkedFrom` (not `extractedFrom`)
+  // them. A fork promoted from a coin has `forkedFrom` (not `coinOrigin`)
   // and is mutable, so it still receives TraceHead normally.
-  if (traceIdentity && !input.extractedFrom && publishedRelays.length > 0) {
+  if (traceIdentity && !input.coinOrigin && publishedRelays.length > 0) {
     try {
       await publishTraceHead(traceIdentity, signed.id, signer, publishedRelays);
     } catch (error) {
@@ -1084,16 +1141,64 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   return signed;
 }
 
+/** Parse the signed Coin envelope. `extracted-from` is only a query index; it
+ * never makes an otherwise ordinary file event into a Coin. */
+export function coinOriginFromEvent(event: Event): CoinOrigin | null {
+  try {
+    const parsed = JSON.parse(event.content) as {
+      coin?: { version?: unknown; origin?: unknown };
+    };
+    const origin = parsed.coin?.origin;
+    if (parsed.coin?.version === 1 && origin && typeof origin === "object") {
+      const candidate = origin as Record<string, unknown>;
+      if (candidate.kind === "direct") return { kind: "direct" };
+      const range = candidate.range && typeof candidate.range === "object"
+        ? candidate.range as Record<string, unknown>
+        : null;
+      if (
+        candidate.kind === "extracted" &&
+        typeof candidate.sourceNodeId === "string" && candidate.sourceNodeId.length > 0 &&
+        typeof candidate.sourceContentHash === "string" &&
+        /^[0-9a-f]{64}$/.test(candidate.sourceContentHash) &&
+        range &&
+        Number.isInteger(range.start) &&
+        Number.isInteger(range.end) &&
+        (range.start as number) >= 0 &&
+        (range.end as number) >= (range.start as number)
+      ) {
+        return {
+          kind: "extracted",
+          sourceNodeId: candidate.sourceNodeId,
+          sourceContentHash: candidate.sourceContentHash,
+          range: { start: range.start as number, end: range.end as number },
+        };
+      }
+    }
+  } catch {
+    // Invalid or non-JSON content is not a Coin.
+  }
+  return null;
+}
+
+/** True only when the event carries a valid current Coin envelope. */
+export function isCoinEvent(event: Event): boolean {
+  return coinOriginFromEvent(event) !== null;
+}
+
 /** Send: push an already-stepped node to all write-enabled external relays.
  *  This is the deliberate "let this leave my machine" gesture (protocol §8) —
  *  the node was stepped locally (by a Step), and now the author chooses to make
  *  it reachable by others. Idempotent: re-sending a node that's already on a
  *  relay is a no-op (the relay dedupes by event id). */
 export async function sendStep(event: Event, signer?: Uint8Array): Promise<void> {
-  const relays = await getWriteRelays();
+  const relays = await getPublicationRelays();
+  if (relays.length === 0) {
+    throw new Error(
+      "no publication relays available — configure a non-loopback write relay before Send",
+    );
+  }
   await publishToMany(relays, event);
-  const isCoin = event.tags.some((tag) => tag[0] === "e" && tag[3] === "extracted-from");
-  if (isCoin || relays.length === 0) return;
+  if (isCoinEvent(event)) return;
   try {
     const traceId = await resolveTraceIdentity(event.id);
     if (traceId) {
@@ -1111,29 +1216,56 @@ export async function sendStep(event: Event, signer?: Uint8Array): Promise<void>
   }
 }
 
-export function isLoopbackRelayUrl(url: string): boolean {
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    return (
-      host === "localhost" ||
-      host === "0.0.0.0" ||
-      host.startsWith("127.") ||
-      host === "::1" ||
-      host === "[::1]"
-    );
-  } catch {
-    // An invalid relay URL cannot establish public fetchability.
-    return true;
-  }
+/** Publish the ordered local signed-event outbox to the current home relay.
+ * Stops at the first failed event so file/folder dependency order is retained.
+ * TraceHead events are caches; the immutable queued nodes remain authoritative
+ * and the next online Step refreshes the cache normally. */
+export async function flushLocalEventOutbox(): Promise<{
+  pending: number;
+  published: number;
+}> {
+  const records = pendingLocalEvents();
+  if (records.length === 0) return { pending: 0, published: 0 };
+  const relay = await getRelayRetrying(resolveRelayUrl());
+  if (!relay) return { pending: records.length, published: 0 };
+  return flushLocalEventOutboxThrough(relay);
 }
+
+let localOutboxFlushQueue: Promise<unknown> = Promise.resolve();
+
+/** Serialize every outbox drain, including foreground Steps and the MCP
+ * background timer, so concurrent tool calls cannot overtake older events. */
+function flushLocalEventOutboxThrough(relay: Relay): Promise<{
+  pending: number;
+  published: number;
+}> {
+  const task = localOutboxFlushQueue.then(async () => {
+    const records = pendingLocalEvents();
+    let published = 0;
+    for (const record of records) {
+      try {
+        await publishWithAuth(relay, record.event);
+        removeLocalEvent(record.event.id);
+        published++;
+      } catch (error) {
+        console.warn(`[provenance] outbox sync stopped at ${record.event.id}:`, error);
+        break;
+      }
+    }
+    return { pending: pendingLocalEvents().length, published };
+  });
+  localOutboxFlushQueue = task.then(() => undefined, () => undefined);
+  return task;
+}
+
+// Kept as a provenance export for callers/tests that learned the helper here.
+export { isLoopbackRelayUrl };
 
 /** Fetch a target from a configured, write-enabled non-loopback relay. Attest
  *  uses this rather than the ordinary read set so a local home-relay hit cannot
  *  masquerade as the protocol's required prior Send. */
 async function fetchSentTraceNode(nodeId: string): Promise<Event | null> {
-  const urls = writeRelays()
-    .map((entry) => entry.url)
-    .filter((url) => !isLoopbackRelayUrl(url));
+  const urls = publicationRelays().map((entry) => entry.url);
   for (const url of urls) {
     const relay = await getRelayRetrying(url);
     if (!relay) continue;
@@ -1251,6 +1383,61 @@ export async function attestNode(
   return signed;
 }
 
+/** Strike one permanently-addressable, immutable kind-4290 Coin (protocol
+ *  §3.8). `coin.origin` is the durable discriminator shared by direct and
+ *  extracted Coins; extracted Coins additionally retain their queryable edge.
+ */
+export async function publishCoin(input: {
+  folderId: string;
+  relativePath: string;
+  phrase: string;
+  origin: CoinOrigin;
+  signer?: Uint8Array;
+  /** Direct-composer edit history. Genesis still has no prev/delta history. */
+  kedits?: KEdit[];
+  /** Mint is local speech until Send. Defaults true for the authoring gesture. */
+  localOnly?: boolean;
+}): Promise<Event> {
+  if (!input.phrase) throw new Error("A Coin cannot have an empty body.");
+  if (input.origin.kind === "extracted") {
+    const { range, sourceContentHash, sourceNodeId } = input.origin;
+    if (!sourceNodeId) throw new Error("An extracted Coin requires a source node id.");
+    if (!/^[0-9a-f]{64}$/.test(sourceContentHash)) {
+      throw new Error("An extracted Coin requires the source snapshot hash.");
+    }
+    if (
+      !Number.isInteger(range.start) ||
+      !Number.isInteger(range.end) ||
+      range.start < 0 ||
+      range.end < range.start ||
+      range.end - range.start !== input.phrase.length
+    ) {
+      throw new Error("An extracted Coin requires an exact UTF-16 source range.");
+    }
+  }
+
+  const signer = input.signer ?? loadOrCreateVoice().secretKey;
+  const contentHash = await sha256HexLocal(input.phrase);
+  return publishEdit({
+    prevEventId: null,
+    relativePath: input.relativePath,
+    folderId: input.folderId,
+    deltas: [],
+    snapshot: input.phrase,
+    contentHash,
+    action: "import",
+    summary: "coin",
+    signer,
+    localOnly: input.localOnly ?? true,
+    bodyHashTag: contentHash,
+    coinOrigin: input.origin,
+    authors: [{ voice: getPublicKey(signer), text: input.phrase }],
+    ...(input.origin.kind === "direct" && input.kedits?.length
+      ? { kedits: input.kedits }
+      : {}),
+  });
+}
+
 /** Harden a bracketed phrase into its own permanently-addressable kind-4290
  *  node (protocol §3.8). The span's text becomes an immutable, citable
  *  snapshot:
@@ -1264,9 +1451,8 @@ export async function attestNode(
  *  - `["x", contentHash]` (spec §3.1: REQUIRED) — enables `#x` content-
  *    identity clustering so independent mints of the same words find
  *    each other.
- *  - `["e", originNodeId, "", "extracted-from"]` (spec §3.1/§3.8: REQUIRED) —
- *    the exact origin node-version the span was pulled out of, recording
- *    extraction fan-out so a reader can find every span minted from one source.
+ *  - `coin.origin` stores the source node, source snapshot hash, and exact
+ *    UTF-16 range; `extracted-from` mirrors the node id for relay queries.
  *
  *  The caller rewrites the bracket `[[ phrase ]]` → `[[ phrase | newNodeId ]]`
  *  in the origin document; that rewrite is itself an ordinary cite delta on
@@ -1281,30 +1467,41 @@ export async function publishHardenedSpan(input: {
   /** REQUIRED: the origin document's current nucleus (node-version the span was
    *  pulled out of). Emitted as the `extracted-from` edge. */
   originNodeId: string;
+  /** REQUIRED: SHA-256 of the origin node's complete snapshot. */
+  sourceContentHash: string;
+  /** REQUIRED: exact UTF-16 range occupied by `phrase` in that snapshot. */
+  sourceRange: { start: number; end: number };
   signer?: Uint8Array;
   /** Mint is local speech until Send. Defaults true for the authoring gesture. */
   localOnly?: boolean;
 }): Promise<Event> {
-  const contentHash = await sha256HexLocal(input.phrase);
-
-  return publishEdit({
-    prevEventId: null,
+  return publishCoin({
     relativePath: input.relativePath,
     folderId: input.folderId,
-    deltas: [],
-    snapshot: input.phrase,
-    contentHash,
-    action: "import",
-    summary: "coin",
+    phrase: input.phrase,
+    origin: {
+      kind: "extracted",
+      sourceNodeId: input.originNodeId,
+      sourceContentHash: input.sourceContentHash,
+      range: input.sourceRange,
+    },
     signer: input.signer,
     localOnly: input.localOnly ?? true,
-    // Spec §3.1: the body hash is REQUIRED on minted-span nodes — `#x`
-    // content-identity queries depend on it (spec §6, §R3).
-    bodyHashTag: contentHash,
-    // Spec §3.8: the origin node-version this span was extracted from, REQUIRED
-    // on minted-span nodes. The origin doc's own cite (the `q` tag on its
-    // next step) flows the other direction; this records extraction fan-out.
-    extractedFrom: input.originNodeId,
+  });
+}
+
+/** Mint signer-authored text directly, without asserting a source trace. */
+export async function publishDirectCoin(input: {
+  folderId: string;
+  relativePath: string;
+  phrase: string;
+  signer?: Uint8Array;
+  kedits?: KEdit[];
+  localOnly?: boolean;
+}): Promise<Event> {
+  return publishCoin({
+    ...input,
+    origin: { kind: "direct" },
   });
 }
 
@@ -1433,7 +1630,7 @@ export async function fetchChain(folderId: string, relativePath: string): Promis
  * `prev` walk reaches `traceId`. Two incomparable maximal candidates are a
  * real branch and are never collapsed by relay order. */
 export type TraceChainResolution =
-  | { status: "resolved"; traceId: string; chain: Event[]; source: "trace-head" | "legacy-coordinate" }
+  | { status: "resolved"; traceId: string; chain: Event[]; source: "trace-head" | "exact-head" | "legacy-coordinate" }
   | { status: "missing" | "broken"; traceId: string; chain: []; candidateHeadIds: string[] }
   | { status: "conflict"; traceId: string; chain: []; candidateHeadIds: string[] };
 
@@ -1548,6 +1745,20 @@ export async function resolveTraceChainCandidates(
   return { status: "resolved", traceId, chain: maximal[0].chain, source: "trace-head" };
 }
 
+/** Rebuild one exact immutable head's ancestry by id. Folder membership names
+ *  an exact latest node, so this remains valid when a legacy trace has no
+ *  TraceHead cache or its path tags changed after a rename. */
+export async function resolveTraceChainAtHead(
+  traceId: string,
+  headId: string,
+  loadEvents: TraceEventBatchLoader = loadTraceEventsByIds,
+): Promise<TraceChainResolution> {
+  const resolved = await resolveTraceChainCandidates(traceId, [headId], loadEvents);
+  return resolved.status === "resolved"
+    ? { ...resolved, source: "exact-head" }
+    : resolved;
+}
+
 const traceIdentityByNode = new Map<string, string>();
 
 /** Resolve any immutable node id back to its genesis trace identity. */
@@ -1605,7 +1816,7 @@ async function traceHeadCandidateIds(traceId: string): Promise<string[]> {
  * legacy folder/path coordinate when no usable file TraceHead exists yet. */
 export async function resolveTraceChain(
   traceId: string,
-  fallback?: { folderId: string; relativePath: string },
+  fallback?: { folderId: string; relativePath: string; headId?: string },
 ): Promise<TraceChainResolution> {
   let candidates: string[] = [];
   try {
@@ -1616,6 +1827,14 @@ export async function resolveTraceChain(
     }
   } catch {
     // The legacy coordinate fallback below preserves offline/back-compat reads.
+  }
+  if (fallback?.headId) {
+    try {
+      const resolved = await resolveTraceChainAtHead(traceId, fallback.headId);
+      if (resolved.status === "resolved") return resolved;
+    } catch {
+      // The coordinate fallback below may still recover legacy indexed nodes.
+    }
   }
   if (fallback) {
     try {
@@ -1935,11 +2154,10 @@ export function eventMeta(event: Event): EventMeta {
 //
 // A `q` edge points at another trace's nucleus by event id. To render it as a
 // chip in the tag row we need that trace's *name*: a named trace shows its
-// structural basename. Current coins are named members of Mint and are
-// recognized by their `extracted-from` edge; legacy spans use a synthetic
-// `<origin>#<shortId>` path and fall back to their body as the display name. The
-// same cited trace can appear from many documents, so the resolution is cached
-// per node id for the session (mirroring `displayNameCache`).
+// structural basename. Coins are named members of Mint and recognized only by
+// their `content.coin` envelope. The same cited trace can appear from many
+// documents, so the resolution is cached per node id for the session
+// (mirroring `displayNameCache`).
 
 /** One resolved cited-trace chip. `kind` distinguishes editable files from
  *  immutable file-reified coins so CSS can give each a distinct affordance. */
@@ -1967,15 +2185,6 @@ export interface CitationChip {
   pubkey?: string;
 }
 
-/** Truncate a span phrase for chip display: collapse to one whitespace run and
- *  cap at `max`, adding an ellipsis. A bare `[[ text ]]` minted into a nameless
- *  trace can be long; the chip needs a short, readable handle. */
-function truncatePhrase(text: string, max = 32): string {
-  const collapsed = text.replace(/\s+/g, " ").trim();
-  if (collapsed.length <= max) return collapsed;
-  return collapsed.slice(0, max - 1).trimEnd() + "…";
-}
-
 const nodeNameCache = new Map<string, CitationChip | null>();
 // The cited event itself is immutable and supplies the target chain coordinate
 // needed by `resolveCitationChip`; retain it with the cached name so progress
@@ -1983,11 +2192,8 @@ const nodeNameCache = new Map<string, CitationChip | null>();
 const citedEventCache = new Map<string, Event>();
 
 /** Resolve a cited node id to a display name + kind, caching for the session.
- *  Fetches the node (once, then cached), reads its `file` tag (`relativePath`)
- *  and its `snapshot` body, and picks the name:
- *    - an `extracted-from` edge → `{ kind: "coin" }`, named from `F` when
- *      present (current Mint) or its truncated snapshot (legacy nameless Mint)
- *    - every other named path → `{ kind: "file", name: basename }`.
+ *  Fetches the node (once, then cached), reads its `F` tag (`relativePath`),
+ *  and identifies Coins exclusively through the `content.coin` envelope.
  *  Returns null when the node can't be fetched from any read relay (a citation
  *  the source has since deleted, or an offline relay) — the caller renders a
  *  fallback id-abbrev chip rather than blocking the row. */
@@ -2002,24 +2208,15 @@ export async function resolveNodeName(nodeId: string): Promise<CitationChip | nu
   }
   citedEventCache.set(nodeId, event);
   const meta = eventMeta(event);
-  let snapshot = "";
-  try {
-    const parsed = JSON.parse(event.content) as { snapshot?: unknown };
-    if (typeof parsed.snapshot === "string") snapshot = parsed.snapshot;
-  } catch {
-    // non-JSON content — snapshot stays ""
-  }
   const path = meta.relativePath;
-  const extracted = event.tags.some((tag) => tag[0] === "e" && tag[3] === "extracted-from");
-  // Synthetic paths and absent F tags are legacy span evidence. Current Mint
-  // spans are named, so their extracted-from edge is the durable discriminator.
-  const legacySpan = !path || path.includes("#");
-  const spanName = path && !path.includes("#")
-    ? path.split("/").pop() || path
-    : truncatePhrase(snapshot) || nodeId.slice(0, 8);
-  const chip: CitationChip | null = extracted || legacySpan
-    ? { nodeId, name: spanName, kind: "coin", pubkey: event.pubkey }
-    : { nodeId, name: path.split("/").pop() || path, kind: "file", pubkey: event.pubkey };
+  const coin = isCoinEvent(event);
+  const name = path ? path.split("/").pop() || path : nodeId.slice(0, 8);
+  const chip: CitationChip = {
+    nodeId,
+    name,
+    kind: coin ? "coin" : "file",
+    pubkey: event.pubkey,
+  };
   nodeNameCache.set(nodeId, chip);
   return chip;
 }
@@ -2478,12 +2675,6 @@ async function publishFolderNode(
     localOnly?: boolean;
   },
 ): Promise<Event> {
-  const relays = opts.localOnly
-    ? await (async () => {
-        const home = await getRelayRetrying(resolveRelayUrl());
-        return home ? [home] : [];
-      })()
-    : await getWriteRelays();
   const key = opts.signer ?? loadOrCreateVoice().secretKey;
   const steppedAt = Date.now();
   // §8: drain any focus observations buffered since the last folder step and
@@ -2518,13 +2709,25 @@ async function publishFolderNode(
     template.tags.push(["x", parsed.contentHash!]);
 
     const signed = finalizeEvent(template, key);
-    await publishToMany(relays, signed);
-    nodePublished = true;
+    let relays: Relay[] = [];
+    if (opts.localOnly) {
+      enqueueLocalEvent(signed);
+      nodePublished = true;
+      const home = await getRelayRetrying(resolveRelayUrl(), 1);
+      if (home) {
+        await flushLocalEventOutboxThrough(home);
+        if (!pendingLocalEventById(signed.id)) relays = [home];
+      }
+    } else {
+      relays = await getWriteRelays();
+      await publishToMany(relays, signed);
+      nodePublished = true;
+    }
     // Spec §4: also publish a TraceHead (kind 34290) head-pointer cache so the
     // folder's head resolves as one bounded fetch for O(1) consumers. `d` = trace
     // identity. Genesis (folderId null) IS the identity — nothing to point at yet,
     // so no TraceHead. The first non-genesis step caches it.
-    if (folderId) {
+    if (folderId && relays.length > 0) {
       await publishTraceHead(folderId, signed.id, key, relays);
     }
     return signed;
@@ -2921,6 +3124,8 @@ export async function focusTimeline(folderId: string): Promise<FocusEntry[]> {
  *  checks (a member's owner is its latest node's signer) without walking a full
  *  chain. Returns null if no relay has it. */
 export async function fetchEventById(nodeId: string): Promise<Event | null> {
+  const pending = pendingLocalEventById(nodeId);
+  if (pending) return pending;
   const relays = await getReadRelays();
   const filter: Filter = { ids: [nodeId] };
   for (const relay of relays) {
@@ -2942,31 +3147,42 @@ export async function fetchNodeOwner(nodeId: string): Promise<string | null> {
   return event?.pubkey ?? null;
 }
 
-/** Returns the owner (signer pubkey) of a folder — the signer of its latest
- *  folder head. This is the folder-level ownership test: a folder is "foreign"
- *  iff its head's signer isn't the active voice. Returns null if the folder
- *  has no folder chain (a fresh/local-only folder — not foreign). */
+/** Resolve the fixed owner of a folder trace. Genesis is authoritative because
+ * a trace has one owner for its whole lifetime; a malformed later node signed
+ * by another key must never redefine ownership. Legacy UUID-keyed folders have
+ * no event whose id equals `folderId`, so they retain the head-signer fallback. */
+export function folderOwnerFromNodes(folderId: string, nodes: readonly Event[]): string | null {
+  const genesis = nodes.find(
+    (event) =>
+      event.id === folderId &&
+      event.tags.some((tag) => tag[0] === "z" && tag[1] === "folder"),
+  );
+  return genesis?.pubkey ?? resolveHead([...nodes])?.pubkey ?? null;
+}
+
+/** Returns the fixed owner (signer pubkey) of a folder, or null when no folder
+ * chain can be verified on the configured read relays. */
 export async function fetchFolderOwner(folderId: string): Promise<string | null> {
-  const head = await fetchLatestFolderNode(folderId);
-  return head?.pubkey ?? null;
+  return folderOwnerFromNodes(folderId, await fetchFolderNodes(folderId));
 }
 
 /** Seeds a shallow folder fork under the user's key. Reads the source folder's
- *  latest folder node (or legacy 34290 manifest as a fallback), mints a new
- *  `destFolderId`, and publishes a folder genesis: `action: "fork"`,
+ *  latest folder node (or its genesis as a fallback) and publishes a folder
+ *  genesis: `action: "fork"`,
  *  `forked-from` the source node, `snapshot.members` copied verbatim from the
  *  source (each member still points at the source owner's node — a citation,
  *  not a copy), member `q` tags carrying the source owner's pubkey so ownership
- *  is recoverable from the fork node alone. Returns the genesis event.
- *
- *  The caller mints `destFolderId` (via newFolderId) so this module stays free
- *  of a folders.ts dependency. */
+ *  is recoverable from the fork node alone. Returns the genesis event. Pass
+ *  `destFolderId: null` for the current genesis-id-is-identity protocol; a
+ *  non-null id remains accepted for legacy UUID-keyed folders. */
 export async function forkFolder(
   sourceFolderId: string,
   destFolderId: string | null,
-  opts?: { signer?: Uint8Array },
+  opts?: { signer?: Uint8Array; localOnly?: boolean },
 ): Promise<Event> {
-  const sourceNode = await fetchLatestFolderNode(sourceFolderId);
+  const sourceNode =
+    await fetchLatestFolderNode(sourceFolderId) ??
+    await fetchEventById(sourceFolderId);
   if (!sourceNode) {
     throw new Error(`Cannot fork folder ${sourceFolderId}: no folder chain found on any read relay.`);
   }
@@ -2985,6 +3201,7 @@ export async function forkFolder(
     forkedFrom,
     memberOwners,
     signer: opts?.signer,
+    localOnly: opts?.localOnly,
   });
 }
 
@@ -4462,7 +4679,11 @@ export function reconstructRunsUpTo(chain: Event[], throughIndex: number): Run[]
   return reconstructRunsFromChain(chain.slice(0, end));
 }
 
-function queryOnce(relay: Relay, filter: Filter, perRelayMs = 4000): Promise<Event[]> {
+function queryAttempt(
+  relay: Relay,
+  filter: Filter,
+  perRelayMs: number,
+): Promise<{ events: Event[]; closeReason: string }> {
   return new Promise((resolve) => {
     const found: Event[] = [];
     // Always settle: on EOSE we close + resolve immediately, and a safety
@@ -4484,11 +4705,45 @@ function queryOnce(relay: Relay, filter: Filter, perRelayMs = 4000): Promise<Eve
     // onclose fires exactly once for either close() path (EOSE or timeout);
     // clean the timer up and resolve with what we have so the queryMany/
     // fetchEventById callers never wait past perRelayMs for any relay.
-    sub.onclose = () => {
+    sub.onclose = (reason) => {
       clearTimeout(timer);
-      resolve(found);
+      resolve({ events: found, closeReason: reason });
     };
   });
+}
+
+/**
+ * Query one relay, replaying the subscription once after NIP-42 AUTH.
+ *
+ * Khatru challenges only after the first protected REQ. nostr-tools answers
+ * that challenge through `onauth`, but a bare Relay does not replay the REQ
+ * that was closed as auth-required (its pool wrapper does). Without this
+ * retry, a freshly-connected authorized writer sees an empty relay on its
+ * first read — exactly the MCP startup path when it inspects a human folder
+ * before it has published anything.
+ */
+async function queryOnce(relay: Relay, filter: Filter, perRelayMs = 4000): Promise<Event[]> {
+  const first = await queryAttempt(relay, filter, perRelayMs);
+  if (!first.closeReason.startsWith("auth-required:") || !relay.onauth) {
+    return first.events;
+  }
+
+  // AUTH and CLOSED can arrive in either order. auth() coalesces onto
+  // nostr-tools' in-flight authPromise; briefly retry only while the challenge
+  // frame has not arrived yet.
+  let authenticated = false;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await relay.auth(relay.onauth);
+      authenticated = true;
+      break;
+    } catch (error) {
+      if (!String(error).includes("no challenge was received")) return first.events;
+      await delay(25 * (attempt + 1));
+    }
+  }
+  if (!authenticated) return first.events;
+  return (await queryAttempt(relay, filter, perRelayMs)).events;
 }
 
 /**
@@ -4499,7 +4754,8 @@ function queryOnce(relay: Relay, filter: Filter, perRelayMs = 4000): Promise<Eve
  * sidecar and external relays are treated as a federated set.
  */
 export async function queryMany(relays: Relay[], filter: Filter, perRelayMs = 4000): Promise<Event[]> {
-  if (relays.length === 0) return [];
+  const local = pendingLocalEventsMatching(filter);
+  if (relays.length === 0) return local;
   // Each relay gets its own perRelayMs timeout inside queryOnce, and the
   // subscription is always closed (on EOSE or on timeout) so no sub leaks onto
   // the session-cached WebSocket. Timeouts/failures are best-effort: a down
@@ -4507,7 +4763,7 @@ export async function queryMany(relays: Relay[], filter: Filter, perRelayMs = 40
   // MUST share this posture — previously it rethrew the timeout, which
   // surfaced as Unhandled Promise Rejection from auto-beginReplay on folder
   // load when the sidecar was slow/unreachable.
-  const byId = new Map<string, Event>();
+  const byId = new Map<string, Event>(local.map((event) => [event.id, event]));
   await Promise.all(
     relays.map(async (relay) => {
       try {

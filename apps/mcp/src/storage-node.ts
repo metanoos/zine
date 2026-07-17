@@ -17,16 +17,29 @@
  *     batch writes, so write-through is correct and avoids a flush-on-exit race.
  *   - `removeItem(k)` is a no-op when the key is absent.
  *
- * Concurrency: a single zine-mcp process owns its config file. Two presses
- * writing the same `~/.zine/mcp.json` (e.g. two harnesses spawned against the
- * same folder) would race — but the desktop client uses browser localStorage
- * (a different store), so in practice the only writer here is this process.
+ * Concurrency: a profile lock enforces one writer per config file. Different
+ * harnesses should use distinct `--profile` names; the desktop client uses a
+ * separate browser localStorage store.
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 const DEFAULT_CONFIG_PATH = join(homedir(), ".zine", "mcp.json");
+const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const heldLocks = new Map<string, number>();
+let cleanupInstalled = false;
 
 interface StorageLike {
   getItem(key: string): string | null;
@@ -61,15 +74,19 @@ class NodeLocalStorage implements StorageLike {
       chmodSync(this.path, 0o600);
       const raw = readFileSync(this.path, "utf8");
       const parsed = JSON.parse(raw) as unknown;
-      this.map =
-        parsed && typeof parsed === "object" && !Array.isArray(parsed)
-          ? (parsed as Record<string, string>)
-          : {};
-    } catch {
-      // A corrupt config file is treated as empty — better to reseed a fresh
-      // agent key than to crash on startup. The desktop app takes the same
-      // posture (keys-store.ts: "Corrupt blob — fall through and reseed").
-      this.map = {};
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed) ||
+        Object.values(parsed).some((value) => typeof value !== "string")
+      ) {
+        throw new Error("profile state must be a JSON object of string values");
+      }
+      this.map = parsed as Record<string, string>;
+    } catch (error) {
+      throw new Error(
+        `cannot read headless profile ${this.path}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     return this.map;
   }
@@ -77,11 +94,25 @@ class NodeLocalStorage implements StorageLike {
   private flush(): void {
     const dir = dirname(this.path);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(this.path, JSON.stringify(this.map ?? {}, null, 2), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-    // writeFile's mode only applies on creation. Tighten an existing file too.
+    const temp = `${this.path}.${process.pid}.${Date.now()}.tmp`;
+    let fd: number | null = null;
+    try {
+      fd = openSync(temp, "wx", 0o600);
+      writeFileSync(fd, JSON.stringify(this.map ?? {}, null, 2), "utf8");
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = null;
+      renameSync(temp, this.path);
+    } catch (error) {
+      if (fd !== null) closeSync(fd);
+      try {
+        unlinkSync(temp);
+      } catch {
+        // The temp may not have been created or may already have been renamed.
+      }
+      throw error;
+    }
+    // Atomic rename preserves the old file until the replacement is complete.
     chmodSync(this.path, 0o600);
   }
 
@@ -113,6 +144,82 @@ class NodeLocalStorage implements StorageLike {
   }
 }
 
+export function configPathForProfile(
+  profile = "default",
+  explicitPath?: string,
+): string {
+  if (!PROFILE_RE.test(profile)) {
+    throw new Error(
+      "--profile must be 1-64 characters using letters, numbers, dot, underscore, or dash",
+    );
+  }
+  if (explicitPath) return explicitPath;
+  return profile === "default"
+    ? DEFAULT_CONFIG_PATH
+    : join(homedir(), ".zine", "profiles", `${profile}.json`);
+}
+
+function processExists(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function releaseLocks(): void {
+  for (const [path, fd] of heldLocks) {
+    try {
+      closeSync(fd);
+    } catch {
+      // Best-effort process-exit cleanup.
+    }
+    try {
+      unlinkSync(`${path}.lock`);
+    } catch {
+      // A stale/missing lock is harmless at exit.
+    }
+  }
+  heldLocks.clear();
+}
+
+function acquireProfileLock(path: string): void {
+  if (heldLocks.has(path)) return;
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const lockPath = `${path}.lock`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(lockPath, "wx", 0o600);
+      writeFileSync(fd, `${process.pid}\n`, "utf8");
+      fsyncSync(fd);
+      heldLocks.set(path, fd);
+      if (!cleanupInstalled) {
+        cleanupInstalled = true;
+        process.once("exit", releaseLocks);
+      }
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let ownerPid = 0;
+      try {
+        ownerPid = Number.parseInt(readFileSync(lockPath, "utf8").trim(), 10);
+      } catch {
+        // Treat an unreadable lock as stale and retry once.
+      }
+      if (processExists(ownerPid)) {
+        throw new Error(
+          `headless profile ${path} is already open by process ${ownerPid}; use another --profile`,
+        );
+      }
+      unlinkSync(lockPath);
+    }
+  }
+  throw new Error(`could not lock headless profile ${path}`);
+}
+
 /**
  * Install the disk-backed localStorage shim onto `globalThis` and return the
  * resolved config path. Must run BEFORE any import that touches the shared
@@ -125,8 +232,12 @@ class NodeLocalStorage implements StorageLike {
  * instance — the native one is in-memory only and would lose the agent key on
  * every restart, defeating the whole point of a persisted voice.
  */
-export function installNodeStorage(configPath: string | undefined): string {
-  const path = configPath ?? DEFAULT_CONFIG_PATH;
+export function installNodeStorage(
+  configPath: string | undefined,
+  profile = "default",
+): string {
+  const path = configPathForProfile(profile, configPath);
+  acquireProfileLock(path);
   const store = new NodeLocalStorage(path);
   (globalThis as { localStorage?: StorageLike }).localStorage = store;
   return path;

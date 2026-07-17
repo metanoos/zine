@@ -134,6 +134,40 @@ export function addRelay(url: string): RelayEntry[] {
   return next;
 }
 
+/**
+ * Replace every user-configured relay with an exact runtime-supplied set.
+ *
+ * The desktop UI edits entries one at a time through add/remove/toggle. A
+ * headless press is configured declaratively by its process arguments, so it
+ * must not inherit a stale publication target from an earlier invocation of
+ * the same config file. Existing ids are retained for unchanged URLs to keep
+ * the persisted representation stable across restarts.
+ */
+export function replaceExternalRelays(urls: readonly string[]): RelayEntry[] {
+  const current = loadRelays();
+  const home = current.find((entry) => entry.builtin) ?? builtinEntry();
+  const existingByUrl = new Map(
+    current.filter((entry) => !entry.builtin).map((entry) => [entry.url, entry]),
+  );
+  const seen = new Set([home.url]);
+  const external: RelayEntry[] = [];
+  for (const rawUrl of urls) {
+    const url = rawUrl.trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    const existing = existingByUrl.get(url);
+    external.push({
+      id: existing?.id ?? `r-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      url,
+      read: true,
+      write: true,
+    });
+  }
+  const next = [home, ...external];
+  saveRelays(next);
+  return next;
+}
+
 export function removeRelay(id: string): RelayEntry[] {
   const entries = loadRelays();
   // Home relay is immune to deletion — surfaced as a no-op here and as a
@@ -168,6 +202,35 @@ export function setRelayWrite(id: string, write: boolean): RelayEntry[] {
 /** Entries the provenance layer should publish to (write === true). */
 export function writeRelays(entries: RelayEntry[] = loadRelays()): RelayEntry[] {
   return entries.filter((e) => e.write);
+}
+
+/** Whether a relay URL resolves only to this machine. Invalid URLs are local
+ * by default: they cannot establish the public reachability required by Send. */
+export function isLoopbackRelayUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return (
+      host === "localhost" ||
+      host === "0.0.0.0" ||
+      host.startsWith("127.") ||
+      host === "::1" ||
+      host === "[::1]"
+    );
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Write-enabled destinations that satisfy Send's machine-boundary rule.
+ *
+ * On desktop/headless the builtin home is loopback and therefore excluded.
+ * The hosted webapp's same-origin relay remains eligible when non-loopback,
+ * preserving its current remote-first behavior until browser authoring is
+ * split from the hosted verifier surface.
+ */
+export function publicationRelays(entries: RelayEntry[] = loadRelays()): RelayEntry[] {
+  return entries.filter((entry) => entry.write && !isLoopbackRelayUrl(entry.url));
 }
 
 /** Entries the provenance layer should read from (read === true). */

@@ -110,3 +110,28 @@ func TestResetLocalStateClearsEventsAndAccessPolicy(t *testing.T) {
 		t.Fatalf("unrelated file was removed: %v", err)
 	}
 }
+
+func TestLoopbackFilterRateLimitIsBypassedWithoutConsumingAToken(t *testing.T) {
+	called := false
+	reject, message := applyLoopbackExemption("127.0.0.1", func() (bool, string) {
+		called = true
+		return true, "rate-limited"
+	})
+	if called {
+		t.Fatal("loopback request reached the rate limiter")
+	}
+	if reject || message != "" {
+		t.Fatalf("loopback decision = (%v, %q), want (false, empty)", reject, message)
+	}
+
+	reject, message = applyLoopbackExemption("203.0.113.4", func() (bool, string) {
+		called = true
+		return true, "rate-limited"
+	})
+	if !called {
+		t.Fatal("remote request did not reach the rate limiter")
+	}
+	if !reject || message != "rate-limited" {
+		t.Fatalf("remote decision = (%v, %q), want (true, rate-limited)", reject, message)
+	}
+}

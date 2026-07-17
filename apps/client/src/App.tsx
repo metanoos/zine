@@ -38,6 +38,7 @@ import {
   fetchFolderNodes,
   fetchEventById,
   publishHardenedSpan,
+  sha256HexLocal,
   sendStep,
   reconstructUpTo,
   reconstructRunsUpTo,
@@ -7771,6 +7772,8 @@ function App() {
   async function mintCoinTrace(
     phrase: string,
     originNodeId: string,
+    sourceContentHash: string,
+    sourceRange: { start: number; end: number },
     signer?: Uint8Array,
   ): Promise<{ path: string; nodeId: string; runs: Run[] }> {
     if (!folder) throw new Error("Cannot mint a coin without an attached press.");
@@ -7789,6 +7792,8 @@ function App() {
         relativePath: mintMemberName,
         phrase,
         originNodeId,
+        sourceContentHash,
+        sourceRange,
         signer,
         localOnly: true,
       });
@@ -7852,20 +7857,33 @@ function App() {
     const docText = view.state.doc.toString();
     const targetSelection = findMintSelectionTarget(docText, from, to);
     if (!targetSelection) return false;
-    const phrase = targetSelection.phrase;
+    let phrase = targetSelection.phrase;
     if (!targetSelection.bracket) {
       if (!wrapSelection(view)) return false;
-      // No need to capture the wrapped bracket's positions here — after the
-      // writeFile await below, we re-find the bracket by phrase (positions may
-      // have shifted if the user typed during the await).
     }
+
+    const sourceSnapshot = view.state.doc.toString();
+    const expectedMatchStart = targetSelection.bracket?.matchStart ?? Math.min(from, to);
+    const sourceBracket = findPendingBrackets(sourceSnapshot).find(
+      (candidate) => candidate.matchStart === expectedMatchStart,
+    );
+    if (!sourceBracket) return false;
+    phrase = sourceSnapshot.slice(sourceBracket.phraseStart, sourceBracket.phraseEnd);
+    const sourceContentHashPromise = sha256HexLocal(sourceSnapshot);
 
     const signer = stepSigner ?? secretKeyForVoice(authorPubkey) ?? undefined;
     try {
       // Pin extraction to the exact source version that contains the selected
       // phrase. This flush is a no-op when the source is already current.
       const originNodeId = await flushEditorLocally(path, view, signer);
-      const coin = await mintCoinTrace(phrase, originNodeId, signer);
+      const sourceContentHash = await sourceContentHashPromise;
+      const coin = await mintCoinTrace(
+        phrase,
+        originNodeId,
+        sourceContentHash,
+        { start: sourceBracket.phraseStart, end: sourceBracket.phraseEnd },
+        signer,
+      );
 
       // Resolve the bracket in the origin doc to cite the new file's node.
       // Dispatch only the changed id, so the bracket phrase and surrounding
@@ -7939,7 +7957,14 @@ function App() {
       originNodeId = await flushEditorLocally(path, view, signer);
     }
 
-    const coin = await mintCoinTrace(phrase, originNodeId, signer);
+    const sourceContentHash = await sha256HexLocal(docText);
+    const coin = await mintCoinTrace(
+      phrase,
+      originNodeId,
+      sourceContentHash,
+      { start: from, end: to },
+      signer,
+    );
     void appendToPalette({
       nodeId: coin.nodeId,
       text: phrase,

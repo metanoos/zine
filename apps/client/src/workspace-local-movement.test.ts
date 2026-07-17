@@ -1,12 +1,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+
+// @ts-expect-error minimal localStorage shim for signer-resolution coverage
+globalThis.localStorage = {
+  values: new Map<string, string>(),
+  getItem(key: string) {
+    return this.values.get(key) ?? null;
+  },
+  setItem(key: string, value: string) {
+    this.values.set(key, value);
+  },
+  removeItem(key: string) {
+    this.values.delete(key);
+  },
+  clear() {
+    this.values.clear();
+  },
+};
 
 import {
   completeDeletion,
   completeStagedWrite,
+  folderWriteSigner,
+  localFileSigner,
   ownershipDisposition,
   pendingMoveForPath,
+  previousStepCitationTargets,
 } from "./workspace-local.js";
+import { authorVoice, loadKeys } from "./keys-store.js";
 
 test("active to Oblivion retains the active relay coordinate", () => {
   assert.deepEqual(
@@ -74,6 +96,13 @@ test("a failed explicit write is surfaced and scheduled for retry", async () => 
   assert.equal(retries, 1);
 });
 
+test("an unavailable prior Step reports the broken history instead of reading event.tags", () => {
+  assert.throws(
+    () => previousStepCitationTargets("notes/draft.md", "prior-node", []),
+    /cannot load the previous Step for notes\/draft\.md at prior-node/,
+  );
+});
+
 test("deletion removes local copies only after every tombstone lands", async () => {
   const order: string[] = [];
   await completeDeletion(
@@ -109,4 +138,43 @@ test("ownership disposition distinguishes owned, foreign, and unverifiable nodes
   assert.equal(ownershipDisposition("alice", "alice"), "owned");
   assert.equal(ownershipDisposition("bob", "alice"), "foreign");
   assert.equal(ownershipDisposition(null, "alice"), "unverifiable");
+});
+
+test("folder membership keeps using a different locally held keychain owner", () => {
+  localStorage.clear();
+  const keys = loadKeys();
+  const folderOwner = keys[0]!;
+  const fileOwner = keys[1]!;
+  const fileSigner = localFileSigner(fileOwner.pubkey);
+
+  assert.ok(fileSigner);
+  const signer = folderWriteSigner(folderOwner.pubkey, fileSigner);
+  assert.ok(signer);
+  assert.equal(getPublicKey(signer), folderOwner.pubkey);
+});
+
+test("folder membership can recover the already-held legacy Root owner", () => {
+  localStorage.clear();
+  loadKeys();
+  const legacySigner = generateSecretKey();
+  const legacyPubkey = getPublicKey(legacySigner);
+  localStorage.setItem(
+    "zine.voice.secretHex",
+    Array.from(legacySigner, (byte) => byte.toString(16).padStart(2, "0")).join(""),
+  );
+  const fileSigner = localFileSigner(authorVoice());
+
+  assert.ok(fileSigner);
+  const signer = folderWriteSigner(legacyPubkey, fileSigner);
+  assert.ok(signer);
+  assert.equal(getPublicKey(signer), legacyPubkey);
+});
+
+test("a genuinely foreign folder still fails closed", () => {
+  localStorage.clear();
+  const fileSigner = localFileSigner(authorVoice());
+  const foreignOwner = getPublicKey(generateSecretKey());
+
+  assert.ok(fileSigner);
+  assert.equal(folderWriteSigner(foreignOwner, fileSigner), null);
 });

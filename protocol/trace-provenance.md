@@ -13,9 +13,12 @@ A **trace** is the protocol's single primitive: a body on an append-only chain
 of signed checkpoints. Its body is either a **file** (text) or a **folder** (an
 ordered membership list).
 
-A **coin** is an immutable, single-node file trace struck from a span of another
-trace. File describes its wire shape, not an editable workspace file, so the
-discriminator remains `z: "file" | "folder"` with no third value.
+A **coin** is an immutable, single-node file trace. It is either **extracted**
+from an exact span of another trace or minted **directly** as signer-authored
+text with no source-trace claim. File describes its wire shape, not an editable
+workspace file, so the reification discriminator remains
+`z: "file" | "folder"` with no third value; the REQUIRED `content.coin`
+envelope (§3.2) distinguishes Coins from mutable file traces.
 
 A **press** is the authoring interface, not a server. A **relay** is the local
 or remote Nostr server to which a press writes traces. A **zine** is an attested
@@ -78,10 +81,10 @@ One stepped checkpoint of one trace. Every node is self-sufficient: it MUST carr
 |---|---|
 | `["z", "file" \| "folder"]` | Reification discriminator. REQUIRED on every node. |
 | `["f", folderGenesisId]` | The folder this trace resides in. REQUIRED on file nodes (coins included — they reside in the Press's dedicated Mint folder). On folder nodes it carries the folder's **own** genesis id and is REQUIRED on every node except genesis itself (an event cannot know its own id before signing). `#f=[id]` returns every node **directly** in a folder — the folder's own chain and its immediate members' nodes; `#z` splits them. A folder member's own members are NOT found transitively: reading a whole tree is bounded fan-out (one `#f` query per folder member, recursing by depth). |
-| `["F", relativePath]` | Structural name for named file **and folder member** traces: the member's name within its immediate parent folder. Single-segment (no `/`) — hierarchy is expressed via folder-members, not slash-joined paths. Coins receive an automatic structural name (§3.8). Absent only on a folder's own genesis and legacy nameless coins. |
+| `["F", relativePath]` | Structural name for named file **and folder member** traces: the member's name within its immediate parent folder. Single-segment (no `/`) — hierarchy is expressed via folder-members, not slash-joined paths. Coins receive an automatic structural name (§3.8). Absent only on a folder's own genesis. |
 | `["e", prevNodeId, relayHint, "prev"]` | Node this one supersedes. Absent only on genesis. |
 | `["e", parentNodeId, relayHint, "merge-parent"]` | Zero or more, merge nodes only — one per branch reconciled. |
-| `["e", originNodeId, relayHint, "extracted-from"]` | REQUIRED on coins — the exact node-version the text was pulled out of. Absent on whole-file genesis imports. |
+| `["e", originNodeId, relayHint, "extracted-from"]` | REQUIRED on **extracted** coins — mirrors `content.coin.origin.sourceNodeId` for relay-side fan-out queries. MUST be absent on direct coins, which make no source claim, and on whole-file genesis imports. |
 | `["e", sourceNodeId, relayHint, "forked-from"]` | REQUIRED on fork-genesis nodes (§3.8) — the exact node-version the trace was seeded from. |
 | `["x", bodyHashHex]` | Body hash (per §2). REQUIRED on coins and on folder nodes; OPTIONAL on named file nodes (open question). `#x` finds every trace with an identical body, whoever minted it. |
 | `["q", nucleusId, relayHint, ownerPubkey]` | Out-edges: the traces this node composes. NIP-18 quote-tag shape. The list is the full **current** set of active out-edges — cumulative, not incremental. On folder nodes, one per member; **`q`-tag order MUST equal `snapshot.members` order** — member ordering is stated once, in two places that MUST agree. |
@@ -96,6 +99,7 @@ One stepped checkpoint of one trace. Every node is self-sufficient: it MUST carr
   "snapshot": "…file text…",
   "deltas": [ … ],
   "contentHash": "…hex…",
+  "coin": { "version": 1, "origin": { "kind": "direct" } },
   "voices": [ "<signer pubkey>", "<other voice pubkey>", … ],
   "authors": [ { "v": "<pubkey>", "len": 42, "src": "<nodeId>" } ],
   "kedits": [ { "op": "ins | del | repl", "from": 42, "to": 42, "text": "…", "voice": "<pubkey>", "t": 1730000000000, "tx": 7, "intent": "undo | redo" } ],
@@ -106,6 +110,23 @@ One stepped checkpoint of one trace. Every node is self-sufficient: it MUST carr
   "contributors": [ { "type": "human | llm | agent", "pubkey": "…" } ]
 }
 ```
+
+`coin` is REQUIRED on Coins and MUST be absent on mutable file traces. Version
+1 has exactly two origin forms:
+
+```json
+{ "version": 1, "origin": { "kind": "direct" } }
+{ "version": 1, "origin": { "kind": "extracted", "sourceNodeId": "…", "sourceContentHash": "…hex…", "range": { "start": 10, "end": 24 } } }
+```
+
+For an extracted Coin, `sourceNodeId` pins the exact source nucleus,
+`sourceContentHash` is the SHA-256 hash of that nucleus's complete text
+snapshot, and `range` is the UTF-16 half-open interval whose bytes MUST equal
+the Coin's `snapshot`. The paired `extracted-from` tag MUST name the same node.
+A direct Coin has no source fields and MUST NOT carry an `extracted-from` edge:
+its claim is only that the event signer minted these exact bytes. Readers MUST
+use the envelope as the sole Coin discriminator; an `extracted-from` tag without
+the envelope does not make an event a Coin.
 
 For folder nodes, `snapshot` is instead:
 
@@ -231,7 +252,7 @@ A `focus` delta records panel occupancy — session-replay data, not membership.
 
 | Action | Meaning | Distinguishing tags |
 |---|---|---|
-| `import` | Genesis — first-observed content, or a coin just struck | no `prev`; `extracted-from` + `x` if a coin |
+| `import` | Genesis — first-observed content, or a coin just struck | no `prev`; `content.coin` + `x` if a coin; `extracted-from` only for extracted coins |
 | `fork` | Genesis seeded from another trace's node under a different owner | `forked-from`, no `prev` |
 | `edit` | Ordinary change | `prev` |
 | `external` | File changed outside the traced editor — disk drift detected at next app open or poll, or an external process / MCP tool wrote it. Signed by the external actor's voice (a per-machine reconciler key for bare drift, a per-actor key for MCP callers), never the authoring key. The authoring key only signs changes the editor's own transactions produced. `authors` is omitted, so reconstruction attributes the bytes to the external voice's pubkey (Tier-2 signer attribution, §3.6) — honestly low-trust: the signer claims only "the machine's state moved," not "the human typed this." Per-actor distinction is carried by the signer pubkey, not this tag. | `prev`; signed by the external voice |
@@ -311,15 +332,23 @@ Given `prompt` + the rule manifest + the cited nuclei, a reader whose binary imp
 
 Everything outside brackets is fluid by default. A bare bracket is rewrite protection only: it shields a span from silent drift across LLM rounds without minting anything. A selection deletion that fully contains brackets removes the loose text but spares each complete bracket; Cut and paste/type-over operate on the complete selection. Clicking bracketed text selects the whole occurrence, and Backspace twice unwraps it to ordinary text (dropping any resolved citation suffix without deleting the visible phrase). A bare bracket is NEVER auto-resolved by coincidental text match — resolution is always an explicit act.
 
-**Coining pass** (client- or CLI-triggered), for each unresolved bracket:
+**Extracted coining pass** (client- or CLI-triggered), for each unresolved bracket:
 
 1. Read the current span text.
-2. Step a new file-reified `TraceNode`, `action: import`, `snapshot` = that text, no `prev`, as a direct member of the Press's dedicated **Mint folder**. This one genesis Step strikes the coin; a coin never gains a later `prev` node. The Mint folder is an independent folder trace mounted beside Root by the press; it is not a member of Root and therefore cannot leak its inventory when Root is Sent. Mint folder genesis and membership Steps remain local until explicitly Sent. The coin has a single-segment `F` name. The reference naming policy is `<YYYY-MM-DD_HHmmss>-<smart-title>.md` in the Press's local time, at second precision, with a numeric collision suffix when necessary. Tags `extracted-from` (the exact origin node-version) and `x` (body hash) are both REQUIRED.
+2. Step a new file-reified `TraceNode`, `action: import`, `snapshot` = that text, no `prev`, as a direct member of the Press's dedicated **Mint folder**. This one genesis Step strikes the coin; a coin never gains a later `prev` node. The Mint folder is an independent folder trace mounted beside Root by the press; it is not a member of Root and therefore cannot leak its inventory when Root is Sent. Mint folder genesis and membership Steps remain local until explicitly Sent. The coin has a single-segment `F` name. The reference naming policy is `<YYYY-MM-DD_HHmmss>-<smart-title>.md` in the Press's local time, at second precision, with a numeric collision suffix when necessary. `content.coin.origin` MUST be `kind: "extracted"` and carry the exact source node, full source-snapshot hash, and UTF-16 span range. Tags `extracted-from` (mirroring the source node) and `x` (Coin body hash) are both REQUIRED.
 3. Rewrite the bracket in place to `[[ text | newNodeId ]]`. That edit is an ordinary `cite` delta (`role: "inline"`, `sourceEventId: newNodeId`) on the origin document's next step, mirrored as a top-level `q` tag.
 
-Coining captures what's there *now* as a fresh trace; it does not reconstruct a pre-mint history for the text. Once struck, the coin's identity and sole nucleus are stable — later rounds cite the same trace. Coining is a local Step, not a Send: the coin becomes a social signal only if its own node is Sent or a Sent container carries a `q` citation to it. Sending a container does not recursively publish the cited coin or the private Mint folder. A coin MAY be reified as a plain text file, but that is an exported materialization, not another Step or a conversion of the coin into a mutable file trace. A cosmetic alias MAY still be attached via `TraceOpinion` (§5); it does not replace the structural `F` name.
+**Direct coining.** A press MAY expose a Mint composer that strikes signer-
+authored text without first creating a mutable source trace. It follows the
+same one-node, `action: import`, named Mint-member, local-Step, and `x` rules,
+but its `content.coin.origin` is `{ "kind": "direct" }` and it MUST NOT emit
+`extracted-from`. The composer MAY retain its pre-mint `kedits` as advisory
+process evidence applied from the empty string; those KEdits do not create a
+`prev` history and the final snapshot remains authoritative.
 
-**Provenance-aware copy.** Copying unbracketed text between two files in one press is a shorthand coining gesture. If the source buffer differs from its latest Step, the press first Steps that exact source snapshot locally; it then strikes a coin whose `extracted-from` names that source nucleus. The clipboard MUST retain an ordinary plain-text representation for interoperability and MAY carry a press-private coin reference. Pasting that reference into another traced file installs `[[ text | coinId ]]`; the target's next Step carries both the cumulative `q` edge and a gesture-local `cite role: "inline"` delta. The source document is not rewritten to cite the coin merely because its text was copied. If the private reference is missing, stale, unverifiable, or stripped by another application, paste degrades to ordinary text and MUST NOT assert source provenance. Materialization happens at Copy, not Paste: waiting until Paste could pin a different source state if the source changed between gestures.
+Coining captures what's there *now* as a fresh trace; it does not reconstruct a pre-mint chain for the text. Once struck, the coin's identity and sole nucleus are stable — later rounds cite the same trace. Coining is a local Step, not a Send: the coin becomes a social signal only if its own node is Sent or a Sent container carries a `q` citation to it. Sending a container does not recursively publish the cited coin or the private Mint folder. A coin MAY be reified as a plain text file, but that is an exported materialization, not another Step or a conversion of the coin into a mutable file trace. A cosmetic alias MAY still be attached via `TraceOpinion` (§5); it does not replace the structural `F` name.
+
+**Provenance-aware copy.** Copying unbracketed text between two files in one press is a shorthand extracted-coining gesture. If the source buffer differs from its latest Step, the press first Steps that exact source snapshot locally; it then strikes an extracted coin whose envelope records the nucleus, full snapshot hash, and exact range, with `extracted-from` mirroring that nucleus. The clipboard MUST retain an ordinary plain-text representation for interoperability and MAY carry a press-private coin reference. Pasting that reference into another traced file installs `[[ text | coinId ]]`; the target's next Step carries both the cumulative `q` edge and a gesture-local `cite role: "inline"` delta. The source document is not rewritten to cite the coin merely because its text was copied. If the private reference is missing, stale, unverifiable, or stripped by another application, paste degrades to ordinary text and MUST NOT assert source provenance. Materialization happens at Copy, not Paste: waiting until Paste could pin a different source state if the source changed between gestures.
 
 **Resilience across edits.** A resolved bracket survives an edit iff its old-content position range overlaps no span in the diff the step already computes — an interval-overlap test, no fetch. Splits survive (both halves keep citing the same id), textual merges survive (two adjacent citations), and any overlapping edit destroys the bracket: the `| eventId` suffix drops, the text reverts to fluid, the cited trace itself is untouched. This is local continuity only — whether a citation was honest is §3.9's separate, reader-triggered check.
 

@@ -49,6 +49,7 @@ import {
 import { findAddedInlineCitations, findResolvedBrackets } from "./brackets.js";
 import { decidePullMerge } from "./three-way-merge.js";
 import { authorVoice, secretKeyForVoice } from "./keys-store.js";
+import { legacySecretKeyForVoice } from "./identity.js";
 import { getPublicKey } from "nostr-tools/pure";
 import type {
   AttachResult,
@@ -183,6 +184,51 @@ export interface LocalWorkspaceOptions {
   requireRelayOnAttach?: boolean;
 }
 
+/** Resolve the signer staged on a local file, including the pre-keychain voice
+ * used by the headless press and older desktop profiles. A missing/deleted
+ * staged voice falls back to the current AUTHOR key. */
+export function localFileSigner(voicePubkey?: string): Uint8Array | null {
+  if (voicePubkey) {
+    const exact = secretKeyForVoice(voicePubkey) ?? legacySecretKeyForVoice(voicePubkey);
+    if (exact) return exact;
+  }
+  const authorPubkey = authorVoice();
+  return secretKeyForVoice(authorPubkey) ?? legacySecretKeyForVoice(authorPubkey);
+}
+
+/** A file Step and its containing folder Step may have different owners. The
+ * file signer records the writing voice; membership must keep extending the
+ * folder's existing single-owner chain. Return null only when that folder key
+ * is not held locally, which is the actual foreign-folder boundary. */
+export function folderWriteSigner(
+  folderOwner: string | null,
+  fileSigner: Uint8Array,
+): Uint8Array | null {
+  if (!folderOwner || getPublicKey(fileSigner) === folderOwner) return fileSigner;
+  return secretKeyForVoice(folderOwner) ?? legacySecretKeyForVoice(folderOwner);
+}
+
+/** Read the previous Step's citation set only after its immutable history has
+ *  been recovered. Continuing from an unknown prior snapshot would create a
+ *  dishonest full-document delta, so an unavailable prior node fails with a
+ *  useful recovery error instead of passing undefined into eventMeta. */
+export function previousStepCitationTargets(
+  relativePath: string,
+  previousNodeId: string | null,
+  chain: Awaited<ReturnType<typeof fetchChain>>,
+): string[] {
+  if (chain.length === 0) {
+    if (previousNodeId) {
+      throw new Error(
+        `cannot load the previous Step for ${relativePath} at ${previousNodeId}; ` +
+          "retry when the home relay is available",
+      );
+    }
+    return [];
+  }
+  return eventMeta(chain[chain.length - 1]).citationTargets;
+}
+
 export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Workspace {
   let ref: FolderRef | null = null;
 
@@ -265,9 +311,13 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         file.traceId ??
         (file.nodeId ? await resolveTraceIdentity(file.nodeId) : null) ??
         (await resolveTraceIdentity(entry.latestNodeId));
-      const signer = file.voicePubkey
-        ? secretKeyForVoice(file.voicePubkey) ?? undefined
-        : undefined;
+      const signer = localFileSigner(file.voicePubkey);
+      if (!signer) throw new Error(`cannot resolve a local signer for ${fromPath}`);
+      const folderOwner = await fetchFolderOwner(folderId);
+      const folderSigner = folderWriteSigner(folderOwner, signer);
+      if (!folderSigner) {
+        throw new Error(`cannot write through foreign folder ${folderId}; fork the folder first`);
+      }
       const event = await publishEdit({
         prevEventId: entry.latestNodeId,
         ...(traceId ? { traceId } : {}),
@@ -279,7 +329,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         action: "delete",
         signer,
       });
-      await removeManifestEntry(folderId, fromPath, signer);
+      await removeManifestEntry(folderId, fromPath, folderSigner);
       saveLocalFile(folderId, relativePath, {
         content,
         tags: file.tags,
@@ -311,6 +361,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       const resolved = await resolveTraceChain(traceId, {
         folderId,
         relativePath: entry?.relativePath ?? fromEntry?.relativePath ?? relativePath,
+        ...(prevId ? { headId: prevId } : {}),
       });
       if (resolved.status === "conflict") {
         throw new Error(`trace ${traceId} has multiple current heads`);
@@ -329,7 +380,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     const prevTags = headUserTags(chain);
     const tagsUnchanged =
       prevTags.length === file.tags.length && prevTags.every((t, i) => t === file.tags[i]);
-    const prevCitations = entry ? eventMeta(chain[chain.length - 1]).citationTargets : [];
+    const prevCitations = previousStepCitationTargets(relativePath, prevId, chain);
     const taggedTraces = file.taggedTraces ?? [];
     const nextCitations = [
       ...findResolvedBrackets(content).map((b) => b.nodeId),
@@ -346,19 +397,16 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       return entry.latestNodeId;
     }
 
-    // Resolve the voice that authored this edit to its secret key, so the push
-    // signs as that voice — not just the AUTHOR default. Falls back to the
-    // AUTHOR key if the stored voice isn't in the keychain (defensive: a voice
-    // deleted after the edit was authored).
-    const signer = file.voicePubkey ? secretKeyForVoice(file.voicePubkey) ?? undefined : undefined;
-    const signerPubkey = signer ? getPublicKey(signer) : authorVoice();
-
-    // A folder chain has one owner too. Extending a foreign folder membership
-    // would be the same ownership violation as extending a foreign file. Root
-    // folders must be explicitly forked before attach; recursive nested-folder
-    // fork-on-write remains a separate operation, so this path fails closed.
+    // Resolve the voice that authored this edit to its secret key, so the file
+    // Step signs as that voice. Folder membership is a separate chain: keep it
+    // under the folder's original locally-held owner even when the file Step
+    // uses another voice.
+    const signer = localFileSigner(file.voicePubkey);
+    if (!signer) throw new Error(`cannot resolve a local signer for ${relativePath}`);
+    const signerPubkey = getPublicKey(signer);
     const folderOwner = await fetchFolderOwner(folderId);
-    if (folderOwner && folderOwner !== signerPubkey) {
+    const folderSigner = folderWriteSigner(folderOwner, signer);
+    if (!folderSigner) {
       throw new Error(`cannot write through foreign folder ${folderId}; fork the folder first`);
     }
 
@@ -388,7 +436,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
             latestNodeId: fork.id,
             contentHash: entry.contentHash,
           },
-          signer,
+          folderSigner,
           { localOnly: file.pendingLocalOnly },
         );
         prevId = fork.id;
@@ -438,7 +486,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         file.pendingMove.fromPath,
         relativePath,
         event.id,
-        signer,
+        folderSigner,
       );
     } else {
       await upsertManifestEntry(folderId, {
@@ -446,7 +494,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         relativePath,
         latestNodeId: event.id,
         contentHash,
-      }, signer, { localOnly: file.pendingLocalOnly });
+      }, folderSigner, { localOnly: file.pendingLocalOnly });
     }
     // Reflect the stepped node id back into local state so the next push's
     // prevId is correct. Preserve voicePubkey so re-pushes stay correctly signed,

@@ -146,7 +146,11 @@ func main() {
 			return false, ""
 		},
 		policies.NoComplexFilters,
-		policies.FilterIPRateLimiter(20, time.Minute, 100),
+		// Folder reads fan out across membership, TraceHead, and immutable-node
+		// filters. Keep the non-loopback limit, but do not let the desktop's own
+		// loopback client exhaust the shared bucket and turn present history into
+		// an empty query result. This mirrors the event-publish exemption above.
+		loopbackExemptFilter(policies.FilterIPRateLimiter(20, time.Minute, 100)),
 	)
 	relay.RejectCountFilter = append(relay.RejectCountFilter,
 		// Count is a read op — gate it identically to filters so a caller can't
@@ -271,11 +275,27 @@ func resetLocalState(dbPath string) (int64, error) {
 // which the sidecar never serves in local mode.
 func loopbackExempt(fn func(context.Context, *nostr.Event) (bool, string)) func(context.Context, *nostr.Event) (bool, string) {
 	return func(ctx context.Context, ev *nostr.Event) (bool, string) {
-		if isLoopback(khatru.GetIP(ctx)) {
-			return false, ""
-		}
-		return fn(ctx, ev)
+		return applyLoopbackExemption(khatru.GetIP(ctx), func() (bool, string) {
+			return fn(ctx, ev)
+		})
 	}
+}
+
+func loopbackExemptFilter(fn func(context.Context, nostr.Filter) (bool, string)) func(context.Context, nostr.Filter) (bool, string) {
+	return func(ctx context.Context, filter nostr.Filter) (bool, string) {
+		return applyLoopbackExemption(khatru.GetIP(ctx), func() (bool, string) {
+			return fn(ctx, filter)
+		})
+	}
+}
+
+// Keep the bypass decision separate so tests can prove that a loopback request
+// does not even consume a token from the wrapped limiter.
+func applyLoopbackExemption(ip string, reject func() (bool, string)) (bool, string) {
+	if isLoopback(ip) {
+		return false, ""
+	}
+	return reject()
 }
 
 func isLoopback(ipStr string) bool {

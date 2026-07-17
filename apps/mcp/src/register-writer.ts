@@ -8,7 +8,7 @@
  * "auth-required" (peers are read-only by design — see relay/access-policy.go).
  *
  * Consent model: zine-mcp is a process the user explicitly installed and
- * pointed at --folder/--relay. Registering its *own* key (never anyone else's)
+ * configured in an MCP client. Registering its *own* key (never anyone else's)
  * to the local relay is the same posture as the desktop app seeding its owner
  * key. The owner can remove the writer via the desktop app at any time.
  *

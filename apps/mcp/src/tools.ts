@@ -12,7 +12,7 @@
  *
  * The `agentVoice()` resolver returns the headless press's signing key. On
  * first call it seeds via `keys-store.ts`'s `loadOrCreateVoice`-equivalent
- * path (the localStorage shim persists it to ~/.zine/mcp.json). The agent is
+ * path (the localStorage shim persists it in the selected profile). The agent is
  * just another author — its runs render in the desktop editor under a
  * distinct, generative color, and its contributions verify through the
  * protocol's attribution machinery (§3.6/§R5) like any cross-author signer.
@@ -27,8 +27,11 @@ import {
   fetchChain,
   fetchEventById,
   fetchManifest,
+  isTraceNodeSent,
   publishHardenedSpan,
+  resolveTraceIdentity,
   sendStep,
+  sha256HexLocal,
   upsertManifestEntry,
 } from "../../client/src/provenance.js";
 import { createLocalWorkspace } from "../../client/src/workspace-local.js";
@@ -37,9 +40,14 @@ import type { Workspace } from "../../client/src/workspace-core.js";
 import { getOrCreateMintFolder } from "../../client/src/root.js";
 import { MINT, mintedPath } from "../../client/src/generated-paths.js";
 import { saveLocalFile } from "../../client/src/local-store.js";
+import { pendingLocalEventCount } from "../../client/src/event-outbox.js";
+import {
+  encodeTraceLocator,
+  type TraceLocator,
+} from "../../client/src/trace-locator.js";
 
 /** The headless press's signing key. Seeded on first call, persisted via the
- *  localStorage shim into ~/.zine/mcp.json. Distinct from the desktop app's
+ *  localStorage shim into the selected profile. Distinct from the desktop app's
  *  manual key by design — the agent is its own attributable author. */
 export function agentVoice() {
   return loadOrCreateVoice();
@@ -47,7 +55,15 @@ export function agentVoice() {
 
 /** Build the local-first workspace the headless press binds to. */
 export function createMcpWorkspace(): Workspace {
-  return createLocalWorkspace({ requireRelayOnAttach: true });
+  return createLocalWorkspace({ requireRelayOnAttach: false });
+}
+
+export interface McpToolContext {
+  profile: string;
+  configPath: string;
+  homeRelay: string;
+  publishRelays: string[];
+  ownerPubkey: string;
 }
 
 /** Wrap a JSON-serializable payload as an MCP tool result (single text block). */
@@ -62,18 +78,71 @@ function requireFolder(ws: Workspace) {
   const ref = ws.ref;
   if (!ref) {
     throw new Error(
-      "no folder bound — pass --folder <folderId> on startup (the folder's genesis event id).",
+      "no Root bound — restart the headless press with a writable profile",
     );
   }
   return ref;
+}
+
+function parsedPayload(event: Awaited<ReturnType<typeof fetchEventById>>): unknown {
+  if (!event) return null;
+  try {
+    return JSON.parse(event.content) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+async function handoffForEvent(
+  event: NonNullable<Awaited<ReturnType<typeof fetchEventById>>>,
+  rootId: string,
+  relativePath: string,
+  relayHints: readonly string[],
+): Promise<{ locator: TraceLocator; encoded: string }> {
+  const traceId = await resolveTraceIdentity(event.id);
+  if (!traceId) throw new Error(`cannot resolve trace identity for ${event.id}`);
+  const locator: TraceLocator = {
+    format: "zine-trace-locator",
+    version: 1,
+    kind: "file",
+    rootId,
+    traceId,
+    nodeId: event.id,
+    relativePath,
+    ownerPubkey: event.pubkey,
+    relayHints: [...new Set(relayHints)],
+  };
+  return { locator, encoded: encodeTraceLocator(locator) };
 }
 
 /**
  * Register every v1 tool on `server`. The closure captures the bound
  * `workspace`, which `server.ts` attaches before calling this.
  */
-export function registerTools(server: McpServer, workspace: Workspace): void {
+export function registerTools(
+  server: McpServer,
+  workspace: Workspace,
+  context: McpToolContext,
+): void {
   // --- reads -------------------------------------------------------------
+
+  server.tool(
+    "zine_workspace_info",
+    "Return this headless profile's stable Root, agent identity, relay posture, " +
+      "and number of signed events still waiting for the local relay.",
+    { _: z.void() },
+    async () => {
+      const ref = requireFolder(workspace);
+      return jsonResult({
+        profile: context.profile,
+        rootId: ref.id,
+        ownerPubkey: context.ownerPubkey,
+        homeRelay: context.homeRelay,
+        publishRelays: context.publishRelays,
+        pendingLocalEvents: pendingLocalEventCount(),
+      });
+    },
+  );
 
   server.tool(
     "zine_list_files",
@@ -142,6 +211,8 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
             steppedAtMs: meta.steppedAtMs ?? null,
             signer: e.pubkey,
             summary,
+            payload: parsedPayload(e),
+            event: e,
           };
         }),
       });
@@ -159,18 +230,13 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
       if (!event) {
         throw new Error(`no node found with id ${nodeId} on the configured relays`);
       }
-      let parsed: {
+      const payload = parsedPayload(event) as {
         snapshot?: string;
         contentHash?: string;
         authors?: unknown;
         voices?: string[];
         summary?: string;
-      } = {};
-      try {
-        parsed = JSON.parse(event.content) as typeof parsed;
-      } catch {
-        // Non-JSON content (rare) — leave parsed empty, return raw fields.
-      }
+      } | null;
       const meta = eventMeta(event);
       return jsonResult({
         nodeId: event.id,
@@ -179,14 +245,35 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
         action: meta.action ?? null,
         relativePath: meta.relativePath ?? null,
         folderId: meta.folderId ?? null,
-        snapshot: parsed.snapshot ?? null,
-        contentHash: parsed.contentHash ?? null,
+        snapshot: payload?.snapshot ?? null,
+        contentHash: payload?.contentHash ?? null,
         citations: meta.citationTargets,
-        authors: parsed.authors ?? null,
-        voices: parsed.voices ?? null,
-        summary: parsed.summary ?? null,
+        authors: payload?.authors ?? null,
+        voices: payload?.voices ?? null,
+        summary: payload?.summary ?? null,
         steppedAtMs: meta.steppedAtMs ?? null,
+        payload,
+        event,
       });
+    },
+  );
+
+  server.tool(
+    "zine_get_handoff",
+    "Return a portable single-file locator that the desktop press can open. " +
+      "The locator carries ids and relay hints only; the signed trace remains authoritative.",
+    { relativePath: z.string() },
+    async ({ relativePath }) => {
+      const ref = requireFolder(workspace);
+      const chain = await fetchChain(ref.id, relativePath);
+      const event = chain[chain.length - 1];
+      if (!event) throw new Error(`${relativePath} has no Step to hand off`);
+      const sent = await isTraceNodeSent(event.id);
+      const relayHints = sent && context.publishRelays.length > 0
+        ? context.publishRelays
+        : [context.homeRelay];
+      const handoff = await handoffForEvent(event, ref.id, relativePath, relayHints);
+      return jsonResult({ sent, ...handoff });
     },
   );
 
@@ -231,14 +318,19 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
         true, // localOnly — the sovereignty filter
         true, // an explicit Step always mints one checkpoint
       );
-      return jsonResult({ nodeId, folderId: ref.id, sent: false });
+      return jsonResult({
+        nodeId,
+        folderId: ref.id,
+        sent: false,
+        pendingLocalEvents: pendingLocalEventCount(),
+      });
     },
   );
 
   server.tool(
     "zine_send",
     "Send (spec §8): Step the supplied state only when it differs from the " +
-      "latest Step, then publish the current node to every write-enabled relay. This is " +
+      "latest Step, then publish the current node to every configured publication relay. This is " +
       "the discussion gesture; unlike zine_step it deliberately leaves the machine.",
     {
       relativePath: z.string(),
@@ -263,9 +355,21 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
         false, // Unchanged Send reuses the latest Step.
       );
       const event = await fetchEventById(nodeId);
-      if (!event) throw new Error("latest Step is unavailable on the home relay");
+      if (!event) throw new Error("latest Step is unavailable from local trace storage");
       await sendStep(event, signer);
-      return jsonResult({ nodeId, folderId: ref.id, sent: true });
+      const handoff = await handoffForEvent(
+        event,
+        ref.id,
+        relativePath,
+        context.publishRelays,
+      );
+      return jsonResult({
+        nodeId,
+        folderId: ref.id,
+        sent: true,
+        pendingLocalEvents: pendingLocalEventCount(),
+        ...handoff,
+      });
     },
   );
 
@@ -309,10 +413,37 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
       originNodeId: z
         .string()
         .describe("the origin document's current nucleus (node-version the span was pulled from)"),
+      sourceStart: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe("UTF-16 start offset when the phrase occurs more than once in the source snapshot"),
     },
-    async ({ originPath, phrase, originNodeId }) => {
+    async ({ originPath, phrase, originNodeId, sourceStart }) => {
       const ref = requireFolder(workspace);
       const voice = agentVoice();
+      const sourceEvent = await fetchEventById(originNodeId);
+      if (!sourceEvent) throw new Error("the source node is unavailable");
+      let sourceSnapshot: string;
+      try {
+        const parsed = JSON.parse(sourceEvent.content) as { snapshot?: unknown };
+        if (typeof parsed.snapshot !== "string") throw new Error("missing snapshot");
+        sourceSnapshot = parsed.snapshot;
+      } catch {
+        throw new Error("the source node does not carry a readable text snapshot");
+      }
+      const resolvedStart = sourceStart ?? sourceSnapshot.indexOf(phrase);
+      if (resolvedStart < 0 || sourceSnapshot.slice(resolvedStart, resolvedStart + phrase.length) !== phrase) {
+        throw new Error("the phrase does not match the requested source range");
+      }
+      if (
+        sourceStart === undefined &&
+        sourceSnapshot.indexOf(phrase, resolvedStart + 1) !== -1
+      ) {
+        throw new Error("the phrase occurs more than once; provide sourceStart to identify the exact span");
+      }
+      const sourceContentHash = await sha256HexLocal(sourceSnapshot);
       const mintFolderId = await getOrCreateMintFolder(ref.id, voice.secretKey);
       const manifest = await fetchManifest(mintFolderId);
       const occupied = new Set(manifest.map((entry) => `${MINT}/${entry.relativePath}`));
@@ -323,6 +454,8 @@ export function registerTools(server: McpServer, workspace: Workspace): void {
         relativePath: memberName,
         phrase,
         originNodeId,
+        sourceContentHash,
+        sourceRange: { start: resolvedStart, end: resolvedStart + phrase.length },
         signer: voice.secretKey,
         localOnly: true,
       });

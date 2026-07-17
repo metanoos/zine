@@ -107,7 +107,12 @@ test("Step target: selecting a pending bracket mints its visible phrase", () => 
   const doc = "before [[ selected ]] after";
   assert.deepEqual(findMintSelectionTarget(doc, 7, 21), {
     phrase: "selected",
-    bracket: { matchStart: 7, matchEnd: 21 },
+    bracket: {
+      matchStart: 7,
+      matchEnd: 21,
+      phraseStart: 10,
+      phraseEnd: 18,
+    },
   });
 });
 
