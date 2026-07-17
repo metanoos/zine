@@ -151,6 +151,15 @@ test("playback uses recorded time and announces accelerated inactivity", () => {
   assert.match(source, /const latestActionOutput = replaySkipNotice \?\?/);
 });
 
+test("Replay keeps the shared reader verdict visible beside every action", () => {
+  assert.match(source, /conformanceVerdicts\.push\(await verifyFileTraceChain\(chain\)\)/);
+  assert.match(source, /traceConformanceLabel\(conformance\.status\)/);
+  assert.match(source, /className=\{`trace-conformance-badge is-\$\{conformance\.status\}`\}/);
+  assert.match(styles, /\.trace-conformance-badge\.is-full/);
+  assert.match(styles, /\.trace-conformance-badge\.is-snapshot-only/);
+  assert.match(styles, /\.trace-conformance-badge\.is-invalid/);
+});
+
 test("the slider thumb advances continuously between rendered replay frames", () => {
   const transport = source.slice(
     source.indexOf("function ReplayTransport("),

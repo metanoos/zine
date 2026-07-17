@@ -58,7 +58,11 @@ import type {
   Run,
   Workspace,
 } from "./workspace-core.js";
-import { ensureMdExt, flattenRuns } from "./workspace-core.js";
+import {
+  ensureMdExt,
+  flattenRuns,
+  synthesizeKEditTransition,
+} from "./workspace-core.js";
 import {
   deleteLocalFile,
   loadLocalFolder,
@@ -717,8 +721,17 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       if (!folderSigner) {
         throw new Error(`cannot write through foreign folder ${source.folderId}; fork the folder first`);
       }
+      const priorEvent = await fetchEventById(entry.latestNodeId);
+      if (!priorEvent) {
+        throw new Error(`cannot fetch the current source Step ${entry.latestNodeId}`);
+      }
+      const priorParsed = JSON.parse(priorEvent.content) as { snapshot?: unknown };
+      if (typeof priorParsed.snapshot !== "string") {
+        throw new Error(`source Step ${entry.latestNodeId} has no text snapshot`);
+      }
       const event = await publishEdit({
         prevEventId: entry.latestNodeId,
+        previousSnapshot: priorParsed.snapshot,
         ...(traceId ? { traceId } : {}),
         relativePath: source.relativePath,
         folderId: source.folderId,
@@ -727,6 +740,11 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         contentHash: await sha256Hex(""),
         action: "delete",
         signer,
+        kedits: synthesizeKEditTransition(
+          priorParsed.snapshot,
+          "",
+          getPublicKey(signer),
+        ),
       });
       const sourceHead = await removeManifestEntry(
         source.folderId,
@@ -804,6 +822,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         }
         return publishEdit({
           prevEventId: null,
+          previousSnapshot: "",
           relativePath,
           folderId,
           deltas: [],
@@ -812,6 +831,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           action: "import",
           ...(file.pendingLocalOnly ? { localOnly: true } : {}),
           signer: genesisSigner,
+          kedits: [],
         });
       },
       (genesis) => {
@@ -972,6 +992,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     const deltas = diffToDeltas(prevContent, content);
     const event = await publishEdit({
       prevEventId: prevId,
+      previousSnapshot: prevContent,
       ...(traceId ? { traceId } : {}),
       relativePath,
       folderId,
@@ -999,7 +1020,11 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       inlineCitations: findAddedInlineCitations(prevContent, content),
       ...(file.pendingReplyingTo ? { replyingTo: file.pendingReplyingTo } : {}),
       ...(citationIds.length > 0 ? { citationIds } : {}),
-      ...(file.pendingKedits && file.pendingKedits.length > 0 ? { kedits: file.pendingKedits } : {}),
+      kedits: file.pendingKedits ?? synthesizeKEditTransition(
+        prevContent,
+        content,
+        signerPubkey,
+      ),
       ...(file.pendingLocalOnly ? { localOnly: true } : {}),
       signer,
     });
@@ -1109,8 +1134,15 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       throw new Error(`cannot delete through foreign folder ${coordinate.folderId}`);
     }
     const traceId = await resolveTraceIdentity(entry.latestNodeId);
+    const priorEvent = await fetchEventById(entry.latestNodeId);
+    if (!priorEvent) throw new Error(`cannot fetch the current Step ${entry.latestNodeId}`);
+    const priorParsed = JSON.parse(priorEvent.content) as { snapshot?: unknown };
+    if (typeof priorParsed.snapshot !== "string") {
+      throw new Error(`current Step ${entry.latestNodeId} has no text snapshot`);
+    }
     await publishEdit({
       prevEventId: entry.latestNodeId,
+      previousSnapshot: priorParsed.snapshot,
       ...(traceId ? { traceId } : {}),
       relativePath: coordinate.relativePath,
       folderId: coordinate.folderId,
@@ -1119,6 +1151,11 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       contentHash: await sha256Hex(""),
       action: "delete",
       signer,
+      kedits: synthesizeKEditTransition(
+        priorParsed.snapshot,
+        "",
+        getPublicKey(signer),
+      ),
     });
     const folderHead = await removeManifestEntry(
       coordinate.folderId,

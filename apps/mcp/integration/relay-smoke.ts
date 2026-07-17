@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { KEdit } from "../../client/src/provenance.js";
 
 import { installNodeStorage } from "../src/storage-node.js";
 import { setHomeRelay } from "../src/relay-config-override.js";
@@ -54,6 +55,10 @@ async function main(): Promise<void> {
   const { resolveFolderBinding, resolveWorkspaceBinding } = await import("../src/folder-binding.js");
   const { finalizeEvent, getPublicKey, verifyEvent } = await import("nostr-tools/pure");
   const { Relay } = await import("nostr-tools/relay");
+  const {
+    synthesizeKEditTransition,
+    validateKEditTransition,
+  } = await import("../../client/src/workspace-core.js");
 
   const voice = loadOrCreateVoice();
   await initializeMcpKeySession(voice);
@@ -166,6 +171,7 @@ async function main(): Promise<void> {
   const firstHash = await sha256HexLocal(firstText);
   const first = await publishEdit({
     prevEventId: null,
+    previousSnapshot: "",
     relativePath: path,
     folderId,
     deltas: diffToDeltas("", firstText),
@@ -174,8 +180,16 @@ async function main(): Promise<void> {
     action: "import",
     signer: voice.secretKey,
     localOnly: true,
+    kedits: synthesizeKEditTransition("", firstText, voice.publicKey),
   });
   assert.equal(verifyEvent(first), true, "first Step signature is invalid");
+  const firstPayload = JSON.parse(first.content) as { kedits?: unknown };
+  assert.ok(Array.isArray(firstPayload.kedits), "first Step is missing required KEdits");
+  assert.equal(
+    validateKEditTransition("", firstText, firstPayload.kedits as KEdit[]).valid,
+    true,
+    "first Step KEdits do not reproduce its snapshot",
+  );
   assert.equal(first.pubkey, expectedAgent, "Step must be owned by the agent voice");
   await upsertManifestEntry(folderId, {
     kind: "file",
@@ -210,6 +224,7 @@ async function main(): Promise<void> {
   const secondHash = await sha256HexLocal(secondText);
   const second = await publishEdit({
     prevEventId: first.id,
+    previousSnapshot: firstText,
     traceId: first.id,
     relativePath: path,
     folderId,
@@ -219,8 +234,16 @@ async function main(): Promise<void> {
     action: "edit",
     signer: voice.secretKey,
     localOnly: true,
+    kedits: synthesizeKEditTransition(firstText, secondText, voice.publicKey),
   });
   assert.equal(verifyEvent(second), true, "second Step signature is invalid");
+  const secondPayload = JSON.parse(second.content) as { kedits?: unknown };
+  assert.ok(Array.isArray(secondPayload.kedits), "second Step is missing required KEdits");
+  assert.equal(
+    validateKEditTransition(firstText, secondText, secondPayload.kedits as KEdit[]).valid,
+    true,
+    "second Step KEdits do not reproduce its snapshot",
+  );
   assert.ok(second.tags.some((tag) => tag[0] === "e" && tag[1] === first.id && tag[3] === "prev"));
   await sendStep(second, voice.secretKey);
   await sendStep(second, voice.secretKey); // idempotent resend
@@ -274,6 +297,7 @@ async function main(): Promise<void> {
   const thirdHash = await sha256HexLocal(thirdText);
   const third = await publishEdit({
     prevEventId: second.id,
+    previousSnapshot: secondText,
     traceId: first.id,
     relativePath: path,
     folderId,
@@ -284,8 +308,16 @@ async function main(): Promise<void> {
     citations: [coin.id],
     signer: voice.secretKey,
     localOnly: true,
+    kedits: synthesizeKEditTransition(secondText, thirdText, voice.publicKey),
   });
   assert.ok(eventMeta(third).citationTargets.includes(coin.id), "Cite target is missing");
+  const thirdPayload = JSON.parse(third.content) as { kedits?: unknown };
+  assert.ok(Array.isArray(thirdPayload.kedits), "Cite Step is missing required KEdits");
+  assert.equal(
+    validateKEditTransition(secondText, thirdText, thirdPayload.kedits as KEdit[]).valid,
+    true,
+    "Cite Step KEdits do not reproduce its snapshot",
+  );
   assert.equal(verifyEvent(third), true, "Cite Step signature is invalid");
   await sendStep(third, voice.secretKey);
   await upsertManifestEntry(folderId, {

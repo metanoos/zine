@@ -88,7 +88,7 @@ export const OP_LENSES: Record<OpKind, readonly OpLens[]> = {
         "Offer a psychoanalytic reading of the text, never a diagnosis of its author. Ground each interpretation in exact textual evidence, distinguish observation from conjecture, name at least one plausible alternative reading, and avoid claims about the author's actual motives or mental state.",
     },
   ],
-  receive: [
+  analyze: [
     DEFAULT_LENS,
     {
       id: "forensic-process-analyst",
@@ -109,7 +109,7 @@ export const DEFAULT_OP_LENSES: OpLensSelections = {
   settle: "default",
   stir: "default",
   reply: "default",
-  receive: "default",
+  analyze: "default",
 };
 
 export function lensForOp(op: OpKind, id: OpLensId | undefined): OpLens {

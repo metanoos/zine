@@ -43,9 +43,9 @@ trace-provenance layer:
 | `zine_workspace_info` | — | Show the profile's stable Root, agent pubkey, relays, and queued-event count |
 | `zine_list_files` | — | List the folder manifest with each file's trace head |
 | `zine_read_file` | — | Read a file's current text + its head node (action, when stepped) |
-| `zine_get_history` | — | Walk a file's trace chain and return each raw signed event |
-| `zine_get_node` | §R1 | Fetch one canonical raw signed event plus its parsed payload by id |
-| `zine_get_handoff` | — | Return a portable locator for the desktop review surface |
+| `zine_get_history` | — | Walk a file's trace chain, return each raw signed event, and classify it `full`, `snapshot-only`, or `invalid` |
+| `zine_get_node` | §R1 | Fetch one canonical raw signed event plus its parsed payload and reader verdict by id |
+| `zine_get_handoff` | — | Return a portable locator and reader verdict for the desktop review surface |
 | `zine_step` | **Step** §8 | Step a node locally (hasn't left the machine) |
 | `zine_send` | **Send** §8 | Step pending changes, otherwise reuse the latest Step, then publish it |
 | `zine_attest` | **Attest** §5A/§8 | Append an endorsement of one sent node |
@@ -54,6 +54,10 @@ trace-provenance layer:
 
 Step records the supplied state locally. Send steps the supplied present state
 only when it differs from the latest Step, then publishes the current node.
+Because a headless tool call is one discrete authoring action, each changed
+file Step records it as one atomic KEdit from the previous snapshot to the
+supplied text. Every file node therefore carries a replay-valid KEdit array;
+an unchanged metadata-only checkpoint carries `[]`.
 The sovereignty filter: not every Step is Sent, and callers do not need to Step
 immediately before Send. A Step first persists as an exact signed event in the
 profile's local state. When the loopback home relay is reachable the press
@@ -194,7 +198,9 @@ node id. `zine_get_handoff` returns the same shape for the current file head.
 Paste that locator into **Desktop action palette → Open Trace**. The desktop
 verifies the exact signed file nucleus and renders any reachable history. Send
 publishes only the chosen file node, so earlier private Steps may correctly be
-absent; the nucleus remains self-sufficient and verifiable.
+absent; the nucleus remains self-sufficient and verifiable as `SNAPSHOT ONLY`
+until its process ancestry is available. Complete valid KEdit process is
+reported as `FULL TRACE`; broken signature, hash, or lineage is `INVALID`.
 
 ## Development
 

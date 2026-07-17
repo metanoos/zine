@@ -45,8 +45,8 @@ const CARD_BG_ALPHA = 0.22;
 
 /** The four roles a key can hold, in display order. Role assignment lives at
  *  the point of use (the ActionPalette or Networking); this view only reports it. */
-type RoleName = "NODE" | "AUTHOR" | "MODEL" | "DOOR";
-const ALL_ROLES: RoleName[] = ["NODE", "AUTHOR", "MODEL", "DOOR"];
+type RoleName = "NODE" | "AUTHOR" | "AI" | "DOOR";
+const ALL_ROLES: RoleName[] = ["NODE", "AUTHOR", "AI", "DOOR"];
 
 export function KeysView({
   onKeysChange,
@@ -205,7 +205,7 @@ export function KeysView({
           const activeRoles = ALL_ROLES.filter((role) =>
             role === "NODE" ? roles.node
             : role === "AUTHOR" ? roles.author
-            : role === "MODEL" ? roles.model
+            : role === "AI" ? roles.model
             : roles.door,
           );
           return (

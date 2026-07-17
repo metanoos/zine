@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { runFactoryReset } from "./factory-reset.js";
+
+const desktopCapability = JSON.parse(
+  readFileSync(new URL("../src-tauri/capabilities/default.json", import.meta.url), "utf8"),
+) as { permissions?: unknown };
+
+test("desktop factory reset can unload the Stronghold vault", () => {
+  assert.ok(Array.isArray(desktopCapability.permissions));
+  assert.ok(desktopCapability.permissions.includes("stronghold:allow-destroy"));
+});
 
 test("desktop factory reset unloads and deletes the vault before reloading", async () => {
   const calls: string[] = [];

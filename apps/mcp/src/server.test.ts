@@ -168,7 +168,26 @@ test("cold headless profile mints one Root and Steps exact events while the rela
     const event = node.event as Record<string, unknown>;
     assert.equal(event.id, nodeId);
     assert.equal(event.pubkey, ownerPubkey);
-    assert.equal((node.payload as { snapshot?: string }).snapshot, "offline signed Step\n");
+    const payload = node.payload as {
+      snapshot?: string;
+      kedits?: { op?: string; from?: number; to?: number; text?: string; voice?: string; tx?: number }[];
+    };
+    assert.equal(payload.snapshot, "offline signed Step\n");
+    assert.deepEqual(payload.kedits?.map(({ op, from, to, text, voice, tx }) => ({
+      op, from, to, text, voice, tx,
+    })), [{
+      op: "ins",
+      from: 0,
+      to: 0,
+      text: "offline signed Step\n",
+      voice: ownerPubkey,
+      tx: 0,
+    }]);
+    assert.equal(
+      (node.conformance as { status?: string } | undefined)?.status,
+      "full",
+    );
+    assert.equal(node.historyComplete, true);
     assert.equal(typeof event.sig, "string");
   } finally {
     await first.client.close();

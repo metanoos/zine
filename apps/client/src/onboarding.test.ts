@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 
 import {
   ONBOARDING_STORAGE_KEY,
+  completedLessonsForStage,
   isOnboardingActive,
   loadOnboardingStage,
   loadOnboardingResume,
@@ -69,8 +70,45 @@ test("malformed or future records follow the safe Root-aware default", () => {
     "dismissed",
   );
   assert.equal(
-    loadOnboardingStage(true, storage(JSON.stringify({ version: 3, stage: "welcome" }))),
+    loadOnboardingStage(true, storage(JSON.stringify({ version: 4, stage: "welcome" }))),
     "dismissed",
+  );
+});
+
+test("lesson completion persists independently from the open guide stage", () => {
+  const store = storage();
+  saveOnboardingStage("complete", store);
+  const afterTrace = loadOnboardingResume(true, store);
+  assert.deepEqual(afterTrace.completedLessons, ["trace"]);
+  assert.equal(afterTrace.stage, "dismissed");
+
+  saveOnboardingStage("dismissed", store, undefined, afterTrace.completedLessons);
+  assert.deepEqual(loadOnboardingResume(true, store).completedLessons, ["trace"]);
+
+  assert.deepEqual(
+    completedLessonsForStage(["trace"], "model-complete"),
+    ["trace", "ai-context"],
+  );
+  assert.deepEqual(
+    completedLessonsForStage(["trace", "ai-context"], "scan-complete"),
+    ["trace", "ai-context", "scan"],
+  );
+});
+
+test("legacy completion migrates without restoring an interrupted tour", () => {
+  assert.deepEqual(
+    loadOnboardingResume(
+      true,
+      storage(JSON.stringify({ version: 2, stage: "complete" })),
+    ),
+    { version: 3, stage: "dismissed", completedLessons: ["trace"] },
+  );
+  assert.deepEqual(
+    loadOnboardingResume(
+      true,
+      storage(JSON.stringify({ version: 2, stage: "model-complete" })),
+    ),
+    { version: 3, stage: "model-complete", completedLessons: ["trace", "ai-context"] },
   );
 });
 
@@ -80,7 +118,7 @@ test("only dismissal ends the onboarding lifecycle", () => {
   assert.equal(isOnboardingActive("dismissed"), false);
 });
 
-test("the optional MODEL chapter advances only through guarded production events", () => {
+test("the optional AI chapter advances only through guarded production events", () => {
   const events = [
     "start-model",
     "provider-probed",
@@ -112,7 +150,14 @@ test("the optional MODEL chapter advances only through guarded production events
   assert.equal(reduceOnboardingStage("context-focus", "request-approved"), "context-focus");
 });
 
-test("MODEL resume persists only safe coordinates and returns to a neutral probe", () => {
+test("the lesson index starts AI and Scan directly without faking completion", () => {
+  assert.equal(reduceOnboardingStage("welcome", "start-model"), "model-setup");
+  assert.equal(reduceOnboardingStage("welcome", "start-scan"), "scan-file");
+  assert.equal(reduceOnboardingStage("scan-file", "start-model"), "scan-file");
+  assert.equal(reduceOnboardingStage("scan-file", "file-scanned"), "scan-complete");
+});
+
+test("AI resume persists only safe coordinates and returns to a neutral probe", () => {
   const store = storage();
   const lesson = {
     folderPath: "MODEL-context-lesson",
@@ -124,15 +169,16 @@ test("MODEL resume persists only safe coordinates and returns to a neutral probe
   };
   saveOnboardingStage("context-replay", store, lesson);
   assert.deepEqual(loadOnboardingResume(true, store), {
-    version: 2,
+    version: 3,
     stage: "model-setup",
+    completedLessons: [],
     lesson,
   });
   const raw = store.getItem(ONBOARDING_STORAGE_KEY) ?? "";
   assert.doesNotMatch(raw, /api.?key|prompt|response|message/i);
 });
 
-test("MODEL reconciliation walks back to the first missing real artifact", () => {
+test("AI reconciliation walks back to the first missing real artifact", () => {
   const all = {
     providerProbed: true,
     lessonValid: true,
@@ -152,7 +198,21 @@ test("MODEL reconciliation walks back to the first missing real artifact", () =>
   assert.equal(reconcileModelOnboardingStage("context-focus", { ...all, providerProbed: false }), "model-setup");
 });
 
-test("the help control sits beside factory reset and restarts onboarding", () => {
+test("AI setup creates the lesson folder trace before writing nested files", () => {
+  const start = appSource.indexOf("async function ensureModelLesson()");
+  const end = appSource.indexOf("async function completeModelSetup()", start);
+  const setup = appSource.slice(start, end);
+  const createFolderAt = setup.indexOf(
+    "await backendRef.current.createFolder(lesson.folderPath)",
+  );
+  const writeFileAt = setup.indexOf("await backendRef.current.writeFile(");
+
+  assert.notEqual(createFolderAt, -1);
+  assert.notEqual(writeFileAt, -1);
+  assert.ok(createFolderAt < writeFileAt);
+});
+
+test("the help control reopens the persistent lesson index", () => {
   const sidebarFooter = appSource.slice(
     appSource.indexOf('<div className="sidebar-directory-footer">'),
     appSource.indexOf("{ctxMenu &&"),
@@ -165,6 +225,27 @@ test("the help control sits beside factory reset and restarts onboarding", () =>
   assert.doesNotMatch(navRail, /CircleHelp|Open onboarding guide/);
   assert.match(appSource, /onOpenOnboarding=\{restartOnboarding\}/);
   assert.match(appSource, /function restartOnboarding\(\)[\s\S]*commitOnboardingStage\("welcome"\);[\s\S]*selectView\("editor"\);/);
+  assert.match(appSource, /completedLessons=\{completedOnboardingLessons\}/);
+  assert.match(onboardingSource, /Make my own trace/);
+  assert.match(onboardingSource, /Add AI, learn context/);
+  assert.match(onboardingSource, /Scan a file/);
+  assert.match(onboardingSource, /Complete · Revisit/);
+});
+
+test("the guide explains why process is richer AI writing context", () => {
+  assert.match(onboardingSource, /how you rewrote it/);
+  assert.match(onboardingSource, /richer[\s\S]*evidence of your style and values than final prose alone/);
+  assert.match(onboardingSource, /what you[\s\S]*tried, removed, and rewrote/);
+  assert.match(onboardingSource, /help an AI infer[\s\S]*style and values/);
+});
+
+test("Scan completion is recorded only after a file is imported", () => {
+  const scan = appSource.slice(
+    appSource.indexOf('async function onScan(kind: "file" | "folder")'),
+    appSource.indexOf("/** Reify:", appSource.indexOf('async function onScan(kind: "file" | "folder")')),
+  );
+  assert.match(scan, /if \(!picked\) return; \/\/ user cancelled/);
+  assert.match(scan, /setOpStatus\(idx, "done", `\$\{created\.length\} scanned`, "scan"\);[\s\S]*advanceOnboarding\("file-scanned"\)/);
 });
 
 test("the hello-world demo is loaded by onboarding, not Root boot", () => {

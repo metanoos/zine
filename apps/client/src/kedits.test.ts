@@ -1,15 +1,17 @@
 /**
  * Keystroke log (`kedits`) wire-shape and op-classification tests.
  *
- * `kedits` is advisory metadata layered on the authoritative `snapshot` (like
- * `deltas`): one `KEdit` per discrete editor change since the previous step.
+ * `kedits` is required process evidence on every file Step: one `KEdit` per
+ * discrete editor change since the previous Step, or an explicit empty array
+ * when the signed text is unchanged.
  * These tests pin four things:
  *
  *  1. Wire shape — a node carrying `kedits` round-trips through JSON, and the
  *     `KEdit` entries read back equal to what was stepped. This is the contract
  *     any reader (the press, a peer's relay, a future replay UI) depends on.
- *  2. Snapshot authority — `reconstructFromChain` resolves content from
- *     `snapshot` when `kedits` is present (§R1).
+ *  2. Snapshot materialization — `reconstructFromChain` resolves content from
+ *     the self-contained `snapshot`; Full Trace validation separately replays
+ *     the required KEdits against it.
  *  3. History intent — real CodeMirror undo/redo transactions retain their
  *     semantic action instead of becoming indistinguishable inverse edits.
  *  4. Transaction grouping — every range in a multi-range edit shares `tx`.
@@ -31,7 +33,7 @@ import type { KEdit } from "./provenance.js";
 
 /** Build a file-node event mirroring the wire shape publishEdit emits:
  *  kind 4290, `z:file`, JSON content with `steppedAt` + `deltas` + `snapshot`
- *  + optionally `kedits`. */
+ *  + required `kedits`. */
 function fileNode(
   id: string,
   prev: string | null,
@@ -39,7 +41,7 @@ function fileNode(
     steppedAt: number;
     deltas: unknown[];
     snapshot?: string;
-    kedits?: KEdit[];
+    kedits: KEdit[];
   },
 ): Event {
   return {
@@ -210,22 +212,22 @@ test("wire shape: kedits survives JSON round-trip intact", () => {
   }
 });
 
-test("wire shape: a node without kedits omits the field (not null)", () => {
-  // A forced no-op Step steps with an empty kedit buffer → kedits absent.
+test("wire shape: a no-op file Step carries an explicit empty KEdit log", () => {
   const node = fileNode("n1", null, {
     steppedAt: 1000,
     deltas: [],
-    snapshot: "unchanged",
+    snapshot: "",
+    kedits: [],
   });
   const parsed = JSON.parse(node.content) as { kedits?: KEdit[] };
-  assert.equal(parsed.kedits, undefined, "kedits absent (not null) when buffer empty");
+  assert.deepEqual(parsed.kedits, []);
 });
 
 // --- snapshots stay authoritative when kedits are present ------------------
 
 test("reconstructFromChain ignores kedits and uses snapshot", () => {
   // A node carries kedits AND a snapshot. Reconstruction must yield the
-  // snapshot — kedits is advisory, never spliced into content.
+  // snapshot — materialization never mutates the signed event during replay.
   const node = fileNode("n1", null, {
     steppedAt: 1000,
     deltas: [],
@@ -308,11 +310,12 @@ test("keditsFromEvent: reads the kedits array from a node's content JSON", () =>
   assert.deepEqual(out[1], kedits[1]);
 });
 
-test("keditsFromEvent: returns [] when a no-op node has no kedits field", () => {
+test("keditsFromEvent: returns an explicit empty log for a no-op node", () => {
   const node = fileNode("n1", null, {
     steppedAt: 1000,
     deltas: [],
-    snapshot: "old content",
+    snapshot: "",
+    kedits: [],
   });
   assert.deepEqual(keditsFromEvent(node), []);
 });
@@ -409,7 +412,7 @@ test("replay: state carries across steps (step1 then step2)", () => {
 });
 
 test("replay: empty kedits produce no frames, state unchanged", () => {
-  // A forced no-op Step: no kedits → no frames.
+  // A forced no-op Step: explicit empty log → no frames.
   assert.deepEqual(applyKedits("unchanged", []), []);
 });
 

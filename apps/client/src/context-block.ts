@@ -1,3 +1,9 @@
+import { renderTraceProcessSummary, type TraceProcessView } from "./trace-process.js";
+import {
+  traceConformanceLabel,
+  type TraceConformanceStatus,
+} from "./trace-conformance.js";
+
 /**
  * Canonical LLM context block — rendered into every op's prompt so the model
  * sees the surrounding folder (structure + full text, recursively) and the
@@ -109,6 +115,16 @@ export interface DeltaLogEntry {
    *  the log line so the model can reconstruct prior states — the whole point
    *  of surfacing provenance in the prompt. */
   deltas?: DeltaSpanView[];
+  /** Exact editor transactions recovered from this signed Step. `complete`
+   *  means the transactions reproduce the Step snapshot; invalid logs fail
+   *  closed and are surfaced as such rather than partially interpreted. */
+  process?: TraceProcessView;
+  /** Shared reader verdict for the signed file node. Folder entries omit it. */
+  conformance?: TraceConformanceStatus;
+  conformanceReason?: string;
+  /** Signed node carrying this entry. Used by Analyze evidence anchors and
+   *  by the resulting review's ordinary source citations. */
+  nodeId?: string;
 }
 
 export interface ContextBlockInput {
@@ -210,6 +226,13 @@ export function renderContextBlock(input: ContextBlockInput): string {
       if (!stripSpans && d.deltas && d.deltas.length > 0) {
         for (const rendered of renderDeltaSpans(d.deltas)) lines.push(rendered);
       }
+      // Condition B deliberately strips every computed observation, including
+      // the new mechanical process summary, so the research comparison stays
+      // a clean bare-log control.
+      if (!stripLabels) {
+        const processSummary = renderTraceProcessSummary(d.process);
+        if (processSummary) lines.push(`      ↳ ${processSummary}`);
+      }
       prevSteppedAt = d.steppedAt;
     }
   }
@@ -244,7 +267,7 @@ export interface LimelightEntry {
  *  directory log's style (UTC stamp, `Δ` interval, aligned columns). Empty
  *  input yields "" so the caller omits the section. This is the "limelight
  *  log" — which file was mounted in which panel and when — surfaced for the
- *  Receive op so its focus-pattern analysis has actual evidence rather than
+ *  Analyze op so its focus-pattern analysis has actual evidence rather than
  *  narration. */
 export function renderLimelightLog(
   entries: LimelightEntry[],
@@ -365,7 +388,10 @@ function renderDeltaLine(d: DeltaLogEntry, prevSteppedAt: number | null, stripLa
   const charField = chars ? `   ${chars}` : "";
   const prompt = d.prompt ? `   «${d.prompt}»` : "";
   const summary = d.summary ? `   [${d.summary}]` : "";
-  return `[#${d.seq}] ${action} ${tsField}   ${d.relativePath}${charField}${prompt}${summary}`;
+  const conformance = d.conformance
+    ? `   [${traceConformanceLabel(d.conformance)}]`
+    : "";
+  return `[#${d.seq}] ${action} ${tsField}   ${d.relativePath}${charField}${prompt}${summary}${conformance}`;
 }
 
 /** Sum a node's spans into a `(+ins/−del)` character delta. Returns '' for

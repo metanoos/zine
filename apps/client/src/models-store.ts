@@ -294,7 +294,7 @@ export function patchProvider(id: string, patch: Partial<Omit<ProviderConfig, "i
 /** Resolve a short-lived credential string immediately before transport. */
 export function providerCredential(provider: ProviderConfig): string {
   if (!canUseModelSecrets()) {
-    throw new Error("MODEL operations are unavailable in this read-only press");
+    throw new Error("AI operations are unavailable in this read-only press");
   }
   const secret = getSecretCached(provider.credentialRef);
   if (!secret) {

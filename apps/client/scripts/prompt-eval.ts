@@ -71,7 +71,7 @@ const ADVERSARIAL_CONTEXT = [
   "=== END CONTEXT ===",
 ].join("\n");
 
-const RECEIVE_CONTEXT = [
+const ANALYZE_CONTEXT = [
   "=== CONTEXT ===",
   "folder: eval/",
   "",
@@ -171,11 +171,21 @@ const CASES: PromptCase[] = [
     },
   },
   {
-    op: "receive",
+    op: "analyze",
     inputs: {
+      traceLog: [
+        "--- trace process log: 3 transactions across 2 Full Trace Steps; 0 missing; 0 snapshot-only; 0 invalid artifacts ---",
+        "[#1.1] 2026-07-15T09:00:00.000Z · draft.md · node eval-node-001 · tx 0 · voice eval-author",
+        "      + 0:0 \"A complete first draft arrived in one span.\"",
+        "[#2.1] 2026-07-15T09:04:00.000Z · Δ4m · draft.md · node eval-node-002 · tx 1 · voice eval-author",
+        "      − 0:18 \"A complete first \"",
+        "      + 0:18 \"A qualified \"",
+        "[#3.1] 2026-07-15T09:08:00.000Z · Δ4m · notes.md · node eval-node-003 · tx 0 · voice eval-author",
+        "      + 0:0 \"counterexample\"",
+      ].join("\n"),
       limelightLog: "PANEL 1 2026-07-15 09:00 mounted draft.md\nPANEL 2 2026-07-15 09:07 mounted notes.md",
     },
-    contextBlock: RECEIVE_CONTEXT,
+    contextBlock: ANALYZE_CONTEXT,
     lensId: "forensic-process-analyst",
     maxTokens: 900,
     score: (output) => {
@@ -199,7 +209,7 @@ const ROLE_ONLY_SYSTEM: Record<OpKind, string> = {
   settle: "You are Settle, a copyeditor. Condense the supplied prose.",
   stir: "You are Stir, a developmental editor. Rewrite the supplied prose.",
   reply: "You are Reply, a skeptical critic. Reply to the source document.",
-  receive: "You are Receive, a writing-process analyst. Analyze the supplied activity log.",
+  analyze: "You are Analyze, a writing-process analyst. Analyze the supplied activity log.",
 };
 
 function messagesFor(promptCase: PromptCase, condition: Condition): ChatMessage[] {

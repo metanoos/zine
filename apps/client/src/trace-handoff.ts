@@ -3,7 +3,6 @@ import { verifyEvent } from "nostr-tools/pure";
 
 import {
   eventMeta,
-  resolveTraceChainAtHead,
   sampleRelays,
   sha256HexLocal,
 } from "./provenance.js";
@@ -13,6 +12,10 @@ import {
   validateTraceLocator,
   type TraceLocator,
 } from "./trace-locator.js";
+import {
+  inspectFileTraceNucleus,
+  type TraceConformanceVerdict,
+} from "./trace-conformance.js";
 
 export interface OpenedTraceStep {
   event: Event;
@@ -27,6 +30,7 @@ export interface OpenedTrace {
   locator: TraceLocator;
   steps: OpenedTraceStep[];
   historyComplete: boolean;
+  conformance: TraceConformanceVerdict;
 }
 
 export type TraceLocatorEventLoader = (ids: readonly string[]) => Promise<Event[]>;
@@ -121,6 +125,12 @@ function verifyNucleus(event: Event, locator: TraceLocator): void {
   }
 }
 
+function requireReadableVerdict(verdict: TraceConformanceVerdict): void {
+  if (verdict.status !== "invalid") return;
+  const issue = verdict.issues.find((candidate) => candidate.kind === "integrity");
+  throw new Error(`trace verification failed: ${issue?.message ?? "invalid signed trace"}`);
+}
+
 /** Fetch and verify the exact single-file nucleus named by a headless locator.
  * Its complete history is shown when available, but is not required: Send
  * deliberately publishes only the selected node and may keep ancestry private.
@@ -148,18 +158,30 @@ export async function openTraceLocator(
   verifyLocatedEvent(exact, locator);
   verifyNucleus(exact, locator);
 
-  const resolution = await resolveTraceChainAtHead(locator.traceId, locator.nodeId, loader);
-  if (resolution.status !== "resolved") {
-    return { locator, steps: [await parseStep(exact)], historyComplete: false };
-  }
-  for (const event of resolution.chain) {
+  const inspection = await inspectFileTraceNucleus(
+    exact,
+    async (nodeId) => {
+      const events = await loader([nodeId]);
+      return events.find((event) => event.id === nodeId) ?? null;
+    },
+    {
+      expectedOwnerPubkey: locator.ownerPubkey,
+      expectedRootId: locator.rootId,
+      expectedRelativePath: locator.relativePath,
+      expectedNucleusId: locator.nodeId,
+      expectedTraceId: locator.traceId,
+    },
+  );
+  requireReadableVerdict(inspection.verdict);
+  for (const event of inspection.chain) {
     verifyLocatedEvent(event, locator);
   }
-  const head = resolution.chain[resolution.chain.length - 1]!;
+  const head = inspection.chain[inspection.chain.length - 1]!;
   verifyNucleus(head, locator);
   return {
     locator,
-    steps: await Promise.all(resolution.chain.map(parseStep)),
-    historyComplete: true,
+    steps: await Promise.all(inspection.chain.map(parseStep)),
+    historyComplete: inspection.historyComplete,
+    conformance: inspection.verdict,
   };
 }

@@ -16,8 +16,8 @@ const operations = [
   ["extendLLM", "function settleDeDupeLLM"],
   ["settleLLM", "function stirLLM"],
   ["stirLLM", "function replyLLM"],
-  ["replyLLM", "function receiveLLM"],
-  ["receiveLLM", "function awaitViewMount"],
+  ["replyLLM", "function analyzeLLM"],
+  ["analyzeLLM", "function awaitViewMount"],
 ] as const;
 
 test("all five MODEL actions use approved preparation, stale validation, and no direct write", () => {
@@ -38,8 +38,15 @@ test("Inspector renders frozen PreparedOperation messages and owns explicit appr
 });
 
 test("stale session results expose inspect, copy, and retry recovery without mutation", () => {
-  assert.match(app, /MODEL response held/);
+  assert.match(app, /AI response held/);
   assert.match(app, /Copy response/);
   assert.match(app, /Inspect to retry/);
   assert.match(app, /setStaleModelResult\(null\)/);
+});
+
+test("Analyze produces an ordinary review with citations to every analyzed source head", () => {
+  const source = functionBody("analyzeLLM", "function awaitViewMount");
+  assert.match(source, /prepared\.contextSnapshot\.inputs/);
+  assert.match(source, /editCitations\(newPath, sourceHeadIds\)/);
+  assert.match(source, /openInPanel\(newPath, destIdx\)/);
 });

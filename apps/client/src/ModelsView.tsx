@@ -161,7 +161,7 @@ export function ModelsView({
     return (
       <section className="view-placeholder models-view">
         <p className="view-placeholder-blurb">
-          This hosted press is model-free. MODEL providers are available only in an unlocked desktop vault.
+          This hosted press is model-free. AI providers are available only in an unlocked desktop vault.
         </p>
       </section>
     );
@@ -171,8 +171,8 @@ export function ModelsView({
     <section className="view-placeholder models-view">
       {modelLessonActive ? (
         <aside className="models-onboarding" role="status" aria-live="polite">
-          <strong>MODEL CONTEXT · 1 OF 7</strong>
-          <span>Add or choose a model, save its credential, then use Test. The probe is synthetic and never includes workspace text.</span>
+          <strong>AI CONTEXT · 1 OF 7</strong>
+          <span>Add or choose an AI provider, save its credential, then use Test. The probe is synthetic and never includes workspace text; the next steps show how a trace gives the AI richer, inspectable context.</span>
         </aside>
       ) : null}
       <p className="view-placeholder-blurb">

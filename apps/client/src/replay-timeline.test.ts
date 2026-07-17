@@ -167,7 +167,7 @@ test("replay frames expose the exact action's inserted and deleted character del
   const first = event("first", "notes.md", "hello", [insert(0, "hello", 1_000)]);
   const second = event("second", "notes.md", "hallo!", [
     replace(1, 2, "a", 2_000, 0),
-    replace(5, 5, "!", 2_000, 0),
+    { ...insert(5, "!", 2_000), tx: 0 },
   ]);
   const timeline = buildReplayTimeline(
     [step(first, "notes.md", 1_500, "hello"), step(second, "notes.md", 2_500, "hallo!")],
@@ -310,6 +310,26 @@ test("replay discards valid KEdits that do not reproduce the signed snapshot", (
     "authoritative",
   );
   assert.equal(timeline.some((frame) => frame.at === 500), false);
+});
+
+test("replay does not animate a KEdit with a dishonest operation label", () => {
+  const node = event("wrong-op", "draft.md", "A", [{
+    op: "repl",
+    from: 0,
+    to: 0,
+    text: "A",
+    voice: VOICE,
+    t: 500,
+    tx: 0,
+  }]);
+  const timeline = buildReplayTimeline(
+    [step(node, "draft.md", 1_000, "A")],
+    { "draft.md": [node] },
+  );
+
+  assert.ok(timeline);
+  assert.equal(timeline.some((frame) => frame.at === 500), false);
+  assert.equal(timeline.at(-1)?.action?.type, "snapshot");
 });
 
 test("an empty folder genesis is a structural Step 0, never a document tab", () => {

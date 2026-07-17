@@ -24,3 +24,8 @@ test("editing a locator clears its one-shot sensitive-relay approval", () => {
   );
   assert.match(styles, /\.trace-locator-approval\s*\{[^}]*border:[^;]*var\(--danger/s);
 });
+
+test("opened handoffs show the shared reader verdict", () => {
+  assert.match(source, /traceConformanceLabel\(opened\.conformance\.status\)/);
+  assert.match(source, /trace-conformance-badge/);
+});

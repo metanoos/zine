@@ -24,7 +24,7 @@ export interface PaletteSecondaryActions {
 export type PaletteStatusRow = "author" | "model" | "substrate";
 
 const AUTHOR_STATUS_OPS = new Set(["step", "send", "attest", "fork"]);
-const MODEL_STATUS_OPS = new Set(["receive", "reply", "extend", "stir", "settle", "run"]);
+const MODEL_STATUS_OPS = new Set(["analyze", "reply", "extend", "stir", "settle", "run"]);
 const SUBSTRATE_STATUS_OPS = new Set(["scan", "reify"]);
 
 /** Route operation feedback to the palette row that owns the initiating action. */
@@ -43,7 +43,7 @@ export function paletteStatusMessage(op?: string, message?: string): string | nu
     case "step": return "stepped";
     case "send": return "sent";
     case "attest": return "attested";
-    case "receive": return "received";
+    case "analyze": return "analyzed";
     case "reply": return "replied";
     case "extend": return "extended";
     case "stir": return "stirred";

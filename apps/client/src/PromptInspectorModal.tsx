@@ -3,7 +3,7 @@
  *
  * Opens when the user clicks the `~tokens` indicator beside the op buttons
  * (App.tsx threads `onInspect` onto `.action-palette-token-count`). Shows the full
- * `messages[]` layout a chosen op (Extend / Settle / Stir / Reply / Receive)
+ * `messages[]` layout a chosen op (Extend / Settle / Stir / Reply / Analyze)
  * would send against the op-target panel's focused file and current scope:
  *
  *   1. system — provider-card personality/instructions (if any)
@@ -19,7 +19,7 @@
  * canonical gathering, preparation, invalidation, and execution.
  *
  * Cheap inputs are derived live (Extend seed, Settle/Stir loose prose). Relay-
- * fetched inputs (Reply's minted traces, Receive's limelight log) are captured
+ * fetched inputs (Reply's minted traces, Analyze's limelight log) are captured
  * by App when the modal opens. Fetch failures are shown as honest notes.
  *
  * Agent-run insight is NOT here: the Run/agent-loop path injects differently
@@ -42,7 +42,7 @@ export interface PromptInspectorProps {
   /** The op to show first. Defaults to "extend". */
   defaultOp: OpKind;
   /** Per-op notes for inputs that couldn't be derived without a relay fetch
-   *  (e.g. Reply's minted traces, Receive's limelight log). Shown inline. */
+   *  (e.g. Reply's minted traces, Analyze's limelight log). Shown inline. */
   inputNotes?: Partial<Record<OpKind, string>>;
   /** The rendered context block (=== CONTEXT === … === END CONTEXT ===), or ""
    *  when no folder is attached / no file is active. Shared across all ops. */
@@ -215,7 +215,7 @@ export function PromptInspectorModal({
             {estimateTokens(totalChars).toLocaleString()} tokens · {totalChars.toLocaleString()} chars
           </span>
           {voicePrompt.trim().length > 0 ? (
-            <span className="prompt-inspector-flag" title="The MODEL voice has a custom preference folded into the operation contract">
+            <span className="prompt-inspector-flag" title="The AI voice has a custom preference folded into the operation contract">
               voice prompt
             </span>
           ) : null}

@@ -376,6 +376,20 @@ Parallel anthologies with the same informal name are not a conflict.
 
 Who wrote what. Two layers, in priority order.
 
+**Process replay.** Every file Step carries a `kedits` array whose atomic
+transactions replay the previous snapshot to the current signed snapshot.
+Genesis replays from the empty string; a metadata-only checkpoint carries an
+explicit `[]`. Interactive writing preserves the captured editor transactions,
+including undo and redo. A discrete import, fork, scan, AI file creation, or
+headless tool write is recorded as one atomic transition rather than being
+misrepresented as physical typing.
+
+The snapshot remains the self-contained materialized body, so a node can still
+be read in one fetch. But a missing, malformed, or replay-mismatched KEdit log
+is not a valid Full Trace: readers may show the signed body only with the
+process record marked nonconforming. A Step keeps this record local; Send
+publishes it, including intermediate text and timing that may be identifying.
+
 **Per-delta attribution (primary).** A body-edit delta may carry an `author`
 index into the node's local `voices` table. Without it, the delta belongs to
 the node signer. A reader can therefore recover attribution in one forward
@@ -568,6 +582,7 @@ hypotheses. Last updated 2026-07-17.
 | Capability | State | How to check |
 |---|---|---|
 | Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke |
+| Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
 | Step, Send, Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
 | Desktop Stronghold storage for signing and provider secrets | Implemented on desktop; browser remains read-only | `secret-store.test.ts`, `secret-migration.test.ts`, key/model store tests, and the Tauri Stronghold shell |
@@ -636,7 +651,7 @@ market demand or a general model-independent effect.
 | Evidence | Supports | Does not establish |
 |---|---|---|
 | Valid TraceNode signature | The named pubkey signed this exact event | Legal identity, humanness, truth, or exclusive authorship |
-| Snapshot hash and valid delta replay | The stored body is internally consistent with the signed record | That every real-world edit was captured |
+| Snapshot hash and replay-valid KEdit transition | The stored body is internally consistent with the signed process record | That the press observed activity outside its own editor/tool boundaries, or that a signer did not deliberately fabricate a trace |
 | Per-delta voice index | The node signer asserted that voice for the changed span | Independent proof that the attributed person or model produced it |
 | Cross-author seam plus signed source node | The attributed text is corroborated by a node under the source key | Consent, originality, or copyright ownership |
 | Completed OpenTimestamps proof | The committed event id existed no later than the Bitcoin attestation | The truth of `created_at`, author identity, or uninterrupted human work |

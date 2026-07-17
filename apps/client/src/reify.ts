@@ -1,6 +1,13 @@
 import type { Event } from "nostr-tools";
 import { verifyEvent } from "nostr-tools/pure";
 
+import {
+  inspectFileTraceNucleus,
+  traceConformanceLabel,
+  type TraceConformanceIssue,
+  type TraceConformanceStatus,
+} from "./trace-conformance.js";
+
 const TRACE_NODE_KIND = 4290;
 
 export interface ReifyTarget {
@@ -13,6 +20,15 @@ export interface ReifyTraceTarget {
   traceId: string;
   nucleusId: string;
   eventIds: string[];
+  conformance: TraceConformanceStatus;
+  conformanceIssues: TraceConformanceIssue[];
+}
+
+export interface ReifyTargetConformance {
+  relativePath: string;
+  nucleusId: string;
+  status: TraceConformanceStatus;
+  issues: TraceConformanceIssue[];
 }
 
 /**
@@ -31,6 +47,7 @@ export interface ReifyTraceBundle {
 
 export interface ReifyExport {
   entries: { relativePath: string; content: string }[];
+  conformance: ReifyTargetConformance[];
   trace?: ReifyTraceBundle;
 }
 
@@ -123,36 +140,6 @@ async function loadFileNode(
   return { event, snapshot: parsed.snapshot };
 }
 
-/** Walk one exact immutable nucleus back through `prev`, newest to genesis. */
-async function loadExactChain(
-  nucleus: ParsedFileNode,
-  loadEvent: ReifyEventLoader,
-): Promise<ParsedFileNode[]> {
-  const newestFirst = [nucleus];
-  const seen = new Set<string>([nucleus.event.id]);
-  let cursor = nucleus.event.tags.find(
-    (tag) => tag[0] === "e" && tag[3] === "prev",
-  )?.[1];
-
-  while (cursor) {
-    if (seen.has(cursor)) {
-      throw new Error(`Reify refused nucleus ${shortId(nucleus.event.id)}: cyclic prev chain`);
-    }
-    seen.add(cursor);
-    const previous = await loadFileNode(cursor, loadEvent);
-    if (previous.event.pubkey !== nucleus.event.pubkey) {
-      throw new Error(
-        `Reify refused nucleus ${shortId(nucleus.event.id)}: prev chain changes owner`,
-      );
-    }
-    newestFirst.push(previous);
-    cursor = previous.event.tags.find(
-      (tag) => tag[0] === "e" && tag[3] === "prev",
-    )?.[1];
-  }
-  return newestFirst.reverse();
-}
-
 /**
  * Materialize exact signed nuclei. Live editor text is deliberately absent
  * from this API, so callers cannot accidentally substitute an unstepped
@@ -177,10 +164,25 @@ export async function prepareReifyExport(
   const materialized = await Promise.all(
     targets.map(async (target) => {
       const nucleus = await loadFileNode(target.nucleusId, loadEvent);
-      const chain = includeTrace
-        ? await loadExactChain(nucleus, loadEvent)
-        : [nucleus];
-      return { target, nucleus, chain };
+      const inspection = await inspectFileTraceNucleus(
+        nucleus.event,
+        loadEvent,
+        { expectedNucleusId: target.nucleusId },
+      );
+      if (inspection.verdict.status === "invalid") {
+        const issue = inspection.verdict.issues.find(
+          (candidate) => candidate.kind === "integrity",
+        );
+        throw new Error(
+          `Reify refused nucleus ${shortId(target.nucleusId)}: ${issue?.message ?? "invalid trace"}`,
+        );
+      }
+      if (includeTrace && !inspection.historyComplete) {
+        throw new Error(
+          `Reify could not fetch nucleus ${shortId(inspection.missingPreviousNodeId ?? target.nucleusId)} for complete trace ancestry`,
+        );
+      }
+      return { target, nucleus, inspection };
     }),
   );
 
@@ -188,20 +190,29 @@ export async function prepareReifyExport(
     relativePath: target.relativePath,
     content: nucleus.snapshot,
   }));
-  if (!includeTrace) return { entries };
+  const conformance = materialized.map(({ target, inspection }) => ({
+    relativePath: target.relativePath,
+    nucleusId: target.nucleusId,
+    status: inspection.verdict.status,
+    issues: inspection.verdict.issues,
+  }));
+  if (!includeTrace) return { entries, conformance };
 
   const eventsById = new Map<string, Event>();
-  const traceTargets = materialized.map(({ target, chain }) => {
-    for (const node of chain) eventsById.set(node.event.id, node.event);
+  const traceTargets = materialized.map(({ target, inspection }) => {
+    for (const event of inspection.chain) eventsById.set(event.id, event);
     return {
       relativePath: target.relativePath,
-      traceId: chain[0].event.id,
+      traceId: inspection.chain[0]!.id,
       nucleusId: target.nucleusId,
-      eventIds: chain.map((node) => node.event.id),
+      eventIds: inspection.chain.map((event) => event.id),
+      conformance: inspection.verdict.status,
+      conformanceIssues: inspection.verdict.issues,
     };
   });
   return {
     entries,
+    conformance,
     trace: {
       format: "zine-trace",
       version: 1,
@@ -219,7 +230,7 @@ export function renderTraceReport(bundle: ReifyTraceBundle): string {
     const stepped = nucleus
       ? new Date(nucleus.created_at * 1000).toISOString()
       : "unavailable";
-    return `| ${markdownCell(target.relativePath)} | \`${shortId(target.nucleusId)}\` | \`${shortId(nucleus?.pubkey ?? "unavailable")}\` | ${target.eventIds.length} | ${stepped} |`;
+    return `| ${markdownCell(target.relativePath)} | ${traceConformanceLabel(target.conformance)} | \`${shortId(target.nucleusId)}\` | \`${shortId(nucleus?.pubkey ?? "unavailable")}\` | ${target.eventIds.length} | ${stepped} |`;
   });
   const traceSections = bundle.targets.flatMap((target) => {
     const stepRows = target.eventIds.map((eventId, index) => {
@@ -234,6 +245,11 @@ export function renderTraceReport(bundle: ReifyTraceBundle): string {
       "",
       `Trace identity: \`${target.traceId}\`  `,
       `Chosen nucleus: \`${target.nucleusId}\``,
+      `Reader verdict: **${traceConformanceLabel(target.conformance)}**${
+        target.conformanceIssues.length > 0
+          ? ` — ${target.conformanceIssues.map((issue) => issue.message).join("; ")}`
+          : ""
+      }`,
       "",
       "| Step | Event | Signer | Action | Time (declared) | Snapshot hash |",
       "|---:|---|---|---|---|---|",
@@ -247,8 +263,8 @@ export function renderTraceReport(bundle: ReifyTraceBundle): string {
     "",
     "This is a readable projection of `.zine/trace.json`. The raw signed events are authoritative; this report is not a substitute for signature, id, snapshot-hash, or lineage verification.",
     "",
-    "| File | Nucleus | Signer | Steps included | Nucleus time (declared) |",
-    "|---|---|---|---:|---|",
+    "| File | Reader verdict | Nucleus | Signer | Steps included | Nucleus time (declared) |",
+    "|---|---|---|---|---:|---|",
     ...summaryRows,
     "",
     ...traceSections,

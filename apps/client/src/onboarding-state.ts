@@ -1,4 +1,8 @@
+// Keep the v2 key so the v3 completion schema can migrate existing records in place.
 export const ONBOARDING_STORAGE_KEY = "zine.onboarding.v2";
+
+export const ONBOARDING_LESSONS = ["trace", "ai-context", "scan"] as const;
+export type OnboardingLessonId = typeof ONBOARDING_LESSONS[number];
 
 export type OnboardingStage =
   | "welcome"
@@ -16,6 +20,8 @@ export type OnboardingStage =
   | "context-step"
   | "context-replay"
   | "model-complete"
+  | "scan-file"
+  | "scan-complete"
   | "dismissed";
 
 export interface ModelLessonResume {
@@ -28,8 +34,9 @@ export interface ModelLessonResume {
 }
 
 export interface OnboardingResumeRecord {
-  version: 2;
+  version: 3;
   stage: OnboardingStage;
+  completedLessons: OnboardingLessonId[];
   lesson?: ModelLessonResume;
 }
 
@@ -51,6 +58,8 @@ const STAGES = new Set<OnboardingStage>([
   "context-step",
   "context-replay",
   "model-complete",
+  "scan-file",
+  "scan-complete",
   "dismissed",
 ]);
 
@@ -94,6 +103,32 @@ function parseLesson(value: unknown): ModelLessonResume | undefined {
   };
 }
 
+function parseCompletedLessons(value: unknown): OnboardingLessonId[] {
+  if (!Array.isArray(value)) return [];
+  return ONBOARDING_LESSONS.filter((lesson) => value.includes(lesson));
+}
+
+function legacyCompletedLessons(
+  stage: OnboardingStage,
+  lesson: ModelLessonResume | undefined,
+): OnboardingLessonId[] {
+  if (stage === "model-complete") return ["trace", "ai-context"];
+  if (RESUMABLE_MODEL_STAGES.has(stage) || lesson) return ["trace"];
+  if (stage === "complete") return ["trace"];
+  return [];
+}
+
+export function completedLessonsForStage(
+  completedLessons: readonly OnboardingLessonId[],
+  stage: OnboardingStage,
+): OnboardingLessonId[] {
+  const completed = new Set(completedLessons);
+  if (stage === "complete") completed.add("trace");
+  if (stage === "model-complete") completed.add("ai-context");
+  if (stage === "scan-complete") completed.add("scan");
+  return ONBOARDING_LESSONS.filter((lesson) => completed.has(lesson));
+}
+
 export function loadOnboardingResume(
   hasExistingRoot: boolean,
   storage: OnboardingStorage = localStorage,
@@ -101,28 +136,46 @@ export function loadOnboardingResume(
   try {
     const raw = storage.getItem(ONBOARDING_STORAGE_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as { version?: unknown; stage?: unknown; lesson?: unknown };
+      const parsed = JSON.parse(raw) as {
+        version?: unknown;
+        stage?: unknown;
+        completedLessons?: unknown;
+        lesson?: unknown;
+      };
       if (typeof parsed.stage === "string" && STAGES.has(parsed.stage as OnboardingStage)) {
         const stage = parsed.stage as OnboardingStage;
-        if (parsed.version === 2) {
+        if (parsed.version === 2 || parsed.version === 3) {
           const lesson = parseLesson(parsed.lesson);
+          const completedLessons = parsed.version === 3
+            ? parseCompletedLessons(parsed.completedLessons)
+            : legacyCompletedLessons(stage, lesson);
           if (RESUMABLE_MODEL_STAGES.has(stage)) {
-            // Provider probe success is session-only. A resumed MODEL lesson
+            // Provider probe success is session-only. A resumed AI lesson
             // returns to setup unless it was already complete.
             return {
-              version: 2,
+              version: 3,
               stage: stage === "model-complete" ? stage : "model-setup",
+              completedLessons,
               ...(lesson ? { lesson } : {}),
             };
           }
-          return { version: 2, stage: stage === "welcome" || stage === "dismissed" ? stage : "dismissed" };
+          return {
+            version: 3,
+            stage: stage === "welcome" || stage === "dismissed" ? stage : "dismissed",
+            completedLessons,
+            ...(lesson ? { lesson } : {}),
+          };
         }
       }
     }
   } catch {
     // Fall through to the Root-aware default.
   }
-  return { version: 2, stage: hasExistingRoot ? "dismissed" : "welcome" };
+  return {
+    version: 3,
+    stage: hasExistingRoot ? "dismissed" : "welcome",
+    completedLessons: [],
+  };
 }
 
 /**
@@ -143,16 +196,27 @@ export function saveOnboardingStage(
   stage: OnboardingStage,
   storage: OnboardingStorage = localStorage,
   lesson?: ModelLessonResume,
+  completedLessons: readonly OnboardingLessonId[] = [],
 ): void {
   const safeLesson = parseLesson(lesson);
+  const safeCompletedLessons = completedLessonsForStage(
+    parseCompletedLessons(completedLessons),
+    stage,
+  );
   storage.setItem(
     ONBOARDING_STORAGE_KEY,
-    JSON.stringify({ version: 2, stage, ...(safeLesson ? { lesson: safeLesson } : {}) }),
+    JSON.stringify({
+      version: 3,
+      stage,
+      completedLessons: safeCompletedLessons,
+      ...(safeLesson ? { lesson: safeLesson } : {}),
+    }),
   );
 }
 
 export type OnboardingEvent =
   | "start-model"
+  | "start-scan"
   | "provider-probed"
   | "target-focused"
   | "folder-mounted"
@@ -160,7 +224,8 @@ export type OnboardingEvent =
   | "request-approved"
   | "result-applied"
   | "result-stepped"
-  | "result-replayed";
+  | "result-replayed"
+  | "file-scanned";
 
 /** Guarded progression; UI clicks cannot skip a missing production artifact. */
 export function reduceOnboardingStage(
@@ -168,6 +233,7 @@ export function reduceOnboardingStage(
   event: OnboardingEvent,
 ): OnboardingStage {
   const transitions: Partial<Record<OnboardingStage, Partial<Record<OnboardingEvent, OnboardingStage>>>> = {
+    welcome: { "start-model": "model-setup", "start-scan": "scan-file" },
     complete: { "start-model": "model-setup" },
     "model-setup": { "provider-probed": "context-focus" },
     "context-focus": { "target-focused": "context-mount" },
@@ -177,6 +243,7 @@ export function reduceOnboardingStage(
     "context-run": { "result-applied": "context-step" },
     "context-step": { "result-stepped": "context-replay" },
     "context-replay": { "result-replayed": "model-complete" },
+    "scan-file": { "file-scanned": "scan-complete" },
   };
   return transitions[stage]?.[event] ?? stage;
 }

@@ -163,12 +163,14 @@ import { DownloadView } from "./Download.js";
 import { AboutView } from "./About.js";
 import { OnboardingGuide, OnboardingWelcome } from "./Onboarding.js";
 import {
+  completedLessonsForStage,
   isOnboardingActive,
   loadOnboardingResume,
   reconcileModelOnboardingStage,
   reduceOnboardingStage,
   saveOnboardingStage,
   type ModelLessonResume,
+  type OnboardingLessonId,
   type OnboardingStage,
 } from "./onboarding-state.js";
 import { aboutHashTarget } from "./about-documents.js";
@@ -275,6 +277,7 @@ import {
   nextKEditTx,
   reconcileRunsText,
   spliceRuns,
+  synthesizeKEditTransition,
   type FileStepBaseline,
   type KEditLog,
   type Workspace,
@@ -362,6 +365,12 @@ import {
   type ReplayDisplay,
   type ReplayFolderState,
 } from "./replay-timeline.js";
+import {
+  combineTraceConformance,
+  traceConformanceLabel,
+  verifyFileTraceChain,
+  type TraceConformanceVerdict,
+} from "./trace-conformance.js";
 import {
   type OpKind as PromptOpKind,
   type OpInputs,
@@ -691,7 +700,7 @@ function isValidTagToken(name: string): boolean {
 // The four action-palette LLM operations. With a non-empty editor selection, each
 // acts on just the selected text (continuing/condensing/reinventing/replying
 // to that range in place); with no selection, each acts on the whole document.
-export type OpKind = "extend" | "settle" | "stir" | "reply" | "receive" | "step" | "send" | "attest" | "run";
+export type OpKind = "extend" | "settle" | "stir" | "reply" | "analyze" | "step" | "send" | "attest" | "run";
 
 /** Split flat doc text into preserved bracket spans (`[[ … ]]`, kept verbatim)
  *  and the loose prose between them. The substrate for Settle (condense loose)
@@ -3237,6 +3246,7 @@ function ReplayTransport({
   playheadAt,
   loading,
   latestActionOutput,
+  conformance,
 }: {
   /** The one focused tree/tab trace that supplies this timeline. */
   targets: readonly {
@@ -3284,6 +3294,8 @@ function ReplayTransport({
   loading: boolean;
   /** Current replay action or fast-forward notice, shown after the slider. */
   latestActionOutput?: string;
+  /** Persistent reader verdict for every file chain in this replay scope. */
+  conformance?: TraceConformanceVerdict | null;
 }) {
   const [rowLabel, setRowLabel] = useState<TraceRowLabel>(() => {
     const stored = localStorage.getItem(TRACE_ROW_LABEL_KEY);
@@ -3626,10 +3638,21 @@ function ReplayTransport({
           </div>
           <span
             className="action-palette-replay-status"
-            title={latestActionOutput}
+            title={[
+              conformance ? traceConformanceLabel(conformance.status) : "",
+              ...(conformance?.issues.map((issue) => issue.message) ?? []),
+              latestActionOutput ?? "",
+            ].filter(Boolean).join(" · ")}
             aria-live="polite"
             aria-atomic="true"
           >
+            {conformance ? (
+              <span
+                className={`trace-conformance-badge is-${conformance.status}`}
+              >
+                {traceConformanceLabel(conformance.status)}
+              </span>
+            ) : null}
             {latestActionOutput ? (
               <span
                 className={
@@ -3988,7 +4011,7 @@ const voiceField = StateField.define<Run[]>({
  *  switch, crash-pad restore, or agent write. */
 const setKEditsEffect = StateEffect.define<KEditLog>();
 
-/** The keystroke log: one `KEdit` per discrete editor change since the last
+/** The interactive process log: one `KEdit` per discrete editor change since the last
  *  step (or the last programmatic content swap). A parallel sink to
  *  `voiceField` — same `iterChanges` walk, same voice resolution, but appends
  *  to a log instead of splicing runs. CodeMirror suppresses transactions
@@ -4008,7 +4031,8 @@ const keditField = StateField.define<KEditLog>({
     }
     // Same gate as voiceField: a setRunsEffect-tagged transaction is a
     // programmatic content swap (file switch, agent write, replay restore) —
-    // not a user edit, so the keystroke log resets.
+    // not a user edit, so the interactive log resets. The host records the
+    // programmatic transition separately as one atomic KEdit when appropriate.
     for (const e of tr.effects) {
       if (e.is(setRunsEffect)) return EMPTY_KEDIT_LOG;
     }
@@ -4041,7 +4065,7 @@ const voiceDecorations = ViewPlugin.fromClass(
 // intents before CodeMirror redraws. Bottom means follow the growing document;
 // fixed means restore the exact prior scrollTop after CM's wrapped-line and
 // virtual-viewport measurements settle. Direct LLM edits carry opVoiceEffect;
-// React-driven Reply/Receive streams arrive as append-only setRuns updates.
+// React-driven Reply/Analyze streams arrive as append-only setRuns updates.
 // Ordinary typing and explicit scrollIntoView requests stay on CodeMirror's
 // native cursor behavior.
 function isStreamedChange(update: import("@codemirror/view").ViewUpdate): boolean {
@@ -5358,7 +5382,7 @@ function isOpKind(op?: PaletteStatusOp): op is OpKind {
 }
 
 const VOICE_OPS: { op: OpKind; label: string; title: string; cls: string }[] = [
-  { op: "receive", label: "Receive", title: "Analyze the writing process from the delta + limelight logs into a new audit doc", cls: "op-receive" },
+  { op: "analyze", label: "Analyze", title: "Analyze the writing process from exact trace, Step, and limelight evidence into a cited review", cls: "op-analyze" },
   { op: "reply", label: "Reply", title: "Write a response into a new doc in the other pane, citing traces", cls: "op-reply" },
   { op: "extend", label: "Extend", title: "Append an AI continuation to this file", cls: "op-extend" },
   { op: "stir", label: "Stir", title: "Reinvent loose prose, run (( commands )), preserve [[ anchors ]]", cls: "op-stir" },
@@ -5423,7 +5447,7 @@ function rollAuthorAlias(excluding: string): string {
 // The unconfigured MODEL row has the same small naming affordance as AUTHOR.
 // Once a provider exists, its actual card label replaces this generic alias.
 const MODEL_LABEL_KEY = "zine.modelLabel";
-const MODEL_ALIASES = ["MODEL", "AUTOMATIC", "AUTOMATON", "AI", "LLM"] as const;
+const MODEL_ALIASES = ["AI", "ASSISTANT", "AUTOMATIC", "AUTOMATON", "LLM"] as const;
 function rollModelAlias(excluding: string): string {
   const others = MODEL_ALIASES.filter((alias) => alias !== excluding);
   return others[Math.floor(Math.random() * others.length)];
@@ -5810,7 +5834,7 @@ function ModelProviderSelect({
 // groups keep identity/model controls at the left and wrap their actions at the
 // right; Replay follows them as the final row:
 //   AUTHOR:    | pen | Step/Mint Send Attest · · | — | — | err | —
-//   MODEL:     | inj | model▾ Receive Reply Extend Stir Settle Run · 1.2k
+//   AI:        | inj | model▾ Analyze Reply Extend Stir Settle Run · 1.2k
 //   FILESYSTEM | key | Scan File Scan Folder Reify Trace Open Trace | — | — | — | —
 //   REPLAY:    | targets | ▶ N× [slider]
 //              |         | ⏮ ◀ [n/latest] ▶ ⏭ · current frame
@@ -5943,7 +5967,7 @@ function ActionPalette({
   });
   const [modelAlias, setModelAlias] = useState<string>(() => {
     const stored = localStorage.getItem(MODEL_LABEL_KEY);
-    return stored && (MODEL_ALIASES as readonly string[]).includes(stored) ? stored : "MODEL";
+    return stored && (MODEL_ALIASES as readonly string[]).includes(stored) ? stored : "AI";
   });
 
   // --- ACTIONS gating ---------------------------------------------------
@@ -6109,7 +6133,7 @@ function ActionPalette({
           keys={keys}
           selectedId={modelKeyId}
           onSelect={onChooseModelKey}
-          ariaLabel="Model voice"
+          ariaLabel="AI voice"
         />
         <div className="action-palette-actions">
           <div className="action-palette-model-cell">
@@ -6123,11 +6147,11 @@ function ActionPalette({
             const isRunning = runningOp === v.op;
             // extend/stir/settle write INTO the existing file, so they obey the
             // focus-∈-scope invariant (must not mutate content whose chain isn't
-            // in context). receive/reply/run create NEW docs/subfolders (analysis /
+            // in context). analyze/reply/run create NEW docs/subfolders (analysis /
             // citing doc / agent run), so they're gated by kind only, not by scope.
-            const createsDoc = v.op === "receive" || v.op === "reply" || v.op === "run";
+            const createsDoc = v.op === "analyze" || v.op === "reply" || v.op === "run";
             const mutatesTarget = !createsDoc;
-            const baseGate = v.op === "receive" ? allowReply : mutatesTarget ? scopedText : scopedReply;
+            const baseGate = v.op === "analyze" ? allowTextOps : mutatesTarget ? scopedText : scopedReply;
             const enabled =
               isRunning ||
               (!runningOp && hasProviders && baseGate);
@@ -6191,7 +6215,7 @@ function ActionPalette({
         <div className="action-palette-actions">
           <button
             type="button"
-            className="action-palette-action op-scan"
+            className="action-palette-action op-scan op-scan-file"
             disabled={!isTauri()}
             title={isTauri() ? "Scan File: acquire one file as a new trace in the private Scan inbox; repeated scans add copies" : "Scanning is desktop-only (the substrate is the local disk)"}
             onClick={() => onScan("file")}
@@ -7420,6 +7444,8 @@ function useProvenance(
   files: Record<string, FileState>,
   replayActiveRef: MutableRefObject<boolean>,
 ) {
+  const liveFilesRef = useRef(files);
+  liveFilesRef.current = files;
   const pendingTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   // Paths with a debounce step in flight. The external-change rescan reads
   // this to avoid clobbering a file the user is mid-edit on — their in-editor
@@ -7461,7 +7487,9 @@ function useProvenance(
     };
   }, []);
 
-  // Debounced crash-pad mirroring on file content changes.
+  // Debounced crash-pad refresh for metadata and belt-and-suspenders recovery.
+  // Content plus KEdits are journaled synchronously in editFile at transaction
+  // time; this pass catches non-editor state changes such as tags.
   useEffect(() => {
     if (!ready.current || !folder) return;
     // Hold the MODEL transaction until its completion metadata is ready. Only
@@ -7482,13 +7510,9 @@ function useProvenance(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [files, folder]);
 
-  /** Mirror an unstepped file's buffer to the localStorage crash pad after `ms` of
-   *  quiet. The ONLY persistence path for typing: never calls stepFile, so typing
-   *  never steps. Both platforms use it (desktop's disk file is untouched until
-   *  Step; webapp has no disk, so the pad IS its crash-safety). The buffer is
-   *  restored on the next boot via loadPad in openScanned, read as unstepped until
-   *  the user Steps. 800ms — tighter than the old 1500ms step debounce because a
-   *  localStorage write is synchronous/cheap and crash loss stays capped low. */
+  /** Refresh an unstepped file's full crash-pad record after `ms` of quiet.
+   * Typing itself is already journaled synchronously by editFile; this never
+   * calls stepFile, so neither path creates an implicit Step. */
   function schedulePad(path: string, ms: number) {
     clearTimeout(pendingTimers.current[path]);
     pendingPaths.current.add(path);
@@ -7651,12 +7675,33 @@ function useProvenance(
         force,
       );
       lastSteppedRef.current.set(path, { content, tags: [...tags], citationIds: [...citationIds] });
-      // Desktop crash pad: the file is now committed to disk, so its buffered
-      // copy in the pad is stale — drop it. This is the single chokepoint for
-      // every disk write (Cmd+S/Step/Send/Attest/direct backend), so clearing
-      // here covers every flush. stepFile is the only thing that reaches the pad
-      // in reverse, so no other site needs to clear it.
-      if (isTauri() && folder) clearPadPath(folder.id, path);
+      // If edits landed while the Step was in flight, immediately rebase their
+      // crash-pad record onto the new head. Never clear a newer KEdit suffix.
+      const liveFile = liveFilesRef.current[path];
+      const liveRemaining = liveFile
+        ? dropKEditLogPrefix(liveFile.kedits ?? EMPTY_KEDIT_LOG, steppedKedits)
+        : EMPTY_KEDIT_LOG;
+      const liveCitations = liveFile?.citationIds ?? [];
+      const hasNewerBuffer = Boolean(liveFile) && (
+        liveRemaining.length > 0 ||
+        flatten(liveFile.runs) !== content ||
+        liveFile.tags.length !== tags.length ||
+        liveFile.tags.some((tag, index) => tag !== tags[index]) ||
+        liveCitations.length !== citationIds.length ||
+        liveCitations.some((id, index) => id !== citationIds[index])
+      );
+      if (folder && liveFile && hasNewerBuffer) {
+        mirrorPad(folder.id, path, {
+          content: flatten(liveFile.runs),
+          tags: liveFile.tags,
+          nodeId,
+          runs: liveFile.runs,
+          citationIds: liveFile.citationIds,
+          kedits: keditLogToArray(liveRemaining),
+        });
+      } else if (folder) {
+        clearPadPath(folder.id, path);
+      }
       // Reflect the freshly-stepped node id back into state so the next diff
       // is against the right baseline. Stable-identity update only. The
       // context-block delta-log memo is keyed by this nodeId, so advancing
@@ -7778,6 +7823,11 @@ function App() {
   const [modelLessonResume, setModelLessonResume] = useState<ModelLessonResume | undefined>(
     onboardingResumeAtBoot.current.lesson,
   );
+  const [completedOnboardingLessons, setCompletedOnboardingLessons] = useState<OnboardingLessonId[]>(
+    onboardingResumeAtBoot.current.completedLessons,
+  );
+  const completedOnboardingLessonsRef = useRef<OnboardingLessonId[]>(completedOnboardingLessons);
+  completedOnboardingLessonsRef.current = completedOnboardingLessons;
   const [modelProbeSession, setModelProbeSession] = useState<{
     providerId: string;
     providerFingerprint: string;
@@ -7789,9 +7839,15 @@ function App() {
     stage: OnboardingStage,
     lesson: ModelLessonResume | undefined = modelLessonResume,
   ): void {
+    const nextCompletedLessons = completedLessonsForStage(
+      completedOnboardingLessonsRef.current,
+      stage,
+    );
     onboardingStageRef.current = stage;
-    saveOnboardingStage(stage, localStorage, lesson);
+    completedOnboardingLessonsRef.current = nextCompletedLessons;
+    saveOnboardingStage(stage, localStorage, lesson, nextCompletedLessons);
     setOnboardingStage(stage);
+    setCompletedOnboardingLessons(nextCompletedLessons);
   }
 
   function advanceOnboarding(event: Parameters<typeof reduceOnboardingStage>[1]): void {
@@ -7834,14 +7890,20 @@ function App() {
     selectView("models");
   }
 
+  function beginScanOnboarding(): void {
+    advanceOnboarding("start-scan");
+    selectView("editor");
+    void onScan("file");
+  }
+
   async function ensureModelLesson(): Promise<ModelContextLesson> {
-    if (!folder) throw new Error("Open a workspace before starting the MODEL lesson");
+    if (!folder) throw new Error("Open a workspace before starting the AI lesson");
     const currentBodies = Object.fromEntries(
       Object.entries(filesRef.current).map(([path, state]) => [path, flatten(state.runs)]),
     );
     const lesson = planModelContextLesson(currentBodies);
     const signer = secretKeyForVoice(authorPubkey);
-    if (!signer) throw new Error("Unlock the AUTHOR key before creating the MODEL lesson");
+    if (!signer) throw new Error("Unlock the AUTHOR key before creating the AI lesson");
     await backendRef.current.createFolder(lesson.folderPath);
     const staged: Record<string, FileState> = {};
     for (const artifact of lesson.artifacts) {
@@ -8251,6 +8313,7 @@ function App() {
   // pausing snaps the step cursor to the current frame's enclosing step.
   const REPLAY_SPEEDS = [1, 2, 4, 8, 16] as const;
   const [replayLoading, setReplayLoading] = useState(false);
+  const [replayConformance, setReplayConformance] = useState<TraceConformanceVerdict | null>(null);
   const replayLoadSequenceRef = useRef(0);
   const [playing, setPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState<number>(1);
@@ -9092,7 +9155,31 @@ function App() {
     seedSteppedRef.current({
       [path]: { ...file, runs, nodeId },
     });
-    if (isTauri() && folder) clearPadPath(folder.id, path);
+    const latest = filesRef.current[path];
+    const latestRemaining = latest
+      ? dropKEditLogPrefix(latest.kedits ?? EMPTY_KEDIT_LOG, steppedKedits)
+      : EMPTY_KEDIT_LOG;
+    const latestCitations = latest?.citationIds ?? [];
+    const hasNewerBuffer = Boolean(latest) && (
+      latestRemaining.length > 0 ||
+      flatten(latest.runs) !== content ||
+      latest.tags.length !== file.tags.length ||
+      latest.tags.some((tag, index) => tag !== file.tags[index]) ||
+      latestCitations.length !== citationIds.length ||
+      latestCitations.some((id, index) => id !== citationIds[index])
+    );
+    if (folder && latest && hasNewerBuffer) {
+      mirrorPad(folder.id, path, {
+        content: flatten(latest.runs),
+        tags: latest.tags,
+        nodeId,
+        runs: latest.runs,
+        citationIds: latest.citationIds,
+        kedits: keditLogToArray(latestRemaining),
+      });
+    } else if (folder) {
+      clearPadPath(folder.id, path);
+    }
     setFiles((prev) => {
       const current = prev[path];
       if (!current) return prev;
@@ -9722,7 +9809,7 @@ function App() {
 
   /** Gather and freeze the one request object shared by estimate, Inspector,
    *  approval, and transport. Focus is a hard prerequisite: selection and a
-   *  merely-active fallback panel never silently become MODEL authority. */
+   *  merely-active fallback panel never silently become AI authority. */
   async function prepareModelOperation(
     idx: number,
     operation: PromptOpKind,
@@ -9731,7 +9818,7 @@ function App() {
     signal?: AbortSignal,
     lensId: OpLensId = opLenses[operation],
   ): Promise<PreparedOperation> {
-    if (!folder) throw new Error("Open a workspace before running a MODEL operation");
+    if (!folder) throw new Error("Open a workspace before running an AI operation");
     const focus = uiFocusRef.current;
     const path = panels[idx]?.active ?? "";
     if (
@@ -9742,11 +9829,11 @@ function App() {
       focus.panelIndex !== idx ||
       focus.tabPath !== path
     ) {
-      throw new Error("Focus a live file before running a MODEL operation");
+      throw new Error("Focus a live file before running an AI operation");
     }
     const file = filesRef.current[path];
     if (!file || file.kind === "folder") {
-      throw new Error("The focused MODEL target is not an editable file");
+      throw new Error("The focused AI target is not an editable file");
     }
     const providerFingerprint = providerProfileFingerprint(provider);
     const voicePrompt = getVoicePrompt(modelPubkey) ?? "";
@@ -9816,7 +9903,7 @@ function App() {
       current.provenance.dependencyFingerprint,
     );
     if (!approved || approved.operation !== operation) {
-      throw new Error("Inspect and approve this MODEL request before running it");
+      throw new Error("Inspect and approve this AI request before running it");
     }
     return approved;
   }
@@ -9844,7 +9931,7 @@ function App() {
       void (async () => {
         try {
           const provider = resolveVoiceProvider(modelPubkey);
-          if (!provider) throw new Error("No MODEL provider configured");
+          if (!provider) throw new Error("No AI provider configured");
           const prepared = await prepareModelOperation(
             panelIdx,
             "extend",
@@ -9991,7 +10078,7 @@ function App() {
   /** Derive the per-op `OpInputs` from the op-target panel's live editor state,
    *  the same way the ops themselves do. Extend seeds from the selection or doc
    *  tail; Settle/Stir use partitionDoc + findCommands + iterBrackets. Reply's
-   *  coins and Receive's limelight log are filled by openInspector's relay
+   *  coins and Analyze's limelight log are filled by openInspector's relay
    *  fetches so the captured preview matches a call made at the same moment. */
   function deriveInspectInputs(): Partial<Record<PromptOpKind, OpInputs>> {
     const idx = opTargetPanel();
@@ -10015,9 +10102,9 @@ function App() {
       extend: { seed, hasSelection: hasSel, rangeFrom: hasSel ? sel.to : doc.length, rangeTo: hasSel ? sel.to : doc.length },
       settle: { loose: settlePrompt, rangeFrom: hasSel ? sel.from : 0, rangeTo: hasSel ? sel.to : doc.length },
       stir: { loose, anchorCount, commands: cmds.map((c) => c.command), rangeFrom: hasSel ? sel.from : 0, rangeTo: hasSel ? sel.to : doc.length },
-      // Reply/Receive relay-backed bodies are filled by openInspector.
+      // Reply/Analyze relay-backed bodies are filled by openInspector.
       reply: { source: stirText },
-      receive: {},
+      analyze: {},
     };
   }
 
@@ -10029,7 +10116,7 @@ function App() {
     const idx = opTargetPanel();
     const provider = resolveVoiceProvider(modelPubkey);
     if (!provider) {
-      setInspectPreparationError("No MODEL provider is configured.");
+      setInspectPreparationError("No AI provider is configured.");
       return;
     }
     setInspectPreparing(operation);
@@ -10081,14 +10168,14 @@ function App() {
       notes.reply = "The relay palette fetch failed; Reply would continue without citable traces.";
     }
     if (focusResult.status === "fulfilled" && folder) {
-      inputs.receive = {
+      inputs.analyze = {
         limelightLog: renderLimelightLog(
           focusResult.value,
           folder.label ?? DEFAULT_ROOT_LABEL,
         ),
       };
     } else if (focusResult.status === "rejected") {
-      notes.receive = "The limelight fetch failed; Receive would continue with the delta log and file contents only.";
+      notes.analyze = "The limelight fetch failed; Analyze will continue with the trace log, Step history, and file contents.";
     }
     setInspectInputs(inputs);
     setInspectContext("");
@@ -10155,7 +10242,7 @@ function App() {
    * Scope is pinned to call time even though publication is deferred. */
   async function prepareLlmMeta(
     idx: number,
-    op: "extend" | "settle" | "stir" | "reply" | "receive",
+    op: "extend" | "settle" | "stir" | "reply" | "analyze",
     provider: ProviderConfig | null,
     prompt: string,
     maxTokens: number,
@@ -10262,7 +10349,7 @@ function App() {
         return;
       }
       if (result.status === "stale") {
-        setOpStatus(idx, "error", "MODEL response held because focus or the file changed", "extend");
+        setOpStatus(idx, "error", "AI response held because focus or the file changed", "extend");
         return;
       }
       recordModelLessonResult(prepared, result.response);
@@ -10292,7 +10379,7 @@ function App() {
     setOpStatus(
       idx,
       "error",
-      "Folder focus is available for replay; MODEL Settle needs one focused, stepped file",
+      "Folder focus is available for replay; AI Settle needs one focused, stepped file",
       "settle",
     );
   }
@@ -10356,7 +10443,7 @@ function App() {
         return;
       }
       if (result.status === "stale") {
-        setOpStatus(idx, "error", "MODEL response held because focus or the file changed", "settle");
+        setOpStatus(idx, "error", "AI response held because focus or the file changed", "settle");
         return;
       }
       recordModelLessonResult(prepared, result.response);
@@ -10446,7 +10533,7 @@ function App() {
         return;
       }
       if (result.status === "stale") {
-        setOpStatus(idx, "error", "MODEL response held because focus or the file changed", "stir");
+        setOpStatus(idx, "error", "AI response held because focus or the file changed", "stir");
         return;
       }
       recordModelLessonResult(prepared, result.response);
@@ -10528,12 +10615,6 @@ function App() {
           const runs = [{ voice: modelVoice, text: parsed.body }];
           editFile(newPath, runs);
           if (llmMeta) setPendingLlmMeta(newPath, llmMeta);
-          mirrorPad(folder.id, newPath, {
-            content: parsed.body,
-            tags: [],
-            nodeId: "",
-            runs,
-          });
           const destIdx = idx + 1;
           spawnPanel(destIdx);
           openInPanel(newPath, destIdx);
@@ -10544,7 +10625,7 @@ function App() {
         return;
       }
       if (result.status === "stale") {
-        setOpStatus(idx, "error", "MODEL response held because focus or the source changed", "reply");
+        setOpStatus(idx, "error", "AI response held because focus or the source changed", "reply");
         return;
       }
       recordModelLessonResult(prepared, result.response);
@@ -10560,27 +10641,24 @@ function App() {
     }
   }
 
-  /** Receive: run the analyst persona over the folder's delta + limelight logs
-   *  and stream the process analysis into a new sibling file. Structurally a
-   *  trimmed Reply (no palette, no source citation, no `replyingTo`): the
-   *  model reads the whole context block — delta log + file contents — plus a
-   *  rendered limelight log (panel-occupancy history from focusTimeline, which
-   *  lives on the folder's chain but is surfaced to a prompt nowhere else).
-   *  Output is an unstepped audit doc the user can check, named via the model's
-   *  `TITLE:` line, same convention as Reply. */
-  async function receiveLLM(idx: number) {
+  /** Analyze: read the validated editor-transaction trace, Step history, file
+   *  contents, and limelight log into an ordinary cited review document. The
+   *  prepared request freezes the exact trace log; the output cites every
+   *  analyzed source head and remains an editable, unstepped Zine file so the
+   *  human and AI can continue their review in the same traced medium. */
+  async function analyzeLLM(idx: number) {
     if (!folder) return;
     const modelVoice = modelPubkey;
-    const provider = resolveOpProvider(idx, modelVoice, "receive");
+    const provider = resolveOpProvider(idx, modelVoice, "analyze");
     if (!provider) return;
-    setOpStatus(idx, "running", undefined, "receive");
+    setOpStatus(idx, "running", undefined, "analyze");
     const controller = new AbortController();
     summonAbort.current[idx] = controller;
     try {
       const srcRel = panels[idx].active || "";
       // Pull the folder's focus chain (panel-occupancy history) and render it
       // as the limelight log. focusTimeline never throws; an empty chain (folder
-      // predates focus deltas) yields "" and RECEIVE_MESSAGES tells the model
+      // predates focus deltas) yields "" and the Analyze prompt tells the AI
       // to analyze only what it has.
       let limelightLog = "";
       try {
@@ -10592,12 +10670,18 @@ function App() {
       const inputs: OpInputs = { limelightLog };
       const prepared = await approvedModelOperation(
         idx,
-        "receive",
+        "analyze",
         inputs,
         provider,
         controller.signal,
       );
-      const llmMeta = await prepareLlmMeta(idx, "receive", provider, limelightLog, 2048);
+      const traceLog = prepared.operationInputs.traceLog ?? "";
+      const analysisPrompt = [traceLog, limelightLog].filter(Boolean).join("\n\n");
+      const llmMeta = await prepareLlmMeta(idx, "analyze", provider, analysisPrompt, 2048);
+      const sourceHeadIds = prepared.contextSnapshot.inputs
+        .map((input) => input.headId)
+        .filter((id): id is string => Boolean(id))
+        .filter((id, index, ids) => ids.indexOf(id) === index);
       const result = await executePreparedOperation({
         prepared,
         provider,
@@ -10614,20 +10698,15 @@ function App() {
           const datePrefix = formatLocalSecondStamp(new Date());
           const label = parsed.title
             ? slugifyFilename(parsed.title.replace(/\.md$/i, ""))
-            : `${stem}-receive`;
+            : `${stem}-analysis`;
           const newPath = uniquePath(
             `${srcDir}${datePrefix}-${label}.md`,
             new Set(Object.keys(filesRef.current)),
           );
           const runs = [{ voice: modelVoice, text: parsed.body }];
           editFile(newPath, runs);
+          editCitations(newPath, sourceHeadIds);
           if (llmMeta) setPendingLlmMeta(newPath, llmMeta);
-          mirrorPad(folder.id, newPath, {
-            content: parsed.body,
-            tags: [],
-            nodeId: "",
-            runs,
-          });
           const destIdx = idx + 1;
           spawnPanel(destIdx);
           openInPanel(newPath, destIdx);
@@ -10638,17 +10717,17 @@ function App() {
         return;
       }
       if (result.status === "stale") {
-        setOpStatus(idx, "error", "MODEL response held because focus or the source changed", "receive");
+        setOpStatus(idx, "error", "AI response held because focus or the source changed", "analyze");
         return;
       }
       recordModelLessonResult(prepared, result.response);
-      setOpStatus(idx, "done", undefined, "receive");
+      setOpStatus(idx, "done", undefined, "analyze");
     } catch (e) {
       if (controller.signal.aborted) {
         setOpStatus(idx, "idle");
         return;
       }
-      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e), "receive");
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e), "analyze");
     } finally {
       summonAbort.current[idx] = null;
     }
@@ -10746,7 +10825,7 @@ function App() {
     }
     else if (op === "stir") void stirLLM(idx);
     else if (op === "reply") void replyLLM(idx);
-    else if (op === "receive") void receiveLLM(idx);
+    else if (op === "analyze") void analyzeLLM(idx);
     else if (op === "step" || op === "send") void deliverAsVoice(idx, op);
     else if (op === "attest") {
       // Attest opens the optional note/location modal before any prerequisite
@@ -10833,7 +10912,7 @@ function App() {
     const runId = `run-${startedAtMs.toString(36)}-${short}`;
     const modelRootSecret = modelSecretKey();
     if (!modelRootSecret) {
-      setOpStatus(idx, "error", "unlock a MODEL signing key before running", "run");
+      setOpStatus(idx, "error", "unlock an AI signing key before running", "run");
       return;
     }
     const modelVoice = ensureModelVoice(modelRootSecret, provider.modelId, provider.label);
@@ -10843,6 +10922,54 @@ function App() {
     const stillInWorkspace = () => folderIdRef.current === runWorkspaceId;
     const scopedRead = (path: string) =>
       isRunPath(path) || isInScope(runScopes, runShielded, path);
+    // Agent tools mutate draft files without going through CodeMirror. Record
+    // each tool write as one synthetic atomic KEdit and synchronously journal
+    // it, so their process is as durable as a human editor transaction.
+    const agentDrafts = new Map<string, FileState>();
+    const stageAgentDraft = (path: string, runs: Run[], allowDetached = false): void => {
+      if (!isRunPath(path)) return;
+      if (!stillInWorkspace() && !allowDetached) {
+        controller.abort();
+        return;
+      }
+      const previous = agentDrafts.get(path) ?? filesRef.current[path];
+      const previousText = previous ? flatten(previous.runs) : "";
+      const nextText = flatten(runs);
+      const baseLog = previous?.kedits ?? EMPTY_KEDIT_LOG;
+      const voice = runs.find((run) => run.text.length > 0)?.voice ?? modelVoice.pubkey;
+      const additions = synthesizeKEditTransition(
+        previousText,
+        nextText,
+        voice,
+        Date.now(),
+        nextKEditTx(baseLog),
+      );
+      const nextLog = appendKEditLog(baseLog, additions);
+      const next: FileState = {
+        ...previous,
+        runs,
+        nodeId: previous?.nodeId ?? "",
+        tags: previous?.tags ?? [],
+        updatedAt: Date.now(),
+        ...(nextLog.length > 0 ? { kedits: nextLog } : {}),
+      };
+      agentDrafts.set(path, next);
+      mirrorPad(runWorkspaceId, path, {
+        content: nextText,
+        tags: next.tags,
+        nodeId: next.nodeId,
+        runs,
+        citationIds: next.citationIds,
+        kedits: keditLogToArray(nextLog),
+        voicePubkey: voice,
+      });
+      if (!stillInWorkspace()) return;
+      filesRef.current = { ...filesRef.current, [path]: next };
+      setFilesRef.current((current) => ({
+        ...current,
+        [path]: { ...current[path], ...next },
+      }));
+    };
 
     const ctx: AgentCtx = {
       nostrSecret: modelRootSecret,
@@ -10866,34 +10993,11 @@ function App() {
           scopedRead(p) && (!prefix || p.startsWith(prefix)),
         );
       },
-      writeDraft: (path, runs) =>
-        setFilesRef.current((prev) => {
-          if (!stillInWorkspace() || !isRunPath(path)) {
-            if (!stillInWorkspace()) controller.abort();
-            return prev;
-          }
-          return {
-            ...prev,
-            [path]: { runs, nodeId: prev[path]?.nodeId ?? "", tags: prev[path]?.tags ?? [] },
-          };
-        }),
-      appendDraft: (path, voice, text) =>
-        setFilesRef.current((prev) => {
-          if (!stillInWorkspace() || !isRunPath(path)) {
-            if (!stillInWorkspace()) controller.abort();
-            return prev;
-          }
-          const existing = prev[path];
-          const runs = existing?.runs ?? [];
-          return {
-            ...prev,
-            [path]: {
-              runs: [...runs, { voice, text }],
-              nodeId: existing?.nodeId ?? "",
-              tags: existing?.tags ?? [],
-            },
-          };
-        }),
+      writeDraft: (path, runs) => stageAgentDraft(path, runs),
+      appendDraft: (path, voice, text) => {
+        const existing = agentDrafts.get(path) ?? filesRef.current[path];
+        stageAgentDraft(path, [...(existing?.runs ?? []), { voice, text }]);
+      },
       runPath,
       seedContext: "",
     };
@@ -10930,20 +11034,9 @@ function App() {
       const path = `${runPath}/run.json`;
       const text = serializeAgentRunManifest(manifest);
       const runs = [{ voice: modelVoice.pubkey, text }];
-      if (stillInWorkspace()) {
-        ctx.writeDraft(path, runs);
-      } else {
-        // The old workspace is no longer in React state. Persist the terminal
-        // manifest directly to its crash pad so reopening it shows "stopped"
-        // instead of a stale forever-running record.
-        mirrorPad(runWorkspaceId, path, {
-          content: text,
-          tags: [],
-          nodeId: "",
-          runs,
-          voicePubkey: modelVoice.pubkey,
-        });
-      }
+      // Detached terminal updates still land in the old workspace's pad so a
+      // reopen shows both the final status and its exact transition.
+      stageAgentDraft(path, runs, true);
     };
     writeManifest();
     const stopForWorkspaceChange = () => {
@@ -12055,6 +12148,7 @@ function App() {
         const runs: Run[] = c.content ? [{ voice, text: c.content }] : [];
         const event = await publishEdit({
           prevEventId: null,
+          previousSnapshot: "",
           relativePath: coordinate.relativePath,
           folderId: coordinate.folderId,
           deltas: diffToDeltas("", c.content),
@@ -12064,6 +12158,7 @@ function App() {
           authors: runs,
           signer,
           localOnly: true,
+          kedits: synthesizeKEditTransition("", c.content, voice),
         });
         const folderHead = await upsertManifestEntry(
           coordinate.folderId,
@@ -12107,6 +12202,9 @@ function App() {
       // Open the first imported file in the active panel.
       if (created.length > 0) openInActivePanel(created[0].path);
       setOpStatus(idx, "done", `${created.length} scanned`, "scan");
+      if (onboardingStageRef.current === "scan-file") {
+        advanceOnboarding("file-scanned");
+      }
     } catch (e) {
       for (const c of created) {
         if (!completed.has(c.path)) pendingPaths.current.delete(c.path);
@@ -12256,10 +12354,15 @@ function App() {
         ? [...exported.entries, ...traceSidecarEntries(exported.trace)]
         : exported.entries;
       await reifyToDisk(dest, entries);
+      const reifyConformance = exported.conformance.some(
+        (target) => target.status === "snapshot-only",
+      )
+        ? "snapshot-only"
+        : "full";
       setOpStatus(
         idx,
         "done",
-        `${exported.entries.length} reified${exported.trace ? " + trace" : ""}`,
+        `${exported.entries.length} reified${exported.trace ? " + trace" : ""} · ${traceConformanceLabel(reifyConformance)}`,
         "reify",
       );
     } catch (e) {
@@ -13057,6 +13160,7 @@ function App() {
     // Keystroke playback can expand the recorded edits without refetching.
     const steps: ReplayStep[] = [];
     const chains: Record<string, Event[]> = {};
+    const conformanceVerdicts: TraceConformanceVerdict[] = [];
     for (const [relativePath] of byPath) {
       let chain: Event[];
       try {
@@ -13067,6 +13171,7 @@ function App() {
       }
       if (chain.length === 0) continue;
       chains[relativePath] = chain;
+      conformanceVerdicts.push(await verifyFileTraceChain(chain));
       // The resolved genesis→head chain is authoritative for replay positions.
       // Aggregate folder activity can briefly expose only the directly-fetched
       // live head; filtering back through that lagging list would hide genesis
@@ -13132,6 +13237,11 @@ function App() {
     setReplay({ steps, index: last });
     replayRef.current = { steps, index: last };
     replayChainsRef.current = chains;
+    setReplayConformance(
+      conformanceVerdicts.length > 0
+        ? combineTraceConformance(conformanceVerdicts)
+        : null,
+    );
     setPlaying(false);
     const timingFrames = buildKeditTimeline() ?? [];
     const loadedTimeline = timingFrames.length > 0 ? timingFrames : null;
@@ -13286,6 +13396,7 @@ function App() {
     setReplayTiming(null);
     setReplaySkipNotice(null);
     setReplayLoading(false);
+    setReplayConformance(null);
     setHistoricalActionStatus({});
     setPlaying(false);
     setPlayTimeline(null);
@@ -13999,30 +14110,52 @@ function App() {
 
   function editFile(path: string, runs: Run[], kedits?: KEditLog) {
     const previous = filesRef.current[path];
+    const previousText = previous ? flatten(previous.runs) : "";
+    const nextText = flatten(runs);
+    const baseLog = previous?.kedits ?? EMPTY_KEDIT_LOG;
+    const synthetic = kedits === undefined
+      ? synthesizeKEditTransition(
+          previousText,
+          nextText,
+          runs.find((run) => run.text.length > 0)?.voice ?? authorVoice(),
+          Date.now(),
+          nextKEditTx(baseLog),
+        )
+      : [];
+    const nextLog = kedits ?? appendKEditLog(baseLog, synthetic);
     if (
       onboardingStageRef.current === "awaiting-edit" &&
       previous &&
-      flatten(previous.runs) !== flatten(runs)
+      previousText !== nextText
     ) {
       commitOnboardingStage("awaiting-step");
     }
-    setFiles((prev) => ({
-      ...prev,
-      [path]: {
-        // Preserve any existing nodeId/tags; for a brand-new path (e.g. the
-        // reply flow's optimistic write) prev[path] is undefined, so spread
-        // yields {} — fill the required FileState fields so consumers that
-        // read file.tags / file.nodeId never see undefined.
-        ...prev[path],
+    const nextFile: FileState = {
+      // Preserve any existing nodeId/tags; for a brand-new path (e.g. Reply)
+      // fill the required fields explicitly.
+      ...previous,
+      runs,
+      updatedAt: Date.now(),
+      nodeId: previous?.nodeId ?? "",
+      tags: previous?.tags ?? [],
+      ...(nextLog.length > 0 ? { kedits: nextLog } : {}),
+    };
+    // Journal the exact content+process transaction before waiting for React's
+    // render or the 800ms metadata refresh. A crash after this line can restore
+    // both the buffer and the KEdits that produced it.
+    filesRef.current = { ...filesRef.current, [path]: nextFile };
+    if (folder) {
+      mirrorPad(folder.id, path, {
+        content: nextText,
+        tags: nextFile.tags,
+        nodeId: nextFile.nodeId,
         runs,
-        updatedAt: Date.now(),
-        nodeId: prev[path]?.nodeId ?? "",
-        tags: prev[path]?.tags ?? [],
-        // Mirror the keystroke log into FileState so stepFile (in a different
-        // scope with no editor view access) can drain it. Cleared after step.
-        ...(kedits && kedits.length > 0 ? { kedits } : {}),
-      },
-    }));
+        citationIds: nextFile.citationIds,
+        kedits: keditLogToArray(nextLog),
+        voicePubkey: runs.find((run) => run.text.length > 0)?.voice,
+      });
+    }
+    setFiles((prev) => ({ ...prev, [path]: { ...prev[path], ...nextFile } }));
   }
 
   // Explicit citation edits land in FileState.citationIds — a `q` edge with no
@@ -14032,18 +14165,25 @@ function App() {
   // citation set in their change check.
   // Each id is a sibling file's current head nodeId (resolved from `files`).
   function editCitations(path: string, ids: string[]) {
-    setFiles((prev) =>
-      prev[path]
-        ? {
-            ...prev,
-            [path]: {
-              ...prev[path],
-              updatedAt: Date.now(),
-              citationIds: ids.length > 0 ? ids : undefined,
-            },
-          }
-        : prev,
-    );
+    const previous = filesRef.current[path];
+    if (!previous) return;
+    const next: FileState = {
+      ...previous,
+      updatedAt: Date.now(),
+      citationIds: ids.length > 0 ? ids : undefined,
+    };
+    filesRef.current = { ...filesRef.current, [path]: next };
+    if (folder) {
+      mirrorPad(folder.id, path, {
+        content: flatten(next.runs),
+        tags: next.tags,
+        nodeId: next.nodeId,
+        runs: next.runs,
+        citationIds: next.citationIds,
+        kedits: keditLogToArray(next.kedits),
+      });
+    }
+    setFiles((prev) => prev[path] ? { ...prev, [path]: { ...prev[path], ...next } } : prev);
   }
 
   /** Open an ordinary tree item (file or folder) into a fresh column inserted
@@ -14944,7 +15084,11 @@ function App() {
           folder && bootState === "ready" ? (
             onboardingStage === "welcome" ? (
               <OnboardingWelcome
-                onStart={beginOnboarding}
+                completedLessons={completedOnboardingLessons}
+                canScan={isTauri()}
+                onStartTrace={beginOnboarding}
+                onStartModel={beginModelOnboarding}
+                onStartScan={beginScanOnboarding}
                 onDismiss={dismissOnboarding}
               />
             ) : (
@@ -15849,6 +15993,7 @@ function App() {
                     playheadAt={replayPlayheadAt}
                     loading={replayLoading}
                     latestActionOutput={latestActionOutput}
+                    conformance={replayConformance}
                     containerTitle={
                       replay
                         ? (() => {
@@ -15988,11 +16133,11 @@ function App() {
                   <div
                     className="compose-dialog prompt-inspector-dialog"
                     role="dialog"
-                    aria-label="Held MODEL response"
+                    aria-label="Held AI response"
                     onClick={(event) => event.stopPropagation()}
                   >
                     <div className="run-head">
-                      <h2 className="run-title">MODEL response held</h2>
+                      <h2 className="run-title">AI response held</h2>
                       <button
                         type="button"
                         className="attest-close"
@@ -16070,15 +16215,14 @@ function App() {
               {isOnboardingActive(onboardingStage) && (
                 <OnboardingGuide
                   stage={onboardingStage}
-                  canBringFile={isTauri()}
+                  canScan={isTauri()}
                   onDismiss={dismissOnboarding}
-                  onBringFile={() => {
-                    dismissOnboarding();
-                    void onScan("file");
+                  onOpenLessons={() => {
+                    if (replayRef.current) endReplay();
+                    commitOnboardingStage("welcome");
+                    selectView("editor");
                   }}
-                  onConfigureModel={() => {
-                    beginModelOnboarding();
-                  }}
+                  onScanFile={() => void onScan("file")}
                   lesson={modelLessonResume}
                 />
               )}
@@ -16198,7 +16342,7 @@ function App() {
             </h2>
             <p id="factory-reset-description" className="confirm-message factory-reset-message">
               Erases all local app state, including the root binding, crash pads, secure key
-              vault, MODEL credentials, relay config, voices, models, and layout. On desktop it
+              vault, AI credentials, relay config, voices, models, and layout. On desktop it
               also deletes every event from the local sidecar and resets peer access. The app
               reloads into vault creation, then mints a new root with an empty oblivion. Events
               already sent to remote relays cannot be erased from those relays. There is no undo.

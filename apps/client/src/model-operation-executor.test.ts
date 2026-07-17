@@ -52,7 +52,7 @@ function current(prepared: PreparedOperation): CurrentModelTarget {
   return { ...prepared.targetRevision, focused: true };
 }
 
-for (const operation of ["extend", "settle", "stir", "reply", "receive"] as const) {
+for (const operation of ["extend", "settle", "stir", "reply", "analyze"] as const) {
   test(`${operation} buffers, revalidates, and applies once`, async () => {
     const prepared = fixture(operation);
     const applied: string[] = [];

@@ -1,48 +1,132 @@
-import type { OnboardingStage } from "./onboarding-state.js";
-import type { ModelLessonResume } from "./onboarding-state.js";
+import {
+  ONBOARDING_LESSONS,
+  type ModelLessonResume,
+  type OnboardingLessonId,
+  type OnboardingStage,
+} from "./onboarding-state.js";
 
 export function OnboardingWelcome({
-  onStart,
+  completedLessons,
+  canScan,
+  onStartTrace,
+  onStartModel,
+  onStartScan,
   onDismiss,
 }: {
-  onStart: () => void;
+  completedLessons: readonly OnboardingLessonId[];
+  canScan: boolean;
+  onStartTrace: () => void;
+  onStartModel: () => void;
+  onStartScan: () => void;
   onDismiss: () => void;
 }) {
+  const completed = new Set(completedLessons);
+  const completeCount = ONBOARDING_LESSONS.filter((lesson) => completed.has(lesson)).length;
+  const lessons: Array<{
+    id: OnboardingLessonId;
+    number: string;
+    title: string;
+    summary: string;
+    onStart: () => void;
+    available: boolean;
+  }> = [
+    {
+      id: "trace",
+      number: "01",
+      title: "Make my own trace",
+      summary:
+        "Rewrite one line, Step it, then Replay the change. Learn how text becomes a process you can inspect.",
+      onStart: onStartTrace,
+      available: true,
+    },
+    {
+      id: "ai-context",
+      number: "02",
+      title: "Add AI, learn context",
+      summary:
+        "Choose exactly what the AI can see, inspect the request, then make its contribution replayable.",
+      onStart: onStartModel,
+      available: true,
+    },
+    {
+      id: "scan",
+      number: "03",
+      title: "Scan a file",
+      summary:
+        "Bring outside writing into a private, read-only inbox while keeping its external origin visible.",
+      onStart: onStartScan,
+      available: canScan,
+    },
+  ];
+  const autofocusLesson = lessons.find((lesson) => lesson.available && !completed.has(lesson.id))
+    ?? lessons.find((lesson) => lesson.available);
+
   return (
     <section className="onboarding-welcome" aria-labelledby="onboarding-welcome-title">
-      <div className="onboarding-welcome-proof" aria-hidden="true">
-        <span className="onboarding-proof-line" />
-        <span className="onboarding-proof-node is-first" />
-        <span className="onboarding-proof-node is-second" />
-        <span className="onboarding-proof-node is-third" />
-        <span className="onboarding-proof-stamp">STEP</span>
-      </div>
       <div className="onboarding-welcome-copy">
-        <p className="onboarding-kicker">YOUR FIRST TRACE</p>
-        <h1 id="onboarding-welcome-title">Make the work inspectable.</h1>
+        <p className="onboarding-kicker">LEARN ZINE · THREE SHORT CHAPTERS</p>
+        <h1 id="onboarding-welcome-title">The final text is only half the story.</h1>
         <p className="onboarding-welcome-lede">
-          A trace is a document with signed, replayable history. See who changed
-          it, what changed, and which version was shared.
+          Text shows what survived. A trace preserves the rewrites, pauses,
+          deletions, pastes, and AI contributions that produced it.
         </p>
-        <p className="onboarding-welcome-local">
-          Your drafts stay on this computer until you Send them.
+        <p className="onboarding-welcome-thesis">
+          That process can make AI a better writing assistant. It can see that
+          you rewrote a sentence, how you rewrote it, and what you rejected—richer
+          evidence of your style and values than final prose alone.
         </p>
-        <div className="onboarding-welcome-actions">
-          <button
-            type="button"
-            className="onboarding-primary"
-            onClick={onStart}
-            autoFocus
-          >
-            Create my first trace
-          </button>
-          <button type="button" className="onboarding-secondary" onClick={onDismiss}>
-            Explore on my own
+        <div className="onboarding-trace-proof" aria-hidden="true">
+          <span>draft</span>
+          <span className="onboarding-trace-proof-change">rewrite</span>
+          <span>Step</span>
+          <span className="onboarding-trace-proof-result">Replay</span>
+        </div>
+      </div>
+
+      <div className="onboarding-curriculum" aria-label="Onboarding lessons">
+        <div className="onboarding-curriculum-head">
+          <div>
+            <p className="onboarding-kicker">CHOOSE A CHAPTER</p>
+            <h2>Start anywhere.</h2>
+          </div>
+          <span className="onboarding-progress">
+            {completeCount} / {ONBOARDING_LESSONS.length} complete
+          </span>
+        </div>
+        <div className="onboarding-lesson-list">
+          {lessons.map((lesson) => {
+            const isComplete = completed.has(lesson.id);
+            return (
+              <button
+                key={lesson.id}
+                type="button"
+                className={`onboarding-lesson${isComplete ? " is-complete" : ""}`}
+                onClick={lesson.onStart}
+                disabled={!lesson.available}
+                autoFocus={autofocusLesson?.id === lesson.id}
+              >
+                <span className="onboarding-lesson-number">{lesson.number}</span>
+                <span className="onboarding-lesson-copy">
+                  <strong>{lesson.title}</strong>
+                  <span>{lesson.summary}</span>
+                </span>
+                <span className="onboarding-lesson-status">
+                  {!lesson.available
+                    ? "Desktop only"
+                    : isComplete
+                      ? "Complete · Revisit"
+                      : "Start"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="onboarding-curriculum-foot">
+          <p>No account required. Drafts stay on this computer until you Send them.</p>
+          <button type="button" className="onboarding-text-button" onClick={onDismiss}>
+            Close guide
           </button>
         </div>
-        <p className="onboarding-reassurance">
-          No account or AI model required.
-        </p>
       </div>
     </section>
   );
@@ -51,30 +135,71 @@ export function OnboardingWelcome({
 export function OnboardingGuide({
   stage,
   onDismiss,
-  onBringFile,
-  onConfigureModel,
-  canBringFile,
+  onOpenLessons,
+  onScanFile,
+  canScan,
   lesson,
 }: {
   stage: OnboardingStage;
   onDismiss: () => void;
-  onBringFile: () => void;
-  onConfigureModel: () => void;
-  canBringFile: boolean;
+  onOpenLessons: () => void;
+  onScanFile: () => void;
+  canScan: boolean;
   lesson?: ModelLessonResume;
 }) {
   if (stage === "model-complete") {
     return (
       <div className="onboarding-complete-overlay">
-        <section className="onboarding-complete-card" role="dialog" aria-modal="true" aria-labelledby="model-onboarding-complete-title">
-          <p className="onboarding-kicker">MODEL CONTEXT COMPLETE</p>
-          <h2 id="model-onboarding-complete-title">You controlled what the model knew.</h2>
+        <section
+          className="onboarding-complete-card"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="model-onboarding-complete-title"
+        >
+          <p className="onboarding-kicker">AI CONTEXT COMPLETE</p>
+          <h2 id="model-onboarding-complete-title">You gave the AI a process, not just prose.</h2>
           <p>
-            Focus chose the target. Mounting included the lesson folder. Shielding excluded the private note. Inspector showed the exact request, and the later Step made the MODEL contribution replayable.
+            Focus chose the target. Mounting included the source. Shielding kept
+            the private note out. The Inspector showed the exact request, and
+            Replay made the AI contribution inspectable alongside your own choices.
           </p>
-          <button type="button" className="onboarding-primary" onClick={onDismiss} autoFocus>
-            Continue writing
-          </button>
+          <div className="onboarding-complete-actions">
+            <button type="button" className="onboarding-primary" onClick={onOpenLessons} autoFocus>
+              Back to lessons
+            </button>
+            <button type="button" className="onboarding-text-button" onClick={onDismiss}>
+              Keep writing
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  if (stage === "scan-complete") {
+    return (
+      <div className="onboarding-complete-overlay">
+        <section
+          className="onboarding-complete-card"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="scan-onboarding-complete-title"
+        >
+          <p className="onboarding-kicker">SCAN COMPLETE</p>
+          <h2 id="scan-onboarding-complete-title">The file arrived with its origin intact.</h2>
+          <p>
+            The outside file now lives in the private, read-only Scan inbox. Use
+            it as source material, or adopt it into Root when you want to make it
+            your own.
+          </p>
+          <div className="onboarding-complete-actions">
+            <button type="button" className="onboarding-primary" onClick={onOpenLessons} autoFocus>
+              Back to lessons
+            </button>
+            <button type="button" className="onboarding-text-button" onClick={onDismiss}>
+              Inspect the file
+            </button>
+          </div>
         </section>
       </div>
     );
@@ -90,10 +215,11 @@ export function OnboardingGuide({
           aria-labelledby="onboarding-complete-title"
         >
           <p className="onboarding-kicker">TRACE COMPLETE</p>
-          <h2 id="onboarding-complete-title">You made a trace.</h2>
+          <h2 id="onboarding-complete-title">The rewrite is now part of the work.</h2>
           <p>
-            Your edit is now a signed local checkpoint. If you later Send this
-            version, its recipient can inspect the same history.
+            The final line shows what survived. The trace also preserves what you
+            tried, removed, and rewrote. That richer process can help an AI infer
+            your style and values without making you spell out every rule.
           </p>
           <dl className="onboarding-gestures">
             <div>
@@ -110,25 +236,49 @@ export function OnboardingGuide({
             </div>
           </dl>
           <div className="onboarding-complete-actions">
-            {canBringFile && (
-              <button type="button" className="onboarding-primary" onClick={onBringFile} autoFocus>
-                Bring in a real file
-              </button>
-            )}
-            <button
-              type="button"
-              className={canBringFile ? "onboarding-secondary" : "onboarding-primary"}
-              onClick={onConfigureModel}
-              autoFocus={!canBringFile}
-            >
-              Add an AI model
+            <button type="button" className="onboarding-primary" onClick={onOpenLessons} autoFocus>
+              Back to lessons
             </button>
             <button type="button" className="onboarding-text-button" onClick={onDismiss}>
-              Keep exploring
+              Keep writing
             </button>
           </div>
         </section>
       </div>
+    );
+  }
+
+  if (stage === "scan-file") {
+    return (
+      <aside
+        className="onboarding-coachmark onboarding-coachmark--scan"
+        role="status"
+        aria-live="polite"
+      >
+        <button
+          type="button"
+          className="onboarding-coachmark-dismiss"
+          aria-label="End onboarding"
+          title="End onboarding"
+          onClick={onDismiss}
+        >
+          ×
+        </button>
+        <p className="onboarding-kicker">SCAN · 1 OF 1</p>
+        <h2>Choose one outside file</h2>
+        <p className="onboarding-coachmark-body">
+          Scan keeps the source read-only and visibly external. It does not
+          silently turn someone else’s text into your own.
+        </p>
+        <button
+          type="button"
+          className="onboarding-primary onboarding-coachmark-action"
+          onClick={onScanFile}
+          disabled={!canScan}
+        >
+          {canScan ? "Choose a file" : "Desktop only"}
+        </button>
+      </aside>
     );
   }
 
@@ -137,7 +287,7 @@ export function OnboardingGuide({
       ? {
           step: "PROOF 1 OF 3",
           title: "Change one line",
-          body: "Make it yours—rewrite the sentence or add something new. Your edit stays buffered locally until you Step it.",
+          body: "Rewrite a sentence rather than only adding one. The path from the old words to the new ones is useful context, and it stays local until you Step it.",
           placement: "editor",
         }
       : stage === "awaiting-step"
@@ -158,56 +308,56 @@ export function OnboardingGuide({
             ? {
                 step: "PLAYING YOUR TRACE",
                 title: "Watch the work form",
-                body: "The replay is reading the signed checkpoints and editor actions you just created.",
+                body: "Replay shows the edit as an event, not just a before-and-after snapshot. This is the richer process an AI writing assistant can learn from.",
                 placement: "replaying",
               }
             : stage === "context-focus"
               ? {
-                  step: "MODEL CONTEXT · 2 OF 7",
+                  step: "AI CONTEXT · 2 OF 7",
                   title: "Focus the interview brief",
-                  body: `Click ${lesson?.targetPath ?? "the lesson brief"} in the directory. Its gold left bar means MODEL actions target that file; focusing does not add it to an operation selection.`,
+                  body: `Click ${lesson?.targetPath ?? "the lesson brief"} in the directory. Its gold left bar means AI actions target that file; focusing does not add it to an operation selection.`,
                   placement: "model-focus",
                 }
               : stage === "context-mount"
                 ? {
-                    step: "MODEL CONTEXT · 3 OF 7",
+                    step: "AI CONTEXT · 3 OF 7",
                     title: "Mount the lesson folder",
                     body: `Use the context icon beside ${lesson?.folderPath ?? "the lesson folder"}. The mount decides which neighboring files enter the request; it never changes focus.`,
                     placement: "model-mount",
                   }
                 : stage === "context-shield"
                   ? {
-                      step: "MODEL CONTEXT · 4 OF 7",
+                      step: "AI CONTEXT · 4 OF 7",
                       title: "Shield the private note",
                       body: `Use the context icon beside ${lesson?.excludedPath ?? "the private note"} to exclude it. The source stays mounted; the note becomes an explicit boundary.`,
                       placement: "model-shield",
                     }
                   : stage === "context-inspect"
                     ? {
-                        step: "MODEL CONTEXT · 5 OF 7",
+                        step: "AI CONTEXT · 5 OF 7",
                         title: "Inspect and approve",
-                        body: "Click the token count in the MODEL row. In Extend, verify the focused brief, mounted interview source, shield decision, provider, and exact messages—then Approve.",
+                        body: "Click the token count in the AI row. In Extend, verify the focused brief, mounted interview source, shield decision, provider, and exact messages—then Approve.",
                         placement: "model-inspect",
                       }
                     : stage === "context-run"
                       ? {
-                          step: "MODEL CONTEXT · 6 OF 7",
+                          step: "AI CONTEXT · 6 OF 7",
                           title: "Run the approved request",
                           body: "Click Extend. The complete response is buffered, the focused revision is checked again, and only then is the result applied once.",
                           placement: "model-run",
                         }
                       : stage === "context-step"
                         ? {
-                            step: "MODEL CONTEXT · 7 OF 7",
-                            title: "Step the MODEL contribution",
-                            body: "The result is still local, dirty work. Click Step now to make the MODEL-authored span a signed checkpoint; MODEL execution never Steps automatically.",
+                            step: "AI CONTEXT · 7 OF 7",
+                            title: "Step the AI contribution",
+                            body: "The result is still local, dirty work. Click Step now to make the AI-authored span a signed checkpoint; AI execution never Steps automatically.",
                             placement: "model-step",
                           }
                         : stage === "context-replay"
                           ? {
-                              step: "MODEL CONTEXT · REPLAY",
+                              step: "AI CONTEXT · REPLAY",
                               title: "Replay the exact result",
-                              body: "Press Play. Completion is earned only when Replay reaches the Step containing the exact MODEL span you just approved and applied.",
+                              body: "Press Play. Completion is earned only when Replay reaches the Step containing the exact AI span you just approved and applied.",
                               placement: "model-replay",
                             }
             : null;
