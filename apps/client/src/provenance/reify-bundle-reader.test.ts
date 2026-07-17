@@ -162,6 +162,54 @@ test("allows targets to share ancestry and events while preserving declared orde
   ]);
 });
 
+test("verifies one shared ordered chain only once across multiple targets", async () => {
+  const event = await fileNode("", "shared result");
+  const targets = [
+    await makeTarget("first.md", [event]),
+    await makeTarget("second.md", [event]),
+  ];
+  const subtle = crypto.subtle;
+  const originalDigest = subtle.digest;
+  let digestCalls = 0;
+  subtle.digest = ((algorithm: AlgorithmIdentifier, data: BufferSource) => {
+    digestCalls += 1;
+    return originalDigest.call(subtle, algorithm, data);
+  }) as SubtleCrypto["digest"];
+
+  try {
+    const result = await verifyReifyTraceBundle(
+      makeBundle(targets, [event]),
+      {},
+    );
+
+    assert.equal(digestCalls, 1);
+    assert.deepEqual(
+      result.targets.map((target) => target.recomputedConformance?.status),
+      ["full", "full"],
+    );
+  } finally {
+    subtle.digest = originalDigest;
+  }
+});
+
+test("rejects a bundle whose target indexes exceed the global reference budget", async () => {
+  const event = await fileNode("", "bounded");
+  const validTarget = await makeTarget("valid.md", [event]);
+  const oversizedTarget = await makeTarget("oversized.md", [event], {
+    eventIds: Array.from({ length: 10_000 }, () => event.id),
+  });
+
+  const result = await verifyReifyTraceBundle(
+    makeBundle([validTarget, oversizedTarget], [event]),
+    { "valid.md": "bounded" },
+  );
+
+  assert.equal(result.valid, false);
+  assert.ok(issueCodes(result).includes("event-reference-budget-exceeded"));
+  assert.deepEqual(result.targets[1]?.eventIds, []);
+  assert.equal(result.targets[1]?.recomputedConformance, null);
+});
+
 test("malformed containers and unsupported versions fail closed without throwing", async () => {
   const cases: { name: string; input: unknown; code: string }[] = [
     { name: "null", input: null, code: "invalid-container" },

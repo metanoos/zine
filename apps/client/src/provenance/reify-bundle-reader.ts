@@ -14,6 +14,7 @@ const SIGNATURE_PATTERN = /^[0-9a-f]{128}$/;
 const MAX_TARGETS = 1_000;
 const MAX_EVENTS = 10_000;
 const MAX_EVENT_IDS_PER_TARGET = 10_000;
+const MAX_TOTAL_EVENT_REFERENCES = 10_000;
 const MAX_PATH_LENGTH = 1_024;
 const MAX_EVENT_CONTENT_LENGTH = 16 * 1024 * 1024;
 const MAX_TAGS_PER_EVENT = 4_096;
@@ -380,6 +381,7 @@ async function verifyReifyTraceBundleInternal(
 
   const parsedTargets: ParsedTarget[] = [];
   const seenPaths = new Map<string, number>();
+  let remainingEventReferences = MAX_TOTAL_EVENT_REFERENCES;
   for (let targetIndex = 0; targetIndex < Math.min(rawTargets.length, MAX_TARGETS); targetIndex += 1) {
     const rawTarget = rawTargets[targetIndex];
     let eventIndexUsable = true;
@@ -434,24 +436,33 @@ async function verifyReifyTraceBundleInternal(
     if (nucleusId === null) targetIssue("invalid-nucleus-id", "target nucleusId must be a canonical event id");
 
     const eventIds: string[] = [];
-    if (!Array.isArray(rawTarget.eventIds) || rawTarget.eventIds.length === 0) {
+    const rawEventIds = Array.isArray(rawTarget.eventIds) ? rawTarget.eventIds : null;
+    let parseEventIds = rawEventIds !== null;
+    if (rawEventIds === null || rawEventIds.length === 0) {
       eventIndexUsable = false;
+      parseEventIds = false;
       targetIssue("invalid-event-index", "target eventIds must be a non-empty ordered array");
-    } else if (rawTarget.eventIds.length > MAX_EVENT_IDS_PER_TARGET) {
+    } else if (rawEventIds.length > MAX_EVENT_IDS_PER_TARGET) {
       eventIndexUsable = false;
+      parseEventIds = false;
       targetIssue(
         "event-index-too-large",
         `target eventIds exceeds the ${MAX_EVENT_IDS_PER_TARGET} entry limit`,
       );
+    } else if (rawEventIds.length > remainingEventReferences) {
+      eventIndexUsable = false;
+      parseEventIds = false;
+      targetIssue(
+        "event-reference-budget-exceeded",
+        `trace bundle exceeds the ${MAX_TOTAL_EVENT_REFERENCES} total event-reference limit`,
+      );
+    } else {
+      remainingEventReferences -= rawEventIds.length;
     }
-    if (Array.isArray(rawTarget.eventIds)) {
+    if (parseEventIds && rawEventIds !== null) {
       const seenIds = new Set<string>();
-      for (
-        let eventIndex = 0;
-        eventIndex < Math.min(rawTarget.eventIds.length, MAX_EVENT_IDS_PER_TARGET);
-        eventIndex += 1
-      ) {
-        const eventId = rawTarget.eventIds[eventIndex];
+      for (let eventIndex = 0; eventIndex < rawEventIds.length; eventIndex += 1) {
+        const eventId = rawEventIds[eventIndex];
         if (!isCanonicalId(eventId)) {
           eventIndexUsable = false;
           targetIssue("invalid-indexed-event-id", "target eventIds contains a non-canonical event id");
@@ -702,6 +713,10 @@ async function verifyReifyTraceBundleInternal(
   }
 
   const targetResults: ReifyBundleTargetVerification[] = [];
+  const conformanceByChain = new Map<
+    string,
+    Awaited<ReturnType<typeof verifyFileTraceChain>>
+  >();
   for (let targetIndex = 0; targetIndex < parsedTargets.length; targetIndex += 1) {
     const target = parsedTargets[targetIndex]!;
     let recomputedConformance: ReifyBundleRecomputedConformance | null = null;
@@ -711,10 +726,19 @@ async function verifyReifyTraceBundleInternal(
       ? target.eventIds.map((eventId) => uniqueEvents.get(eventId)?.event ?? null)
       : [];
     if (target.eventIndexUsable && chain.every((event): event is Event => event !== null)) {
-      const verdict = await verifyFileTraceChain(chain, {
-        expectedNucleusId: target.nucleusId ?? undefined,
-        expectedTraceId: target.traceId ?? undefined,
-      });
+      const conformanceKey = JSON.stringify([
+        target.traceId,
+        target.nucleusId,
+        target.eventIds,
+      ]);
+      let verdict = conformanceByChain.get(conformanceKey);
+      if (!verdict) {
+        verdict = await verifyFileTraceChain(chain, {
+          expectedNucleusId: target.nucleusId ?? undefined,
+          expectedTraceId: target.traceId ?? undefined,
+        });
+        conformanceByChain.set(conformanceKey, verdict);
+      }
       recomputedConformance = {
         status: verdict.status,
         issues: verdict.issues.map((issue) => ({ ...issue })),
