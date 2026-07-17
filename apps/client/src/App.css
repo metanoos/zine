@@ -6130,6 +6130,43 @@ html[data-theme="light"] .editor-host {
   font-family: var(--font-mono);
   cursor: pointer;
 }
+.trace-locator-approval {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.75rem;
+  color: var(--ink);
+  background: var(--surface-sunken);
+  border: 1px solid var(--danger, #c33);
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+.trace-locator-approval h3,
+.trace-locator-approval p,
+.trace-locator-approval ul {
+  margin: 0;
+}
+.trace-locator-approval h3 { color: var(--danger, #c33); }
+.trace-locator-approval ul {
+  display: grid;
+  gap: 0.25rem;
+  padding-left: 1.3rem;
+}
+.trace-locator-approval code { overflow-wrap: anywhere; }
+.trace-locator-approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+.trace-locator-approval-actions button {
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+.trace-locator-approval-actions button.is-primary {
+  color: var(--surface-raised);
+  background: var(--danger, #c33);
+  border-color: var(--danger, #c33);
+}
 .trace-locator-result {
   display: grid;
   gap: 0.7rem;

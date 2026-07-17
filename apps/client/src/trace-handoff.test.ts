@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 
-import { openTraceLocator } from "./trace-handoff.js";
+import {
+  openTraceLocator,
+  RelayHintApprovalRequiredError,
+} from "./trace-handoff.js";
 import type { TraceLocator } from "./trace-locator.js";
 
 const SECRET = Uint8Array.from([...new Uint8Array(31), 1]);
@@ -77,6 +80,44 @@ test("desktop handoff opens the exact sent nucleus when private ancestry is unav
   );
   assert.equal(opened.historyComplete, false);
   assert.deepEqual(opened.steps.map((step) => step.snapshot), ["shared result\n"]);
+});
+
+test("sensitive relay hints require exact approval before any loader runs", async () => {
+  const genesis = await node("local handoff\n");
+  const privateRelay = "ws://127.0.0.1:4869";
+  const locator: TraceLocator = {
+    format: "zine-trace-locator",
+    version: 1,
+    kind: "file",
+    rootId: ROOT,
+    traceId: genesis.id,
+    nodeId: genesis.id,
+    relativePath: "result.md",
+    ownerPubkey: OWNER,
+    relayHints: [privateRelay],
+  };
+  let loads = 0;
+  const loadEvents = async () => {
+    loads += 1;
+    return [genesis];
+  };
+
+  await assert.rejects(
+    openTraceLocator(locator, loadEvents),
+    (error) => {
+      assert.ok(error instanceof RelayHintApprovalRequiredError);
+      assert.deepEqual(error.relayHints, [privateRelay]);
+      return true;
+    },
+  );
+  assert.equal(loads, 0);
+
+  const opened = await openTraceLocator(locator, {
+    loadEvents,
+    approvedRelayHints: [privateRelay],
+  });
+  assert.equal(loads > 0, true);
+  assert.equal(opened.steps[0]?.snapshot, "local handoff\n");
 });
 
 test("desktop handoff rejects a locator whose owner claim mismatches the chain", async () => {

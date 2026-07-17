@@ -1,7 +1,16 @@
 import { useMemo, useState } from "react";
 import { diffLines } from "diff";
 
-import { openTraceLocator, type OpenedTrace } from "./trace-handoff.js";
+import {
+  openTraceLocator,
+  RelayHintApprovalRequiredError,
+  type OpenedTrace,
+} from "./trace-handoff.js";
+import {
+  parseTraceLocator,
+  relayHintsRequiringApproval,
+  type TraceLocator,
+} from "./trace-locator.js";
 
 function shortId(value: string): string {
   return value.length > 16 ? `${value.slice(0, 16)}…` : value;
@@ -10,6 +19,10 @@ function shortId(value: string): string {
 export function TraceLocatorModal({ onClose }: { onClose: () => void }) {
   const [input, setInput] = useState("");
   const [opened, setOpened] = useState<OpenedTrace | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<{
+    locator: TraceLocator;
+    relayHints: string[];
+  } | null>(null);
   const [selected, setSelected] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -20,18 +33,40 @@ export function TraceLocatorModal({ onClose }: { onClose: () => void }) {
     [previous?.snapshot, step?.snapshot],
   );
 
-  async function open() {
+  async function loadLocator(locator: TraceLocator, approvedRelayHints: string[]) {
     setBusy(true);
     setError(null);
+    setPendingApproval(null);
     try {
-      const next = await openTraceLocator(input);
+      const next = await openTraceLocator(locator, { approvedRelayHints });
       setOpened(next);
       setSelected(next.steps.length - 1);
     } catch (cause) {
       setOpened(null);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (cause instanceof RelayHintApprovalRequiredError) {
+        setPendingApproval({ locator, relayHints: [...cause.relayHints] });
+      } else {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
       setBusy(false);
+    }
+  }
+
+  function requestOpen() {
+    setError(null);
+    setOpened(null);
+    try {
+      const locator = parseTraceLocator(input);
+      const relayHints = relayHintsRequiringApproval(locator);
+      if (relayHints.length > 0) {
+        setPendingApproval({ locator, relayHints });
+        return;
+      }
+      void loadLocator(locator, []);
+    } catch (cause) {
+      setPendingApproval(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
     }
   }
 
@@ -55,16 +90,48 @@ export function TraceLocatorModal({ onClose }: { onClose: () => void }) {
         <textarea
           className="trace-locator-input"
           value={input}
-          onChange={(event) => setInput(event.target.value)}
+          onChange={(event) => {
+            setInput(event.target.value);
+            setPendingApproval(null);
+          }}
           placeholder="zine-trace:…"
           rows={3}
           spellCheck={false}
         />
         <div className="trace-locator-actions">
-          <button type="button" onClick={() => void open()} disabled={busy || !input.trim()}>
+          <button type="button" onClick={requestOpen} disabled={busy || !input.trim()}>
             {busy ? "Verifying…" : "Open trace"}
           </button>
         </div>
+        {pendingApproval && (
+          <section
+            className="trace-locator-approval"
+            role="alert"
+            aria-labelledby="trace-locator-approval-title"
+          >
+            <h3 id="trace-locator-approval-title">Private or unencrypted connection requested</h3>
+            <p>
+              This locator asks Zine to contact a local/private destination or a plaintext
+              clearnet relay. Continue only if you trust its sender.
+            </p>
+            <ul>
+              {pendingApproval.relayHints.map((hint) => <li key={hint}><code>{hint}</code></li>)}
+            </ul>
+            <div className="trace-locator-approval-actions">
+              <button type="button" onClick={() => setPendingApproval(null)}>Cancel</button>
+              <button
+                type="button"
+                className="is-primary"
+                onClick={() => void loadLocator(
+                  pendingApproval.locator,
+                  pendingApproval.relayHints,
+                )}
+              >
+                Connect to listed relays
+              </button>
+            </div>
+          </section>
+        )}
         {error && <p className="create-error" role="alert">{error}</p>}
         {opened && step && (
           <div className="trace-locator-result">

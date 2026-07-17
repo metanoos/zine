@@ -7,7 +7,12 @@ import {
   sampleRelays,
   sha256HexLocal,
 } from "./provenance.js";
-import { parseTraceLocator, type TraceLocator } from "./trace-locator.js";
+import {
+  parseTraceLocator,
+  unapprovedRelayHints,
+  validateTraceLocator,
+  type TraceLocator,
+} from "./trace-locator.js";
 
 export interface OpenedTraceStep {
   event: Event;
@@ -25,6 +30,22 @@ export interface OpenedTrace {
 }
 
 export type TraceLocatorEventLoader = (ids: readonly string[]) => Promise<Event[]>;
+
+export interface OpenTraceLocatorOptions {
+  loadEvents?: TraceLocatorEventLoader;
+  /** One-shot consent for the exact sensitive relay URLs shown to the user. */
+  approvedRelayHints?: readonly string[];
+}
+
+export class RelayHintApprovalRequiredError extends Error {
+  readonly relayHints: readonly string[];
+
+  constructor(relayHints: readonly string[]) {
+    super("relay approval is required before opening this trace");
+    this.name = "RelayHintApprovalRequiredError";
+    this.relayHints = [...relayHints];
+  }
+}
 
 async function parseStep(event: Event): Promise<OpenedTraceStep> {
   let payload: Record<string, unknown>;
@@ -106,10 +127,22 @@ function verifyNucleus(event: Event, locator: TraceLocator): void {
  * No event is imported into the desktop Root and no new trace is minted. */
 export async function openTraceLocator(
   input: string | TraceLocator,
-  loadEvents?: TraceLocatorEventLoader,
+  loadEventsOrOptions?: TraceLocatorEventLoader | OpenTraceLocatorOptions,
 ): Promise<OpenedTrace> {
-  const locator = typeof input === "string" ? parseTraceLocator(input) : input;
-  const loader = loadEvents ?? ((ids) => defaultLoader(locator, ids));
+  const locator = typeof input === "string"
+    ? parseTraceLocator(input)
+    : validateTraceLocator(input);
+  const options: OpenTraceLocatorOptions = typeof loadEventsOrOptions === "function"
+    ? { loadEvents: loadEventsOrOptions }
+    : loadEventsOrOptions ?? {};
+  const unapproved = unapprovedRelayHints(
+    locator,
+    options.approvedRelayHints,
+  );
+  if (unapproved.length > 0) {
+    throw new RelayHintApprovalRequiredError(unapproved);
+  }
+  const loader = options.loadEvents ?? ((ids) => defaultLoader(locator, ids));
   const exact = (await loader([locator.nodeId])).find((event) => event.id === locator.nodeId);
   if (!exact) throw new Error("could not fetch the trace locator nucleus");
   verifyLocatedEvent(exact, locator);
