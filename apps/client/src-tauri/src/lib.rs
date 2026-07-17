@@ -1,17 +1,18 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+mod llm_proxy;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use futures_util::StreamExt;
-use serde::Serialize;
-use tauri::{ipc::Channel, Manager, path::BaseDirectory};
 use base64::Engine;
+use serde::Serialize;
+use tauri::{path::BaseDirectory, Manager};
 
 static RELAY_SPAWNED: AtomicBool = AtomicBool::new(false);
 const SECRET_VAULT_FILENAME: &str = "zine-secrets.hold";
@@ -504,108 +505,6 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_dir())
-}
-
-// --- LLM fetch proxy ----------------------------------------------------
-//
-// The webview can't reliably `fetch()` cross-origin LLM providers — some
-// responses arrive double-stamped with `Access-Control-Allow-Origin` (e.g.
-// `http://localhost:1420, *`), which browsers reject. Routing the request
-// through native HTTP sidesteps CORS entirely: there's no browser in the loop.
-//
-// SSE streaming is the wrinkle: the caller (llm.ts) passes an `onDelta` to get
-// content chunks as they arrive. A plain `Result` can't deliver mid-flight
-// chunks, so we forward each SSE event over the Tauri `ipc::Channel` as we see
-// it, and resolve `Ok(())` when the stream closes. Protocol-specific JSON
-// parsing stays in JS — Rust only does SSE framing (split on blank line, join
-// `data:` lines), mirroring llm.ts's `consumeSSE`. Non-streaming calls emit one
-// message holding the full body, then resolve.
-
-/// One message forwarded to the webview over `on_event`. For streaming
-/// responses this is a single SSE event's joined `data:` payload; for
-/// non-streaming responses it's the full response body.
-#[tauri::command]
-async fn llm_fetch(
-    url: String,
-    method: String,
-    headers: std::collections::HashMap<String, String>,
-    body: String,
-    stream: bool,
-    on_event: Channel<String>,
-) -> Result<(), String> {
-    let client = reqwest::Client::new();
-    let mut req = match method.to_ascii_uppercase().as_str() {
-        "POST" => client.post(&url),
-        "GET" => client.get(&url),
-        _ => return Err(format!("unsupported method: {method}")),
-    };
-    let mut header_map = reqwest::header::HeaderMap::new();
-    for (k, v) in &headers {
-        let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-            .map_err(|e| format!("bad header name {k:?}: {e}"))?;
-        let value = reqwest::header::HeaderValue::from_str(v)
-            .map_err(|e| format!("bad header value for {k}: {e}"))?;
-        header_map.append(name, value);
-    }
-    req = req.headers(header_map).body(body);
-
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("LLM request failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        let snippet = if text.len() > 500 {
-            format!("{}…", &text[..500])
-        } else {
-            text
-        };
-        return Err(format!("HTTP {}: {}", status.as_u16(), snippet));
-    }
-
-    if !stream {
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| format!("read body: {e}"))?;
-        on_event
-            .send(text)
-            .map_err(|e| format!("ipc send failed: {e}"))?;
-        return Ok(());
-    }
-
-    let mut byte_stream = resp.bytes_stream();
-    let mut buffer = String::new();
-    while let Some(chunk_result) = byte_stream.next().await {
-        let chunk = chunk_result.map_err(|e| format!("stream chunk: {e}"))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(idx) = buffer.find("\n\n") {
-            let raw_event = buffer[..idx].to_string();
-            buffer = buffer[idx + 2..].to_string();
-            let data = extract_sse_data(&raw_event);
-            if data.is_empty() {
-                continue;
-            }
-            on_event
-                .send(data)
-                .map_err(|e| format!("ipc send failed: {e}"))?;
-        }
-    }
-    Ok(())
-}
-
-/// Extract the joined `data:` payload from one raw SSE event block, mirroring
-/// llm.ts's framing: collect every line starting with `data:`, strip the
-/// prefix, trim one leading space, and join the remainder with `\n`. Returns
-/// an empty string for events with no `data:` field (comments, keep-alives).
-fn extract_sse_data(raw_event: &str) -> String {
-    let lines: Vec<&str> = raw_event
-        .lines()
-        .filter_map(|l| l.strip_prefix("data:"))
-        .map(|rest| rest.strip_prefix(' ').unwrap_or(rest))
-        .collect();
-    lines.join("\n")
 }
 
 // --- OpenTimestamps (NIP-03) --------------------------------------------
@@ -1249,7 +1148,7 @@ pub fn run() {
             pick_file,
             scan_external,
             write_text_file,
-            llm_fetch,
+            llm_proxy::llm_fetch,
             stamp_ots,
             upgrade_ots,
             spawn_tor,

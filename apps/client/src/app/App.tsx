@@ -217,21 +217,15 @@ import {
 import { getVoiceProvider, setVoiceProvider } from "../ai/voice-provider-store.js";
 import { getVoicePrompt } from "../ai/voice-prompt-store.js";
 import { loadProviders, type ProviderConfig } from "../ai/models-store.js";
-import {
-  PREPARED_OPERATION_VERSION,
-  PROMPT_LAYER_VERSIONS,
-  PreparedOperationApproval,
-  prepareOperation,
-  type PreparedOperation,
-} from "../ai/prepared-operation.js";
+import type { PreparedOperation } from "../ai/prepared-operation.js";
 import { contentFingerprint } from "../ai/context-snapshot.js";
-import { SnapshotCoordinator, type SnapshotDependencies } from "../ai/snapshot-coordinator.js";
 import { providerProfileFingerprint } from "../ai/provider-fingerprint.js";
+import type { RecoverableModelResult } from "../ai/model-operation-executor.js";
+import { ModelOperationController } from "../ai/model-operation-controller.js";
 import {
-  executePreparedOperation,
-  type CurrentModelTarget,
-  type RecoverableModelResult,
-} from "../ai/model-operation-executor.js";
+  resolveAiPaletteRegistry,
+  type AiPaletteActionId,
+} from "../ai/palette-registry.js";
 import { canSignWithSecrets } from "../identity/secret-store.js";
 import { resetLocalApp } from "./factory-reset.js";
 import { captureKEditTransaction } from "../provenance/kedit-capture.js";
@@ -697,10 +691,10 @@ function isValidTagToken(name: string): boolean {
   return TAG_TOKEN_RE.test(name);
 }
 
-// The four action-palette LLM operations. With a non-empty editor selection, each
+// The action-palette LLM operations. With a non-empty editor selection, each
 // acts on just the selected text (continuing/condensing/reinventing/replying
 // to that range in place); with no selection, each acts on the whole document.
-export type OpKind = "extend" | "settle" | "stir" | "reply" | "analyze" | "step" | "send" | "attest" | "run";
+export type OpKind = AiPaletteActionId | "step" | "send" | "attest";
 
 /** Split flat doc text into preserved bracket spans (`[[ … ]]`, kept verbatim)
  *  and the loose prose between them. The substrate for Settle (condense loose)
@@ -5381,14 +5375,7 @@ function isOpKind(op?: PaletteStatusOp): op is OpKind {
   return op !== undefined && op !== "scan" && op !== "reify" && op !== "fork";
 }
 
-const VOICE_OPS: { op: OpKind; label: string; title: string; cls: string }[] = [
-  { op: "analyze", label: "Analyze", title: "Analyze the writing process from exact trace, Step, and limelight evidence into a cited review", cls: "op-analyze" },
-  { op: "reply", label: "Reply", title: "Write a response into a new doc in the other pane, citing traces", cls: "op-reply" },
-  { op: "extend", label: "Extend", title: "Append an AI continuation to this file", cls: "op-extend" },
-  { op: "stir", label: "Stir", title: "Reinvent loose prose, run (( commands )), preserve [[ anchors ]]", cls: "op-stir" },
-  { op: "settle", label: "Settle", title: "File: condense loose prose, keep brackets. Folder: de-dupe near-duplicate scans into one", cls: "op-settle" },
-  { op: "run", label: "Run", title: "Start an agent run — research and draft in a new subfolder under the current scope", cls: "op-run" },
-];
+const AI_PALETTE_ROW = resolveAiPaletteRegistry()[0];
 
 // Author ops (Step or Mint / Send / Attest) live in the palette's AUTHOR row
 // but are not LLM ops — they step, mint, send, or attest the trace, signed as
@@ -5444,12 +5431,8 @@ function rollAuthorAlias(excluding: string): string {
   return others[Math.floor(Math.random() * others.length)];
 }
 
-// The unconfigured MODEL row has the same small naming affordance as AUTHOR.
-// Once a provider exists, its actual card label replaces this generic alias.
-const MODEL_LABEL_KEY = "zine.modelLabel";
-const MODEL_ALIASES = ["AI", "ASSISTANT", "AUTOMATIC", "AUTOMATON", "LLM"] as const;
-function rollModelAlias(excluding: string): string {
-  const others = MODEL_ALIASES.filter((alias) => alias !== excluding);
+function rollAlias(aliases: readonly string[], excluding: string): string {
+  const others = aliases.filter((alias) => alias !== excluding);
   return others[Math.floor(Math.random() * others.length)];
 }
 
@@ -5966,8 +5949,10 @@ function ActionPalette({
     return stored && (AUTHOR_ALIASES as readonly string[]).includes(stored) ? stored : "AUTHOR";
   });
   const [modelAlias, setModelAlias] = useState<string>(() => {
-    const stored = localStorage.getItem(MODEL_LABEL_KEY);
-    return stored && (MODEL_ALIASES as readonly string[]).includes(stored) ? stored : "AI";
+    const stored = localStorage.getItem(AI_PALETTE_ROW.label.storageKey);
+    return stored && AI_PALETTE_ROW.label.aliases.includes(stored)
+      ? stored
+      : AI_PALETTE_ROW.label.defaultLabel;
   });
 
   // --- ACTIONS gating ---------------------------------------------------
@@ -6120,10 +6105,10 @@ function ActionPalette({
         <button
           type="button"
           className="action-palette-label action-palette-label-clickable"
-          title="Click to update label in view; no effect on behavior"
+          title={AI_PALETTE_ROW.label.rerollTitle}
           onClick={() => {
-            const next = rollModelAlias(modelAlias);
-            localStorage.setItem(MODEL_LABEL_KEY, next);
+            const next = rollAlias(AI_PALETTE_ROW.label.aliases, modelAlias);
+            localStorage.setItem(AI_PALETTE_ROW.label.storageKey, next);
             setModelAlias(next);
           }}
         >
@@ -6133,44 +6118,46 @@ function ActionPalette({
           keys={keys}
           selectedId={modelKeyId}
           onSelect={onChooseModelKey}
-          ariaLabel="AI voice"
+          ariaLabel={AI_PALETTE_ROW.voice.ariaLabel}
         />
         <div className="action-palette-actions">
-          <div className="action-palette-model-cell">
-            <ModelProviderSelect
-              providers={providers}
-              selectedId={resolvedModelProviderId}
-              onSelect={onSelectProvider}
-            />
-          </div>
-          {VOICE_OPS.map((v) => {
-            const isRunning = runningOp === v.op;
+          {AI_PALETTE_ROW.providerSelection.capability === "voice-pinned" && (
+            <div className="action-palette-model-cell">
+              <ModelProviderSelect
+                providers={providers}
+                selectedId={resolvedModelProviderId}
+                onSelect={onSelectProvider}
+              />
+            </div>
+          )}
+          {AI_PALETTE_ROW.actions.map((action) => {
+            const isRunning = runningOp === action.id;
             // extend/stir/settle write INTO the existing file, so they obey the
             // focus-∈-scope invariant (must not mutate content whose chain isn't
             // in context). analyze/reply/run create NEW docs/subfolders (analysis /
             // citing doc / agent run), so they're gated by kind only, not by scope.
-            const createsDoc = v.op === "analyze" || v.op === "reply" || v.op === "run";
+            const createsDoc = action.id === "analyze" || action.id === "reply" || action.id === "run";
             const mutatesTarget = !createsDoc;
-            const baseGate = v.op === "analyze" ? allowTextOps : mutatesTarget ? scopedText : scopedReply;
+            const baseGate = action.id === "analyze" ? allowTextOps : mutatesTarget ? scopedText : scopedReply;
             const enabled =
               isRunning ||
               (!runningOp && hasProviders && baseGate);
             return (
               <button
-                key={v.op}
+                key={action.id}
                 type="button"
-                className={`action-palette-action ${v.cls}${isRunning ? " running" : ""}`}
+                className={`action-palette-action ${action.className}${isRunning ? " running" : ""}`}
                 disabled={!enabled}
                 title={
                   isRunning
-                    ? `${v.label} — running, click to stop`
+                    ? `${action.label} — running, click to stop`
                     : !hasProviders
                       ? "Configure a model in Models to use AI operations"
-                      : v.title
+                      : action.title
                 }
-                onClick={() => (isRunning ? onStop() : onOp(v.op))}
+                onClick={() => (isRunning ? onStop() : onOp(action.id))}
               >
-                {v.label}
+                {action.label}
               </button>
             );
           })}
@@ -8443,15 +8430,13 @@ function App() {
   } = useProvenance(folder, files, replayActiveRef);
   const unsteppedPathSetRef = useRef(unsteppedPathSet);
   unsteppedPathSetRef.current = unsteppedPathSet;
-  const snapshotCoordinatorRef = useRef(new SnapshotCoordinator());
-  const preparedApprovalRef = useRef(new PreparedOperationApproval());
+  const modelOperationControllerRef = useRef<ModelOperationController | null>(null);
   // Drop the context-block delta-log memo whenever the attached folder changes
   // (attach, switch, detach) — memoized chains are keyed by folder id + path,
   // so a stale folder id's entries must not survive into the new one.
   useEffect(() => {
     clearChainMemo();
-    snapshotCoordinatorRef.current.invalidate();
-    preparedApprovalRef.current.invalidate();
+    modelOperationControllerRef.current?.invalidate();
   }, [folder?.id]);
   // End replay when the folder changes (switch/detach): the replay steps and
   // snapshot are keyed to the prior folder's chains and would otherwise drive
@@ -8695,6 +8680,73 @@ function App() {
   );
   const shieldedRef = useRef<Set<string>>(shielded);
   shieldedRef.current = shielded;
+  if (!modelOperationControllerRef.current) {
+    modelOperationControllerRef.current = new ModelOperationController({
+      capture: (panelIndex, modelVoicePubkey) => {
+        const liveFolder = folderRef.current;
+        const activePath = panelsRef.current[panelIndex]?.active ?? "";
+        const liveFocus = uiFocusRef.current;
+        const liveFile = filesRef.current[activePath];
+        return {
+          workspaceId: liveFolder?.id ?? null,
+          activePath,
+          focus: liveFocus
+            ? {
+                kind: liveFocus.kind,
+                path: liveFocus.path ?? "",
+                nodeId: liveFocus.nodeId ?? null,
+                panelIndex: liveFocus.panelIndex,
+                tabPath: liveFocus.tabPath,
+              }
+            : null,
+          target: liveFile && liveFile.kind !== "folder"
+            ? {
+                path: activePath,
+                traceId: liveFile.traceId ?? null,
+                headId: liveFile.nodeId || null,
+                contentHash: contentFingerprint(flatten(liveFile.runs)),
+              }
+            : null,
+          mount: scopeRef.current,
+          shields: [...shieldedRef.current],
+          voicePrompt: getVoicePrompt(modelVoicePubkey) ?? "",
+          dirtyTarget: unsteppedPathSetRef.current.has(activePath),
+          gatherContext: (signal) => {
+            if (!liveFolder) {
+              return Promise.reject(new Error("Open a workspace before running an AI operation"));
+            }
+            return gatherContextSnapshot(
+              liveFolder,
+              filesRef.current,
+              scopeRef.current,
+              activePath,
+              shieldedRef.current,
+              { signal },
+            );
+          },
+        };
+      },
+      readCurrentTarget: (prepared) => {
+        const liveFolder = folderRef.current;
+        const liveFile = filesRef.current[prepared.targetRevision.path];
+        if (!liveFolder || !liveFile || liveFile.kind === "folder") return null;
+        const focus = uiFocusRef.current;
+        return {
+          folderId: liveFolder.id,
+          path: prepared.targetRevision.path,
+          traceId: liveFile.traceId ?? "",
+          headId: liveFile.nodeId,
+          contentHash: contentFingerprint(flatten(liveFile.runs)),
+          focused: Boolean(
+            focus?.kind === "file" &&
+            focus.path === prepared.targetRevision.path &&
+            panelsRef.current[focus.panelIndex]?.active === prepared.targetRevision.path &&
+            !panelsRef.current[focus.panelIndex]?.replayOwned
+          ),
+        };
+      },
+    });
+  }
   useEffect(() => {
     const lesson = modelLessonResume;
     if (!lesson) return;
@@ -9807,107 +9859,6 @@ function App() {
     return provider;
   }
 
-  /** Gather and freeze the one request object shared by estimate, Inspector,
-   *  approval, and transport. Focus is a hard prerequisite: selection and a
-   *  merely-active fallback panel never silently become AI authority. */
-  async function prepareModelOperation(
-    idx: number,
-    operation: PromptOpKind,
-    operationInputs: OpInputs,
-    provider: ProviderConfig,
-    signal?: AbortSignal,
-    lensId: OpLensId = opLenses[operation],
-  ): Promise<PreparedOperation> {
-    if (!folder) throw new Error("Open a workspace before running an AI operation");
-    const focus = uiFocusRef.current;
-    const path = panels[idx]?.active ?? "";
-    if (
-      !focus ||
-      focus.kind !== "file" ||
-      !focus.path ||
-      focus.path !== path ||
-      focus.panelIndex !== idx ||
-      focus.tabPath !== path
-    ) {
-      throw new Error("Focus a live file before running an AI operation");
-    }
-    const file = filesRef.current[path];
-    if (!file || file.kind === "folder") {
-      throw new Error("The focused AI target is not an editable file");
-    }
-    const providerFingerprint = providerProfileFingerprint(provider);
-    const voicePrompt = getVoicePrompt(modelPubkey) ?? "";
-    const dependencies: SnapshotDependencies = {
-      focus: JSON.stringify({
-        kind: focus.kind,
-        path: focus.path,
-        nodeId: focus.nodeId ?? null,
-        panelIndex: focus.panelIndex,
-        tabPath: focus.tabPath,
-      }),
-      targetRevision: JSON.stringify({
-        folderId: folder.id,
-        path,
-        traceId: file.traceId ?? null,
-        headId: file.nodeId || null,
-        contentHash: contentFingerprint(flatten(file.runs)),
-      }),
-      mount: JSON.stringify(scopeRef.current),
-      shields: [...shieldedRef.current].sort(),
-      providerFingerprint,
-      modelVoicePromptHash: contentFingerprint(voicePrompt),
-      lensId,
-      operation,
-      operationInputsHash: contentFingerprint(JSON.stringify(operationInputs)),
-      promptLayerVersions: [
-        ...PROMPT_LAYER_VERSIONS,
-        `prepared-operation:v${PREPARED_OPERATION_VERSION}`,
-      ],
-    };
-    const snapshot = await snapshotCoordinatorRef.current.request(
-      dependencies,
-      (gatherSignal) => gatherContextSnapshot(
-        folder,
-        filesRef.current,
-        scopeRef.current,
-        path,
-        shieldedRef.current,
-        { signal: gatherSignal },
-      ),
-      signal,
-    );
-    return prepareOperation({
-      operation,
-      operationInputs,
-      contextSnapshot: snapshot,
-      provider,
-      modelVoicePubkey: modelPubkey,
-      voicePrompt,
-      lensId,
-      dirtyTarget: unsteppedPathSetRef.current.has(path),
-    });
-  }
-
-  /** Re-prepare current dependencies only to locate the exact session object
-   *  approved in Inspector. Transport receives that object, never the freshly
-   *  rebuilt comparison object. */
-  async function approvedModelOperation(
-    idx: number,
-    operation: PromptOpKind,
-    operationInputs: OpInputs,
-    provider: ProviderConfig,
-    signal?: AbortSignal,
-  ): Promise<PreparedOperation> {
-    const current = await prepareModelOperation(idx, operation, operationInputs, provider, signal);
-    const approved = preparedApprovalRef.current.get(
-      current.provenance.dependencyFingerprint,
-    );
-    if (!approved || approved.operation !== operation) {
-      throw new Error("Inspect and approve this AI request before running it");
-    }
-    return approved;
-  }
-
   // Approximate prompt-size estimate for the token indicator beside the LLM
   // buttons. The number reflects the payload an op would send against the
   // op-target panel's active file (the same target Extend/Settle/Stir/Reply
@@ -9932,12 +9883,14 @@ function App() {
         try {
           const provider = resolveVoiceProvider(modelPubkey);
           if (!provider) throw new Error("No AI provider configured");
-          const prepared = await prepareModelOperation(
-            panelIdx,
-            "extend",
-            { seed: "", hasSelection: false },
+          const prepared = await modelOperationControllerRef.current!.prepare({
+            panelIndex: panelIdx,
+            operation: "extend",
+            operationInputs: { seed: "", hasSelection: false },
             provider,
-          );
+            modelVoicePubkey: modelPubkey,
+            lensId: opLenses.extend,
+          });
           if (!cancelled) setTokenEstimate(prepared.budget.estimatedTokens);
         } catch {
           if (!cancelled) setTokenEstimate(null);
@@ -9971,31 +9924,10 @@ function App() {
   const [staleModelResult, setStaleModelResult] = useState<RecoverableModelResult | null>(null);
 
   useEffect(() => {
-    snapshotCoordinatorRef.current.invalidate();
-    preparedApprovalRef.current.invalidate();
+    modelOperationControllerRef.current!.invalidate();
     setApprovedRequestHash(null);
     setInspectPrepared({});
   }, [folder?.id, files, uiFocus, scope, shielded, providers, modelPubkey, opLenses]);
-
-  function readCurrentModelTarget(prepared: PreparedOperation): CurrentModelTarget | null {
-    const liveFolder = folderRef.current;
-    const liveFile = filesRef.current[prepared.targetRevision.path];
-    if (!liveFolder || !liveFile || liveFile.kind === "folder") return null;
-    const focus = uiFocusRef.current;
-    return {
-      folderId: liveFolder.id,
-      path: prepared.targetRevision.path,
-      traceId: liveFile.traceId ?? "",
-      headId: liveFile.nodeId,
-      contentHash: contentFingerprint(flatten(liveFile.runs)),
-      focused: Boolean(
-        focus?.kind === "file" &&
-        focus.path === prepared.targetRevision.path &&
-        panelsRef.current[focus.panelIndex]?.active === prepared.targetRevision.path &&
-        !panelsRef.current[focus.panelIndex]?.replayOwned
-      ),
-    };
-  }
 
   function recordModelLessonResult(prepared: PreparedOperation, response: string): void {
     const lesson = modelLessonResume;
@@ -10122,14 +10054,14 @@ function App() {
     setInspectPreparing(operation);
     setInspectPreparationError(null);
     try {
-      const prepared = await prepareModelOperation(
-        idx,
+      const prepared = await modelOperationControllerRef.current!.prepare({
+        panelIndex: idx,
         operation,
-        inputs[operation] ?? {},
+        operationInputs: inputs[operation] ?? {},
         provider,
-        undefined,
+        modelVoicePubkey: modelPubkey,
         lensId,
-      );
+      });
       setInspectPrepared((current) => ({ ...current, [operation]: prepared }));
       setInspectContext(prepared.contextSnapshot.renderedBlock);
     } catch (error) {
@@ -10318,23 +10250,21 @@ function App() {
         rangeFrom: anchor,
         rangeTo: anchor,
       };
-      const prepared = await approvedModelOperation(
-        idx,
-        "extend",
-        inputs,
+      const { prepared, result } = await modelOperationControllerRef.current!.executeApproved({
+        panelIndex: idx,
+        operation: "extend",
+        operationInputs: inputs,
         provider,
-        controller.signal,
-      );
-      llmMeta = await prepareLlmMeta(idx, "extend", provider, seed, 4096);
-      const result = await executePreparedOperation({
-        prepared,
-        provider,
+        modelVoicePubkey: pubkey,
+        lensId: opLenses.extend,
         maxTokens: 4096,
         signal: controller.signal,
-        readCurrentTarget: () => readCurrentModelTarget(prepared),
+        beforeExecute: async () => {
+          llmMeta = await prepareLlmMeta(idx, "extend", provider, seed, 4096);
+        },
         onStale: (recovery) => setStaleModelResult(recovery),
-        apply: (response) => {
-          const insertAt = prepared.operationInputs.rangeFrom ?? anchor;
+        apply: (response, approved) => {
+          const insertAt = approved.operationInputs.rangeFrom ?? anchor;
           const prefix = insertAt > 0 && view.state.doc.sliceString(insertAt - 1, insertAt) !== "\n"
             ? "\n"
             : "";
@@ -10411,27 +10341,23 @@ function App() {
         rangeFrom: from,
         rangeTo: to,
       };
-      const prepared = await approvedModelOperation(
-        idx,
-        "settle",
-        inputs,
+      const { prepared, result } = await modelOperationControllerRef.current!.executeApproved({
+        panelIndex: idx,
+        operation: "settle",
+        operationInputs: inputs,
         provider,
-        controller.signal,
-      );
-      const result = await executePreparedOperation({
-        prepared,
-        provider,
+        modelVoicePubkey: pubkey,
+        lensId: opLenses.settle,
         maxTokens: 512,
         signal: controller.signal,
-        readCurrentTarget: () => readCurrentModelTarget(prepared),
         onStale: (recovery) => setStaleModelResult(recovery),
-        apply: (response) => {
+        apply: (response, approved) => {
           const next = restoreSettleAnchors(response, encoded.anchors);
           if (next === text) return;
           view.dispatch({
             changes: {
-              from: prepared.operationInputs.rangeFrom ?? from,
-              to: prepared.operationInputs.rangeTo ?? to,
+              from: approved.operationInputs.rangeFrom ?? from,
+              to: approved.operationInputs.rangeTo ?? to,
               insert: next,
             },
             effects: opVoiceEffect.of(pubkey),
@@ -10502,26 +10428,22 @@ function App() {
         rangeFrom: from,
         rangeTo: to,
       };
-      const prepared = await approvedModelOperation(
-        idx,
-        "stir",
-        inputs,
+      const { prepared, result } = await modelOperationControllerRef.current!.executeApproved({
+        panelIndex: idx,
+        operation: "stir",
+        operationInputs: inputs,
         provider,
-        controller.signal,
-      );
-      const result = await executePreparedOperation({
-        prepared,
-        provider,
+        modelVoicePubkey: pubkey,
+        lensId: opLenses.stir,
         maxTokens: 1024,
         signal: controller.signal,
-        readCurrentTarget: () => readCurrentModelTarget(prepared),
         onStale: (recovery) => setStaleModelResult(recovery),
-        apply: (response) => {
+        apply: (response, approved) => {
           const next = reweaveAnchors(response, text);
           view.dispatch({
             changes: {
-              from: prepared.operationInputs.rangeFrom ?? from,
-              to: prepared.operationInputs.rangeTo ?? to,
+              from: approved.operationInputs.rangeFrom ?? from,
+              to: approved.operationInputs.rangeTo ?? to,
               insert: next,
             },
             effects: opVoiceEffect.of(pubkey),
@@ -10581,22 +10503,21 @@ function App() {
       }
       const traces = palette.slice(0, 20).map((p) => `- "${p.text}" (nodeId ${p.nodeId})`).join("\n");
       const inputs: OpInputs = { source: sourceText, traces };
-      const prepared = await approvedModelOperation(
-        idx,
-        "reply",
-        inputs,
-        provider,
-        controller.signal,
-      );
       const sourceNodeId = filesRef.current[srcRel]?.nodeId || undefined;
-      const llmMeta = await prepareLlmMeta(idx, "reply", provider, sourceText, 1024);
-      if (llmMeta && sourceNodeId) llmMeta.replyingTo = sourceNodeId;
-      const result = await executePreparedOperation({
-        prepared,
+      let llmMeta: LlmStepMeta | null = null;
+      const { prepared, result } = await modelOperationControllerRef.current!.executeApproved({
+        panelIndex: idx,
+        operation: "reply",
+        operationInputs: inputs,
         provider,
+        modelVoicePubkey: modelVoice,
+        lensId: opLenses.reply,
         maxTokens: 1024,
         signal: controller.signal,
-        readCurrentTarget: () => readCurrentModelTarget(prepared),
+        beforeExecute: async () => {
+          llmMeta = await prepareLlmMeta(idx, "reply", provider, sourceText, 1024);
+          if (llmMeta && sourceNodeId) llmMeta.replyingTo = sourceNodeId;
+        },
         onStale: (recovery) => setStaleModelResult(recovery),
         apply: (response) => {
           const parsed = parseReplyOutput(response, true);
@@ -10668,26 +10589,26 @@ function App() {
         /* no focus chain is fine — the persona covers the missing-data case */
       }
       const inputs: OpInputs = { limelightLog };
-      const prepared = await approvedModelOperation(
-        idx,
-        "analyze",
-        inputs,
+      let llmMeta: LlmStepMeta | null = null;
+      let sourceHeadIds: string[] = [];
+      const { prepared, result } = await modelOperationControllerRef.current!.executeApproved({
+        panelIndex: idx,
+        operation: "analyze",
+        operationInputs: inputs,
         provider,
-        controller.signal,
-      );
-      const traceLog = prepared.operationInputs.traceLog ?? "";
-      const analysisPrompt = [traceLog, limelightLog].filter(Boolean).join("\n\n");
-      const llmMeta = await prepareLlmMeta(idx, "analyze", provider, analysisPrompt, 2048);
-      const sourceHeadIds = prepared.contextSnapshot.inputs
-        .map((input) => input.headId)
-        .filter((id): id is string => Boolean(id))
-        .filter((id, index, ids) => ids.indexOf(id) === index);
-      const result = await executePreparedOperation({
-        prepared,
-        provider,
+        modelVoicePubkey: modelVoice,
+        lensId: opLenses.analyze,
         maxTokens: 2048,
         signal: controller.signal,
-        readCurrentTarget: () => readCurrentModelTarget(prepared),
+        beforeExecute: async (approved) => {
+          const traceLog = approved.operationInputs.traceLog ?? "";
+          const analysisPrompt = [traceLog, limelightLog].filter(Boolean).join("\n\n");
+          llmMeta = await prepareLlmMeta(idx, "analyze", provider, analysisPrompt, 2048);
+          sourceHeadIds = approved.contextSnapshot.inputs
+            .map((input) => input.headId)
+            .filter((id): id is string => Boolean(id))
+            .filter((id, index, ids) => ids.indexOf(id) === index);
+        },
         onStale: (recovery) => setStaleModelResult(recovery),
         apply: (response) => {
           const parsed = parseReplyOutput(response, true);
@@ -16184,8 +16105,7 @@ function App() {
                   lensSelections={opLenses}
                   onLensChange={(operation, lensId) => {
                     chooseOpLens(operation, lensId);
-                    snapshotCoordinatorRef.current.invalidate();
-                    preparedApprovalRef.current.invalidate();
+                    modelOperationControllerRef.current!.invalidate();
                     setApprovedRequestHash(null);
                     setInspectPrepared({});
                     void prepareInspectorOperation(operation, inspectInputs, lensId);
@@ -16199,7 +16119,7 @@ function App() {
                     void prepareInspectorOperation(operation);
                   }}
                   onApprove={(prepared) => {
-                    preparedApprovalRef.current.approve(prepared);
+                    modelOperationControllerRef.current!.approve(prepared);
                     setApprovedRequestHash(prepared.preparedRequestHash);
                     if (
                       onboardingStageRef.current === "context-inspect" &&

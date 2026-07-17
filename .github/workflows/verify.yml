@@ -14,6 +14,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  protocol:
+    name: Shared protocol kernel
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: packages/protocol/package-lock.json
+      - run: npm ci
+        working-directory: packages/protocol
+      - run: npm test
+        working-directory: packages/protocol
+
   client:
     name: Client tests and build
     runs-on: ubuntu-22.04
@@ -24,7 +39,7 @@ jobs:
           node-version: "24"
           cache: npm
           cache-dependency-path: apps/client/package-lock.json
-      - run: node --test scripts/dependency-state.test.mjs
+      - run: node --test scripts/dependency-state.test.mjs scripts/test-rust.test.mjs
       - run: npm ci
         working-directory: apps/client
       - run: npm run typecheck
@@ -70,6 +85,13 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
@@ -86,8 +108,7 @@ jobs:
             apps/client/src-tauri/target
           key: rust-${{ runner.os }}-${{ hashFiles('apps/client/src-tauri/Cargo.lock') }}
           restore-keys: rust-${{ runner.os }}-
-      - run: cargo test --locked
-        working-directory: apps/client/src-tauri
+      - run: node scripts/test-rust.mjs
 
   relay-smoke:
     name: Real-relay protocol smoke

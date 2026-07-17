@@ -96,13 +96,47 @@ Relays add synchronization and reachability:
    Do not add it as a read-only peer. In local mode (no owner set), no writer
    entry is needed.
 
-## Install
+## Build and pack
+
+The source build requires Node 24 and a Zine repository checkout because it
+bundles the shared protocol and press modules into one executable file. From
+the repository root:
 
 ```bash
-cd apps/mcp && npm ci && npm run build
+npm ci --prefix apps/mcp
+npm run build --prefix apps/mcp
 ```
 
-This produces `dist/server.js`, exposed as the `zine-mcp` bin.
+This produces `apps/mcp/dist/server.js`. The bundle is exposed as the
+`zine-mcp` bin and has no runtime npm dependencies or monorepo path references.
+Create the intentionally private tarball with:
+
+```bash
+cd apps/mcp
+npm pack
+```
+
+`prepack` rebuilds the bundle. The tarball contains only `README.md`,
+`dist/server.js`, and `package.json`; it excludes source, tests, local state,
+`node_modules`, and unrelated repository files.
+
+To install that artifact in a fresh local project:
+
+```bash
+mkdir /tmp/zine-mcp-local && cd /tmp/zine-mcp-local
+npm init -y
+npm install /absolute/path/to/zine/apps/mcp/zine-mcp-0.1.0.tgz
+./node_modules/.bin/zine-mcp --help
+```
+
+For a `zine-mcp` command available directly on `PATH`, install the same local
+tarball globally with `npm install --global /absolute/path/to/zine-mcp-0.1.0.tgz`.
+That is a local artifact install, not a registry publication.
+
+Public registry publication is deliberately disabled by the package's
+`private` metadata. Registry naming, licensing, signing or attestation, public
+publication, and release automation remain separate release decisions that
+require explicit approval.
 
 ## Configure your harness
 
@@ -110,6 +144,9 @@ MCP clients configure a headless press by spawning a `command` plus `args` over
 stdio. There is no interactive setup or required working directory. Give
 independent agents different `--profile` names; omit it for the default
 profile. Add publication relays only when Send/Attest should be available.
+The examples below use the installed `zine-mcp` command. If the tarball was
+installed in a local project instead of globally, use the absolute path to that
+project's `node_modules/.bin/zine-mcp` as `command`.
 
 ### Claude Desktop
 
@@ -119,9 +156,8 @@ profile. Add publication relays only when Send/Attest should be available.
 {
   "mcpServers": {
     "zine": {
-      "command": "node",
+      "command": "zine-mcp",
       "args": [
-        "/absolute/path/to/zine/apps/mcp/dist/server.js",
         "--profile", "claude",
         "--publish-relay", "wss://relay.example.com"
       ]
@@ -138,9 +174,8 @@ profile. Add publication relays only when Send/Attest should be available.
 {
   "mcpServers": {
     "zine": {
-      "command": "node",
+      "command": "zine-mcp",
       "args": [
-        "/absolute/path/to/zine/apps/mcp/dist/server.js",
         "--profile", "zcode"
       ]
     }
@@ -156,10 +191,8 @@ profile. Add publication relays only when Send/Attest should be available.
 {
   "mcpServers": {
     "zine": {
-      "command": "node",
-      "args": [
-        "/absolute/path/to/zine/apps/mcp/dist/server.js"
-      ]
+      "command": "zine-mcp",
+      "args": []
     }
   }
 }
@@ -206,9 +239,15 @@ reported as `FULL TRACE`; broken signature, hash, or lineage is `INVALID`.
 
 ```bash
 npm run dev    # run via tsx (transpile-on-the-fly)
-npm test       # build/start smoke tests plus unit tests
+npm test       # unit tests plus clean tarball install/help smoke
 npm run build  # typecheck, then bundle the executable to dist/server.js
+npm run test:package  # build, pack, inspect, install offline, and run --help
 ```
+
+The package smoke uses temporary directories, an isolated `HOME` and empty npm
+cache, and npm's offline mode. It installs no runtime dependencies, never starts
+the server past argument parsing, does not contact a relay or provider, and
+removes the tarball and installation project when it finishes.
 
 The protocol gestures and workspace behavior come from the shared client
 modules (`provenance.ts`, `workspace-local.ts`, `identity.ts`,

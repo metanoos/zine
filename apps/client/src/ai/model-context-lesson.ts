@@ -1,7 +1,15 @@
 import { contentFingerprint } from "./context-snapshot.js";
-import type { ModelLessonResume } from "../app/onboarding-state.js";
 
 export const MODEL_CONTEXT_LESSON_VERSION = 1;
+
+export interface ModelLessonResume {
+  folderPath: string;
+  targetPath: string;
+  sourcePath: string;
+  excludedPath: string;
+  resultNodeId?: string;
+  resultSpanHash?: string;
+}
 
 const TARGET_BODY = `# 24-hour working interview
 

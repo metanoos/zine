@@ -2,6 +2,14 @@ import { finalizeEvent, getPublicKey, verifyEvent } from "nostr-tools/pure";
 import type { Event, EventTemplate } from "nostr-tools";
 import type { Filter } from "nostr-tools";
 import { Relay } from "nostr-tools/relay";
+import {
+  parseKEditsFromContent,
+  synthesizeKEditTransition,
+  validateKEditTransition,
+  type KEdit,
+} from "@zine/protocol";
+
+export type { KEdit, KEditIntent } from "@zine/protocol";
 
 import { loadOrCreateVoice, resolveRelayUrl } from "../identity/identity.js";
 import {
@@ -14,8 +22,6 @@ import type { Run } from "../workspace/workspace-core.js";
 import {
   dominantVoiceInRegion,
   flattenRuns,
-  synthesizeKEditTransition,
-  validateKEditTransition,
 } from "../workspace/workspace-core.js";
 import { authorSecretKey, nodeSecretKey } from "../identity/keys-store.js";
 import {
@@ -102,44 +108,6 @@ export interface EditorDelta {
   positionEnd: number;
   newValue: string | null;
   timestamp: number;
-}
-
-/** Semantic editor history action attached to the transaction's concrete text
- *  edits. Ordinary typing/deletion has no intent marker. */
-export type KEditIntent = "undo" | "redo";
-
-/** One range in a discrete authoring transaction. Interactive edits come from
- *  CodeMirror's `iterChanges`; non-editor imports, forks, scans, and tool writes
- *  use one atomic transition. A KEdit is coarser than a DOM keystroke (a
- *  multi-char IME commit or paste is one entry) but finer than a stepped
- *  `EditorDelta`. The complete array since the prior Step is the process log.
- *
- *  Offsets are UTF-16 code units into the PRE-edit document state, matching
- *  the protocol's `EditorDelta.position` convention (§3.3) and how CM's
- *  `iterChanges` reports `fromA`/`toA`. `text` is a clean JS string, so
- *  astral-plane characters (emoji, rare CJK) round-trip correctly even when
- *  `to - from` exceeds the visible glyph count. */
-export interface KEdit {
-  /** `ins` = pure insertion (from === to); `del` = pure deletion (text === "");
-   *  `repl` = replace-over-range (both non-empty). */
-  op: "ins" | "del" | "repl";
-  from: number;
-  to: number;
-  text: string;
-  /** Resolved pen for this edit: op-tagged voice (LLM stream) > facet AUTHOR
-   *  voice > `authorVoice()` fallback. Same resolution as `voiceField`. */
-  voice: string;
-  /** `Date.now()` at the transaction that carried this change. Inter-edit
-   *  spacing is free signal for revision-entropy analysis (vet.ts timing). */
-  t: number;
-  /** Non-negative transaction id scoped to this node's `kedits` array. Every
-   *  range changed by one editor transaction shares the same id and must be
-   *  applied atomically against the same pre-transaction document. */
-  tx: number;
-  /** Present when CodeMirror identifies the transaction as a history action.
-   *  This distinguishes Cmd/Ctrl+Z and redo from a manual inverse edit while
-   *  `op`/`from`/`to`/`text` still carry the replayable document mutation. */
-  intent?: KEditIntent;
 }
 
 /** How an immutable Coin entered the Mint. The content envelope is the
@@ -4420,30 +4388,7 @@ export function reconstructFromChain(chain: Event[]): string {
  * `traceProcessFromEvent` when conformance must distinguish those cases and
  * validate the full transition. */
 export function keditsFromEvent(event: Event): KEdit[] {
-  try {
-    const parsed = JSON.parse(event.content) as { kedits?: unknown[] };
-    return Array.isArray(parsed.kedits) ? parsed.kedits.filter(isKEdit) : [];
-  } catch {
-    return [];
-  }
-}
-
-function isKEdit(value: unknown): value is KEdit {
-  if (!value || typeof value !== "object") return false;
-  const edit = value as Partial<KEdit>;
-  return (
-    (edit.op === "ins" || edit.op === "del" || edit.op === "repl") &&
-    Number.isInteger(edit.from) &&
-    Number.isInteger(edit.to) &&
-    (edit.from as number) >= 0 &&
-    (edit.to as number) >= (edit.from as number) &&
-    typeof edit.text === "string" &&
-    typeof edit.voice === "string" &&
-    Number.isFinite(edit.t) &&
-    Number.isInteger(edit.tx) &&
-    (edit.tx as number) >= 0 &&
-    (edit.intent === undefined || edit.intent === "undo" || edit.intent === "redo")
-  );
+  return parseKEditsFromContent(event.content);
 }
 
 /** Reconstruct per-author runs by replaying the chain. Attribution is sourced

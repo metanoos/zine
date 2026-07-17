@@ -1,0 +1,22 @@
+{
+  "name": "@zine/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./corpus": "./corpus/conformance-v1.json"
+  },
+  "scripts": {
+    "test": "tsc --noEmit && tsx --test src/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "nostr-tools": "^2.23.9",
+    "tsx": "^4.23.0",
+    "typescript": "~5.8.3"
+  }
+}

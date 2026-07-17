@@ -20,6 +20,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import {
+  encodeTraceLocator,
+  inspectFileTraceNucleus,
+  verifyFileTraceChain,
+  type TraceConformanceVerdict,
+  type TraceLocator,
+} from "@zine/protocol";
 import type { Event } from "nostr-tools";
 import { verifyEvent } from "nostr-tools/pure";
 
@@ -56,15 +63,6 @@ import { getOrCreateMintFolder } from "../../client/src/workspace/root.js";
 import { MINT, mintedPath } from "../../client/src/workspace/generated-paths.js";
 import { saveLocalFile } from "../../client/src/workspace/local-store.js";
 import { pendingLocalEventCount } from "../../client/src/provenance/event-outbox.js";
-import {
-  encodeTraceLocator,
-  type TraceLocator,
-} from "../../client/src/provenance/trace-locator.js";
-import {
-  inspectFileTraceNucleus,
-  verifyFileTraceChain,
-  type TraceConformanceVerdict,
-} from "../../client/src/provenance/trace-conformance.js";
 
 /** The headless press's signing key. Seeded on first call, persisted via the
  *  localStorage shim into the selected profile. Distinct from the desktop app's
@@ -202,7 +200,7 @@ async function handoffForEvent(
     ownerPubkey: event.pubkey,
     relayHints: [...new Set(relayHints)],
   };
-  const inspection = await inspectFileTraceNucleus(event, fetchEventById, {
+  const inspection = await inspectFileTraceNucleus(event, fetchEventById, verifyEvent, {
     expectedOwnerPubkey: event.pubkey,
     expectedRootId: rootId,
     expectedRelativePath: relativePath,
@@ -296,7 +294,7 @@ export function registerTools(
     async ({ relativePath }) => {
       const ref = requireFolder(workspace);
       const chain = await fetchChain(ref.id, relativePath);
-      const conformance = await verifyFileTraceChain(chain);
+      const conformance = await verifyFileTraceChain(chain, verifyEvent);
       return jsonResult({
         relativePath,
         conformance,
@@ -343,7 +341,7 @@ export function registerTools(
         summary?: string;
       } | null;
       const meta = eventMeta(event);
-      const inspection = await inspectFileTraceNucleus(event, fetchEventById);
+      const inspection = await inspectFileTraceNucleus(event, fetchEventById, verifyEvent);
       return jsonResult({
         nodeId: event.id,
         kind: event.kind,

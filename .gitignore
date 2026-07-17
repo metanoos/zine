@@ -8,6 +8,8 @@ build/
 
 # compiled relay binary (Go); rebuilt with `cd relay && go build -o zine-relay .`
 relay/zine-relay
+# release relay resource; rebuilt from current source by `npm run dogfood:macos`
+apps/client/src-tauri/binaries/zine-relay
 
 # Tauri / Rust
 apps/client/src-tauri/target/

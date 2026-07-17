@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@zine/protocol": ["../../packages/protocol/src/index.ts"],
+      "@codemirror/state": ["node_modules/@codemirror/state/dist/index.d.ts"],
+      "@codemirror/view": ["node_modules/@codemirror/view/dist/index.d.ts"],
+      "diff": ["node_modules/diff/libesm/index.d.ts"],
+      "nostr-tools": ["node_modules/nostr-tools/lib/types/index.d.ts"],
+      "nostr-tools/*": ["node_modules/nostr-tools/lib/types/*.d.ts"]
+    }
+  }
+}

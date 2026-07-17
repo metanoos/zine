@@ -34,8 +34,7 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "binaries/zine-relay": "binaries/zine-relay",
-      "binaries/tor": "binaries/tor"
+      "binaries/zine-relay": "binaries/zine-relay"
     }
   }
 }

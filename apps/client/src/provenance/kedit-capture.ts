@@ -1,6 +1,7 @@
 import { Transaction } from "@codemirror/state";
+import type { KEdit, KEditIntent } from "@zine/protocol";
 
-import type { KEdit, KEditIntent } from "./provenance.js";
+export { groupKEditsByTransaction } from "@zine/protocol";
 
 /** Preserve the editor's semantic history action when one exists. CodeMirror
  *  supplies these annotations on the inverse/forward transactions generated
@@ -38,19 +39,4 @@ export function captureKEditTransaction(
     });
   });
   return edits;
-}
-
-/** Group consecutive KEdits that share a transaction id. */
-export function groupKEditsByTransaction(kedits: readonly KEdit[]): KEdit[][] {
-  const groups: KEdit[][] = [];
-  for (const edit of kedits) {
-    const previous = groups[groups.length - 1];
-    const previousTx = previous?.[0]?.tx;
-    if (previous && previousTx === edit.tx) {
-      previous.push(edit);
-    } else {
-      groups.push([edit]);
-    }
-  }
-  return groups;
 }
