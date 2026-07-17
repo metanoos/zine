@@ -23,6 +23,11 @@ import {
   voiceSpanStyle,
 } from "./keys-store.js";
 import { getSubstrateVoice } from "./external-voice-store.js";
+import {
+  MemorySecretStore,
+  unlockSecretSession,
+  type SecretStore,
+} from "./secret-store.js";
 
 beforeEach(() => store.clear());
 
@@ -39,6 +44,18 @@ test("fresh keychains keep voices first and infrastructure identities at the tai
   const persisted = store.get("zine.keys") ?? "";
   assert.doesNotMatch(persisted, /secretHex/);
   assert.match(persisted, /secretRef/);
+});
+
+test("unsupported key profiles are not loaded", () => {
+  store.set("zine.keys", JSON.stringify([{
+    id: "old-key",
+    label: "old",
+    secretRef: "nostr:key:old-key",
+    pubkey: "a".repeat(64),
+    identity: DEFAULT_VOICE_PALETTE[0],
+    createdAt: 1,
+  }]));
+  assert.equal(loadKeys().some((key) => key.id === "old-key"), false);
 });
 
 test("fresh-install colors are shuffled without mutating the ROYGBIV palette", () => {
@@ -59,17 +76,17 @@ test("starter roles are independent of their neutral voice labels", () => {
   assert.equal(getNodeKey()?.label, "node-1");
 });
 
-test("new voices continue the voice sequence instead of counting infrastructure keys", () => {
-  const keys = addKey();
+test("new voices continue the voice sequence instead of counting infrastructure keys", async () => {
+  const keys = await addKey();
   assert.equal(keys.at(-1)?.label, "voice-6");
 });
 
-test("filesystem scans reuse the seeded EXTERNAL identity", () => {
+test("filesystem scans reuse the seeded EXTERNAL identity", async () => {
   const before = loadKeys();
   const external = before.find((key) => key.label === "external-1");
   assert.ok(external);
 
-  const voice = getSubstrateVoice("FILESYSTEM");
+  const voice = await getSubstrateVoice("FILESYSTEM");
   assert.equal(voice.publicKey, external.pubkey);
   assert.equal(loadKeys().length, before.length);
 });
@@ -93,4 +110,27 @@ test("foreign voices receive distinct full inline identities", () => {
   assert.equal(second.className, "voice-span");
   assert.match(first.style ?? "", /font-family:/);
   assert.notEqual(first.style, second.style);
+});
+
+test("a failed secret write never publishes an orphaned key profile", async () => {
+  loadKeys();
+  const before = store.get("zine.keys");
+  const failingStore: SecretStore = {
+    get: async () => null,
+    set: async () => { throw new Error("vault write failed"); },
+    delete: async () => {},
+    listRefs: async () => [],
+    capabilities: () => ({ persistent: true, signing: true, model: true }),
+  };
+  await unlockSecretSession(failingStore);
+  try {
+    await assert.rejects(addKey(), /vault write failed/);
+    assert.equal(store.get("zine.keys"), before);
+  } finally {
+    await unlockSecretSession(new MemorySecretStore({
+      persistent: true,
+      signing: true,
+      model: true,
+    }));
+  }
 });

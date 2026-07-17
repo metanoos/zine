@@ -37,8 +37,8 @@ function fileNode(
     kind: 4290,
     tags: [
       ["z", "file"],
-      ["file", "draft.md"],
-      ["folder", "f"],
+      ["F", "draft.md"],
+      ["f", "f"],
       ["action", "edit"],
       ...(prev ? [["e", prev, "", "prev"]] : []),
     ],
@@ -90,16 +90,15 @@ test("forced checkpoint after an edit still reconstructs (snapshot carries throu
   assert.equal(reconstructFromChain([n1, n2, n3]), "hello world");
 });
 
-test("forced checkpoint: deltas:[] with no snapshot falls back to prior content", () => {
-  // A malformed forced node that shed its snapshot but kept deltas:[]
-  // must not zero out the content — reconstructFromChain skips empty deltas
-  // and preserves the running content from the prior node's snapshot.
+test("forced checkpoint: a node without a snapshot is rejected", () => {
   const n1 = fileNode("n1", null, {
     steppedAt: 1000,
     deltas: [{ type: "insert", position: { start: 0, end: 0 }, newValue: "hello", timestamp: 1000 }],
     snapshot: "hello",
   });
-  // n2 has no snapshot field and empty deltas — a reader must still see "hello".
   const n2 = fileNode("n2", "n1", { steppedAt: 2000, deltas: [] });
-  assert.equal(reconstructFromChain([n1, n2]), "hello");
+  assert.throws(
+    () => reconstructFromChain([n1, n2]),
+    /missing its required snapshot/,
+  );
 });

@@ -91,6 +91,21 @@ function composeSettleSystem(): string {
   );
 }
 
+/** Settle (de-dupe) has its own distinct preamble — not a variable of Settle. */
+function composeSettleDedupeSystem(): string {
+  return (
+    `${SYSTEM_PREAMBLE}\n\n` +
+    "YOUR ROLE — Settle (de-dupe): the reconciler. You are given several " +
+    "files that are near-duplicates of the same content (acquired by " +
+    "repeated scans of the same source). Merge them into ONE coherent, " +
+    "complete version: keep every load-bearing idea that appears in ANY " +
+    "copy, reconcile differences by preferring the more specific/complete " +
+    "reading, and drop pure redundancy. You do NOT add new content beyond " +
+    "what the copies contain. You do NOT emit fences, headers, or preamble. " +
+    "Return ONLY the merged text."
+  );
+}
+
 /** The anchor line baked into Stir's system prompt. */
 function stirAnchorLine(anchorCount: number): string {
   return anchorCount > 0
@@ -229,6 +244,19 @@ export function settleMessages(loose: string): ChatMessage[] {
   return [
     { role: "system", content: composeSettleSystem() },
     { role: "user", content: loose },
+  ];
+}
+
+/** Settle (de-dupe): collapse near-duplicate files into one. NOT an inspector
+ *  tab op (it's a folder-scoped variant of Settle), but its preamble lives here
+ *  so the live op and any future reconstructor agree. */
+export function settleDedupeMessages(duplicates: { path: string; content: string }[]): ChatMessage[] {
+  const body = duplicates
+    .map((d, i) => `--- FILE ${i + 1}: ${d.path} ---\n${d.content}`)
+    .join("\n\n");
+  return [
+    { role: "system", content: composeSettleDedupeSystem() },
+    { role: "user", content: body },
   ];
 }
 

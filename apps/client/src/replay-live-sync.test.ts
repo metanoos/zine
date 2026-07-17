@@ -3,11 +3,11 @@ import test from "node:test";
 
 import {
   appendReplayStepsAtLiveEnd,
-  freshMountedReplayHeads,
+  freshSelectedReplayHeads,
   replayHeadSignature,
 } from "./replay-live-sync.js";
 
-test("fresh replay heads include mounted descendants and exclude other mounts", () => {
+test("fresh replay heads include selected descendants and exclude other traces", () => {
   const files = {
     "drafts/a.md": { nodeId: "new-a" },
     "drafts/private/secret.md": { nodeId: "new-secret" },
@@ -16,7 +16,7 @@ test("fresh replay heads include mounted descendants and exclude other mounts", 
   };
 
   assert.deepEqual(
-    freshMountedReplayHeads(
+    freshSelectedReplayHeads(
       files,
       new Set(["known"]),
       [{ kind: "folder", path: "drafts" }],
@@ -69,6 +69,18 @@ test("an empty first timeline is represented by a changed head signature", () =>
   assert.notEqual(
     replayHeadSignature({ "first.md": { nodeId: "first-step" } }),
     replayHeadSignature({}),
+  );
+});
+
+test("an empty activity query still discovers the first selected live head", () => {
+  assert.deepEqual(
+    freshSelectedReplayHeads(
+      { "first.md": { nodeId: "first-step" } },
+      new Set(),
+      [{ kind: "folder", path: "" }],
+      new Set(),
+    ),
+    [{ path: "first.md", nodeId: "first-step" }],
   );
 });
 

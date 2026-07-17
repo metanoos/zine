@@ -19,7 +19,7 @@ export function providerProfileFingerprint(provider: ProviderConfig): string {
     baseUrl: provider.baseUrl,
     modelId: provider.modelId,
     credentialRef: provider.credentialRef,
-    credentialConfigured: provider.credentialConfigured ?? false,
+    credentialConfigured: provider.credentialConfigured,
     reasoningEffort: provider.reasoningEffort ?? null,
     verbosity: provider.verbosity ?? null,
     personality: provider.personality ?? null,

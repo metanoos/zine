@@ -35,10 +35,13 @@ export function voiceNpub(pubkey: string): string {
   }
 }
 
-/** Compact but collision-resistant-on-screen key label (prefix + suffix). */
-export function shortVoiceKey(pubkey: string): string {
-  const key = voiceNpub(pubkey);
-  return key.length > 24 ? `${key.slice(0, 13)}…${key.slice(-6)}` : key;
+/** The value copied for a voice. Raw protocol pubkeys are the default; npub is
+ *  retained as an explicit secondary sharing format. */
+export function voiceKeyForCopy(
+  pubkey: string,
+  format: "pubkey" | "npub" = "pubkey",
+): string {
+  return format === "npub" ? voiceNpub(pubkey) : pubkey;
 }
 
 /**

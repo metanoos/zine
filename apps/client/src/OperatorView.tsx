@@ -16,7 +16,6 @@
  */
 
 import { useState } from "react";
-import { npubEncode } from "nostr-tools/nip19";
 import { Megaphone, Plus, Trash2, ShieldAlert, UserPlus, UserMinus } from "lucide-react";
 import {
   isOperator,
@@ -25,17 +24,7 @@ import {
   type OperatorState,
 } from "./operator-store.js";
 import { loadOrCreateVoice } from "./identity.js";
-
-/** Render a 64-hex pubkey as a short npub (first 14 chars after the prefix),
- *  enough to recognize a key without flooding the row. */
-function shortNpub(pubkey: string): string {
-  try {
-    return npubEncode(pubkey).slice(0, 24) + "…";
-  } catch {
-    // Shouldn't happen for a 64-hex string, but don't crash the view over it.
-    return pubkey.slice(0, 12) + "…";
-  }
-}
+import { PubkeyDisplay } from "./PubkeyDisplay.js";
 
 export function OperatorView({
   state,
@@ -99,7 +88,7 @@ function IdentitySection({
       <h3 className="operator-section-title">Identity</h3>
       <div className="operator-identity-row">
         <span className="operator-identity-label">Operator key</span>
-        <code className="operator-pubkey">{shortNpub(state.operator || "(unbound)")}</code>
+        <PubkeyDisplay pubkey={state.operator || "(unbound)"} className="operator-pubkey" />
         {op && (
           <button type="button" className="operator-inline-btn" onClick={onOpenSetup}>
             Rotate key
@@ -173,7 +162,7 @@ function TeamSection({
         <ul className="operator-list">
           {state.curation_team.map((pk) => (
             <li key={pk} className="operator-list-row">
-              <code className="operator-pubkey">{shortNpub(pk)}</code>
+              <PubkeyDisplay pubkey={pk} className="operator-pubkey" />
               {canEdit && (
                 <button
                   type="button"
@@ -268,7 +257,7 @@ function ModerationSection({
         <ul className="operator-list">
           {state.banned.map((pk) => (
             <li key={pk} className="operator-list-row">
-              <code className="operator-pubkey">{shortNpub(pk)}</code>
+              <PubkeyDisplay pubkey={pk} className="operator-pubkey" />
               <button
                 type="button"
                 className="operator-icon-btn"

@@ -33,13 +33,13 @@ test("folder ownership stays pinned to genesis when a later signer differs", () 
   );
 });
 
-test("legacy UUID-keyed folders fall back to the current head signer", () => {
-  const first = folderNode("first-node", "legacy-owner");
-  const head = folderNode("head-node", "legacy-owner", first.id);
+test("a folder without its genesis event has no verifiable owner", () => {
+  const first = folderNode("first-node", "owner");
+  const head = folderNode("head-node", "owner", first.id);
 
   assert.equal(
-    folderOwnerFromNodes("legacy-folder-uuid", [first, head]),
-    "legacy-owner",
+    folderOwnerFromNodes("missing-genesis", [first, head]),
+    null,
   );
 });
 

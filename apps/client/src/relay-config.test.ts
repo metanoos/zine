@@ -38,6 +38,7 @@ test("a hosted web home remains a publication destination", () => {
 test("loopback classification covers IPv4, IPv6, and invalid URLs", () => {
   assert.equal(isLoopbackRelayUrl("ws://localhost:4869"), true);
   assert.equal(isLoopbackRelayUrl("ws://127.12.0.1:4869"), true);
+  assert.equal(isLoopbackRelayUrl("ws://127.attacker.example:4869"), false);
   assert.equal(isLoopbackRelayUrl("ws://[::1]:4869"), true);
   assert.equal(isLoopbackRelayUrl("ws://0.0.0.0:4869"), true);
   assert.equal(isLoopbackRelayUrl("wss://relay.example.com"), false);

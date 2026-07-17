@@ -11,13 +11,12 @@
  *   3. user   — injected context block + op body
  *
  * This is a pre-send view: there is no attempt to rebuild a past call from
- * incomplete provenance. It reads the same builders as the live operation
- * (op-prompts.ts), so the preview is faithful by construction.
+ * incomplete provenance. App passes the immutable PreparedOperation itself;
+ * this component renders its exact messages and returns that same object when
+ * the user approves it. It never runs prompt builders.
  *
- * The modal is a pure presentation layer: App.tsx derives the per-op inputs
- * (seed from the editor selection, loose prose via partitionDoc, etc.) and the
- * context block, then passes them in. Keeping the editor/parser coupling in
- * App.tsx matches RunModal's pattern (App owns logic, modal is the surface).
+ * The modal is a pure presentation layer. App owns editor/parser coupling,
+ * canonical gathering, preparation, invalidation, and execution.
  *
  * Cheap inputs are derived live (Extend seed, Settle/Stir loose prose). Relay-
  * fetched inputs (Reply's minted traces, Receive's limelight log) are captured

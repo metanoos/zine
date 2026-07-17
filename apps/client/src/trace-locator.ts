@@ -12,6 +12,8 @@ export interface TraceLocator {
 
 const PREFIX = "zine-trace:";
 const HEX_64 = /^[0-9a-f]{64}$/;
+const MAX_LOCATOR_CHARS = 32_768;
+const MAX_RELAY_HINTS = 8;
 
 function encodeBase64Url(text: string): string {
   const bytes = new TextEncoder().encode(text);
@@ -44,14 +46,34 @@ export function validateTraceLocator(value: unknown): TraceLocator {
   if (typeof locator.relativePath !== "string" || !locator.relativePath.trim()) {
     throw new Error("relativePath is required");
   }
-  if (
-    !Array.isArray(locator.relayHints) ||
-    locator.relayHints.length === 0 ||
-    locator.relayHints.some((url) => typeof url !== "string" || !/^wss?:\/\//.test(url))
-  ) {
+  if (!Array.isArray(locator.relayHints) || locator.relayHints.length === 0) {
     throw new Error("relayHints must contain at least one ws:// or wss:// URL");
   }
-  return locator as TraceLocator;
+  const relayHints = [...new Set(locator.relayHints)];
+  if (relayHints.length > MAX_RELAY_HINTS) {
+    throw new Error(`relayHints may contain at most ${MAX_RELAY_HINTS} destinations`);
+  }
+  for (const raw of relayHints) {
+    if (typeof raw !== "string" || raw.length > 2_048) {
+      throw new Error("relayHints contains an invalid URL");
+    }
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw new Error("relayHints contains an invalid URL");
+    }
+    if (
+      (url.protocol !== "ws:" && url.protocol !== "wss:") ||
+      !url.hostname ||
+      url.username ||
+      url.password ||
+      url.hash
+    ) {
+      throw new Error("relayHints must contain plain ws:// or wss:// relay URLs");
+    }
+  }
+  return { ...locator, relayHints } as TraceLocator;
 }
 
 export function encodeTraceLocator(locator: TraceLocator): string {
@@ -60,6 +82,9 @@ export function encodeTraceLocator(locator: TraceLocator): string {
 
 export function parseTraceLocator(input: string): TraceLocator {
   const trimmed = input.trim();
+  if (trimmed.length > MAX_LOCATOR_CHARS) {
+    throw new Error("trace locator is too large");
+  }
   let parsed: unknown;
   try {
     parsed = trimmed.startsWith(PREFIX)

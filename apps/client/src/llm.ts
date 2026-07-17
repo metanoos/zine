@@ -187,8 +187,7 @@ async function callAnthropic(
  *  Rust `llm_fetch` command (native HTTP — the webview's `fetch` can't reliably
  *  reach cross-origin LLM providers: responses arrive with a doubled
  *  `Access-Control-Allow-Origin` that browsers reject). In a plain browser,
- *  fall back to direct `fetch` + `consumeSSE` — same codepath the desktop shell
- *  used before the proxy existed.
+ *  use direct `fetch` + `consumeSSE`.
  *
  *  Browser dev caveat: z.ai's gateway double-stamps `Access-Control-Allow-
  *  Origin`, which no direct fetch survives. `devProxyUrl()` rewrites z.ai URLs

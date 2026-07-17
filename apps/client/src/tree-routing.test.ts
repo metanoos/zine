@@ -11,6 +11,7 @@ test("an empty synthetic Oblivion node activates as a folder, not a file", () =>
     {
       file: (path) => activations.push(`file:${path}`),
       folder: (path) => activations.push(`folder:${path}`),
+      coin: (path) => activations.push(`coin:${path}`),
     },
   );
 
@@ -25,8 +26,39 @@ test("file nodes still activate the file handler", () => {
     {
       file: (path) => activations.push(`file:${path}`),
       folder: (path) => activations.push(`folder:${path}`),
+      coin: (path) => activations.push(`coin:${path}`),
     },
   );
 
   assert.deepEqual(activations, ["file:draft.md"]);
+});
+
+test("files retained in Oblivion are selection-only on row activation", () => {
+  const activations: string[] = [];
+
+  activateTreeItem(
+    { path: "oblivion/2026-07-16_120000/draft.md", type: "file" },
+    {
+      file: (path) => activations.push(`file:${path}`),
+      folder: (path) => activations.push(`folder:${path}`),
+      coin: (path) => activations.push(`coin:${path}`),
+    },
+  );
+
+  assert.deepEqual(activations, []);
+});
+
+test("minted file-shaped nodes activate the coin handler", () => {
+  const activations: string[] = [];
+
+  activateTreeItem(
+    { path: "mint/2026-07-16_120000-quote.md", type: "file", systemKind: "minted" },
+    {
+      file: (path) => activations.push(`file:${path}`),
+      folder: (path) => activations.push(`folder:${path}`),
+      coin: (path) => activations.push(`coin:${path}`),
+    },
+  );
+
+  assert.deepEqual(activations, ["coin:mint/2026-07-16_120000-quote.md"]);
 });

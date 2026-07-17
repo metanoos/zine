@@ -47,9 +47,8 @@ export interface ProviderConfig {
   baseUrl: string;
   modelId: string;
   credentialRef: string;
-  credentialConfigured?: boolean;
-  /** Optional generation controls. Missing means provider/model default, which
-   *  keeps old saved cards backward-compatible and unsupported models usable. */
+  credentialConfigured: boolean;
+  /** Optional generation controls. Missing means provider/model default. */
   reasoningEffort?: ReasoningEffort;
   verbosity?: ModelVerbosity;
   personality?: ModelPersonality;
@@ -141,23 +140,63 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
  *  added. Presets are surfaced separately via `availablePresets()`; nothing
  *  is auto-seeded. */
 export function loadProviders(): ProviderConfig[] {
-  let raw: ProviderConfig[] = [];
+  let raw: unknown[] = [];
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) raw = JSON.parse(stored) as ProviderConfig[];
+    if (stored) raw = JSON.parse(stored) as unknown[];
   } catch {
     raw = [];
   }
   if (!Array.isArray(raw)) raw = [];
-  return raw.map((provider) => {
-    const legacy = provider as ProviderConfig & { apiKey?: string };
-    const { apiKey: plaintext, ...profile } = legacy;
-    return {
-      ...profile,
-      credentialRef: profile.credentialRef || providerCredentialRef(profile.id),
-      credentialConfigured: profile.credentialConfigured ?? Boolean(plaintext),
-    };
+  return raw.flatMap((provider) => {
+    const current = currentProvider(provider);
+    return current ? [current] : [];
   });
+}
+
+function currentProvider(value: unknown): ProviderConfig | null {
+  if (!value || typeof value !== "object") return null;
+  const provider = value as Record<string, unknown>;
+  if (
+    typeof provider.id !== "string" ||
+    !provider.id ||
+    typeof provider.label !== "string" ||
+    (provider.protocol !== "openai" && provider.protocol !== "anthropic") ||
+    typeof provider.baseUrl !== "string" ||
+    typeof provider.modelId !== "string" ||
+    typeof provider.credentialRef !== "string" ||
+    !provider.credentialRef ||
+    typeof provider.credentialConfigured !== "boolean"
+  ) return null;
+  const reasoningEffort = provider.reasoningEffort;
+  const verbosity = provider.verbosity;
+  const personality = provider.personality;
+  if (
+    reasoningEffort !== undefined &&
+    !["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(reasoningEffort))
+  ) return null;
+  if (verbosity !== undefined && !["low", "medium", "high"].includes(String(verbosity))) return null;
+  if (personality !== undefined && !["none", "friendly", "pragmatic"].includes(String(personality))) return null;
+  if (provider.temperature !== undefined && (typeof provider.temperature !== "number" || !Number.isFinite(provider.temperature))) return null;
+  if (provider.maxTokens !== undefined && (typeof provider.maxTokens !== "number" || !Number.isInteger(provider.maxTokens) || provider.maxTokens <= 0)) return null;
+  if (provider.instructions !== undefined && typeof provider.instructions !== "string") return null;
+  if (provider.preset !== undefined && typeof provider.preset !== "string") return null;
+  return {
+    id: provider.id,
+    label: provider.label,
+    protocol: provider.protocol,
+    baseUrl: provider.baseUrl,
+    modelId: provider.modelId,
+    credentialRef: provider.credentialRef,
+    credentialConfigured: provider.credentialConfigured,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort: reasoningEffort as ReasoningEffort }),
+    ...(verbosity === undefined ? {} : { verbosity: verbosity as ModelVerbosity }),
+    ...(personality === undefined ? {} : { personality: personality as ModelPersonality }),
+    ...(provider.temperature === undefined ? {} : { temperature: provider.temperature as number }),
+    ...(provider.maxTokens === undefined ? {} : { maxTokens: provider.maxTokens as number }),
+    ...(provider.instructions === undefined ? {} : { instructions: provider.instructions }),
+    ...(provider.preset === undefined ? {} : { preset: provider.preset }),
+  };
 }
 
 /** Presets not yet represented in the saved list — what the "add provider"
@@ -169,12 +208,22 @@ export function availablePresets(existing: ProviderConfig[] = loadProviders()): 
 
 /** Persist the provider list. */
 export function saveProviders(providers: ProviderConfig[]): void {
-  const profiles = providers.map((provider) => {
-    const { apiKey: _plaintext, ...profile } = provider as ProviderConfig & {
-      apiKey?: string;
-    };
-    return profile;
-  });
+  const profiles = providers.map((provider) => ({
+    id: provider.id,
+    label: provider.label,
+    protocol: provider.protocol,
+    baseUrl: provider.baseUrl,
+    modelId: provider.modelId,
+    credentialRef: provider.credentialRef,
+    credentialConfigured: provider.credentialConfigured,
+    ...(provider.reasoningEffort === undefined ? {} : { reasoningEffort: provider.reasoningEffort }),
+    ...(provider.verbosity === undefined ? {} : { verbosity: provider.verbosity }),
+    ...(provider.personality === undefined ? {} : { personality: provider.personality }),
+    ...(provider.temperature === undefined ? {} : { temperature: provider.temperature }),
+    ...(provider.maxTokens === undefined ? {} : { maxTokens: provider.maxTokens }),
+    ...(provider.instructions === undefined ? {} : { instructions: provider.instructions }),
+    ...(provider.preset === undefined ? {} : { preset: provider.preset }),
+  }));
   localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
 }
 

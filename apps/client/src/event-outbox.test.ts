@@ -28,7 +28,7 @@ function event(path: string, previous?: string) {
     tags: [
       ["z", "file"],
       ["F", path],
-      ["D", "a".repeat(64)],
+      ["f", "a".repeat(64)],
       ...(previous ? [["e", previous, "", "prev"]] : []),
     ],
     content: JSON.stringify({ snapshot: path }),

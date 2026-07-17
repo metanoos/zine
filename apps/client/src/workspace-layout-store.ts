@@ -31,7 +31,7 @@ export interface WorkspaceLayout {
   // The per-tab surface (preview | markdown | diff). Kept as a literal union
   // rather than importing Mode from brackets.ts to avoid a module cycle (App
   // imports this store). The values are stored verbatim, so a newly added
-  // surface round-trips without a migration.
+  // surface round-trips directly.
   tabModes: Record<string, "preview" | "markdown" | "diff">;
   activePanel: number;
   panelWeights: number[];

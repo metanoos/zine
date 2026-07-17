@@ -32,6 +32,30 @@ export interface AboutDocumentTarget {
   sectionId?: string;
 }
 
+/** Format zero-based document/section positions as editorial folios. */
+export function aboutFolio(documentIndex: number, sectionIndex?: number): string {
+  const documentNumber = String(documentIndex + 1);
+  if (sectionIndex === undefined) return documentNumber;
+  return `${documentNumber}.${sectionIndex + 1}`;
+}
+
+/** Find the visible folio for an internal About link target. */
+export function aboutTargetFolio(
+  documents: readonly AboutDocument[],
+  target: AboutDocumentTarget,
+): string | null {
+  const documentIndex = documents.findIndex(({ id }) => id === target.documentId);
+  if (documentIndex < 0) return null;
+  if (!target.sectionId) return aboutFolio(documentIndex);
+
+  const sectionIndex = documents[documentIndex].sections.findIndex(
+    ({ id }) => id === target.sectionId,
+  );
+  return sectionIndex < 0
+    ? aboutFolio(documentIndex)
+    : aboutFolio(documentIndex, sectionIndex);
+}
+
 const DOCUMENT_BY_FILENAME: Record<string, AboutDocumentId> = {
   "PRODUCT.MD": "product",
   "PROTOCOL.MD": "protocol",

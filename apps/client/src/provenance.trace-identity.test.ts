@@ -41,7 +41,7 @@ test("trace identity is the genesis reached through prev links", async () => {
   assert.equal(await resolveTraceIdentity("a2", loader(events)), "g");
 });
 
-test("an exact manifest head recovers a legacy chain without a coordinate lookup", async () => {
+test("an exact folder-member head resolves a renamed chain without coordinates", async () => {
   const genesis = node("g");
   genesis.tags.push(["F", "old-name.md"]);
   const moved = node("a1", "g");

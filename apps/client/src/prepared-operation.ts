@@ -41,7 +41,6 @@ export interface PreparedOperation {
     modelVoicePubkey: string;
     lensId: OpLensId;
     voicePromptHash: string;
-    focusFingerprint: string;
     dependencyFingerprint: string;
   };
   budget: {
@@ -63,7 +62,6 @@ export interface PrepareOperationInput {
   modelVoicePubkey: string;
   voicePrompt?: string;
   lensId: OpLensId;
-  focusFingerprint: string;
   dirtyTarget: boolean;
   requestId?: string;
   createdAt?: number;
@@ -153,7 +151,6 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
     providerFingerprint,
     modelVoicePubkey: input.modelVoicePubkey,
     voicePromptHash,
-    focusFingerprint: input.focusFingerprint,
     lensId: input.lensId,
     promptLayerVersions: PROMPT_LAYER_VERSIONS,
   }));
@@ -191,7 +188,6 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
       modelVoicePubkey: input.modelVoicePubkey,
       lensId: input.lensId,
       voicePromptHash,
-      focusFingerprint: input.focusFingerprint,
       dependencyFingerprint,
     },
     budget: {

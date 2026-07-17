@@ -11,8 +11,7 @@
  *  1. buildAuthors / parseAuthors round-trip (and rejection of mismatches).
  *  2. reconstructRunsFromChain adopts a valid `authors` map verbatim, so a
  *     multi-author document keeps its attribution instead of collapsing.
- *  3. The legacy path (no `authors`) still degrades to per-node-signer, so old
- *     chains read exactly as before.
+ *  3. A node without `authors` uses per-node-signer attribution.
  *
  * Wire shape is `{v, len, src?}` per protocol §3.6: runs carry NO text (the
  * body lives once, in `snapshot`), only a UTF-16 length. parseAuthors
@@ -271,7 +270,7 @@ test("reconstructRunsFromChain: tag-only node with authors preserves attribution
 
 test("reconstructRunsFromChain: a stale/mismatched authors map falls back to signer", () => {
   // If authors lengths don't sum to snapshot, parseAuthors returns null and
-  // the node degrades to per-node-signer attribution (the legacy path). This
+  // the node degrades to per-node-signer attribution. This
   // is the integrity guard: a forged or drifted map can't mis-attribute.
   const chain: FakeEvent[] = [
     {
@@ -287,10 +286,10 @@ test("reconstructRunsFromChain: a stale/mismatched authors map falls back to sig
   assert.deepEqual(runs, [{ voice: B, text: "actual content" }]);
 });
 
-// --- reconstructRunsFromChain: legacy path preserved ----------------------
+// --- reconstructRunsFromChain: signer-default path ------------------------
 
-test("reconstructRunsFromChain: legacy nodes (no authors) attribute by signer", () => {
-  // Old chains have no authors field. A genesis by A, then an edit by B that
+test("reconstructRunsFromChain: nodes without authors attribute by signer", () => {
+  // A genesis by A, then an edit by B that
   // inserts text — B's insert is attributed to B, A's surrounding text to A.
   const chain: FakeEvent[] = [
     {
@@ -325,16 +324,16 @@ test("reconstructRunsFromChain: empty chain yields []", () => {
   assert.deepEqual(reconstructRunsFromChain([]), []);
 });
 
-test("reconstructRunsFromChain: mixed chain (legacy then authored) snaps at the authored node", () => {
-  // A legacy genesis (no authors, signer A), then a modern edit node carrying
-  // authors. The modern node's authors map is adopted verbatim — it describes
-  // the whole resulting document, so the legacy genesis's attribution is
+test("reconstructRunsFromChain: a later authors snapshot replaces signer-default attribution", () => {
+  // A signer-attributed genesis, then an edit node carrying authors. The later
+  // authors map is adopted verbatim — it describes the whole resulting document,
+  // so the genesis's attribution is
   // superseded by the map at the point the map arrives.
   const chain: FakeEvent[] = [
     {
       id: "g1",
       pubkey: A,
-      content: nodeContent({ snapshot: "hello world" }), // legacy, no authors
+      content: nodeContent({ snapshot: "hello world" }),
     },
     {
       id: "e1",
@@ -357,11 +356,9 @@ test("reconstructRunsFromChain: mixed chain (legacy then authored) snaps at the 
   ]);
 });
 
-test("reconstructRunsFromChain: legacy authors map beats an unannotated body delta", () => {
-  // Nodes written before per-delta attribution carried a complete `authors`
-  // map but no delta-level `author` field or `voices` table. The body delta's
-  // missing author must not default the inserted MODEL text to the step signer
-  // (typically AUTHOR/OPERATOR) and override the older, valid carrier.
+test("reconstructRunsFromChain: body deltas take priority over an authors map", () => {
+  // Current nodes treat per-delta attribution as primary. An unannotated body
+  // delta belongs to the signer even if a conflicting authors map is present.
   const chain: FakeEvent[] = [
     {
       id: "g1",
@@ -390,8 +387,7 @@ test("reconstructRunsFromChain: legacy authors map beats an unannotated body del
   ];
 
   assert.deepEqual(reconstructRunsFromChain(chain as never), [
-    { voice: A, text: "human " },
-    { voice: B, text: "model" },
+    { voice: A, text: "human model" },
   ]);
 });
 
@@ -400,13 +396,12 @@ test("reconstructRunsFromChain: legacy authors map beats an unannotated body del
 // Body-edit deltas now carry an OPTIONAL `author` index into a node-local
 // `voices` table. Reconstruction's Tier-2 (delta-insert path) resolves each
 // delta's voice through that table, defaulting to the signer when the index is
-// absent, missing, or out of range. A valid legacy `authors` map short-circuits
-// only when no body delta carries the newer marker — these tests pin both the
-// per-delta path and that overlap policy.
+// absent, missing, or out of range. These tests pin the per-delta path and its
+// priority over the node-snapshot carrier.
 
 test("attributeDeltas: mono-author delta (signer) leaves authorIndex unset, no voices", () => {
   // A delta whose dominant voice is the signer emits no authorIndex and no
-  // voices table — the wire stays byte-identical to the legacy form.
+  // voices table, keeping mono-author nodes compact.
   const deltas: EditorDelta[] = [
     { type: "insert", positionStart: 0, positionEnd: 0, newValue: "hello", timestamp: 1 },
   ];
@@ -480,7 +475,7 @@ test("reconstructRunsFromChain: per-delta author attributes insert to the named 
 
 test("reconstructRunsFromChain: delta with no author field defaults to signer", () => {
   // The default-to-signer rule: a delta without `author` attributes to
-  // event.pubkey, same as the legacy path.
+  // event.pubkey.
   const chain: FakeEvent[] = [
     {
       id: "e1",

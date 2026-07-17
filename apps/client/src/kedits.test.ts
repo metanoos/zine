@@ -8,13 +8,11 @@
  *  1. Wire shape — a node carrying `kedits` round-trips through JSON, and the
  *     `KEdit` entries read back equal to what was stepped. This is the contract
  *     any reader (the press, a peer's relay, a future replay UI) depends on.
- *  2. Backward compat — `reconstructFromChain` still resolves content from
- *     `snapshot` when `kedits` is present. Old readers ignore the field; the
- *     snapshot stays authoritative (§R1).
+ *  2. Snapshot authority — `reconstructFromChain` resolves content from
+ *     `snapshot` when `kedits` is present (§R1).
  *  3. History intent — real CodeMirror undo/redo transactions retain their
  *     semantic action instead of becoming indistinguishable inverse edits.
- *  4. Transaction grouping — every range in a multi-range edit shares `tx`,
- *     while legacy entries without `tx` remain independently replayable.
+ *  4. Transaction grouping — every range in a multi-range edit shares `tx`.
  *
  * What's NOT tested here: the `keditField` StateField itself and the
  * drain-in-stepFile path (both need the full App harness). The capture helper
@@ -51,8 +49,8 @@ function fileNode(
     kind: 4290,
     tags: [
       ["z", "file"],
-      ["file", "draft.md"],
-      ["folder", "f"],
+      ["F", "draft.md"],
+      ["f", "f"],
       ["action", "edit"],
       ...(prev ? [["e", prev, "", "prev"]] : []),
     ],
@@ -79,7 +77,7 @@ function classifyOp(from: number, to: number, text: string): KEdit["op"] {
 const VOICE = "pk-author";
 
 function kedit(from: number, to: number, text: string, t = 1000): KEdit {
-  return { op: classifyOp(from, to, text), from, to, text, voice: VOICE, t };
+  return { op: classifyOp(from, to, text), from, to, text, voice: VOICE, t, tx: t };
 }
 
 test("op classification: pure insert (from === to)", () => {
@@ -177,14 +175,13 @@ test("capture: every range in one history transaction shares tx and intent", () 
   assert.deepEqual(captured.map((edit) => edit.intent), ["undo", "undo"]);
 });
 
-test("grouping: legacy entries remain singletons and tx groups stay atomic", () => {
+test("grouping keeps adjacent transaction ranges atomic", () => {
   const groups = groupKEditsByTransaction([
     { ...kedit(0, 0, "a"), tx: 0 },
     { ...kedit(2, 2, "c"), tx: 0 },
-    kedit(1, 1, "b"),
     { ...kedit(3, 3, "d"), tx: 1 },
   ]);
-  assert.deepEqual(groups.map((group) => group.length), [2, 1, 1]);
+  assert.deepEqual(groups.map((group) => group.length), [2, 1]);
 });
 
 // --- wire shape: kedits round-trips through JSON ----------------------------
@@ -224,9 +221,9 @@ test("wire shape: a node without kedits omits the field (not null)", () => {
   assert.equal(parsed.kedits, undefined, "kedits absent (not null) when buffer empty");
 });
 
-// --- backward compat: snapshot stays authoritative when kedits is present ----
+// --- snapshots stay authoritative when kedits are present ------------------
 
-test("backward compat: reconstructFromChain ignores kedits, uses snapshot", () => {
+test("reconstructFromChain ignores kedits and uses snapshot", () => {
   // A node carries kedits AND a snapshot. Reconstruction must yield the
   // snapshot — kedits is advisory, never spliced into content.
   const node = fileNode("n1", null, {
@@ -241,7 +238,7 @@ test("backward compat: reconstructFromChain ignores kedits, uses snapshot", () =
   assert.equal(reconstructFromChain([node]), "the final text");
 });
 
-test("backward compat: chain of kedits-carrying nodes reconstructs linearly", () => {
+test("a chain of kedits-carrying nodes reconstructs linearly", () => {
   // Three steps, each carrying kedits. Content reconstruction walks snapshots.
   const n1 = fileNode("n1", null, {
     steppedAt: 1000, deltas: [], snapshot: "v1", kedits: [kedit(0, 0, "v1")],
@@ -311,12 +308,21 @@ test("keditsFromEvent: reads the kedits array from a node's content JSON", () =>
   assert.deepEqual(out[1], kedits[1]);
 });
 
-test("keditsFromEvent: returns [] when the node has no kedits field (backward compat)", () => {
-  // A pre-kedits node or a forced no-op Step: no kedits on the wire.
+test("keditsFromEvent: returns [] when a no-op node has no kedits field", () => {
   const node = fileNode("n1", null, {
     steppedAt: 1000,
     deltas: [],
     snapshot: "old content",
+  });
+  assert.deepEqual(keditsFromEvent(node), []);
+});
+
+test("keditsFromEvent: discards entries without a current tx id", () => {
+  const node = fileNode("n1", null, {
+    steppedAt: 1000,
+    deltas: [],
+    snapshot: "x",
+    kedits: [{ op: "ins", from: 0, to: 0, text: "x", voice: VOICE, t: 1 } as KEdit],
   });
   assert.deepEqual(keditsFromEvent(node), []);
 });

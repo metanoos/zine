@@ -44,14 +44,14 @@ test("adding a preset copies its model default into the saved provider", () => {
   assert.equal(provider.modelId, "glm-5.2");
 });
 
-test("generation options round-trip while legacy cards remain valid", () => {
+test("generation options round-trip while omitted controls use provider defaults", () => {
   store.clear();
   const preset = PROVIDER_PRESETS.find((candidate) => candidate.slug === "openai");
   assert.ok(preset);
   const [created] = addProviderFromPreset(preset);
 
-  // Newly added and legacy persisted cards omit optional controls so provider
-  // defaults continue to apply until the user chooses an override.
+  // Newly added cards omit optional controls so provider defaults continue to
+  // apply until the user chooses an override.
   assert.equal(created.reasoningEffort, undefined);
   assert.equal(created.personality, undefined);
   assert.equal(created.maxTokens, undefined);
@@ -84,4 +84,17 @@ test("provider credentials never enter the serialized card profile", async () =>
   const persisted = store.get("zine.models") ?? "";
   assert.doesNotMatch(persisted, /sk-never-serialize|apiKey/);
   assert.match(persisted, /credentialRef/);
+});
+
+test("provider records without the current credential state are rejected", () => {
+  store.clear();
+  store.set("zine.models", JSON.stringify([{
+    id: "old-provider",
+    label: "Old",
+    protocol: "openai",
+    baseUrl: "https://example.com/v1",
+    modelId: "example",
+    credentialRef: "model:provider:old-provider:api-key",
+  }]));
+  assert.deepEqual(loadProviders(), []);
 });

@@ -35,4 +35,18 @@ test("trace locators reject folder ambiguity and unsafe relay hints", () => {
     () => parseTraceLocator(JSON.stringify({ ...LOCATOR, relayHints: ["https://example.com"] })),
     /relayHints/,
   );
+  assert.throws(
+    () => parseTraceLocator(JSON.stringify({
+      ...LOCATOR,
+      relayHints: Array.from({ length: 9 }, (_, index) => `wss://relay-${index}.example.com`),
+    })),
+    /at most 8/,
+  );
+  assert.throws(
+    () => parseTraceLocator(JSON.stringify({
+      ...LOCATOR,
+      relayHints: ["wss://user:secret@relay.example.com"],
+    })),
+    /plain ws/,
+  );
 });

@@ -39,7 +39,6 @@ export class StrongholdSecretStore implements SecretStore {
       client = await stronghold.loadClient(CLIENT_NAME);
     } catch {
       client = await stronghold.createClient(CLIENT_NAME);
-      await stronghold.save();
     }
     return new StrongholdSecretStore(stronghold, client.getStore());
   }
@@ -50,9 +49,15 @@ export class StrongholdSecretStore implements SecretStore {
   }
 
   async set(ref: string, value: Uint8Array): Promise<void> {
+    await this.setMany([[ref, value]]);
+  }
+
+  async setMany(entries: ReadonlyArray<readonly [string, Uint8Array]>): Promise<void> {
     const refs = new Set(await this.readRefs());
-    refs.add(ref);
-    await this.store.insert(ref, Array.from(value));
+    for (const [ref, value] of entries) {
+      refs.add(ref);
+      await this.store.insert(ref, Array.from(value));
+    }
     await this.writeRefs([...refs].sort());
     await this.stronghold.save();
   }

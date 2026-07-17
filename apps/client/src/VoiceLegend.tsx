@@ -1,9 +1,8 @@
-/** Document-level voice legend shown directly beneath outgoing citations. */
+/** Document-level voice legend shown directly above outgoing citations. */
 
 import { useEffect, useRef, useState } from "react";
-import { Check, Copy, X } from "lucide-react";
+import { Check, X } from "lucide-react";
 import {
-  identityColors,
   identityForDisplayVoice,
   identityForPubkey,
   loadKeys,
@@ -13,10 +12,11 @@ import {
   collectVoiceAttributions,
   loadVoiceNicknames,
   saveVoiceNickname,
-  shortVoiceKey,
   shouldShowVoiceLegend,
-  voiceNpub,
+  voiceKeyForCopy,
 } from "./voice-attribution-ui.js";
+import { PubkeyDisplay } from "./PubkeyDisplay.js";
+import { VoiceChip } from "./VoiceChip.js";
 
 const COLLAPSED_VOICE_COUNT = 5;
 
@@ -33,7 +33,7 @@ export function VoiceLegend({
   const [hovered, setHovered] = useState("");
   const [selected, setSelected] = useState("");
   const [draftNickname, setDraftNickname] = useState("");
-  const [copied, setCopied] = useState(false);
+  const [copiedNpub, setCopiedNpub] = useState(false);
   // Resolving a published foreign style mutates the shared identity cache.
   // This revision makes the legend itself repaint; FileEditor separately
   // subscribes to the same cache and refreshes CodeMirror decorations.
@@ -67,11 +67,11 @@ export function VoiceLegend({
   useEffect(() => {
     if (!selectedItem) {
       setDraftNickname("");
-      setCopied(false);
+      setCopiedNpub(false);
       return;
     }
     setDraftNickname(selectedItem.local ? "" : nicknames[selectedItem.pubkey] ?? "");
-    setCopied(false);
+    setCopiedNpub(false);
   }, [selectedItem?.pubkey, selectedItem?.local, nicknames]);
 
   // Resolve remote kind-34292 styles (or the deterministic per-pubkey
@@ -99,13 +99,14 @@ export function VoiceLegend({
     setNicknames(saveVoiceNickname(pubkey, draftNickname));
   }
 
-  async function copyKey(pubkey: string) {
+  async function copyNpub(pubkey: string) {
     try {
-      await navigator.clipboard.writeText(voiceNpub(pubkey));
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
+      if (!navigator.clipboard) return;
+      await navigator.clipboard.writeText(voiceKeyForCopy(pubkey, "npub"));
+      setCopiedNpub(true);
+      window.setTimeout(() => setCopiedNpub(false), 1200);
     } catch {
-      setCopied(false);
+      setCopiedNpub(false);
     }
   }
 
@@ -119,30 +120,22 @@ export function VoiceLegend({
       <div className="panel-voice-list">
         {visible.map((item) => {
           const identity = identityForDisplayVoice(item.pubkey);
-          const { fg, bg } = identityColors(identity, 0.13);
-          const keyLabel = shortVoiceKey(item.pubkey);
           return (
-            <button
+            <VoiceChip
               key={item.pubkey}
-              type="button"
-              className={
-                "panel-voice-chip" +
-                (selected === item.pubkey ? " is-selected" : "")
-              }
-              title={`${item.label ? `${item.label}\n` : ""}${voiceNpub(item.pubkey)}\n${item.charCount.toLocaleString()} attributed character${item.charCount === 1 ? "" : "s"}`}
-              aria-pressed={selected === item.pubkey}
+              className="panel-voice-chip"
+              label={item.label || "Voice"}
+              pubkey={item.pubkey}
+              identity={identity}
+              selected={selected === item.pubkey}
               onMouseEnter={() => setHovered(item.pubkey)}
               onMouseLeave={() => setHovered("")}
-              onClick={() => setSelected((current) => (current === item.pubkey ? "" : item.pubkey))}
-            >
-              <span
-                className="panel-voice-chip-identity voice-span"
-                style={{ color: fg, background: bg, fontFamily: identity.font }}
-              >
-                {item.label ? <span className="panel-voice-chip-name">{item.label}</span> : null}
-                <span className="panel-voice-chip-key">{keyLabel}</span>
-              </span>
-            </button>
+              actionProps={{
+                title: `${item.label ? `${item.label}\n` : ""}${item.pubkey}\n${item.charCount.toLocaleString()} attributed character${item.charCount === 1 ? "" : "s"}`,
+                "aria-pressed": selected === item.pubkey,
+                onClick: () => setSelected((current) => (current === item.pubkey ? "" : item.pubkey)),
+              }}
+            />
           );
         })}
         {hiddenCount > 0 ? (
@@ -170,14 +163,15 @@ export function VoiceLegend({
             </button>
           </div>
           <div className="panel-voice-full-key">
-            <code title={voiceNpub(selectedItem.pubkey)}>{voiceNpub(selectedItem.pubkey)}</code>
+            <PubkeyDisplay pubkey={selectedItem.pubkey} className="panel-voice-pubkey-display" />
             <button
               type="button"
-              className="panel-voice-copy"
-              aria-label="Copy voice public key"
-              onClick={() => void copyKey(selectedItem.pubkey)}
+              className="panel-voice-format-copy"
+              title="Copy npub"
+              aria-label="Copy npub"
+              onClick={() => void copyNpub(selectedItem.pubkey)}
             >
-              {copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
+              {copiedNpub ? <Check size={12} aria-hidden="true" /> : "npub"}
             </button>
           </div>
           <span className="panel-voice-coverage">

@@ -48,8 +48,6 @@ function secretFor(keyId: string): Uint8Array | null {
  * Read the persisted doors list. Entries whose keychain key was deleted are
  * pruned (a dangling door has no secret to derive from — and Tor can't register
  * it), and the address is re-derived so it never drifts from the stored secret.
- * This is the relay-config.ts normalize() pattern: a stored list never needs a
- * manual migration step.
  */
 export function loadDoors(): DoorEntry[] {
   let raw: DoorEntry[] = [];

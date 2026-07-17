@@ -69,7 +69,7 @@ export function SecurityBootstrap({ children }: { children: ReactNode }) {
     try {
       const store = await StrongholdSecretStore.open(passphrase);
       await unlockSecretSession(store);
-      await migrateLegacySecrets();
+      await migrateLegacySecrets({ freshVault: !vaultExists });
       await initializeKeyStoreForAuthoring();
       setPassphrase("");
       setConfirmation("");
@@ -96,8 +96,8 @@ export function SecurityBootstrap({ children }: { children: ReactNode }) {
         <h1>{vaultExists ? "Unlock your press" : "Create your secure vault"}</h1>
         <p>
           {vaultExists
-            ? "Unlock signing keys and MODEL credentials for this session."
-            : "Your signing keys and MODEL credentials will be encrypted by Stronghold. This passphrase is never stored."}
+            ? "Unlock your signing keys and provider credentials for this session."
+            : "Your signing keys and provider credentials will be encrypted in a local secure vault. This passphrase is never stored."}
         </p>
         <label>
           <span>Vault passphrase</span>

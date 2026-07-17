@@ -57,26 +57,21 @@ function builtinEntry(): RelayEntry {
   };
 }
 
-/**
- * Normalize a raw stored entry into the current shape. Reads the legacy
- * `enabled` + `role` ("read"|"write"|"both") fields from older versions and
- * folds them into the `read`/`write` booleans, so a stored list never needs a
- * manual migration step.
- */
-function normalize(raw: Partial<RelayEntry> & { enabled?: boolean; role?: string }): RelayEntry | null {
-  if (typeof raw.id !== "string" || typeof raw.url !== "string") return null;
-  // Prefer the new fields when present; otherwise derive from legacy shape.
-  const read = typeof raw.read === "boolean"
-    ? raw.read
-    : typeof raw.enabled === "boolean"
-      ? raw.enabled && (raw.role === "read" || raw.role === "both" || !raw.role)
-      : true;
-  const write = typeof raw.write === "boolean"
-    ? raw.write
-    : typeof raw.enabled === "boolean"
-      ? raw.enabled && (raw.role === "write" || raw.role === "both" || !raw.role)
-      : true;
-  return { id: raw.id, url: raw.url, read, write, builtin: raw.builtin === true ? true : undefined };
+/** Validate a stored entry against the current shape. */
+function normalize(raw: Partial<RelayEntry>): RelayEntry | null {
+  if (
+    typeof raw.id !== "string" ||
+    typeof raw.url !== "string" ||
+    typeof raw.read !== "boolean" ||
+    typeof raw.write !== "boolean"
+  ) return null;
+  return {
+    id: raw.id,
+    url: raw.url,
+    read: raw.read,
+    write: raw.write,
+    builtin: raw.builtin === true ? true : undefined,
+  };
 }
 
 /** Read the persisted list, always ensuring the home entry leads it. */
@@ -97,11 +92,8 @@ export function loadRelays(): RelayEntry[] {
   }
 
   // The home entry must always be present, lead the list, and be read+write.
-  // A prior version persisted a user-toggleable read/write on it; any stored
-  // copy is replaced with the always-on entry so stale `write: false` values
-  // (which silently broke every publish) are corrected on the next load. The
-  // URL is refreshed against the current runtime so a moved webapp never shows
-  // a stale address.
+  // Its URL is refreshed against the current runtime so a moved webapp never
+  // shows a stale address.
   const rest = entries.filter((e) => !e.builtin);
   const homeUrl = resolveRelayUrl();
   const trimmed = rest.filter((e) => e.url !== homeUrl);
@@ -212,7 +204,7 @@ export function isLoopbackRelayUrl(url: string): boolean {
     return (
       host === "localhost" ||
       host === "0.0.0.0" ||
-      host.startsWith("127.") ||
+      /^127(?:\.\d{1,3}){3}$/.test(host) ||
       host === "::1" ||
       host === "[::1]"
     );

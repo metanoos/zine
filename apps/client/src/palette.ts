@@ -21,6 +21,41 @@ export interface PaletteSecondaryActions {
   attest: boolean;
 }
 
+export type PaletteStatusRow = "author" | "model" | "substrate";
+
+const AUTHOR_STATUS_OPS = new Set(["step", "send", "attest", "fork"]);
+const MODEL_STATUS_OPS = new Set(["receive", "reply", "extend", "stir", "settle", "run"]);
+const SUBSTRATE_STATUS_OPS = new Set(["scan", "reify"]);
+
+/** Route operation feedback to the palette row that owns the initiating action. */
+export function paletteStatusRow(op?: string): PaletteStatusRow | null {
+  if (!op) return null;
+  if (AUTHOR_STATUS_OPS.has(op)) return "author";
+  if (MODEL_STATUS_OPS.has(op)) return "model";
+  if (SUBSTRATE_STATUS_OPS.has(op)) return "substrate";
+  return null;
+}
+
+/** Prefer operation-specific detail, with a concise fallback for ordinary success. */
+export function paletteStatusMessage(op?: string, message?: string): string | null {
+  if (message) return message;
+  switch (op) {
+    case "step": return "stepped";
+    case "send": return "sent";
+    case "attest": return "attested";
+    case "receive": return "received";
+    case "reply": return "replied";
+    case "extend": return "extended";
+    case "stir": return "stirred";
+    case "settle": return "settled";
+    case "run": return "run complete";
+    case "scan": return "scanned";
+    case "reify": return "reified";
+    case "fork": return "forked";
+    default: return null;
+  }
+}
+
 /** Secondary AUTHOR slots are mutually scoped to passage vs. whole-trace work. */
 export function paletteSecondaryActions(
   state: PaletteSelectionState,

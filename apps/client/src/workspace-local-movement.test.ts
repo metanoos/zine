@@ -21,14 +21,53 @@ globalThis.localStorage = {
 
 import {
   completeDeletion,
+  completeBackgroundPush,
   completeStagedWrite,
+  completedEmptyGenesisBootstrapHead,
   folderWriteSigner,
+  localFolderCoordinate,
   localFileSigner,
   ownershipDisposition,
   pendingMoveForPath,
   previousStepCitationTargets,
+  publishEmptyGenesisIfNeeded,
 } from "./workspace-local.js";
 import { authorVoice, loadKeys } from "./keys-store.js";
+import { saveLocalFile } from "./local-store.js";
+
+test("flat local paths resolve to direct recursive folder coordinates", () => {
+  localStorage.clear();
+  saveLocalFile("root", "projects", {
+    kind: "folder",
+    content: "",
+    tags: [],
+    nodeId: "projects-head",
+    traceId: "projects-genesis",
+  });
+  saveLocalFile("root", "projects/drafts", {
+    kind: "folder",
+    content: "",
+    tags: [],
+    nodeId: "drafts-head",
+    traceId: "drafts-genesis",
+  });
+
+  assert.deepEqual(localFolderCoordinate("root", "readme.md"), {
+    folderId: "root",
+    folderPath: "",
+    relativePath: "readme.md",
+  });
+  assert.deepEqual(localFolderCoordinate("root", "projects/plan.md"), {
+    folderId: "projects-genesis",
+    folderPath: "projects",
+    relativePath: "plan.md",
+  });
+  assert.deepEqual(localFolderCoordinate("root", "projects/drafts/idea.md"), {
+    folderId: "drafts-genesis",
+    folderPath: "projects/drafts",
+    relativePath: "idea.md",
+  });
+});
 
 test("active to Oblivion retains the active relay coordinate", () => {
   assert.deepEqual(
@@ -103,6 +142,82 @@ test("an unavailable prior Step reports the broken history instead of reading ev
   );
 });
 
+test("a scheduled first publish reports its persisted head to the UI", async () => {
+  const order: string[] = [];
+  const file = { runs: [], nodeId: "first-node", tags: [] };
+  const nodeId = await completeBackgroundPush(
+    async () => {
+      order.push("publish");
+      return "first-node";
+    },
+    () => {
+      order.push("read");
+      return file;
+    },
+    (persisted) => {
+      order.push(`notify:${persisted?.nodeId}`);
+    },
+  );
+
+  assert.equal(nodeId, "first-node");
+  assert.deepEqual(order, ["publish", "read", "notify:first-node"]);
+});
+
+test("starter bootstrap persists an empty genesis before the body Step", async () => {
+  const order: string[] = [];
+  const genesis = await publishEmptyGenesisIfNeeded(
+    true,
+    null,
+    async () => {
+      order.push("publish-empty");
+      return { id: "genesis" };
+    },
+    (node) => order.push(`persist:${node.id}`),
+  );
+
+  assert.equal(genesis?.id, "genesis");
+  assert.deepEqual(order, ["publish-empty", "persist:genesis"]);
+});
+
+test("starter bootstrap resumes from an existing empty genesis", async () => {
+  let publishes = 0;
+  const genesis = await publishEmptyGenesisIfNeeded(
+    true,
+    "genesis",
+    async () => {
+      publishes++;
+      return { id: "sibling" };
+    },
+    () => {},
+  );
+
+  assert.equal(genesis, null);
+  assert.equal(publishes, 0);
+});
+
+test("starter bootstrap reuses a body Step whose manifest update failed", () => {
+  assert.equal(
+    completedEmptyGenesisBootstrapHead(
+      true,
+      null,
+      [{ id: "genesis" }, { id: "body-step" }],
+      "ayoooo, world!\n\n",
+      "ayoooo, world!\n\n",
+    ),
+    "body-step",
+  );
+  assert.equal(
+    completedEmptyGenesisBootstrapHead(
+      true,
+      null,
+      [{ id: "genesis" }, { id: "old-body" }],
+      "old",
+      "new edit",
+    ),
+    null,
+  );
+});
+
 test("deletion removes local copies only after every tombstone lands", async () => {
   const order: string[] = [];
   await completeDeletion(
@@ -151,23 +266,6 @@ test("folder membership keeps using a different locally held keychain owner", ()
   const signer = folderWriteSigner(folderOwner.pubkey, fileSigner);
   assert.ok(signer);
   assert.equal(getPublicKey(signer), folderOwner.pubkey);
-});
-
-test("folder membership can recover the already-held legacy Root owner", () => {
-  localStorage.clear();
-  loadKeys();
-  const legacySigner = generateSecretKey();
-  const legacyPubkey = getPublicKey(legacySigner);
-  localStorage.setItem(
-    "zine.voice.secretHex",
-    Array.from(legacySigner, (byte) => byte.toString(16).padStart(2, "0")).join(""),
-  );
-  const fileSigner = localFileSigner(authorVoice());
-
-  assert.ok(fileSigner);
-  const signer = folderWriteSigner(legacyPubkey, fileSigner);
-  assert.ok(signer);
-  assert.equal(getPublicKey(signer), legacyPubkey);
 });
 
 test("a genuinely foreign folder still fails closed", () => {

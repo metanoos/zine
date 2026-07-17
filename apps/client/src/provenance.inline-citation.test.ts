@@ -33,6 +33,7 @@ test("inline citation metadata is not replayed as a second body edit", () => {
   const markup = "[[ copied passage | coin-node ]]";
   const event = {
     content: JSON.stringify({
+      snapshot: markup,
       deltas: [
         {
           type: "insert",

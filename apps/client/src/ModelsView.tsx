@@ -40,6 +40,7 @@ import {
 import { probeProvider } from "./llm.js";
 import { isAnthropicEffort } from "./model-config.js";
 import { canUseModelSecrets } from "./secret-store.js";
+import { providerProfileFingerprint } from "./provider-fingerprint.js";
 
 type TestState = Record<string, { state: "idle" | "testing" | "ok" | "error"; msg?: string }>;
 
@@ -56,10 +57,14 @@ const ANTHROPIC_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", 
 
 export function ModelsView({
   onProvidersChange,
+  modelLessonActive = false,
+  onProviderTested,
 }: {
   /** Called whenever the provider list changes (add/remove/patch) so App can
    *  refresh the Press model dropdown with the same card labels. */
   onProvidersChange?: (providers: ProviderConfig[]) => void;
+  modelLessonActive?: boolean;
+  onProviderTested?: (providerId: string, providerFingerprint: string) => void;
 }) {
   const [providers, setProviders] = useState<ProviderConfig[]>(() => loadProviders());
   const [test, setTest] = useState<TestState>({});
@@ -118,11 +123,13 @@ export function ModelsView({
     setTest((t) => ({ ...t, [cfg.id]: { state: "testing" } }));
     try {
       await commitCredential(cfg.id);
-      const reply = await probeProvider(cfg);
+      const testedProvider = loadProviders().find((provider) => provider.id === cfg.id) ?? cfg;
+      const reply = await probeProvider(testedProvider);
       setTest((t) => ({
         ...t,
         [cfg.id]: { state: "ok", msg: reply ? reply.slice(0, 60) : "(empty reply)" },
       }));
+      onProviderTested?.(testedProvider.id, providerProfileFingerprint(testedProvider));
     } catch (e) {
       setTest((t) => ({
         ...t,
@@ -162,6 +169,12 @@ export function ModelsView({
 
   return (
     <section className="view-placeholder models-view">
+      {modelLessonActive ? (
+        <aside className="models-onboarding" role="status" aria-live="polite">
+          <strong>MODEL CONTEXT · 1 OF 7</strong>
+          <span>Add or choose a model, save its credential, then use Test. The probe is synthetic and never includes workspace text.</span>
+        </aside>
+      ) : null}
       <p className="view-placeholder-blurb">
         LLM providers for prompt injection — add from a preset or configure a
         custom endpoint.

@@ -11,7 +11,7 @@
  * and shows the resulting cell box on a tiny preview. Pins are add/remove — the
  * folder's current set is read with `fetchFolderGeohashes`, written with
  * `setFolderGeohashes` (which republishes the folder node carrying the new `g`
- * tags; carry-forward in `publishManifest` keeps them across routine steps).
+ * tags; folder-node publication keeps them across routine steps).
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";

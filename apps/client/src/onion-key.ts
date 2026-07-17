@@ -21,7 +21,6 @@ import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { sha3_256 } from "@noble/hashes/sha3.js";
 import { ed25519 } from "@noble/curves/ed25519.js";
-import { loadOrCreateVoice } from "./identity.js";
 
 /** Domain-separation salt for the HKDF step, UTF-8 encoded (because
  *  @noble/hashes v2 requires Uint8Array, not string, for salt/info). Versioned
@@ -106,32 +105,6 @@ export function onionAddressForSecret(secret: Uint8Array): { address: string; se
   };
 }
 
-/** Backward-compatible pure hex adapter used by protocol vectors and callers
- * that already hold an explicitly imported test key. App profiles never do. */
-export function onionAddressForKey(secretHex: string): { address: string; seedBase64: string } {
-  return onionAddressForSecret(hexToBytes(secretHex));
-}
-
-/**
- * Derive the onion address + base64 expanded key from the owner (NODE) key's
- * secret hex. Callers resolve the owner key from the keychain and pass its
- * secretHex — this keeps onion-key.ts free of a keys-store import (which would
- * create a load-time cycle through provenance.ts). When no secret is passed,
- * falls back to the legacy single voice — used by the headless/Node press path
- * and tests that haven't seeded a keychain. In the desktop app, the keychain's
- * builtin key is seeded from that same legacy slot, so the two agree.
- *
- * The expanded key (base64) is what gets passed to Tor's control port via
- * `ADD_ONION ED25519-V3:<base64>`.
- */
-export function deriveOnionAddress(ownerSecret?: Uint8Array): { address: string; seedBase64: string } {
-  // No secret passed — use the legacy single voice (headless/Node/tests).
-  if (!ownerSecret) {
-    return onionAddressForSecret(loadOrCreateVoice().secretKey);
-  }
-  return onionAddressForSecret(ownerSecret);
-}
-
 // --- base32 (RFC 4648, lowercase, no padding) ----------------------------
 
 const BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
@@ -158,12 +131,6 @@ function base32Encode(data: Uint8Array): string {
 
 function utf8Bytes(s: string): Uint8Array {
   return new TextEncoder().encode(s);
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  return out;
 }
 
 function asciiBytes(s: string): Uint8Array {

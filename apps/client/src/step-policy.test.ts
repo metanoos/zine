@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 
 import { planAttestation, planDelivery } from "./step-policy.js";
 
-test("Step is unavailable when the trace is current", () => {
-  assert.equal(planDelivery("step", false, "head"), "unavailable");
+test("an explicit Step appends a checkpoint when the trace is current", () => {
+  assert.equal(planDelivery("step", false, "head"), "append-local-step");
 });
 
-test("Step records pending work and can create the first node", () => {
+test("Step records pending work and can create genesis", () => {
   assert.equal(planDelivery("step", true, "head"), "append-local-step");
   assert.equal(planDelivery("step", false, ""), "append-local-step");
 });

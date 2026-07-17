@@ -54,15 +54,15 @@ interface SubstrateBinding {
   /** The user-pinned keychain key id that signs for this substrate. When set,
    *  it overrides auto-provision: scans sign as *this* key (which must still
    *  exist in the keychain), and no "Substrate · <name>" key is minted. When
-   *  absent, the legacy auto-provision path runs. Workflow state, not provenance
+   *  absent, the automatic provisioning path runs. Workflow state, not provenance
    *  — the signed node is what's durable, the choice of signer is local setup. */
   keyId?: string | null;
 }
 
 /** Provision a fresh voice with `label`, returning its key material. `addKey`
  *  appends to the keychain and returns the full list; the new entry is last. */
-function provisionVoice(label: string): ExternalVoice {
-  const keys = addKey(label);
+async function provisionVoice(label: string): Promise<ExternalVoice> {
+  const keys = await addKey(label);
   const entry = keys[keys.length - 1];
   const secretKey = secretKeyForVoice(entry.pubkey);
   if (!secretKey) {
@@ -82,14 +82,14 @@ function resolvePubkey(pubkey: string): ExternalVoice | null {
 
 /** The per-machine reconciler voice for bare disk drift. Auto-provisions on
  *  first call, persists the pubkey, reuses forever after. */
-export function getReconcilerVoice(): ExternalVoice {
+export async function getReconcilerVoice(): Promise<ExternalVoice> {
   const stored = localStorage.getItem(RECONCILER_KEY);
   if (stored) {
   const voice = resolvePubkey(stored);
     if (voice) return voice;
     // Key was deleted from the keychain — fall through and re-provision.
   }
-  const voice = provisionVoice("reconciler-1");
+  const voice = await provisionVoice("reconciler-1");
   localStorage.setItem(RECONCILER_KEY, voice.publicKey);
   return voice;
 }
@@ -115,7 +115,7 @@ function saveMcpActors(actors: McpActorBinding[]): void {
  *  Not called today — MCP integration is not yet wired. This is the seam: when
  *  an MCP tool's write-back lands, it calls this and passes the result as the
  *  `signer` (+ `action: "external"`) into the write path. */
-export function getMcpActorVoice(server: string, tool: string, model: string): ExternalVoice {
+export async function getMcpActorVoice(server: string, tool: string, model: string): Promise<ExternalVoice> {
   const actors = loadMcpActors();
   const match = actors.find(
     (a) => a.server === server && a.tool === tool && a.model === model,
@@ -129,7 +129,7 @@ export function getMcpActorVoice(server: string, tool: string, model: string): E
   // seed-key naming convention (e.g. "server-tool-model"); an empty model
   // collapses to "server-tool".
   const parts = [server, tool, model].filter((p) => p && p.length > 0);
-  const voice = provisionVoice(parts.join("-").toLowerCase());
+  const voice = await provisionVoice(parts.join("-").toLowerCase());
   if (match) {
     match.pubkey = voice.publicKey;
   } else {
@@ -165,11 +165,11 @@ function saveSubstrates(substrates: SubstrateBinding[]): void {
  *      was deleted, this falls through to auto-provision so a scan never dead-
  *      ends. No "Substrate · <name>" key is minted while a pin is active.
  *    - **Auto-provision** (no pin): mints a per-name keypair on first call,
- *      reuses on subsequent calls — the legacy behavior.
+ *      reuses on subsequent calls.
  *
  *  Same shape as getReconcilerVoice/getMcpActorVoice: workflow state, not
  *  provenance (the binding is local setup; the signed node is what's durable). */
-export function getSubstrateVoice(name: string): ExternalVoice {
+export async function getSubstrateVoice(name: string): Promise<ExternalVoice> {
   const substrates = loadSubstrates();
   const match = substrates.find((s) => s.name === name);
   // User-pinned signer: resolve the chosen keychain key and sign as it.
@@ -188,8 +188,7 @@ export function getSubstrateVoice(name: string): ExternalVoice {
   }
   // A fresh keychain already contains the filesystem's EXTERNAL identity. Bind
   // it on first use instead of minting a second `external-1` card during App's
-  // startup effect. This also repairs older fresh profiles that were seeded
-  // with EXTERNAL before substrate bindings existed.
+  // startup effect.
   if (!match && name === "FILESYSTEM") {
     const seeded = loadKeys().find((key) => key.label.trim().toLowerCase() === "external-1");
     if (seeded) {
@@ -207,7 +206,7 @@ export function getSubstrateVoice(name: string): ExternalVoice {
   // unchanged — only the keychain label shown in the bar's KeySelect. Names are
   // lowercased to match the seed-key naming convention.
   const label = name === "FILESYSTEM" ? "external-1" : `substrate-${name.toLowerCase()}`;
-  const voice = provisionVoice(label);
+  const voice = await provisionVoice(label);
   if (match) {
     match.pubkey = voice.publicKey;
   } else {

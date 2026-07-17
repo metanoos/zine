@@ -12,9 +12,10 @@ export type AttestationPlan =
 
 /**
  * Decide whether a delivery gesture appends a Step or reuses the current one.
- * Step records pending work or creates the first node; a current trace has no
- * Step action. Send appends only when state is pending (or the trace has no
- * Step yet); otherwise it distributes the head.
+ * Every explicit Step appends one local checkpoint, including an unchanged
+ * snapshot: the deliberate checkpoint is itself process evidence. Send still
+ * appends only when state is pending (or the trace has no node yet); otherwise
+ * it distributes the existing head.
  */
 export function planDelivery(
   op: "step" | "send",
@@ -22,7 +23,7 @@ export function planDelivery(
   latestStepId: string,
 ): DeliveryPlan {
   if (op === "step") {
-    return hasPendingChanges || !latestStepId ? "append-local-step" : "unavailable";
+    return "append-local-step";
   }
   return hasPendingChanges || !latestStepId ? "append-and-send" : "send-latest";
 }

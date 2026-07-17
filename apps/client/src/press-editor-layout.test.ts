@@ -24,3 +24,15 @@ test("streamed appends restore both bottom and fixed scroll anchors", () => {
   assert.match(source, /effect\.is\(opVoiceEffect\)/);
   assert.match(source, /effect\.is\(setRunsEffect\)/);
 });
+
+test("voice attribution sits outside the citation bars", () => {
+  const header = source.match(
+    /const provenanceHeader = file \? \(([\s\S]*?)\n  \) : null;/,
+  );
+  assert.ok(header, "missing document provenance header");
+
+  const voiceIndex = header[1].indexOf("<VoiceLegend");
+  const citationIndex = header[1].indexOf("{citationBar}");
+  assert.ok(voiceIndex >= 0, "missing voice attribution in document header");
+  assert.ok(citationIndex > voiceIndex, "outgoing citations must remain flush with the body");
+});

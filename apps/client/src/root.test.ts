@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-// @ts-expect-error minimal localStorage shim for Root's factory preload
+// @ts-expect-error minimal localStorage shim for Root and onboarding demo state
 globalThis.localStorage = {
   values: new Map<string, string>(),
   getItem(key: string) {
@@ -21,62 +21,74 @@ globalThis.localStorage = {
 import { loadLocalFolder, saveLocalFile } from "./local-store.js";
 import { buildDirectoryTree } from "./tree-model.js";
 import { authorVoice, getModelKeyId, loadKeys } from "./keys-store.js";
+import { getPublicKey } from "nostr-tools/pure";
+import { getScanFolderId, rootAuthorSigner } from "./root.js";
 import {
-  FACTORY_ROOT_FILE_CONTENT,
-  FACTORY_ROOT_FILE_PATH,
-  preloadFactoryRoot,
-} from "./root.js";
+  loadOnboardingDemo,
+  ONBOARDING_DEMO_FILE_CONTENT,
+  ONBOARDING_DEMO_FILE_PATH,
+} from "./onboarding-demo.js";
 
-test("preloadFactoryRoot adds the wokspace starter document", () => {
+test("a fresh Root genesis uses the AUTHOR signing key", () => {
   localStorage.clear();
-  preloadFactoryRoot("root-1");
+  assert.equal(getPublicKey(rootAuthorSigner()), authorVoice());
+});
 
-  const file = loadLocalFolder("root-1")?.files[FACTORY_ROOT_FILE_PATH];
-  assert.equal(FACTORY_ROOT_FILE_PATH, "wokspace/ayoo-world.md");
-  assert.equal(file?.content, FACTORY_ROOT_FILE_CONTENT);
-  assert.equal(file?.content, "ayoooo, world!\n\n");
-  assert.equal(file?.content.endsWith("\n\n"), true);
+test("Scan keeps a per-Root local pointer separate from Root identity", () => {
+  localStorage.clear();
+  localStorage.setItem("zine.scan.root-a", "scan-folder-a");
+  assert.equal(getScanFolderId("root-a"), "scan-folder-a");
+  assert.equal(getScanFolderId("root-b"), null);
+});
+
+test("loadOnboardingDemo keeps AUTHOR ownership and spare-voice prose attribution", async () => {
+  localStorage.clear();
+  const demo = await loadOnboardingDemo("root-1");
+
+  const file = loadLocalFolder("root-1")?.files[ONBOARDING_DEMO_FILE_PATH];
+  assert.equal(demo.path, ONBOARDING_DEMO_FILE_PATH);
+  assert.equal(ONBOARDING_DEMO_FILE_PATH, "hello-world.md");
+  assert.equal(file?.content, ONBOARDING_DEMO_FILE_CONTENT);
+  assert.equal(file?.content, "# Ayooo, world!\n\nThis is my first trace.\n");
+  assert.equal(file?.content.endsWith("\n"), true);
   assert.equal(file?.nodeId, "");
-  assert.ok(file?.voicePubkey);
-  assert.notEqual(file?.voicePubkey, authorVoice());
-  const starterVoice = loadKeys().find((key) => key.pubkey === file?.voicePubkey);
+  assert.equal(file?.pendingEmptyGenesis, true);
+  assert.equal(file?.voicePubkey, authorVoice());
+  const attributedVoice = file?.runs?.[0]?.voice;
+  assert.ok(attributedVoice);
+  assert.notEqual(attributedVoice, authorVoice());
+  const starterVoice = loadKeys().find((key) => key.pubkey === attributedVoice);
   assert.equal(starterVoice?.label, "voice-2");
   assert.notEqual(starterVoice?.id, getModelKeyId());
   assert.deepEqual(file?.runs, [
-    { voice: file?.voicePubkey, text: FACTORY_ROOT_FILE_CONTENT },
+    { voice: attributedVoice, text: ONBOARDING_DEMO_FILE_CONTENT },
   ]);
+  assert.deepEqual(demo.file, { runs: file?.runs, nodeId: "", tags: [] });
 
   const [root] = buildDirectoryTree(
-    [{ path: FACTORY_ROOT_FILE_PATH, type: "file" }],
+    [{ path: ONBOARDING_DEMO_FILE_PATH, type: "file" }],
     "root",
   );
-  assert.equal(root.children?.[0]?.name, "wokspace");
-  assert.equal(root.children?.[0]?.children?.[0]?.name, "ayoo-world.md");
+  assert.equal(root.children?.[0]?.name, "hello-world.md");
 });
 
-test("preloadFactoryRoot never overwrites an existing starter path", () => {
+test("repeating onboarding creates a fresh demo without replacing prior work", async () => {
   localStorage.clear();
-  saveLocalFile("root-2", FACTORY_ROOT_FILE_PATH, {
+  saveLocalFile("root-2", ONBOARDING_DEMO_FILE_PATH, {
     content: "my draft",
     tags: ["personal"],
     nodeId: "existing-node",
   });
 
-  preloadFactoryRoot("root-2");
+  const second = await loadOnboardingDemo("root-2");
+  const third = await loadOnboardingDemo("root-2");
 
-  const file = loadLocalFolder("root-2")?.files[FACTORY_ROOT_FILE_PATH];
-  assert.equal(file?.content, "my draft");
-  assert.deepEqual(file?.tags, ["personal"]);
-  assert.equal(file?.nodeId, "existing-node");
-});
-
-test("preloadFactoryRoot creates a non-Author voice for a legacy single-key profile", () => {
-  localStorage.clear();
-  localStorage.setItem("zine.voice.secretHex", "11".repeat(32));
-
-  preloadFactoryRoot("root-legacy");
-
-  const file = loadLocalFolder("root-legacy")?.files[FACTORY_ROOT_FILE_PATH];
-  assert.ok(file?.voicePubkey);
-  assert.notEqual(file?.voicePubkey, authorVoice());
+  const files = loadLocalFolder("root-2")?.files;
+  assert.equal(second.path, "hello-world-2.md");
+  assert.equal(third.path, "hello-world-3.md");
+  assert.equal(files?.[ONBOARDING_DEMO_FILE_PATH]?.content, "my draft");
+  assert.deepEqual(files?.[ONBOARDING_DEMO_FILE_PATH]?.tags, ["personal"]);
+  assert.equal(files?.[ONBOARDING_DEMO_FILE_PATH]?.nodeId, "existing-node");
+  assert.equal(files?.[second.path]?.content, ONBOARDING_DEMO_FILE_CONTENT);
+  assert.equal(files?.[third.path]?.content, ONBOARDING_DEMO_FILE_CONTENT);
 });

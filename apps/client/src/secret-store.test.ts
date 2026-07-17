@@ -3,11 +3,14 @@ import test from "node:test";
 
 import {
   MemorySecretStore,
+  closeSecretSession,
   deleteSecret,
   getSecretCached,
   initializeBrowserReadOnlySecretSession,
+  isSecretSessionUnlocked,
   listSecretRefs,
   putSecret,
+  putSecrets,
   secretSessionCapabilities,
   unlockSecretSession,
 } from "./secret-store.js";
@@ -30,6 +33,50 @@ test("session writes are read-back verified and deletion clears resolution", asy
   assert.deepEqual(await listSecretRefs(), ["voice:1"]);
   await deleteSecret("voice:1");
   assert.equal(getSecretCached("voice:1"), null);
+});
+
+test("session batch writes use one durable store mutation and verify every value", async () => {
+  class BatchStore extends MemorySecretStore {
+    batches = 0;
+
+    override async setMany(entries: ReadonlyArray<readonly [string, Uint8Array]>): Promise<void> {
+      this.batches += 1;
+      await super.setMany(entries);
+    }
+  }
+
+  const store = new BatchStore({ persistent: true, signing: true, model: true });
+  await unlockSecretSession(store);
+  await putSecrets([
+    ["voice:1", new Uint8Array([1, 2])],
+    ["voice:2", new Uint8Array([3, 4])],
+  ]);
+
+  assert.equal(store.batches, 1);
+  assert.deepEqual(getSecretCached("voice:1"), new Uint8Array([1, 2]));
+  assert.deepEqual(getSecretCached("voice:2"), new Uint8Array([3, 4]));
+});
+
+test("closing a secret session releases its backend and clears cached material", async () => {
+  class CloseableStore extends MemorySecretStore {
+    closed = false;
+
+    async close(): Promise<void> {
+      this.closed = true;
+    }
+  }
+
+  const store = new CloseableStore({ persistent: true, signing: true, model: true });
+  await unlockSecretSession(store);
+  await putSecret("voice:closing", new Uint8Array([9, 8, 7]));
+  await closeSecretSession();
+
+  assert.equal(store.closed, true);
+  assert.equal(isSecretSessionUnlocked(), false);
+  assert.equal(getSecretCached("voice:closing"), null);
+  await assert.rejects(putSecret("voice:after-close", new Uint8Array([1])), /locked/);
+
+  await unlockSecretSession(new MemorySecretStore());
 });
 
 test("browser session is explicitly non-authoring and non-persistent", async () => {

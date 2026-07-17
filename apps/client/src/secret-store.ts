@@ -3,14 +3,13 @@
  * retain only opaque references.
  *
  *   unlock store -> preload session cache -> resolve briefly at use site
- *        |                    |                         |
- *        +-- migration ------+                         +-- sign / transport
- *             write -> read-back verify -> profile swap -> legacy delete
+ *                                                |
+ *                                                +-- sign / transport
  *
  * The synchronous cache exists because the provenance/editor stack signs in
  * event handlers that are already synchronous at their resolution boundary.
- * Store I/O remains asynchronous and every bootstrap/migration write is
- * awaited before the app is allowed to author.
+ * Store I/O remains asynchronous and bootstrap writes are awaited before the
+ * app is allowed to author.
  */
 
 export interface SecretStoreCapabilities {
@@ -22,9 +21,12 @@ export interface SecretStoreCapabilities {
 export interface SecretStore {
   get(ref: string): Promise<Uint8Array | null>;
   set(ref: string, value: Uint8Array): Promise<void>;
+  setMany?(entries: ReadonlyArray<readonly [string, Uint8Array]>): Promise<void>;
   delete(ref: string): Promise<void>;
   listRefs(): Promise<string[]>;
   capabilities(): SecretStoreCapabilities;
+  /** Release native/session resources before destructive profile reset. */
+  close?(): Promise<void>;
 }
 
 function copy(value: Uint8Array): Uint8Array {
@@ -49,6 +51,10 @@ export class MemorySecretStore implements SecretStore {
 
   async set(ref: string, value: Uint8Array): Promise<void> {
     this.values.set(ref, copy(value));
+  }
+
+  async setMany(entries: ReadonlyArray<readonly [string, Uint8Array]>): Promise<void> {
+    for (const [ref, value] of entries) await this.set(ref, value);
   }
 
   async delete(ref: string): Promise<void> {
@@ -121,6 +127,21 @@ export function lockSecretSession(): void {
   unlocked = false;
 }
 
+/** Persist and release the active backend, then discard every cached secret.
+ * Factory reset must do this before deleting a Stronghold snapshot; otherwise
+ * Stronghold's unload save can recreate the vault after native deletion. */
+export async function closeSecretSession(): Promise<void> {
+  await activeStore.close?.();
+  clearCache();
+  activeStore = new MemorySecretStore({
+    persistent: false,
+    signing: false,
+    model: false,
+  });
+  activeCapabilities = activeStore.capabilities();
+  unlocked = false;
+}
+
 export function secretSessionCapabilities(): SecretStoreCapabilities {
   return { ...activeCapabilities };
 }
@@ -149,24 +170,52 @@ export function getSecretCached(ref: string): Uint8Array | null {
 }
 
 /** Cache immediately for synchronous consumers, then durably write + verify. */
-export async function putSecret(ref: string, value: Uint8Array): Promise<void> {
+export async function putSecrets(
+  entries: ReadonlyArray<readonly [string, Uint8Array]>,
+): Promise<void> {
   if (!unlocked) throw new SecretStoreLockedError();
   if (!activeCapabilities.signing && !activeCapabilities.model) {
     throw new SecretStoreLockedError("This press is read-only; secure authoring is unavailable");
   }
-  const cached = copy(value);
-  sessionSecrets.set(ref, cached);
+
+  const staged = entries.map(([ref, value]) => [ref, copy(value)] as const);
+  const previous = new Map<string, Uint8Array | null>();
+  for (const [ref, value] of staged) {
+    if (!previous.has(ref)) {
+      const existing = sessionSecrets.get(ref);
+      previous.set(ref, existing ? copy(existing) : null);
+    }
+    sessionSecrets.set(ref, value);
+  }
+
   try {
-    await activeStore.set(ref, value);
-    const verified = await activeStore.get(ref);
-    if (!verified || !equalBytes(verified, value)) {
-      throw new Error(`Secure-store verification failed for ${ref}`);
+    if (activeStore.setMany) {
+      await activeStore.setMany(staged);
+    } else {
+      for (const [ref, value] of staged) await activeStore.set(ref, value);
+    }
+    for (const [ref, value] of staged) {
+      const verified = await activeStore.get(ref);
+      if (!verified || !equalBytes(verified, value)) {
+        throw new Error(`Secure-store verification failed for ${ref}`);
+      }
     }
   } catch (error) {
-    cached.fill(0);
-    sessionSecrets.delete(ref);
+    for (const [ref, value] of staged) {
+      value.fill(0);
+      sessionSecrets.delete(ref);
+    }
+    for (const [ref, value] of previous) {
+      if (value) sessionSecrets.set(ref, value);
+    }
     throw error;
   }
+
+  for (const value of previous.values()) value?.fill(0);
+}
+
+export async function putSecret(ref: string, value: Uint8Array): Promise<void> {
+  await putSecrets([[ref, value]]);
 }
 
 export async function deleteSecret(ref: string): Promise<void> {

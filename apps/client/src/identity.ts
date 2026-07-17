@@ -16,7 +16,7 @@ import { canSignWithSecrets } from "./secret-store.js";
  * That separation is the accepted two-worlds cost of the first wire-up.
  */
 
-const STORAGE_KEY = "zine.voice.secretHex";
+const STORAGE_KEY = "zine.headless.voice.secretHex";
 
 export interface Voice {
   secretKey: Uint8Array;
@@ -43,26 +43,6 @@ export function loadOrCreateVoice(): Voice {
   localStorage.setItem(STORAGE_KEY, bytesToHex(secretKey));
   cached = { secretKey, publicKey };
   return cached;
-}
-
-/** Resolve the pre-keychain browser voice only when it already owns
- * `publicKey`. Unlike `loadOrCreateVoice`, this lookup never creates a key as
- * a side effect. That matters when deciding whether a folder is genuinely
- * foreign: probing an unknown owner must not manufacture another identity.
- *
- * Fresh keychain profiles briefly minted Root with this legacy voice before
- * later writes switched to the AUTHOR key. Keeping this narrow recovery path
- * lets those profiles continue their existing folder chain without treating
- * a locally held signing key as foreign. */
-export function legacySecretKeyForVoice(publicKey: string): Uint8Array | null {
-  const existing = localStorage.getItem(STORAGE_KEY);
-  if (!existing || !/^[0-9a-fA-F]{64}$/.test(existing)) return null;
-  try {
-    const secretKey = hexToBytes(existing);
-    return getPublicKey(secretKey) === publicKey ? secretKey : null;
-  } catch {
-    return null;
-  }
 }
 
 /**

@@ -1,5 +1,5 @@
-import { Component, Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { MutableRefObject, ReactNode } from "react";
+import { Component, Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, MutableRefObject, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   Compartment,
@@ -36,9 +36,14 @@ import {
   fetchChain,
   fetchFolderActivity,
   fetchFolderNodes,
+  fetchFolderOwner,
   fetchEventById,
+  diffToDeltas,
+  publishEdit,
+  publishDirectCoin,
   publishHardenedSpan,
   sha256HexLocal,
+  sendHistoricalStep,
   sendStep,
   reconstructUpTo,
   reconstructRunsUpTo,
@@ -51,7 +56,6 @@ import {
   bufferFocus,
   focusTimeline,
   getOrCreateRuleTrace,
-  clearPendingLlmMeta,
   setPendingLlmMeta,
   fetchManifest,
   findMergeCandidates,
@@ -66,6 +70,7 @@ import {
   type CitationChip,
   type MergeCandidate,
   type KEdit,
+  type CoinOrigin,
   type LlmStepMeta,
   excludeInboundSources,
   findInboundSnapshot,
@@ -81,6 +86,8 @@ import { MergePanel } from "./MergePanel.js";
 import { MergePreviewModal } from "./MergePreviewModal.js";
 import { threeWayMerge, autoMergedText } from "./three-way-merge.js";
 import { AttestModal } from "./AttestModal.js";
+import { CoinView, DirectCoinComposerView } from "./CoinModal.js";
+import { OblivionModal } from "./OblivionModal.js";
 import { RunModal } from "./RunModal.js";
 import { PromptInspectorModal } from "./PromptInspectorModal.js";
 import { SendFailureModal } from "./SendFailureModal.js";
@@ -99,10 +106,20 @@ import {
   type AgentRunManifest,
   type AgentRunTrigger,
   type AutomationRecipeDraft,
-  type AutomationScope,
+  type AutomationScopes,
 } from "./automation-store.js";
 import { ensureModelVoice } from "./model-voice.js";
-import { ownerFolderOf, activeMounted } from "./focus-routing.js";
+import { ownerFolderOf, activeMount } from "./focus-routing.js";
+import {
+  focusDirectoryPath,
+  focusReplayTarget,
+  locateFocus,
+  rebaseUiFocus,
+  refreshFocusNode,
+  sameUiFocus,
+  type FocusRef,
+  type UiFocus,
+} from "./ui-focus.js";
 import { activateTreeItem, type ActivatableTreeItem } from "./tree-routing.js";
 import type { Event } from "nostr-tools";
 import { diffLines } from "diff";
@@ -131,6 +148,9 @@ import {
   classifyPaletteSelection,
   palettePrimaryAction,
   paletteSecondaryActions,
+  paletteStatusMessage,
+  paletteStatusRow,
+  type PaletteStatusRow,
   type PaletteSelectionState,
 } from "./palette.js";
 import {
@@ -142,6 +162,16 @@ import {
 
 import { DownloadView } from "./Download.js";
 import { AboutView } from "./About.js";
+import { OnboardingGuide, OnboardingWelcome } from "./Onboarding.js";
+import {
+  isOnboardingActive,
+  loadOnboardingResume,
+  reconcileModelOnboardingStage,
+  reduceOnboardingStage,
+  saveOnboardingStage,
+  type ModelLessonResume,
+  type OnboardingStage,
+} from "./onboarding-state.js";
 import { aboutHashTarget } from "./about-documents.js";
 import { NetworkingView } from "./Networking.js";
 import { ModelsView } from "./ModelsView.js";
@@ -157,6 +187,7 @@ import {
 } from "./social-query.js";
 import { PinPanel } from "./PinPanel.js";
 import { OperatorView } from "./OperatorView.js";
+import { TraceLocatorModal } from "./TraceLocatorModal.js";
 import {
   bindOperator,
   isStaff,
@@ -165,7 +196,6 @@ import {
   type OperatorState,
 } from "./operator-store.js";
 import {
-  identityColors,
   identityForPubkey,
   loadKeys,
   authorVoice,
@@ -176,6 +206,8 @@ import {
   type KeyEntry,
 } from "./keys-store.js";
 import { VoiceLegend } from "./VoiceLegend.js";
+import { VoiceChip } from "./VoiceChip.js";
+import { formatPubkey, PubkeyDisplay } from "./PubkeyDisplay.js";
 import {
   loadWorkspaceLayout,
   saveWorkspaceLayout,
@@ -199,7 +231,9 @@ import {
   type CurrentModelTarget,
   type RecoverableModelResult,
 } from "./model-operation-executor.js";
-import { captureKEditTransaction, groupKEditsByTransaction } from "./kedit-capture.js";
+import { canSignWithSecrets } from "./secret-store.js";
+import { resetLocalApp } from "./factory-reset.js";
+import { captureKEditTransaction } from "./kedit-capture.js";
 import {
   captureStreamingScrollAnchor,
   restoreStreamingScrollTop,
@@ -215,14 +249,19 @@ import {
   type SampleEventMeta,
   type AttachedFolder,
 } from "./workspace.js";
-import { createLocalWorkspace, type StagedMerge } from "./workspace-local.js";
+import {
+  prepareReifyExport,
+  traceSidecarEntries,
+} from "./reify.js";
+import {
+  createLocalWorkspace,
+  folderWriteSigner,
+  type StagedMerge,
+} from "./workspace-local.js";
 import { loadLocalFolder, saveLocalFile, mirrorPad, clearPadPath, loadPad, loadLocalShielded, saveLocalShielded, type LocalFile } from "./local-store.js";
 import {
   EMPTY_KEDIT_LOG,
-  applyKEditTransaction,
   appendKEditLog,
-  changedRegion,
-  dominantVoiceInRegion,
   dropKEditLogPrefix,
   ensureMdExt,
   fileHasUnsteppedChanges,
@@ -238,15 +277,22 @@ import {
 } from "./workspace-core.js";
 import { getPublicKey } from "nostr-tools/pure";
 import { isTauri, resolveRelayUrl } from "./identity.js";
-import { canSignWithSecrets } from "./secret-store.js";
 import {
   getOrCreateMintFolder,
+  getOrCreateScanFolder,
   getRootId,
   getRootLabel,
   mintRoot,
   setRootLabel,
   DEFAULT_ROOT_LABEL,
 } from "./root.js";
+import { planScanIntake } from "./scan-intake.js";
+import { loadOnboardingDemo } from "./onboarding-demo.js";
+import {
+  modelContextLessonForFolder,
+  planModelContextLesson,
+  type ModelContextLesson,
+} from "./model-context-lesson.js";
 import {
   getSubstrateVoice,
   getSubstrateSignerKeyId,
@@ -258,22 +304,24 @@ import {
   gatherContextSnapshot,
   clearChainMemo,
   renderLimelightLog,
-  isShielded,
 } from "./context-gather.js";
 import {
+  applyContextMount,
   applyScopeClick,
-  mountsForGroupAction,
-  mountedScopeLabel,
-  pathIsMounted,
-  pathInEffectiveScopes,
-  rebaseMountsAfterMove,
-  scopeKey,
-  topLevelMountedPaths,
+  contextMountState,
+  pathInEffectiveScope,
+  rebaseContextMountAfterMove,
+  rebaseTraceRefsAfterMove,
+  selectionForGroupAction,
+  topLevelSelectedPaths,
+  traceRefsKey,
+  type ContextMounts,
   type ScopeRef,
+  type TraceRef,
 } from "./scope-model.js";
 import {
   appendReplayStepsAtLiveEnd,
-  freshMountedReplayHeads,
+  freshSelectedReplayHeads,
   replayHeadSignature,
 } from "./replay-live-sync.js";
 import {
@@ -284,8 +332,32 @@ import {
 import { occupancyTransitions, type OccupancyEntry } from "./panel-occupancy.js";
 import {
   createReplayPanels,
+  replayLivePanelIndices,
   removeReplayPanels,
+  type ReplayPanelPath,
 } from "./replay-panel-layout.js";
+import {
+  buildReplayTiming,
+  formatReplayDuration,
+  REPLAY_IDLE_THRESHOLD_MS,
+  replayTimeFraction,
+  replayTransition,
+  type ReplayTiming,
+} from "./replay-timing.js";
+import {
+  buildReplayTimeline,
+  emptyReplayDisplay,
+  folderReplayState,
+  replayFrameIndexAtOrBefore,
+  selectedReplayPaths,
+  orderReplayTraceChain,
+  replayDisplayAt,
+  replayDisplayThroughFrame,
+  replayDisplayWithFrame,
+  type PlayFrame,
+  type ReplayDisplay,
+  type ReplayFolderState,
+} from "./replay-timeline.js";
 import {
   type OpKind as PromptOpKind,
   type OpInputs,
@@ -296,16 +368,24 @@ import {
   type OpLensId,
 } from "./op-lenses.js";
 import {
+  ArrowUpDown,
   BarChart3,
   BookOpen,
+  ChevronDown,
+  ChevronRight,
+  CircleHelp,
+  CircleDollarSign,
   Code,
-  Coins,
   Cpu,
   Download,
   Eye,
+  FileInput,
   FileText,
+  FileX,
   Folder,
+  FolderInput,
   FolderOpen,
+  FolderX,
   GitCompare,
   GitFork,
   Globe,
@@ -318,35 +398,47 @@ import {
   PanelLeftOpen,
   Quote,
   Radio,
-  Settings,
+  Radiation,
+  ScanLine,
   Sun,
   Trash2,
   type LucideIcon,
 } from "lucide-react";
 import {
   MINT,
+  SCAN,
   OBLIVION,
   forkPathForMint,
   formatLocalSecondStamp,
   isMintPath as isMint,
+  isScanPath as isScan,
   isOblivionPath as isOblivion,
   isSystemRootPath,
   mintedPath,
   slugifyFilename,
+  systemPathDisplayName,
   uniquePath,
 } from "./generated-paths.js";
+import { directoryContextMenuCapabilities } from "./directory-context-menu.js";
 import { deleteOutcomeMessage } from "./delete-confirmation.js";
 import { closeDeletedTabs, type DeleteTabTarget } from "./delete-tabs.js";
 import {
   buildDirectoryTree,
+  treeNodeDisplayName,
   type TreeEntry,
   type TreeNode,
 } from "./tree-model.js";
+import {
+  DIRECTORY_SORT_OPTIONS,
+  loadDirectorySort,
+  saveDirectorySort,
+  type DirectorySortOrder,
+} from "./directory-sort.js";
 import "./App.css";
 
 // Active new-file/new-folder creation. `parent` is the folder path the new
 // item should be created inside ("" = workspace root). Set by the
-// mounted-folder row's New buttons (scoped to the active trace's folder) and
+// root row's New buttons (scoped to the selected trace's folder) and
 // by the folder context menu (the right-clicked folder). While set, a phantom
 // input row renders inline among `parent`'s children; the user types a name
 // and hits Enter (or Esc to cancel) — no modal.
@@ -363,8 +455,10 @@ interface Creating {
 interface PanelState {
   tabs: string[];
   active: string;
-  /** Ephemeral column created for animated replay, never persisted. */
+  /** Session-owned read-only replay panel, never persisted. */
   replayOwned?: boolean;
+  /** Historical panel slot from a replay focus delta. */
+  replayPanelIndex?: number;
 }
 
 type PanelOccupancy = OccupancyEntry<FocusSelection>;
@@ -376,19 +470,33 @@ type PanelOccupancy = OccupancyEntry<FocusSelection>;
 // realized as a kind-4290 nucleus. `path` is set for file/folder selections;
 // `nodeId` is the trace nucleus id (file/folder chain head or coin id);
 // `phrase` carries the visible text for a coin selection.
-type SelectionKind = "file" | "folder" | "coin";
-interface SelectionRef {
-  kind: SelectionKind;
-  path?: string;
-  nodeId?: string;
-  phrase?: string;
+interface DirectCoinDraft {
+  phrase: string;
+  kedits: KEdit[];
+  nextTx: number;
 }
+
+const emptyDirectCoinDraft = (): DirectCoinDraft => ({
+  phrase: "",
+  kedits: [],
+  nextTx: 0,
+});
 
 interface AttestTarget {
   path: string;
   kind: "file" | "folder" | "coin";
   nodeId?: string;
   plan: Exclude<AttestationPlan, "unavailable">;
+  /** Replay-local exact-node action; must never Step or retarget live focus. */
+  historical?: true;
+  panelIndex?: number;
+}
+
+type HistoricalActionPhase = "idle" | "running" | "done" | "error";
+interface HistoricalActionStatus {
+  send: HistoricalActionPhase;
+  attest: HistoricalActionPhase;
+  message?: string;
 }
 
 interface CoinClipboardCitation {
@@ -423,26 +531,25 @@ interface ReplayStep {
    *  not off-screen. `null` only when the step touched nothing (a tag/reply-
    *  -only edit on a non-first step). */
   changeRange: { from: number; to: number } | null;
-  /** Present when this step is a FOLDER MEMBERSHIP event (kind 4292), not a file
-   *  content step. A membership step has no `contentUpToHere`/`runsUpToHere`/
-   *  `changeRange` (those are "" / [] / null) — it's a structural station on the
-   *  timeline, labeled with the membership change (added/removed/renamed X) and
-   *  shown only via the stepper's step label. Scrubbing onto a membership step
-   *  does NOT freeze a file or swap tabs: there's no content to show, so scope
-   *  stays sticky and focus stays put. `relativePath` still carries the affected
-   *  path so the label can name it. */
+  /** Present when this is a folder node carrying a structural membership
+   *  change. It labels the Step without turning the folder into a document. */
   membership?: { type: "add" | "remove" | "rename"; path: string };
+  /** Signed folder membership plus buffered focus observations. Structural
+   *  replay state only: folders never become panel tabs. */
+  folder?: ReplayFolderState;
 }
 
-// One frame of keystroke playback — the file's runs after applying one editor
-// transaction. `stepIndex` is the index into `replay.steps` of the Step whose
-// transaction produced this frame, so a pause can snap the cursor to the right
-// save point. Built once per play session and torn down on pause/stop; the Step
-// timeline and its slider keep working at save-point granularity throughout.
-interface PlayFrame {
-  path: string;
-  stepIndex: number;
-  runs: Run[];
+/** Latest content Step for one replay tab at a global cursor. */
+function replayStepIndexForPath(
+  steps: readonly ReplayStep[],
+  index: number,
+  path: string,
+): number {
+  for (let i = Math.min(index, steps.length - 1); i >= 0; i--) {
+    const step = steps[i];
+    if (step.relativePath === path) return i;
+  }
+  return -1;
 }
 
 // Views reachable from the nav rail. `editor` is the existing two-panel
@@ -545,8 +652,9 @@ function mergePadIntoFileState(existing: FileState | undefined, lf: LocalFile): 
     kind: existing?.kind,
     runs,
     nodeId: lf.nodeId || existing?.nodeId || "",
+    updatedAt: lf.updatedAt,
     tags: lf.tags ?? existing?.tags ?? [],
-    taggedTraces: lf.taggedTraces ?? existing?.taggedTraces,
+    citationIds: lf.citationIds ?? existing?.citationIds,
     // Carry the drained keystroke log so an unstepped buffer survives a
     // reload and lands on the next step.
     ...(lf.kedits && lf.kedits.length > 0 ? { kedits: keditLogFromArray(lf.kedits) } : {}),
@@ -665,26 +773,35 @@ function stripRanges(text: string, ranges: [number, number][]): string {
   return out;
 }
 
-/** Split a buffered Reply/Receive response into an optional TITLE header and
- * body. If the first line is not a TITLE, preserve the whole response. */
-function parseReplyOutput(raw: string): { title: string | null; body: string } {
+/**
+ * Split a Reply model stream into an optional TITLE header + body.
+ * The model is asked to emit `TITLE: <name>` as its first line. Until that
+ * first line is complete (`headerDone`), the body is withheld so the TITLE
+ * line never lands in the editor. If the first line isn't a TITLE, the whole
+ * raw string is treated as body (fallback when the model ignores the format).
+ */
+function parseReplyOutput(
+  raw: string,
+  streamDone = false,
+): { title: string | null; body: string; headerDone: boolean } {
   const nl = raw.indexOf("\n");
   if (nl < 0) {
+    if (!streamDone) return { title: null, body: "", headerDone: false };
     const m = raw.match(/^TITLE:\s*(.+?)\s*$/i);
     if (m) {
       const title = m[1].trim();
-      return { title: title || null, body: "" };
+      return { title: title || null, body: "", headerDone: true };
     }
-    return { title: null, body: raw };
+    return { title: null, body: raw, headerDone: true };
   }
   const first = raw.slice(0, nl);
   const rest = raw.slice(nl + 1).replace(/^\r?\n/, "");
   const m = first.match(/^TITLE:\s*(.+?)\s*$/i);
   if (m) {
     const title = m[1].trim();
-    return { title: title || null, body: rest };
+    return { title: title || null, body: rest, headerDone: true };
   }
-  return { title: null, body: raw };
+  return { title: null, body: raw, headerDone: true };
 }
 
 // --- tree moves (drag & drop) -----------------------------------------
@@ -727,9 +844,9 @@ function parentPath(path: string): string {
   return i === -1 ? ROOT : path.slice(0, i);
 }
 
-/** Effective scope is the selected union with shielded traversal boundaries. */
+/** Effective scope is the one context mount with shielded traversal boundaries. */
 function isInScope(
-  scopes: readonly ScopeRef[],
+  scopes: ContextMounts,
   shielded: Set<string>,
   targetPath: string,
 ): boolean {
@@ -737,8 +854,14 @@ function isInScope(
     !!targetPath &&
     !isOblivion(targetPath) &&
     !isMint(targetPath) &&
-    pathInEffectiveScopes(scopes, shielded, targetPath)
+    !isScan(targetPath) &&
+    pathInEffectiveScope(scopes, shielded, targetPath)
   );
+}
+
+function automationScopesFor(mounts: ContextMounts): AutomationScopes {
+  const mount = mounts[0];
+  return mount ? [{ kind: mount.kind, path: mount.path }] : [];
 }
 
 // Does `parent` contain any file or folder beneath it? Used by both move and
@@ -764,12 +887,19 @@ function canDrop(
   files: Set<string>,
   folders: Set<string>,
 ): boolean {
-  // Mint is a flat, append-only system region. Ordinary items cannot be moved
-  // into it. Dragging one of its coins out is a Fork gesture, so the original
-  // remains and basename collisions are resolved when the fork path is built.
-  if (isMint(destFolder) || (isOblivion(destFolder) && isMint(src))) return false;
+  // Mint and Scan are append-only system regions. Ordinary items cannot be
+  // moved into either. Dragging one of their members out is an adoption/fork
+  // gesture, so the source remains in its private system folder.
+  if (
+    isMint(destFolder) ||
+    isScan(destFolder) ||
+    (isOblivion(destFolder) && (isMint(src) || isScan(src)))
+  ) return false;
   if (isMint(src)) {
     return src !== MINT && !isSystemRootPath(destFolder);
+  }
+  if (isScan(src)) {
+    return src !== SCAN && !isSystemRootPath(destFolder);
   }
   if (destFolder === parentPath(src)) return false; // already here
   if (isDescendantOrSelf(src, destFolder)) return false; // can't move into self/descendant
@@ -798,11 +928,93 @@ const FOLDER_TAB_PREFIX = "folder://";
 const isFolderTab = (p: string): boolean => p.startsWith(FOLDER_TAB_PREFIX);
 const folderTab = (relPath: string): string => FOLDER_TAB_PREFIX + relPath;
 const folderTabPath = (p: string): string => p.slice(FOLDER_TAB_PREFIX.length);
+const DIRECT_COIN_COMPOSER_TAB = "coin-compose://direct";
+const isCoinComposerTab = (p: string): boolean => p === DIRECT_COIN_COMPOSER_TAB;
+/** Mint members are immutable Coin tabs, never editable file tabs. */
+const isCoinTab = (p: string): boolean => !isFolderTab(p) && p !== MINT && isMint(p);
 /** Tab label: the basename of a file, or the basename of a folder's relpath. */
-const tabLabel = (p: string): string => basename(isFolderTab(p) ? folderTabPath(p) : p);
+const tabLabel = (p: string): string => {
+  if (isCoinComposerTab(p)) return "New Coin";
+  const path = isFolderTab(p) ? folderTabPath(p) : p;
+  return path === ROOT ? "Root" : systemPathDisplayName(path);
+};
 /** Tab tooltip: a folder tab shows its relpath with a trailing slash to read
  *  as a folder; a file tab shows its raw path. */
-const tabTitle = (p: string): string => (isFolderTab(p) ? folderTabPath(p) + "/" : p);
+const tabTitle = (p: string): string =>
+  isCoinComposerTab(p) ? "New direct Coin" : isFolderTab(p) ? folderTabPath(p) + "/" : p;
+
+function folderMembershipFromEvent(
+  event: Event,
+  mountedPath: string,
+): ReplayStep["membership"] {
+  let deltas: Array<{
+    type?: string;
+    relativePath?: string;
+    fromPath?: string;
+    toPath?: string;
+  }>;
+  try {
+    const parsed = JSON.parse(event.content) as { deltas?: typeof deltas };
+    deltas = Array.isArray(parsed.deltas) ? parsed.deltas : [];
+  } catch {
+    return undefined;
+  }
+  const delta = deltas.find(
+    (candidate) =>
+      candidate.type === "add" ||
+      candidate.type === "remove" ||
+      candidate.type === "rename",
+  );
+  if (!delta || (delta.type !== "add" && delta.type !== "remove" && delta.type !== "rename")) {
+    return undefined;
+  }
+  const relativePath = delta.type === "rename" ? delta.toPath : delta.relativePath;
+  if (!relativePath) return undefined;
+  const path =
+    !mountedPath ||
+    relativePath === mountedPath ||
+    relativePath.startsWith(`${mountedPath}/`)
+      ? relativePath
+      : `${mountedPath}/${relativePath}`;
+  return { type: delta.type, path };
+}
+
+function folderReplayStep(
+  event: Event,
+  mountedPath: string,
+): ReplayStep {
+  return {
+    event,
+    relativePath: "",
+    meta: eventMeta(event),
+    contentUpToHere: "",
+    runsUpToHere: [],
+    changeRange: null,
+    membership: folderMembershipFromEvent(event, mountedPath),
+    folder: folderReplayState(event, mountedPath),
+  };
+}
+
+/** Folder trace identity is still its genesis id, but the shared file resolver
+ * deliberately rejects folder-reified nodes. Walk the exact folder head here
+ * so nested selected folders can replay their own chain too. */
+async function resolveFolderTraceIdentity(nodeId: string): Promise<string | null> {
+  const seen = new Set<string>();
+  let cursor: string | undefined = nodeId;
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    const event = await fetchEventById(cursor);
+    if (!event || !event.tags.some((tag) => tag[0] === "z" && tag[1] === "folder")) {
+      return null;
+    }
+    const prev = event.tags.find(
+      (tag) => tag[0] === "e" && tag[3] === "prev",
+    )?.[1];
+    if (!prev) return event.id;
+    cursor = prev;
+  }
+  return null;
+}
 
 /** Rebase a folder-tab sentinel when the underlying folder moves/renames.
  *  Applies the same path rebase to the inner relpath; returns the sentinel
@@ -872,7 +1084,11 @@ function pruneTabModes(
   panels: PanelState[],
 ): Record<string, Mode> {
   const open = new Set<string>();
-  for (const p of panels) for (const t of p.tabs) open.add(t);
+  for (const p of panels) {
+    for (const t of p.tabs) {
+      if (!isFolderTab(t) && !isCoinTab(t) && !isCoinComposerTab(t)) open.add(t);
+    }
+  }
   if (open.size === 0) return {};
   const next: Record<string, Mode> = {};
   for (const [path, mode] of Object.entries(modes)) {
@@ -999,8 +1215,10 @@ function TreeItem({
   collapsed,
   onToggleFolder,
   focusedTabPath,
+  selectedPaths,
   scopes,
   shielded,
+  onSetMountState,
   draggingPaths,
   dropTargetPath,
   onDragStart,
@@ -1020,6 +1238,8 @@ function TreeItem({
   onRenameCancel,
   onRowActivate,
   onCreateStart,
+  onMintCoin,
+  onScan,
   creating,
   createDraft,
   createError,
@@ -1033,18 +1253,18 @@ function TreeItem({
   depth: number;
   collapsed: Set<string>;
   onToggleFolder: (path: string) => void;
-  /** Tree path shown by the active tab in the focused panel. Kept separate
-   *  from scope so switching tabs never changes which traces are mounted. */
+  /** Tree path shown by the active tab in the focused panel. */
   focusedTabPath: string | null;
-  /** Explicit mounts. Their folder descendants belong to derived scope. */
-  scopes: readonly ScopeRef[];
+  /** Explorer-style row selection, kept separate from the context mount. */
+  selectedPaths: ReadonlySet<string>;
+  /** The one explicit context mount. A folder contributes its descendants. */
+  scopes: ContextMounts;
   /** Shielded paths. A folder shields its entire subtree. */
   shielded: Set<string>;
-  /** Row click with modifier context. The Sidebar owns the selection model:
-   *  plain click mounts-sole + activates (file opens, folder toggles);
-   *  Cmd/Ctrl-click toggles a mount without activating; Shift-click ranges
-   *  from the anchor. Folder expand/collapse is folded in here so a plain
-   *  click both selects and toggles, matching the prior single-select UX. */
+  /** Replace, clear, or exclude within the one prompt-context mount. */
+  onSetMountState: (target: ScopeRef, mounted: boolean) => void;
+  /** Row click with modifier context. The Sidebar owns ordinary selection;
+   *  plain click also activates the trace while modifier clicks select only. */
   onRowActivate: (item: ActivatableTreeItem, e: React.MouseEvent) => void;
   draggingPaths: Set<string>;
   dropTargetPath: string | null;
@@ -1063,9 +1283,12 @@ function TreeItem({
   onRenameKey: (e: React.KeyboardEvent<HTMLInputElement>) => void;
   onRenameCommit: () => void;
   onRenameCancel: () => void;
-  /** New file / New folder from the mounted-folder row. Parent is chosen by
-   *  the Sidebar (active-trace scope); only the root row renders the buttons. */
+  /** New file / New folder from the root row. Parent follows tree selection. */
   onCreateStart: (kind: "file" | "folder") => void;
+  /** Open the direct-Coin composer from the Mint region header. */
+  onMintCoin: () => void;
+  /** Acquire a filesystem snapshot from the Scan region header. */
+  onScan: (kind: "file" | "folder") => void;
   /** Active inline creation (null unless a New button/context-menu entry was
    *  just clicked). When set, a phantom input row renders among this folder's
    *  children iff `creating.parent === node.path`. */
@@ -1079,51 +1302,72 @@ function TreeItem({
   onCreateCancel: () => void;
 }) {
   const indent = { paddingLeft: depth * 14 + 10 };
+  const displayName = treeNodeDisplayName(node);
   const isDragging = draggingPaths.has(node.path);
   const isDropTarget = dropTargetPath === node.path;
   const isRenaming = renamingPath === node.path;
   const isTabFocused = focusedTabPath !== null && node.path === focusedTabPath;
+  const isTreeSelected = selectedPaths.has(node.path);
   if (node.type === "folder") {
     const isOpen = !collapsed.has(node.path);
     const dropAllowed = canDropOn(node.path);
     const isRoot = node.isRoot === true;
     const isCappedSystemRegion =
-      node.systemKind === "mint" || node.systemKind === "oblivion";
-    // A directly mounted shielded trace starts a new inclusion root; shielded
-    // descendants below that root remain traversal boundaries.
-    const folderMounted = pathIsMounted(scopes, node.path);
-    const folderShielded = isShielded(shielded, node.path);
-    const folderInScope =
-      !isOblivion(node.path) &&
-      !isMint(node.path) &&
-      pathInEffectiveScopes(scopes, shielded, node.path);
-    const folderShownShielded = folderShielded && !folderInScope;
+      node.systemKind === "mint" ||
+      node.systemKind === "scan" ||
+      node.systemKind === "oblivion";
+    const privateSystemItem =
+      isMint(node.path) || isScan(node.path) || isOblivion(node.path);
+    const folderMountState = privateSystemItem
+      ? "unmounted"
+      : contextMountState(scopes, shielded, node.path);
+    const folderMounted = folderMountState === "mounted";
+    const folderIncluded = folderMounted || folderMountState === "included";
     const folderIconClass =
       "tree-icon" +
-      (folderShownShielded ? " tree-icon-shielded" : folderInScope ? " tree-icon-in-scope" : "");
+      (isOblivion(node.path)
+        ? " tree-icon-oblivion"
+        : folderMounted
+          ? " tree-icon-in-scope"
+          : folderMountState === "included"
+            ? " tree-icon-included"
+            : folderMountState === "shielded"
+              ? " tree-icon-shielded"
+              : "");
     const rowClass =
       "tree-row tree-folder" +
       (isRoot ? " tree-row-root" : "") +
       (isTabFocused ? " tree-row-tab-focused" : "") +
-      (folderMounted ? " tree-row-mounted" : "") +
-      (folderShownShielded ? " tree-row-shielded" : "") +
+      (isTreeSelected ? " tree-row-selected" : "") +
       (isDragging ? " tree-dragging" : "") +
       (isDropTarget && dropAllowed ? " tree-drop-target" : "") +
       (isDropTarget && !dropAllowed ? " tree-drop-denied" : "");
     const folderGlyph =
       node.systemKind === "mint" ? (
-        <Leaf size={13} className="tree-icon" aria-hidden="true" />
+        <Leaf size={13} className="tree-icon tree-icon-mint" aria-hidden="true" />
+      ) : node.systemKind === "scan" ? (
+        <ScanLine size={13} className="tree-icon tree-icon-scan" aria-hidden="true" />
       ) : node.systemKind === "oblivion" ? (
         <Trash2 size={13} className="tree-icon" aria-hidden="true" />
+      ) : folderMountState === "shielded" ? (
+        <FolderX size={13} className={folderIconClass} aria-hidden="true" />
       ) : node.systemKind === "root" ? (
         <BookOpen size={13} className={folderIconClass} aria-hidden="true" />
+      ) : isScan(node.path) ? (
+        <FolderInput size={13} className="tree-icon tree-icon-scan" aria-hidden="true" />
       ) : isOpen ? (
         <FolderOpen size={13} className={folderIconClass} aria-hidden="true" />
       ) : (
         <Folder size={13} className={folderIconClass} aria-hidden="true" />
       );
     return (
-      <div className={"tree-node" + (isCappedSystemRegion ? " tree-node-system" : "")}>
+      <div
+        className={
+          "tree-node" +
+          (isRoot ? " tree-node-root" : "") +
+          (isCappedSystemRegion ? " tree-node-system" : "")
+        }
+      >
         <div
           className={rowClass}
           style={indent}
@@ -1172,29 +1416,66 @@ function TreeItem({
           }}
           onContextMenu={(e) => onContextMenuRow(e, node)}
           onClick={(e) => {
-            // Don't toggle collapse when the rename input is mounted; clicking
-            // into the field would otherwise yank the row open/closed. A plain
-            // click both selects the folder (gold box) and toggles it; modifier
-            // clicks (cmd/shift) are handled by onRowActivate, which only
-            // toggles expand on a plain (non-modifier) click.
-            if (!isRenaming) {
-              onRowActivate(node, e);
-              if (!e.metaKey && !e.ctrlKey && !e.shiftKey) onToggleFolder(node.path);
-            }
+            // The label focuses/opens the folder. Expansion belongs only to
+            // the separate chevron below.
+            if (!isRenaming) onRowActivate(node, e);
           }}
         >
-          {node.systemKind ? (
+          <button
+            type="button"
+            className="tree-expand-btn"
+            aria-expanded={isOpen}
+            aria-label={`${isOpen ? "Collapse" : "Expand"} ${displayName}`}
+            title={isOpen ? "Collapse folder" : "Expand folder"}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleFolder(node.path);
+            }}
+          >
+            {isOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </button>
+          {isCappedSystemRegion || isScan(node.path) ? (
             <span
               className="tree-icon-slot tree-system-icon"
-              title={node.systemKind === "mint" ? "Mint" : node.systemKind === "oblivion" ? "Oblivion" : "Root"}
+              title={
+                node.systemKind === "mint"
+                  ? "Mint"
+                  : node.systemKind === "scan"
+                    ? "Scan"
+                    : isScan(node.path)
+                      ? "Scanned folder"
+                    : "Oblivion"
+              }
               aria-hidden="true"
             >
               {folderGlyph}
             </span>
           ) : (
-            <span className="tree-icon-slot" aria-hidden="true">
+            <button
+              type="button"
+              className="tree-icon-slot tree-icon-btn"
+              data-mount-state={folderMountState}
+              aria-pressed={folderIncluded}
+              aria-label={
+                folderIncluded
+                  ? `Exclude ${displayName} from context`
+                  : `Mount ${displayName} for context`
+              }
+              title={
+                folderIncluded
+                  ? "Exclude folder and descendants from prompt context"
+                  : "Mount folder and descendants, replacing the current prompt context"
+              }
+              onClick={(e) => {
+                e.stopPropagation();
+                onSetMountState(
+                  { kind: "folder", path: node.path },
+                  !folderIncluded,
+                );
+              }}
+            >
               {folderGlyph}
-            </span>
+            </button>
           )}
           {isRenaming ? (
             <input
@@ -1219,16 +1500,7 @@ function TreeItem({
               aria-invalid={!!renameError}
             />
           ) : (
-            <span className="tree-name">{node.name}</span>
-          )}
-          {node.attestations !== undefined && (
-            <span
-              className="tree-attestation-badge"
-              title={`${node.attestations} reachable attestation${node.attestations === 1 ? "" : "s"}`}
-              aria-label={`${node.attestations} reachable attestation${node.attestations === 1 ? "" : "s"}`}
-            >
-              {node.attestations}
-            </span>
+            <span className="tree-name">{displayName}</span>
           )}
           {isRoot && node.systemKind === "root" && (
             <span
@@ -1256,6 +1528,49 @@ function TreeItem({
               </button>
             </span>
           )}
+          {isRoot && node.systemKind === "mint" && (
+            <span
+              className="tree-row-actions"
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <button
+                className="icon-btn"
+                type="button"
+                title="Mint a direct Coin"
+                aria-label="Mint a direct Coin"
+                onClick={onMintCoin}
+              >
+                <CircleDollarSign size={14} aria-hidden="true" />
+              </button>
+            </span>
+          )}
+          {isRoot && node.systemKind === "scan" && (
+            <span
+              className="tree-row-actions"
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <button
+                className="icon-btn"
+                type="button"
+                title="Scan folder"
+                aria-label="Scan folder"
+                onClick={() => onScan("folder")}
+              >
+                <FolderInput size={14} aria-hidden="true" />
+              </button>
+              <button
+                className="icon-btn"
+                type="button"
+                title="Scan file"
+                aria-label="Scan file"
+                onClick={() => onScan("file")}
+              >
+                <FileInput size={14} aria-hidden="true" />
+              </button>
+            </span>
+          )}
           {isRenaming && renameError && <p className="create-error">{renameError}</p>}
         </div>
         {isOpen && (
@@ -1273,8 +1588,10 @@ function TreeItem({
                 collapsed={collapsed}
                 onToggleFolder={onToggleFolder}
                 focusedTabPath={focusedTabPath}
+                selectedPaths={selectedPaths}
                 scopes={scopes}
                 shielded={shielded}
+                onSetMountState={onSetMountState}
                 draggingPaths={draggingPaths}
                 dropTargetPath={dropTargetPath}
                 onDragStart={onDragStart}
@@ -1294,6 +1611,8 @@ function TreeItem({
                 onRenameCancel={onRenameCancel}
                 onRowActivate={onRowActivate}
                 onCreateStart={onCreateStart}
+                onMintCoin={onMintCoin}
+                onScan={onScan}
                 creating={creating}
                 createDraft={createDraft}
                 createError={createError}
@@ -1323,24 +1642,31 @@ function TreeItem({
     );
   }
 
-  const fileMounted = pathIsMounted(scopes, node.path);
-  const fileShielded = isShielded(shielded, node.path);
-  const fileInScope =
-    !isOblivion(node.path) &&
-    !isMint(node.path) &&
-    pathInEffectiveScopes(scopes, shielded, node.path);
-  const fileShownShielded = fileShielded && !fileInScope;
+  const privateSystemItem =
+    isMint(node.path) || isScan(node.path) || isOblivion(node.path);
+  const fileMountState = privateSystemItem
+    ? "unmounted"
+    : contextMountState(scopes, shielded, node.path);
+  const fileMounted = fileMountState === "mounted";
+  const fileIncluded = fileMounted || fileMountState === "included";
   const fileIconClass =
     "tree-icon" +
-    (fileShownShielded ? " tree-icon-shielded" : fileInScope ? " tree-icon-in-scope" : "");
+    (isOblivion(node.path)
+      ? " tree-icon-oblivion"
+      : fileMounted
+        ? " tree-icon-in-scope"
+        : fileMountState === "included"
+          ? " tree-icon-included"
+          : fileMountState === "shielded"
+            ? " tree-icon-shielded"
+            : "");
 
   return (
     <div
       className={
         "tree-row tree-file" +
         (isTabFocused ? " tree-row-tab-focused" : "") +
-        (fileMounted ? " tree-row-mounted" : "") +
-        (fileShownShielded ? " tree-row-shielded" : "") +
+        (isTreeSelected ? " tree-row-selected" : "") +
         (isDragging ? " tree-dragging" : "")
       }
       style={indent}
@@ -1360,18 +1686,49 @@ function TreeItem({
         if (!isRenaming) onRowActivate(node, e);
       }}
     >
-      {node.systemKind === "minted" ? (
+      <span className="tree-expand-spacer" aria-hidden="true" />
+      {node.systemKind === "minted" || isScan(node.path) ? (
         <span
           className="tree-icon-slot tree-system-icon"
-          title="Coin"
+          title={node.systemKind === "minted" ? "Coin" : "Scanned file"}
           aria-hidden="true"
         >
-          <Coins size={13} className="tree-icon" aria-hidden="true" />
+          {node.systemKind === "minted" ? (
+            <CircleDollarSign size={13} className="tree-icon tree-icon-coin" aria-hidden="true" />
+          ) : (
+            <FileInput size={13} className="tree-icon tree-icon-scan" aria-hidden="true" />
+          )}
         </span>
       ) : (
-        <span className="tree-icon-slot" aria-hidden="true">
-          <FileText size={13} className={fileIconClass} aria-hidden="true" />
-        </span>
+        <button
+          type="button"
+          className="tree-icon-slot tree-icon-btn"
+          data-mount-state={fileMountState}
+          aria-pressed={fileIncluded}
+          aria-label={
+            fileIncluded
+              ? `Exclude ${displayName} from context`
+              : `Mount ${displayName} for context`
+          }
+          title={
+            fileIncluded
+              ? "Exclude file from prompt context"
+              : "Mount file, replacing the current prompt context"
+          }
+          onClick={(e) => {
+            e.stopPropagation();
+            onSetMountState(
+              { kind: "file", path: node.path },
+              !fileIncluded,
+            );
+          }}
+        >
+          {fileMountState === "shielded" ? (
+            <FileX size={13} className={fileIconClass} aria-hidden="true" />
+          ) : (
+            <FileText size={13} className={fileIconClass} aria-hidden="true" />
+          )}
+        </button>
       )}
       {isRenaming ? (
         <input
@@ -1394,16 +1751,7 @@ function TreeItem({
           aria-invalid={!!renameError}
         />
       ) : (
-        <span className="tree-name">{node.name}</span>
-      )}
-      {node.attestations !== undefined && (
-        <span
-          className="tree-attestation-badge"
-          title={`${node.attestations} reachable attestation${node.attestations === 1 ? "" : "s"}`}
-          aria-label={`${node.attestations} reachable attestation${node.attestations === 1 ? "" : "s"}`}
-        >
-          {node.attestations}
-        </span>
+        <span className="tree-name">{displayName}</span>
       )}
       {isRenaming && renameError && <p className="create-error">{renameError}</p>}
     </div>
@@ -1415,12 +1763,19 @@ function Sidebar({
   collapsed,
   onToggleFolder,
   focusedTabPath,
+  selectedItems,
+  onSelectionChange,
   scopes,
-  onScopesChange,
   shielded,
-  onToggleShielded,
+  onSetMountState,
   onActivateFile,
+  onActivateCoin,
+  onActivateOblivion,
   onActivateFolder,
+  onOpenFolder,
+  onMintCoin,
+  onScan,
+  onReify,
   creating,
   createError,
   onCreateStart,
@@ -1440,20 +1795,10 @@ function Sidebar({
   tagBrowser,
   folderId,
   onOpenToSide,
-  onBeginReplay,
-  replayStep,
-  replayIndex,
-  replayCount,
-  stepTimes,
-  playing,
-  playSpeed,
-  replayActive,
-  onStep,
-  onTogglePlay,
-  onCycleSpeed,
-  playFraction,
-  onOpenFolder,
-  onOpenSettings,
+  directorySort,
+  onDirectorySortChange,
+  onOpenOnboarding,
+  onOpenFactoryReset,
 }: {
   tree: TreeNode[];
   collapsed: Set<string>;
@@ -1461,19 +1806,33 @@ function Sidebar({
   /** Tree path shown by the active tab in the focused panel, or null when no
    *  tab is active. Drives only the focus marker; it never mutates scope. */
   focusedTabPath: string | null;
-  /** Explicit mounts, owned by App. Effective scope is derived from this set. */
-  scopes: readonly ScopeRef[];
-  onScopesChange: (scopes: ScopeRef[]) => void;
+  /** Explorer selection. This exact trace union supplies playback. */
+  selectedItems: readonly TraceRef[];
+  onSelectionChange: (items: TraceRef[]) => void;
+  /** The one explicit context mount, owned by App. */
+  scopes: ContextMounts;
   /** Shielded traversal boundaries, passed through to each row. */
   shielded: Set<string>;
-  onToggleShielded: (path: string) => void;
+  onSetMountState: (target: ScopeRef, mounted: boolean) => void;
   /** Open a file into the active panel and make it the active trace. Called on
    *  a plain (non-modifier) click of a file row. */
   onActivateFile: (path: string) => void;
+  /** Inspect a Mint entry without opening its file-shaped storage node. */
+  onActivateCoin: (path: string) => void;
+  /** Inspect an Oblivion file from its explicit context-menu action. */
+  onActivateOblivion: (path: string) => void;
   /** Make a folder the active trace (folders aren't editors, so nothing opens).
    *  Called on a plain (non-modifier) click of a folder row. Expand/collapse is
    *  toggled separately by the row's onClick. */
   onActivateFolder: (path: string) => void;
+  /** Open a folder tab in the active panel from its context menu. */
+  onOpenFolder: (path: string) => void;
+  /** Open the direct-Coin composer from the Mint region header. */
+  onMintCoin: () => void;
+  /** Acquire a file or folder from the Scan region header. */
+  onScan: (kind: "file" | "folder") => void;
+  /** Reify one explicitly chosen tree file or folder to the filesystem. */
+  onReify: (target: ScopeRef) => void;
   creating: Creating | null;
   createError: string | null;
   onCreateStart: (kind: "file" | "folder", parent?: string) => void;
@@ -1499,50 +1858,13 @@ function Sidebar({
    *  (the context menu's "Open to side"). A folder opens as a folder tab, a
    *  file as an editor tab; a new column is always spawned. */
   onOpenToSide: (path: string) => void;
-  /** Open a folder as a folder tab in the *active* panel (the context menu's
-   *  "Open"). Mirrors onActivateFile but for folders: opens the special
-   *  folder tab instead of leaving the folder as a selection-only trace. */
-  onOpenFolder: (path: string) => void;
-  /** Open the settings panel (factory reset lives here). */
-  onOpenSettings: () => void;
-  /** Bootstrap folder-wide replay (async fetch of the folder's steps). Called
-   *  by the transport's ▶ when no timeline is loaded yet. */
-  onBeginReplay: () => void;
-  /** The current replay step (the one the editor is showing), or null when not
-   *  replaying. Drives the transport's hover tooltip (action/file/time/blurb). */
-  replayStep: ReplayStep | null;
-  /** Current replay index (0-based). `replayCount - 1` is the sticky `last`.
-   *  Display-only position for the transport: while keystroke playback runs
-   *  this tracks the edit frame being shown (each PlayFrame carries its
-   *  producing step's stepIndex) so the slider/stepper stay in sync with the
-   *  visible typing; otherwise it's the committed `replay.index`. The committed
-   *  `replay.index` itself drives the editor's frozen-content override + snapshot
-   *  capture/restore, which must not thrash per edit — so the caller derives
-   *  this display value without advancing the committed one. */
-  replayIndex: number;
-  /** Total replay steps in the folder timeline. */
-  replayCount: number;
-  /** steppedAtMs per step, in step order. Drives the time-proportional slider
-   *  axis: large time gaps between adjacent steps render as translucent colored
-   *  bands inside the track ("3d", "4h"), clickable to jump across idle spans
-   *  instead of stepping one-by-one. `[]` (or omit) → index-linear fallback. */
-  stepTimes?: number[];
-  /** Whether the auto-play timer is advancing the timeline. */
-  playing: boolean;
-  /** Current play speed multiplier. */
-  playSpeed: number;
-  /** True while replay holds the editor read-only (historical step or playback).
-   *  Highlights the ⏭ skip-to-live escape in the transport. */
-  replayActive: boolean;
-  /** Seek replay to step `n`. */
-  onStep: (n: number) => void;
-  /** Toggle auto-play on/off. */
-  onTogglePlay: () => void;
-  /** Advance to the next play speed (wraps). */
-  onCycleSpeed: () => void;
-  /** Sub-step progress (0..1) through the current save point during
-   *  playback — drives the fractional readout (3.4 / 12) and thumb glide. */
-  playFraction?: number;
+  /** One ordering preference shared by Root and every generated region. */
+  directorySort: DirectorySortOrder;
+  onDirectorySortChange: (order: DirectorySortOrder) => void;
+  /** Restart the guided first-trace journey. */
+  onOpenOnboarding: () => void;
+  /** Open the destructive local-app factory-reset confirmation. */
+  onOpenFactoryReset: () => void;
 }) {
   // inline rename state. renamingPath is the node being edited; renameDraft is
   // the live input value; renameError keeps the input open on a bad name (same
@@ -1583,13 +1905,12 @@ function Sidebar({
     }
   }, [creating]);
 
-  // The shift-range anchor is local interaction state. Mounts live in App;
-  // panels and tabs cannot mutate them by changing focus.
+  // Explorer selection is replay state owned by App. The context mount remains a
+  // separate state path and only the icon buttons mutate them.
   const [anchorPath, setAnchorPath] = useState<string | null>(null);
-  const mountedPaths = useMemo(() => new Set(scopes.map((scope) => scope.path)), [scopes]);
-  const replayMountedLabel = useMemo(
-    () => mountedScopeLabel(scopes, tree.find((node) => node.path === ROOT)?.name ?? "Root"),
-    [scopes, tree],
+  const selectedPaths = useMemo(
+    () => new Set(selectedItems.map((item) => item.path)),
+    [selectedItems],
   );
 
   // drag state lives here — the set of source paths being dragged (one or
@@ -1604,6 +1925,8 @@ function Sidebar({
   // context menu + delete-confirm state. ctxMenu is positioned at the cursor;
   // confirmDelete holds the paths pending a Delete click.
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [sortMenuOpen, setSortMenuOpen] = useState(false);
+  const sortMenuRef = useRef<HTMLDivElement>(null);
   const [confirmDelete, setConfirmDelete] = useState<{
     paths: string[];
     name: string;
@@ -1615,7 +1938,24 @@ function Sidebar({
   const [revokeMessage, setRevokeMessage] = useState<string | null>(null);
   const [revokeError, setRevokeError] = useState<string | null>(null);
 
-  // Clear the range anchor when the attached folder changes.
+  useEffect(() => {
+    if (!sortMenuOpen) return;
+    function onPointerDown(e: MouseEvent) {
+      if (!sortMenuRef.current?.contains(e.target as Node)) setSortMenuOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setSortMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [sortMenuOpen]);
+
+  // App clears the replay/tree selection when the attached folder changes;
+  // the Sidebar only owns the range-selection anchor.
   const folderIdRef = useRef(folderId);
   useEffect(() => {
     if (folderIdRef.current !== folderId) {
@@ -1628,7 +1968,7 @@ function Sidebar({
   // depth-first in display order). Shift-click ranges are computed over this so
   // collapsed subtrees are skipped, matching what the user sees.
   const visibleItems = useMemo(() => {
-    const out: ScopeRef[] = [];
+    const out: TraceRef[] = [];
     const walk = (nodes: TreeNode[]) => {
       for (const n of nodes) {
         out.push({ kind: n.type, path: n.path });
@@ -1646,11 +1986,11 @@ function Sidebar({
   function createParent(): string {
     // Prefer the sole selected folder: clicking a New button after selecting a
     // folder should nest inside it, regardless of which tab the focused panel
-    // is showing. `focusedTabPath` follows open tabs, while `scopes` changes
-    // only through tree gestures. Falls back to focused-panel location when
-    // there is not exactly one scoped folder.
-    if (scopes.length === 1) {
-      const selected = scopes[0];
+    // is showing. `focusedTabPath` follows open tabs, while row selection is
+    // local to the explorer. Falls back to focused-panel location when there
+    // is not exactly one selected folder.
+    if (selectedItems.length === 1) {
+      const selected = selectedItems[0];
       if (selected.kind === "folder") {
         return selected.path;
       }
@@ -1661,21 +2001,45 @@ function Sidebar({
     return parentPath(p);
   }
 
-  // The tree is the sole mount-selection surface. Modifier clicks only update
-  // mounts; a plain click also activates the trace (file opens, folder toggles).
+  // Modifier gestures edit the Explorer operation set without moving focus.
+  // A plain click clears stale operation selection, then focuses/opens exactly
+  // one trace. Context mounting remains exclusive to icon buttons.
   function onRowActivate(item: ActivatableTreeItem, e: React.MouseEvent) {
+    if (!e.metaKey && !e.ctrlKey && !e.shiftKey) {
+      onSelectionChange([]);
+      setAnchorPath(null);
+      activateTreeItem(item, {
+        file: onActivateFile,
+        folder: onActivateFolder,
+        coin: onActivateCoin,
+      });
+      return;
+    }
     const result = applyScopeClick(
-      scopes,
+      selectedItems,
       { kind: item.type, path: item.path },
       visibleItems,
       anchorPath,
       { additive: e.metaKey || e.ctrlKey, range: e.shiftKey },
     );
-    onScopesChange(result.scopes);
+    onSelectionChange(result.scopes);
     setAnchorPath(result.anchorPath);
-    if (e.metaKey || e.ctrlKey || e.shiftKey) return;
-    activateTreeItem(item, { file: onActivateFile, folder: onActivateFolder });
   }
+
+  useEffect(() => {
+    function clearOperationSelection(e: KeyboardEvent) {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target?.matches("input, textarea, select") ||
+        target?.isContentEditable
+      ) return;
+      onSelectionChange([]);
+      setAnchorPath(null);
+    }
+    document.addEventListener("keydown", clearOperationSelection);
+    return () => document.removeEventListener("keydown", clearOperationSelection);
+  }, [onSelectionChange]);
 
   // dismiss the context menu on any pointer-down outside the menu itself, or
   // on Escape. A single listener covers both the menu and the open-input row.
@@ -1698,17 +2062,23 @@ function Sidebar({
     };
   }, [ctxMenu]);
 
-  // Right-click mounts-sole if the row wasn't already mounted, otherwise keeps
-  // the current mounts so the menu acts on the whole set.
+  // Right-click selects only this row unless it already belongs to the current
+  // explorer selection, in which case the menu acts on the whole selection.
   function openContextMenu(e: React.MouseEvent, item: ActivatableTreeItem) {
     e.preventDefault();
     e.stopPropagation();
-    const actionMounts = mountsForGroupAction(scopes, {
+    // Oblivion is a lifecycle boundary, not an actionable directory. Suppress
+    // both the native menu and an empty custom popover for its header row.
+    if (item.path === OBLIVION) {
+      setCtxMenu(null);
+      return;
+    }
+    const actionSelection = selectionForGroupAction(selectedItems, {
       kind: item.type,
       path: item.path,
     });
-    if (!mountedPaths.has(item.path)) {
-      onScopesChange(actionMounts);
+    if (!selectedPaths.has(item.path)) {
+      onSelectionChange(actionSelection);
       setAnchorPath(item.path);
     }
     setCtxMenu({ x: e.clientX, y: e.clientY, path: item.path });
@@ -1718,7 +2088,7 @@ function Sidebar({
   // path nested beneath another selected path (an ancestor carries its
   // descendants, so listing both would double-count).
   function topLevelSelected(): string[] {
-    return topLevelMountedPaths(scopes);
+    return topLevelSelectedPaths(selectedItems);
   }
 
   function requestDelete(paths: string[]) {
@@ -1741,12 +2111,11 @@ function Sidebar({
   }
 
   // Begin an inline rename of `path`. Prefills the input with the current
-  // basename; the focus/select effect above selects it for overtype. ROOT has
-  // no basename — use the synthetic root node's display label instead.
+  // basename; the focus/select effect above selects it for overtype.
   function requestRename(path: string) {
     setCtxMenu(null);
     setRenamingPath(path);
-    setRenameDraft(path === ROOT ? (tree[0]?.name ?? "") : basename(path));
+    setRenameDraft(basename(path));
     setRenameError(null);
   }
 
@@ -1817,7 +2186,11 @@ function Sidebar({
   }
 
   function dragEffect(): "copy" | "move" {
-    return [...draggingPathsRef.current].some((path) => isMint(path) && path !== MINT)
+    return [...draggingPathsRef.current].some(
+      (path) =>
+        (isMint(path) && path !== MINT) ||
+        (isScan(path) && path !== SCAN),
+    )
       ? "copy"
       : "move";
   }
@@ -1831,101 +2204,157 @@ function Sidebar({
 
   return (
     <nav className="sidebar">
-      <div className="sidebar-settings-bar">
-        <button
-          type="button"
-          className="icon-btn sidebar-settings-btn"
-          title="Settings"
-          aria-label="Settings"
-          onClick={onOpenSettings}
+      <div className="sidebar-directory-tree">
+        <div
+          className={"tree" + (dropTargetPath === ROOT && canDropOn(ROOT) ? " tree-drop-target" : "")}
+          onDragEnter={(e) => {
+            if (e.target === e.currentTarget && canDropOn(ROOT)) {
+              e.preventDefault();
+              setDropTargetPath(ROOT);
+            }
+          }}
+          onDragOver={(e) => {
+            // allow dropping onto empty space inside the tree → move to root.
+            // child rows stopPropagation on their own drops, so this only fires
+            // for the bare container.
+            if (e.target === e.currentTarget && canDropOn(ROOT)) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = dragEffect();
+              setDropTargetPath(ROOT);
+            }
+          }}
+          onDrop={(e) => {
+            if (e.target !== e.currentTarget || !canDropOn(ROOT)) return;
+            e.preventDefault();
+            onMove([...draggingPathsRef.current], ROOT);
+            clearDrag();
+          }}
+          onDragEnd={clearDrag}
         >
-          <Settings size={16} aria-hidden="true" />
-        </button>
-      </div>
-      <div
-        className={"tree" + (dropTargetPath === ROOT && canDropOn(ROOT) ? " tree-drop-target" : "")}
-        onDragEnter={(e) => {
-          if (e.target === e.currentTarget && canDropOn(ROOT)) {
-            e.preventDefault();
-            setDropTargetPath(ROOT);
-          }
-        }}
-        onDragOver={(e) => {
-          // allow dropping onto empty space inside the tree → move to root.
-          // child rows stopPropagation on their own drops, so this only fires
-          // for the bare container.
-          if (e.target === e.currentTarget && canDropOn(ROOT)) {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = dragEffect();
-            setDropTargetPath(ROOT);
-          }
-        }}
-        onDrop={(e) => {
-          if (e.target !== e.currentTarget || !canDropOn(ROOT)) return;
-          e.preventDefault();
-          onMove([...draggingPathsRef.current], ROOT);
-          clearDrag();
-        }}
-        onDragEnd={clearDrag}
-      >
-        {tree.map((node) => (
-          <TreeItem
-            key={node.path}
-            node={node}
-            depth={0}
-            collapsed={collapsed}
-            onToggleFolder={onToggleFolder}
-            focusedTabPath={focusedTabPath}
-            scopes={scopes}
-            shielded={shielded}
-            draggingPaths={draggingPaths}
-            dropTargetPath={dropTargetPath}
-            onDragStart={(item) => {
-              const actionMounts = mountsForGroupAction(scopes, {
-                kind: item.type,
-                path: item.path,
-              });
-              // Dragging an explicitly mounted row drags the mounted group;
-              // dragging any other row first mounts it alone.
-              if (!mountedPaths.has(item.path)) {
-                onScopesChange(actionMounts);
-                setAnchorPath(item.path);
-              }
-              const nextDragging = new Set(topLevelMountedPaths(actionMounts));
-              draggingPathsRef.current = nextDragging;
-              setDraggingPaths(nextDragging);
-            }}
-            onDragEnterTarget={setDropTargetPath}
-            onDragLeaveTarget={(path) => {
-              setDropTargetPath((cur) => (cur === path ? null : cur));
-            }}
-            onDropOn={(destFolder) => {
-              onMove([...draggingPathsRef.current], destFolder);
-              clearDrag();
-            }}
-            canDropOn={canDropOn}
-            dragEffect={dragEffect}
-            onContextMenuRow={openContextMenu}
-            renamingPath={renamingPath}
-            renameInputRef={renameInputRef}
-            renameDraft={renameDraft}
-            renameError={renameError}
-            onRenameChange={setRenameDraft}
-            onRenameKey={onRenameKey}
-            onRenameCommit={commitRename}
-            onRenameCancel={cancelRename}
-            onRowActivate={onRowActivate}
-            onCreateStart={(kind) => onCreateStart(kind, createParent())}
-            creating={creating}
-            createDraft={createDraft}
-            createError={createError}
-            createInputRef={createInputRef}
-            onCreateChange={setCreateDraft}
-            onCreateKey={onCreateKey}
-            onCreateCommit={commitCreate}
-            onCreateCancel={onCreateCancel}
-          />
-        ))}
+          {tree.map((node) => (
+            <TreeItem
+              key={node.path}
+              node={node}
+              depth={0}
+              collapsed={collapsed}
+              onToggleFolder={onToggleFolder}
+              focusedTabPath={focusedTabPath}
+              selectedPaths={selectedPaths}
+              scopes={scopes}
+              shielded={shielded}
+              onSetMountState={onSetMountState}
+              draggingPaths={draggingPaths}
+              dropTargetPath={dropTargetPath}
+              onDragStart={(item) => {
+                const actionSelection = selectionForGroupAction(selectedItems, {
+                  kind: item.type,
+                  path: item.path,
+                });
+                // Dragging a selected row drags the selected group; dragging
+                // any other row first selects it alone.
+                if (!selectedPaths.has(item.path)) {
+                  onSelectionChange(actionSelection);
+                  setAnchorPath(item.path);
+                }
+                const nextDragging = new Set(topLevelSelectedPaths(actionSelection));
+                draggingPathsRef.current = nextDragging;
+                setDraggingPaths(nextDragging);
+              }}
+              onDragEnterTarget={setDropTargetPath}
+              onDragLeaveTarget={(path) => {
+                setDropTargetPath((cur) => (cur === path ? null : cur));
+              }}
+              onDropOn={(destFolder) => {
+                onMove([...draggingPathsRef.current], destFolder);
+                clearDrag();
+              }}
+              canDropOn={canDropOn}
+              dragEffect={dragEffect}
+              onContextMenuRow={openContextMenu}
+              renamingPath={renamingPath}
+              renameInputRef={renameInputRef}
+              renameDraft={renameDraft}
+              renameError={renameError}
+              onRenameChange={setRenameDraft}
+              onRenameKey={onRenameKey}
+              onRenameCommit={commitRename}
+              onRenameCancel={cancelRename}
+              onRowActivate={onRowActivate}
+              onCreateStart={(kind) => onCreateStart(kind, createParent())}
+              onMintCoin={onMintCoin}
+              onScan={onScan}
+              creating={creating}
+              createDraft={createDraft}
+              createError={createError}
+              createInputRef={createInputRef}
+              onCreateChange={setCreateDraft}
+              onCreateKey={onCreateKey}
+              onCreateCommit={commitCreate}
+              onCreateCancel={onCreateCancel}
+            />
+          ))}
+        </div>
+        <div className="sidebar-directory-footer">
+          <div ref={sortMenuRef} className="sidebar-sort-control">
+            <button
+              type="button"
+              className={`icon-btn sidebar-sort-btn${sortMenuOpen ? " active" : ""}`}
+              title="Sort directory"
+              aria-label="Sort directory"
+              aria-expanded={sortMenuOpen}
+              aria-controls="directory-sort-menu"
+              onClick={() => setSortMenuOpen((open) => !open)}
+            >
+              <ArrowUpDown size={16} aria-hidden="true" />
+            </button>
+            {sortMenuOpen && (
+              <div
+                id="directory-sort-menu"
+                className="sidebar-sort-menu"
+                role="radiogroup"
+                aria-label="Directory sort order"
+              >
+                <span className="sidebar-sort-label">Sort directory</span>
+                {DIRECTORY_SORT_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className="sidebar-sort-option"
+                    role="radio"
+                    aria-checked={directorySort === option.value}
+                    onClick={() => {
+                      onDirectorySortChange(option.value);
+                      setSortMenuOpen(false);
+                    }}
+                  >
+                    <span aria-hidden="true">
+                      {directorySort === option.value ? "●" : "○"}
+                    </span>
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            className="icon-btn sidebar-help-btn"
+            title="Onboarding"
+            aria-label="Open onboarding guide"
+            onClick={onOpenOnboarding}
+          >
+            <CircleHelp size={16} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className="icon-btn sidebar-reset-btn"
+            title="Factory reset"
+            aria-label="Factory reset"
+            onClick={onOpenFactoryReset}
+          >
+            <Radiation size={16} aria-hidden="true" />
+          </button>
+        </div>
       </div>
       {ctxMenu && (
         <div
@@ -1935,169 +2364,237 @@ function Sidebar({
           onContextMenu={(e) => e.preventDefault()}
         >
           {(() => {
-            // Same folder-test as elsewhere: an explicit empty-folder entry, or
-            // any file/folder nested beneath it. The synthetic root (path ===
-            // ROOT) is always treated as a folder here so the mounted folder
-            // offers the folder actions in its context menu too.
+            const path = ctxMenu.path;
             const isFolder =
-              ctxMenu.path === ROOT ||
-              isSystemRootPath(ctxMenu.path) ||
-              folderPaths.has(ctxMenu.path) ||
-              hasChild(filePaths, folderPaths, ctxMenu.path);
-            // Open actions are inherently single-target. Hide them for a
-            // mounted group rather than silently applying them to one member.
-            return !isFolder && mountedPaths.size === 1 ? (
-              <>
+              path === ROOT ||
+              isSystemRootPath(path) ||
+              folderPaths.has(path) ||
+              hasChild(filePaths, folderPaths, path);
+            const isCoin = !isFolder && isMint(path);
+            const menu = directoryContextMenuCapabilities(
+              path,
+              isFolder,
+              selectedPaths.size,
+            );
+            if (!menu.showMenu) return null;
+
+            // Build capability groups first, then insert separators only
+            // between non-empty groups. This avoids each item type growing its
+            // own subtly different separator and trailing-divider rules.
+            const groups: ReactNode[] = [];
+            if (menu.openLabel) {
+              groups.push(
+                <Fragment key="open">
+                  <button
+                    type="button"
+                    className="ctx-menu-item"
+                    onClick={() => {
+                      setCtxMenu(null);
+                      if (isFolder) onOpenFolder(path);
+                      else if (isCoin) onActivateCoin(path);
+                      else if (isOblivion(path)) onActivateOblivion(path);
+                      else onActivateFile(path);
+                    }}
+                  >
+                    {menu.openLabel}
+                  </button>
+                  {menu.openToSide && (
+                    <button
+                      type="button"
+                      className="ctx-menu-item"
+                      onClick={() => {
+                        setCtxMenu(null);
+                        onOpenToSide(path);
+                      }}
+                    >
+                      Open to side
+                    </button>
+                  )}
+                </Fragment>,
+              );
+            }
+
+            if (
+              menu.newFile ||
+              menu.newFolder ||
+              menu.mintCoin ||
+              menu.scanFolder ||
+              menu.scanFile
+            ) {
+              groups.push(
+                <Fragment key="create">
+                  {menu.newFile && (
+                    <button
+                      type="button"
+                      className="ctx-menu-item"
+                      onClick={() => {
+                        setCtxMenu(null);
+                        onCreateStart("file", path);
+                      }}
+                    >
+                      New File
+                    </button>
+                  )}
+                  {menu.newFolder && (
+                    <button
+                      type="button"
+                      className="ctx-menu-item"
+                      onClick={() => {
+                        setCtxMenu(null);
+                        onCreateStart("folder", path);
+                      }}
+                    >
+                      New Folder
+                    </button>
+                  )}
+                  {menu.mintCoin && (
+                    <button
+                      type="button"
+                      className="ctx-menu-item"
+                      onClick={() => {
+                        setCtxMenu(null);
+                        onMintCoin();
+                      }}
+                    >
+                      Mint New Coin
+                    </button>
+                  )}
+                  {menu.scanFolder && (
+                    <button
+                      type="button"
+                      className="ctx-menu-item"
+                      onClick={() => {
+                        setCtxMenu(null);
+                        onScan("folder");
+                      }}
+                    >
+                      Scan Folder
+                    </button>
+                  )}
+                  {menu.scanFile && (
+                    <button
+                      type="button"
+                      className="ctx-menu-item"
+                      onClick={() => {
+                        setCtxMenu(null);
+                        onScan("file");
+                      }}
+                    >
+                      Scan File
+                    </button>
+                  )}
+                </Fragment>,
+              );
+            }
+
+            if (menu.reify) {
+              groups.push(
                 <button
+                  key="reify"
                   type="button"
                   className="ctx-menu-item"
-                  // Open the file as a tab in the active panel.
                   onClick={() => {
-                    const p = ctxMenu.path;
                     setCtxMenu(null);
-                    onOpenFolder(p);
+                    onReify({ kind: isFolder ? "folder" : "file", path });
                   }}
                 >
-                  Open
-                </button>
+                  Reify…
+                </button>,
+              );
+            }
+
+            const inScan = topLevelSelected().filter(
+              (path) => isScan(path) && path !== SCAN,
+            );
+            const inOblivion = topLevelSelected().filter(
+              (p) => isOblivion(p) && p !== OBLIVION,
+            );
+            if (inScan.length > 0 || inOblivion.length > 0) {
+              groups.push(
+                <Fragment key="move">
+                  {inScan.length > 0 && (
+                    <button
+                      type="button"
+                      className="ctx-menu-item"
+                      onClick={() => {
+                        setCtxMenu(null);
+                        onMove(inScan, ROOT);
+                      }}
+                    >
+                      Adopt into Root{inScan.length > 1 ? ` (${inScan.length})` : ""}
+                    </button>
+                  )}
+                  {inOblivion.length > 0 && (
+                    <button
+                      type="button"
+                      className="ctx-menu-item"
+                      onClick={() => {
+                        setCtxMenu(null);
+                        onMove(inOblivion, ROOT);
+                      }}
+                    >
+                      Restore{inOblivion.length > 1 ? ` (${inOblivion.length})` : ""}
+                    </button>
+                  )}
+                </Fragment>,
+              );
+            }
+
+            if (menu.rename) {
+              groups.push(
                 <button
+                  key="rename"
                   type="button"
                   className="ctx-menu-item"
-                  // Open this file into a fresh column immediately to the right
-                  // of the active panel.
-                  onClick={() => {
-                    const p = ctxMenu.path;
-                    setCtxMenu(null);
-                    onOpenToSide(p);
-                  }}
+                  disabled={menu.renameDisabled}
+                  onClick={() => requestRename(path)}
                 >
-                  Open to side
-                </button>
-                <div className="ctx-menu-separator" aria-hidden="true" />
-              </>
-            ) : null;
+                  Rename
+                </button>,
+              );
+            }
+
+            const canRevoke =
+              filePaths.has(path) &&
+              isOblivion(path) &&
+              topLevelSelected().length === 1;
+            if (canRevoke || menu.delete) {
+              groups.push(
+                <Fragment key="danger">
+                  {canRevoke && (
+                    <button
+                      type="button"
+                      className="ctx-menu-item danger"
+                      onClick={() => {
+                        setCtxMenu(null);
+                        setRevokeMessage(null);
+                        setRevokeError(null);
+                        setConfirmRevoke({ path, name: systemPathDisplayName(path) });
+                      }}
+                    >
+                      Request relay revocation…
+                    </button>
+                  )}
+                  {menu.delete && (
+                    <button
+                      type="button"
+                      className="ctx-menu-item danger"
+                      onClick={() => requestDelete(topLevelSelected())}
+                    >
+                      Delete{selectedPaths.size > 1 ? ` (${selectedPaths.size})` : ""}
+                    </button>
+                  )}
+                </Fragment>,
+              );
+            }
+
+            return groups.map((group, index) => (
+              <Fragment key={index}>
+                {index > 0 && <div className="ctx-menu-separator" aria-hidden="true" />}
+                {group}
+              </Fragment>
+            ));
           })()}
-          {(() => {
-            // New File / New Folder target the right-clicked folder. Same
-            // folder-test as elsewhere: an explicit empty-folder entry, or any
-            // file/folder nested beneath it. The synthetic root (path === ROOT)
-            // is always treated as a folder here so the mounted folder offers
-            // "new" in its context menu too.
-            const isFolder =
-              ctxMenu.path === ROOT ||
-              isSystemRootPath(ctxMenu.path) ||
-              folderPaths.has(ctxMenu.path) ||
-              hasChild(filePaths, folderPaths, ctxMenu.path);
-            // Creation needs one destination folder, so it is not offered for
-            // a multi-mount context action.
-            return isFolder &&
-              mountedPaths.size === 1 &&
-              !isMint(ctxMenu.path) &&
-              !isOblivion(ctxMenu.path) ? (
-              <>
-                <button
-                  type="button"
-                  className="ctx-menu-item"
-                  onClick={() => {
-                    const p = ctxMenu.path;
-                    setCtxMenu(null);
-                    onCreateStart("file", p);
-                  }}
-                >
-                  New File
-                </button>
-                <button
-                  type="button"
-                  className="ctx-menu-item"
-                  onClick={() => {
-                    const p = ctxMenu.path;
-                    setCtxMenu(null);
-                    onCreateStart("folder", p);
-                  }}
-                >
-                  New Folder
-                </button>
-                <div className="ctx-menu-separator" aria-hidden="true" />
-              </>
-            ) : null;
-          })()}
-          {(() => {
-            // Restore: move an item in Oblivion (or selection) back to root. Only
-            // offered on items INSIDE oblivion (not the oblivion root itself).
-            const inOblivion = topLevelSelected().filter((p) => isOblivion(p) && p !== OBLIVION);
-            return inOblivion.length > 0 ? (
-              <button
-                type="button"
-                className="ctx-menu-item"
-                onClick={() => {
-                  setCtxMenu(null);
-                  onMove(inOblivion, ROOT);
-                }}
-              >
-                Restore{inOblivion.length > 1 ? ` (${inOblivion.length})` : ""}
-              </button>
-            ) : null;
-          })()}
-          {ctxMenu.path !== ROOT && !isMint(ctxMenu.path) && !isOblivion(ctxMenu.path) && (
-            <>
-              <button
-                type="button"
-                className="ctx-menu-item"
-                title={
-                  shielded.has(ctxMenu.path)
-                    ? "Include in command scope again"
-                    : "Exclude from command scope"
-                }
-                onClick={() => {
-                  const p = ctxMenu.path;
-                  setCtxMenu(null);
-                  onToggleShielded(p);
-                }}
-              >
-                {shielded.has(ctxMenu.path)
-                  ? "Unshield from command scope"
-                  : "Shield from command scope"}
-              </button>
-              <div className="ctx-menu-separator" aria-hidden="true" />
-            </>
-          )}
-          {!isMint(ctxMenu.path) && !isOblivion(ctxMenu.path) && (
-            <button
-              type="button"
-              className="ctx-menu-item"
-              // Rename is a single-item operation; disable it when the selection
-              // spans more than one row so the affordance matches the behavior.
-              // The synthetic root is renamable (display label only).
-              disabled={mountedPaths.size > 1}
-              onClick={() => requestRename(ctxMenu.path)}
-            >
-              Rename
-            </button>
-          )}
-          {filePaths.has(ctxMenu.path) && topLevelSelected().length === 1 && (
-            <button
-              type="button"
-              className="ctx-menu-item danger"
-              onClick={() => {
-                const path = ctxMenu.path;
-                setCtxMenu(null);
-                setRevokeMessage(null);
-                setRevokeError(null);
-                setConfirmRevoke({ path, name: basename(path) });
-              }}
-            >
-              Request relay revocation…
-            </button>
-          )}
-          {ctxMenu.path !== ROOT && !isSystemRootPath(ctxMenu.path) && !isMint(ctxMenu.path) && (
-            <button
-              type="button"
-              className="ctx-menu-item danger"
-              onClick={() => requestDelete(topLevelSelected())}
-            >
-              Delete{mountedPaths.size > 1 ? ` (${mountedPaths.size})` : ""}
-            </button>
-          )}
         </div>
       )}
       {confirmDelete && (
@@ -2190,47 +2687,6 @@ function Sidebar({
           {tagBrowser}
         </SampleModal>
       )}
-      <ReplayTransport
-        mountedLabel={replayMountedLabel}
-        index={replayIndex}
-        count={replayCount}
-        playing={playing}
-        playSpeed={playSpeed}
-        replayActive={replayActive}
-        onBegin={onBeginReplay}
-        onStep={onStep}
-        onTogglePlay={onTogglePlay}
-        onCycleSpeed={onCycleSpeed}
-        stepTimes={stepTimes}
-        playFraction={playFraction}
-        // Hover context for the row: the current step's action, file, time,
-        // and (for LLM steps) its summary or prompt. On `last` this is the
-        // just-stepped node; on a historical step it's the save point being
-        // verified. Only shown once replay is active.
-        containerTitle={
-          replayStep
-            ? replayStep.membership
-              ? // A membership step's label is the structural change itself —
-                // "added notes/draft.md", "removed old.md" — not file prose.
-                [
-                  replayStep.membership.type,
-                  replayStep.membership.path,
-                  new Date(replayStep.meta.steppedAtMs).toLocaleString(),
-                ]
-                  .filter(Boolean)
-                  .join(" · ")
-              : [
-                  replayStep.meta.action ?? "edit",
-                  replayStep.relativePath,
-                  new Date(replayStep.meta.steppedAtMs).toLocaleString(),
-                  stepDescription(replayStep.event).summary ??
-                    stepDescription(replayStep.event).prompt,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")
-            : undefined
-        }
-      />
     </nav>
   );
 }
@@ -2330,6 +2786,96 @@ function stepDescription(event: Event): { prompt?: string; summary?: string } {
   }
 }
 
+/** Make invisible editor input legible in the compact replay readout. Single
+ * key-like characters stay exact; longer transactions get a bounded preview. */
+function replayTextLabel(text: string): string {
+  if (text === " ") return "Space";
+  if (text === "\n") return "Enter";
+  if (text === "\t") return "Tab";
+  const visible = text.replace(/\r\n?|\n/g, "↵").replace(/\t/g, "⇥");
+  const characters = [...visible];
+  const preview = characters.slice(0, 24).join("");
+  return `“${preview}${characters.length > 24 ? "…" : ""}”`;
+}
+
+function replayMutationLabel(
+  action: NonNullable<PlayFrame["action"]>,
+): string {
+  const changes = action.changes;
+  const concrete = changes.length === 1
+    ? (() => {
+        const change = changes[0];
+        if (!change) return "Edit";
+        if (!change.deleted) {
+          const verb = [...change.inserted].length === 1 ? "Type" : "Insert";
+          return `${verb} ${replayTextLabel(change.inserted)}`;
+        }
+        if (!change.inserted) return `Delete ${replayTextLabel(change.deleted)}`;
+        return `Replace ${replayTextLabel(change.deleted)} → ${replayTextLabel(change.inserted)}`;
+      })()
+    : `${action.type === "delete" ? "Delete" : action.type === "insert" ? "Insert" : "Edit"} ${changes.length} ranges`;
+
+  if (action.type === "undo") return `Undo · ${concrete}`;
+  if (action.type === "redo") return `Redo · ${concrete}`;
+  if (action.type === "snapshot") return `Snapshot · ${concrete}`;
+  return concrete;
+}
+
+/** Genesis is structural: it is the one chain node without an `e…prev`
+ * pointer, independent of whether its initial snapshot was empty or already
+ * carried imported content. */
+function isReplayGenesis(step: ReplayStep): boolean {
+  return !step.event.tags.some(
+    (tag) => tag[0] === "e" && tag[3] === "prev",
+  );
+}
+
+/** One terse line for the replay transport's live action readout. Editor
+ * transactions report their exact mutation; the exact frame that makes a
+ * checkpoint durable adds the global Step counter. */
+function replayActionLabel(
+  frame: PlayFrame | undefined,
+  step: ReplayStep | undefined,
+  latestStepIndex: number,
+  rootLabel: string,
+  folderReplay: boolean,
+): string | undefined {
+  let detail: string | undefined;
+  if (frame?.kind === "focus" && frame.focus) {
+    const path = frame.path || rootLabel;
+    const target = frame.focus.selection.kind === "folder" ? `${path}/` : path;
+    detail = folderReplay
+      ? `${target} · ${frame.focus.op}`
+      : frame.focus.op;
+  } else if (frame?.reachesStep && step && !step.folder && isReplayGenesis(step)) {
+    const genesis = frame.action
+      ? `Genesis · ${replayMutationLabel(frame.action)}`
+      : "Genesis";
+    detail = folderReplay ? `${step.relativePath} · ${genesis}` : genesis;
+  } else if (frame?.action && frame.path) {
+    const action = replayMutationLabel(frame.action);
+    detail = folderReplay ? `${frame.path} · ${action}` : action;
+  } else if (step?.folder) {
+    if (step.membership) {
+      detail = folderReplay
+        ? `${step.membership.path} · ${step.membership.type}`
+        : step.membership.type;
+    } else {
+      const path = step.folder.path === ROOT ? rootLabel : step.folder.path;
+      detail = folderReplay ? `${path}/ · Genesis` : "Genesis";
+    }
+  } else if (frame?.reachesStep && frame.path) {
+    detail = folderReplay ? frame.path : undefined;
+  } else if (step) {
+    const action = step.meta.action ?? "edit";
+    detail = folderReplay ? `${step.relativePath} · ${action}` : action;
+  }
+
+  if (!frame?.reachesStep) return detail;
+  const marker = `Step ${frame.stepIndex} / ${latestStepIndex}`;
+  return detail ? `${marker} · ${detail}` : marker;
+}
+
 
 // --- in-place diff pane --------------------------------------------------
 //
@@ -2352,9 +2898,8 @@ function stepDescription(event: Event): { prompt?: string; summary?: string } {
 // REPLAY (frozen on step #N) — "what did THIS step change?" This is the
 // step-to-step review path that replaces the old chronological Steps modal:
 // scope the file, scrub the stepper, and read each step's delta here. The
-// replay stepper overwrites file.runs with step #N's snapshot (replayStepTo),
-// so the working buffer is NOT flatten(file.runs) here — the live buffer is
-// passed in via replayLiveText (parked in replay.snapshot[path]).
+// replay panel receives step #N's snapshot without touching `files`; the live
+// buffer is passed separately via replayLiveText.
 //   • vs prev (default): the previous content-step of this file vs step #N —
 //     the delta THIS step introduced.
 //   • vs live: the live buffer (replayLiveText) vs step #N — how the live doc
@@ -2576,89 +3121,32 @@ function OperatorSetupModal({
 
 // --- folder-wide replay transport --------------------------------------
 //
-// Always-visible transport pinned at the bottom of the sidebar. Three rows,
-// shown directly (no "Replay folder" gate):
-//   row 1 — mounted scope:      MOUNTED drafts/ + final.md
-//   row 2 — stepper + counter:  ⏮ ◀ [n / total] ▶ ⏭   (left-aligned)
-//   row 3 — transport:          ▶/⏸  ·  N×  ·  [===== slider =====]
-// The stepper + slider jump save-point to save-point. Play animates per
-// character (typewriter). `last` is sticky (resting = live document): a new
-// step while parked at the right end appends a step, the counter ticks up, and
-// the slider's max grows to include it. Before replay is bootstrapped (count
-// 0) the step buttons disable and ▶ becomes "load & play" — it bootstraps the
-// timeline (beginReplay is async) then starts playback.
+// Always-visible transport in the action palette's last row (no "Replay
+// folder" gate):
+//   TRACE/REPLAY: | selected traces | ⏮ · N× · ▶/⏸ · n/latest · ⏭ · [slider]
+// Position 0 is the trace's real genesis node; every appended node increments
+// the displayed Step. The live working document is never a pseudo-position.
+// Manual seeks and Play share one persistent,
+// read-only replay panel. While the selected trace resolves, a spinner replaces ▶.
+// Once resolution finishes, ▶ is clickable even when Genesis is the trace's
+// only node; the Step controls operate on the real node count.
 //
-// Time-proportional axis: the slider is a custom control (a native <input
-// type="range"> can't map its thumb to anything but linear-in-value). Ticks,
-// thumb, and idle bands are all positioned by real steppedAtMs via stepAxis,
-// so a 3-day gap reads wider than a 3-second one. Large idle spans (>3× the
-// median inter-step interval) render as translucent COLORED BANDS inside the
-// track, clickable to jump past the idle stretch (the old separate ribbon is
-// gone — the bands are in-track now). The n / count readout goes fractional
-// (e.g. 3.4 / 12) while playback is mid-way through a save point's char
-// reveal, and the thumb interpolates between ticks during play. Playback
-// itself advances one char per tick everywhere, so it never dwells on idle —
-// the bands are "skipped" in wall-clock terms by construction.
+// Step ticks, KEdit playback, thumb, activity bubbles, and idle bands all use
+// one playback-time axis. Each recorded action is a bubble; actions at most
+// five seconds apart merge into one burst. At 1× elapsed time remains literal.
+// Idle gaps over 20 seconds play at 100×, occupy 1/100 of their recorded
+// width, and announce their exact duration.
 
-/** Compact, human-readable duration for a gap label. Picks the largest unit
- *  that fits (days → hours → minutes → seconds), rounded. <1s renders as "" so
- *  the caller can drop it (a sub-second gap is never "large"). */
-function formatGap(ms: number): string {
-  const s = ms / 1000;
-  if (s >= 86400) return `${Math.round(s / 86400)}d`;
-  if (s >= 3600) return `${Math.round(s / 3600)}h`;
-  if (s >= 60) return `${Math.round(s / 60)}m`;
-  if (s >= 1) return `${Math.round(s)}s`;
-  return "";
-}
-
-/** The large gaps in a timeline, for the scan ribbon. Each entry is positioned
- *  by its `afterIndex` (the step immediately before the gap) and carries its
- *  gap span in ms. "Large" = > 3× the median inter-step interval; with <3 steps
- *  there's no meaningful median, so nothing is flagged. */
-function computeGaps(times: number[]): { afterIndex: number; ms: number }[] {
-  if (times.length < 3) return [];
-  const intervals: number[] = [];
-  for (let i = 1; i < times.length; i++) {
-    const d = times[i] - times[i - 1];
-    if (d > 0) intervals.push(d);
-  }
-  if (intervals.length === 0) return [];
-  const sorted = [...intervals].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  const threshold = median * 3;
-  const out: { afterIndex: number; ms: number }[] = [];
-  for (let i = 1; i < times.length; i++) {
-    const d = times[i] - times[i - 1];
-    if (d > threshold) out.push({ afterIndex: i - 1, ms: d });
-  }
-  return out;
-}
-
-/** Fraction (0..1) of step `i` along a time-proportional axis — ticks/thumb/
- *  bands are spaced by real steppedAtMs instead of evenly by index. Falls back
- *  to index-linear when there are <2 steps or the timestamps aren't monotonic
- *  (e.g. all-equal/zero steppedAtMs), so a bad timeline can't collapse the axis. */
-function timeFraction(stepTimes: number[], i: number): number {
-  const n = stepTimes.length;
-  if (n < 2 || i <= 0) return 0;
-  if (i >= n - 1) return 1;
-  const span = stepTimes[n - 1] - stepTimes[0];
-  if (span <= 0) return i / (n - 1);
-  return (stepTimes[i] - stepTimes[0]) / span;
-}
-
-/** Inverse of timeFraction for the slider's drag/keyboard handlers: pick the
- *  step whose time-fraction is nearest `f`. Last-wins on ties so dragging right
- *  monotonically advances. */
-function fractionToStep(stepTimes: number[], f: number): number {
-  const n = stepTimes.length;
+/** Pick the nearest real Step tick to a pointer fraction. Last wins on ties so
+ *  dragging right monotonically advances. */
+function fractionToStep(stepFractions: number[], f: number): number {
+  const n = stepFractions.length;
   if (n < 2) return 0;
   const clamped = Math.max(0, Math.min(1, f));
   let best = 0;
   let bestDist = Infinity;
   for (let i = 0; i < n; i++) {
-    const d = Math.abs(timeFraction(stepTimes, i) - clamped);
+    const d = Math.abs(stepFractions[i] - clamped);
     if (d <= bestDist) {
       bestDist = d;
       best = i;
@@ -2667,64 +3155,84 @@ function fractionToStep(stepTimes: number[], f: number): number {
   return best;
 }
 
-/** Position helper for ReplayTransport: time-proportional when we have a full
- *  timeline (one timestamp per step), index-linear otherwise. Centralizes the
- *  fallback so the slider, ticks, and bands all share one axis. */
-function stepAxis(stepTimes: number[] | undefined, count: number): (i: number) => number {
-  if (stepTimes && stepTimes.length === count && count > 1) {
-    return (i: number) => timeFraction(stepTimes, i);
+/** Position real Step ticks on the same playback-time axis as KEdit playback. */
+function stepAxis(
+  stepTimes: number[] | undefined,
+  count: number,
+  timing: ReplayTiming | null,
+): (displayedStep: number) => number {
+  if (stepTimes && stepTimes.length === count && count > 0) {
+    if (timing) {
+      return (displayedStep: number) =>
+        replayTimeFraction(timing, stepTimes[Math.max(0, displayedStep)] ?? timing.startAt);
+    }
+    const start = stepTimes[0];
+    const end = stepTimes[stepTimes.length - 1];
+    const span = end - start;
+    if (span > 0) {
+      return (displayedStep: number) =>
+        Math.max(0, Math.min(1, ((stepTimes[displayedStep] ?? start) - start) / span));
+    }
   }
-  return (i: number) => (count > 1 ? i / (count - 1) : 0);
+  return (displayedStep: number) =>
+    count > 1 ? displayedStep / (count - 1) : 0;
 }
 
-/** Sub-step progress (0..1) of the playback cursor through its enclosing
- *  save point — drives the fractional readout (3.4 / 12) and the thumb's
- *  interpolation between ticks. `timeline` is the per-char play frames,
- *  `cursor` the current frame index. Returns 0 when not mid-reveal (or when a
- *  step has only one frame, where there's nothing to sub-divide). */
-function stepPlayFraction(timeline: PlayFrame[] | null, cursor: number): number {
-  if (!timeline || cursor < 0 || cursor >= timeline.length) return 0;
-  const step = timeline[cursor].stepIndex;
-  let start = cursor;
-  while (start > 0 && timeline[start - 1].stepIndex === step) start--;
-  let end = cursor;
-  while (end + 1 < timeline.length && timeline[end + 1].stepIndex === step) end++;
-  const span = end - start;
-  return span > 0 ? (cursor - start) / span : 0;
+const TRACE_ROW_LABEL_KEY = "zine.traceRowLabel";
+const TRACE_ROW_LABELS = ["TRACE", "REPLAY", "ZINE"] as const;
+type TraceRowLabel = (typeof TRACE_ROW_LABELS)[number];
+function nextTraceRowLabel(current: TraceRowLabel): TraceRowLabel {
+  const index = TRACE_ROW_LABELS.indexOf(current);
+  return TRACE_ROW_LABELS[(index + 1) % TRACE_ROW_LABELS.length];
 }
 
 function ReplayTransport({
-  mountedLabel,
+  targets,
   index,
   count,
+  ready,
   playing,
   playSpeed,
-  replayActive,
   onBegin,
   onStep,
+  onAction,
+  onSeekAt,
   onTogglePlay,
   onCycleSpeed,
   containerTitle,
   stepTimes,
-  playFraction,
+  actionTimes,
+  actionIndex,
+  timing,
+  playheadAt,
+  loading,
+  latestActionOutput,
 }: {
-  /** Exact explicit mount union whose effective scope supplies this timeline. */
-  mountedLabel: string;
+  /** The one focused tree/tab trace that supplies this timeline. */
+  targets: readonly {
+    kind: TraceRef["kind"];
+    path: string;
+    label: string;
+    title: string;
+  }[];
   index: number;
   count: number;
+  /** Mounted traces have resolved. This is intentionally independent of the
+   *  number of post-genesis Steps: Genesis alone is playable. */
+  ready: boolean;
   /** Whether the auto-play timer is advancing. */
   playing: boolean;
   /** Current play speed multiplier. */
   playSpeed: number;
-  /** True while replay holds the editor read-only (a historical step, or
-   *  mid-playback). Highlights the ⏭ skip-to-live escape as the way out —
-   *  landing on `last` flips this false and lifts read-only. */
-  replayActive: boolean;
   /** Bootstrap replay (async fetch of the folder's steps). Called by ▶ when no
    *  timeline is loaded yet. */
   onBegin: () => void;
-  /** Seek replay to step `n`. Driven by the stepper buttons and the slider. */
+  /** Seek replay to displayed Step `n` (0…count - 1). */
   onStep: (n: number) => void;
+  /** Seek replay to exact recorded action `n`, including same-time actions. */
+  onAction: (n: number) => void;
+  /** Seek replay to the last recorded action at or before wall-clock `at`. */
+  onSeekAt: (at: number) => void;
   /** Toggle auto-play on/off. Starts at the current step; reaching last stops. */
   onTogglePlay: () => void;
   /** Advance to the next speed (wraps). */
@@ -2732,226 +3240,377 @@ function ReplayTransport({
   /** Hover context for the whole block: the current step's action/file/time/(blurb).
    *  Lets the condensed layout still say where you are without a summary line. */
   containerTitle?: string;
-  /** steppedAtMs per step, in step order. Drives the time-proportional axis. */
+  /** steppedAtMs per step, in step order. Drives the playback-time axis. */
   stepTimes?: number[];
-  /** Sub-step progress (0..1) through the current save point during
-   *  playback — drives the fractional readout (3.4 / 12) and lets the thumb
-   *  interpolate between ticks. 0 when parked/not playing. */
-  playFraction?: number;
+  /** Timestamp of every replayable action. The track scrubs this cursor while
+   * the separate Step controls continue to navigate saved checkpoints. */
+  actionTimes?: number[];
+  actionIndex: number;
+  /** Shared KEdit/checkpoint axis with accelerated idle gaps compressed. */
+  timing: ReplayTiming | null;
+  /** Timestamp of the exact action currently rendered in the replay panels. */
+  playheadAt?: number;
+  /** True while an empty transport is fetching its first playable timeline. */
+  loading: boolean;
+  /** Current replay action or fast-forward notice, shown after the slider. */
+  latestActionOutput?: string;
 }) {
-  const bootstrapped = count > 0;
+  const [rowLabel, setRowLabel] = useState<TraceRowLabel>(() => {
+    const stored = localStorage.getItem(TRACE_ROW_LABEL_KEY);
+    return TRACE_ROW_LABELS.includes(stored as TraceRowLabel)
+      ? (stored as TraceRowLabel)
+      : "TRACE";
+  });
+  const hasActions = !!actionTimes && actionTimes.length > 0;
+  const hasTimeline = count > 0 || hasActions;
+  const hasFocus = targets.length > 0;
+  const targetLabel = hasFocus
+    ? targets.map((target) => target.label).join(", ")
+    : "no trace focused";
+  const targetTitle = targets.map((target) => target.title).join("");
+  const latest = Math.max(0, count - 1);
   const first = index <= 0;
-  const last = index >= count - 1;
-  // The custom slider is positioned by absolute time (stepAxis), not by index.
+  const last = index >= latest;
+  // The custom slider is positioned by replay time (stepAxis), not by index.
   // A native <input type="range"> can't map its thumb to anything but linear-
   // in-value, so this is a div + pointer/keyboard handler replicating the
-  // native contract (drag, arrows, Home/End, a11y). Seeking stays integer
-  // (fractionToStep snaps to the nearest save point).
-  const tf = stepAxis(stepTimes, count);
-  const gaps = stepTimes && stepTimes.length > 0 ? computeGaps(stepTimes) : [];
-  const frac = playFraction ?? 0;
-  // The readout goes fractional only mid-reveal: parked = "3 / 12", playing
-  // between steps 3→4 = "3.4 / 12". toFixed(1) drops the decimal for .0.
-  const shown = playing && frac > 0 ? (index + frac).toFixed(1) : String(index + 1);
-  const clampStep = (n: number) => Math.max(0, Math.min(count - 1, n));
+  // native contract (drag, arrows, Home/End, a11y). The track snaps to actions;
+  // the buttons below remain save-point controls.
+  const tf = stepAxis(stepTimes, count, timing);
+  const actionAxis = stepAxis(actionTimes, actionTimes?.length ?? 0, timing);
+  const clampStep = (n: number) => Math.max(0, Math.min(latest, n));
+  const latestAction = Math.max(0, (actionTimes?.length ?? 1) - 1);
+  const currentAction = Math.max(0, Math.min(latestAction, actionIndex));
+  const exactThumbFraction =
+    timing && playheadAt !== undefined
+      ? replayTimeFraction(timing, playheadAt)
+      : tf(index);
+  const nextActionAt = actionTimes?.[currentAction + 1];
+  const thumbTransition =
+    playing &&
+    timing &&
+    playheadAt !== undefined &&
+    nextActionAt !== undefined &&
+    nextActionAt > playheadAt
+      ? replayTransition(
+          playheadAt,
+          nextActionAt,
+          playSpeed,
+          timing.idleThresholdMs,
+        )
+      : null;
+  const thumbAdvancing = !!thumbTransition && thumbTransition.delayMs > 0;
+  const thumbStyle = {
+    left: `${exactThumbFraction * 100}%`,
+    ...(thumbAdvancing && timing && nextActionAt !== undefined
+      ? {
+          "--replay-thumb-from": `${exactThumbFraction * 100}%`,
+          "--replay-thumb-to": `${replayTimeFraction(timing, nextActionAt) * 100}%`,
+          "--replay-thumb-duration": `${thumbTransition.delayMs}ms`,
+        }
+      : {}),
+  } as CSSProperties;
+  const seekAction = (n: number) => {
+    if (!actionTimes || actionTimes.length === 0) return false;
+    onAction(Math.max(0, Math.min(latestAction, n)));
+    return true;
+  };
   const seekFromClientX = (clientX: number, el: HTMLElement) => {
     const rect = el.getBoundingClientRect();
     const f = rect.width > 0 ? (clientX - rect.left) / rect.width : 0;
-    onStep(stepTimes && stepTimes.length === count ? fractionToStep(stepTimes, f) : clampStep(Math.round(f * (count - 1))));
+    if (actionTimes && actionTimes.length > 0) {
+      const positions = Array.from(
+        { length: actionTimes.length },
+        (_, i) => actionAxis(i),
+      );
+      seekAction(fractionToStep(positions, f));
+      return;
+    }
+    if (stepTimes && stepTimes.length === count) {
+      const positions = Array.from({ length: count }, (_, i) => tf(i));
+      onStep(fractionToStep(positions, f));
+    } else {
+      onStep(clampStep(Math.round(f * latest)));
+    }
   };
   return (
     <div
-      className={"sidebar-replay" + (playing ? " is-playing" : "")}
+      className={"action-palette-group action-palette-replay" + (playing ? " is-playing" : "")}
       role="group"
-      aria-label={`Replay timeline mounted on ${mountedLabel}`}
+      aria-label={`Replay timeline for ${targetLabel}`}
       title={containerTitle}
     >
-      <div
-        className="sidebar-replay-row sidebar-replay-scope"
-        title={`Mounted timeline: ${mountedLabel}`}
+      <button
+        type="button"
+        className="action-palette-label action-palette-label-clickable"
+        title="Click to update label in view; no effect on behavior"
+        onClick={() => {
+          const next = nextTraceRowLabel(rowLabel);
+          localStorage.setItem(TRACE_ROW_LABEL_KEY, next);
+          setRowLabel(next);
+        }}
       >
-        <span className="sidebar-replay-scope-key">Mounted</span>
-        <span className="sidebar-replay-scope-value">{mountedLabel}</span>
-      </div>
-      <div className="sidebar-replay-row sidebar-replay-stepper">
-        <button
-          type="button"
-          className="steps-step-btn"
-          disabled={!bootstrapped || first || playing}
-          onClick={() => onStep(0)}
-          title="First save point"
-        >
-          ⏮
-        </button>
-        <button
-          type="button"
-          className="steps-step-btn"
-          disabled={!bootstrapped || first || playing}
-          onClick={() => onStep(index - 1)}
-          title="Previous save point"
-        >
-          ◀
-        </button>
-        <span className="steps-position" title="Save point position in the folder timeline">
-          {count > 0 ? `${shown} / ${count}` : "— / —"}
-        </span>
-        <button
-          type="button"
-          className="steps-step-btn"
-          disabled={!bootstrapped || last || playing}
-          onClick={() => onStep(index + 1)}
-          title="Next save point"
-        >
-          ▶
-        </button>
-        <button
-          type="button"
-          className={
-            "steps-step-btn" + (replayActive && !last ? " sidebar-replay-skip" : "")
-          }
-          // ⏭ is the read-only escape: always enabled (even mid-playback) so
-          // the highlighted button reliably drops you back on the live doc.
-          // onStep tears down the edit timeline before seeking to `last`.
-          disabled={!bootstrapped || last}
-          onClick={() => onStep(count - 1)}
-          title="Skip to live (latest save point)"
-        >
-          ⏭
-        </button>
-      </div>
-      <div className="sidebar-replay-row sidebar-replay-transport">
-        <button
-          type="button"
-          className="steps-step-btn sidebar-replay-play"
-          disabled={playing}
-          onClick={() => (bootstrapped ? onTogglePlay() : onBegin())}
-          title={
-            playing
-              ? "Pause playback"
-              : bootstrapped
-                ? "Play through the timeline"
-                : "Load this folder's steps and play"
-          }
-        >
-          {playing ? "⏸" : "▶"}
-        </button>
-        <button
-          type="button"
-          className="sidebar-replay-speed"
-          onClick={onCycleSpeed}
-          title="Cycle playback speed"
-        >
-          {playSpeed}×
-        </button>
-        <div
-          // Custom time-proportional slider. role=slider + aria-valu* gives
-          // screen readers the same contract the old <input type="range"> had.
-          // onPointerDown both seeks-and-begins-drag (pointer capture keeps the
-          // drag tracking outside the element). Disabled while playing — seek
-          // pauses playback anyway, and dragging during autoplay would fight it.
-          className="sidebar-replay-track"
-          role="slider"
-          aria-label="Replay position"
-          aria-valuemin={0}
-          aria-valuemax={Math.max(0, count - 1)}
-          aria-valuenow={index}
-          aria-valuetext={`Save point ${index + 1} of ${count}`}
-          aria-disabled={!bootstrapped || playing}
-          tabIndex={bootstrapped && !playing ? 0 : -1}
-          onPointerDown={(e) => {
-            if (!bootstrapped || playing) return;
-            (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-            seekFromClientX(e.clientX, e.currentTarget);
-          }}
-          onPointerMove={(e) => {
-            // Only treat as a drag while the pointer is held (buttons pressed).
-            if (e.buttons === 0) return;
-            if (!bootstrapped || playing) return;
-            seekFromClientX(e.clientX, e.currentTarget);
-          }}
-          onKeyDown={(e) => {
-            if (!bootstrapped || playing) return;
-            switch (e.key) {
-              case "ArrowRight":
-              case "ArrowUp":
-                e.preventDefault();
-                onStep(index + 1);
-                break;
-              case "ArrowLeft":
-              case "ArrowDown":
-                e.preventDefault();
-                onStep(index - 1);
-                break;
-              case "Home":
-                e.preventDefault();
-                onStep(0);
-                break;
-              case "End":
-                e.preventDefault();
-                onStep(count - 1);
-                break;
+        {rowLabel}:
+      </button>
+      <span
+        className="action-palette-replay-targets"
+        title={
+          hasFocus
+            ? `Focused replay trace: ${targetTitle}`
+            : "Focus a trace for replay"
+        }
+      >
+        {hasFocus ? (
+          targets.map((target) => (
+            <span
+              key={`${target.kind}:${target.path}`}
+              className="action-palette-replay-target"
+              title={target.title}
+            >
+              {target.kind === "folder" ? (
+                <FolderOpen size={12} className="tab-status" aria-hidden="true" />
+              ) : (
+                <FileText size={12} className="tab-status" aria-hidden="true" />
+              )}
+              <span className="action-palette-replay-target-label">{target.label}</span>
+            </span>
+          ))
+        ) : (
+          <span className="action-palette-replay-target-empty">Select traces</span>
+        )}
+      </span>
+      <div className="action-palette-replay-controls">
+        <div className="action-palette-replay-transport">
+          {loading ? (
+            <span
+              className="action-palette-replay-loading"
+              role="status"
+              aria-label="Loading replay"
+              title="Loading selected trace"
+            >
+              <span className="action-palette-replay-spinner" aria-hidden="true" />
+            </span>
+          ) : (
+            <button
+              type="button"
+              className="steps-step-btn action-palette-replay-play"
+              disabled={!hasFocus}
+              onClick={() => (ready ? onTogglePlay() : onBegin())}
+              title={
+                !hasFocus
+                  ? "Focus a trace for replay"
+                  : playing
+                  ? "Pause playback"
+                  : ready
+                    ? "Play the focused trace from Genesis"
+                    : "Load the focused trace and play"
+              }
+            >
+              {playing ? "⏸" : "▶"}
+            </button>
+          )}
+          <button
+            type="button"
+            className="action-palette-replay-speed"
+            onClick={onCycleSpeed}
+            title="Cycle playback speed"
+          >
+            {playSpeed}×
+          </button>
+          <button
+            type="button"
+            className="steps-step-btn action-palette-replay-previous"
+            disabled={!hasTimeline || first}
+            onClick={() => onStep(index - 1)}
+            title="Previous Step marker"
+            aria-label="Previous Step"
+          >
+            ⏮
+          </button>
+          <button
+            type="button"
+            className="steps-step-btn action-palette-replay-next"
+            disabled={!hasTimeline || last}
+            onClick={() => onStep(index + 1)}
+            title="Next Step marker"
+            aria-label="Next Step"
+          >
+            ⏭
+          </button>
+          <span className="steps-position" title="Save point position in the folder timeline">
+            {count > 0 ? `${index} / ${latest}` : "— / —"}
+          </span>
+          <div
+            // Custom time-proportional slider. role=slider + aria-valu* gives
+            // screen readers the same contract the old <input type="range"> had.
+            // onPointerDown both seeks-and-begins-drag. Pointer capture keeps the
+            // drag tracking outside the element without changing play/pause state.
+            className="action-palette-replay-track"
+            role="slider"
+            aria-label="Replay position"
+            aria-valuemin={0}
+            aria-valuemax={hasActions ? latestAction : latest}
+            aria-valuenow={hasActions ? currentAction : Math.max(0, index)}
+            aria-valuetext={
+              hasActions
+                ? `Action ${currentAction + 1} of ${actionTimes.length}`
+                : `Step ${index} of ${latest}`
             }
-          }}
-        >
+            aria-disabled={!hasTimeline}
+            tabIndex={hasTimeline ? 0 : -1}
+            onPointerDown={(e) => {
+              if (!hasTimeline) return;
+              (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+              const target = e.target instanceof Element ? e.target : null;
+              const stepTick = target?.closest<HTMLElement>(
+                ".action-palette-replay-tick",
+              );
+              if (stepTick) {
+                onStep(Number(stepTick.dataset.stepIndex));
+              } else if (!target?.closest(".action-palette-replay-activity-bubble")) {
+                seekFromClientX(e.clientX, e.currentTarget);
+              }
+            }}
+            onPointerMove={(e) => {
+              // Only treat as a drag while the pointer is held (buttons pressed).
+              if (e.buttons === 0) return;
+              if (!hasTimeline) return;
+              seekFromClientX(e.clientX, e.currentTarget);
+            }}
+            onPointerUp={(e) => {
+              if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                e.currentTarget.releasePointerCapture(e.pointerId);
+              }
+            }}
+            onKeyDown={(e) => {
+              if (!hasTimeline) return;
+              switch (e.key) {
+                case "ArrowRight":
+                case "ArrowUp":
+                  e.preventDefault();
+                  if (!seekAction(currentAction + 1)) onStep(index + 1);
+                  break;
+                case "ArrowLeft":
+                case "ArrowDown":
+                  e.preventDefault();
+                  if (!seekAction(currentAction - 1)) onStep(index - 1);
+                  break;
+                case "Home":
+                  e.preventDefault();
+                  if (!seekAction(0)) onStep(0);
+                  break;
+                case "End":
+                  e.preventDefault();
+                  if (!seekAction(latestAction)) onStep(latest);
+                  break;
+              }
+            }}
+          >
           {/* Track rule: the 3px baseline the ticks/thumb sit on. */}
-          <span className="sidebar-replay-rule" aria-hidden="true" />
-          {/* Idle bands: large time gaps (>3× median interval) rendered in-track
-              as translucent colored spans, clickable to jump past the idle
-              stretch. Replaces the old separate ScanGapRibbon. */}
-          {gaps.map((g) => {
-            const label = formatGap(g.ms);
-            if (!label) return null;
-            const left = tf(g.afterIndex);
-            const width = tf(g.afterIndex + 1) - left;
-            const target = g.afterIndex + 1;
+          <span className="action-palette-replay-rule" aria-hidden="true" />
+          {/* Accelerated inactivity is a muted hatched rail rather than an
+              activity capsule. A CSS minimum keeps heavily compressed gaps
+              visible without changing their time-axis coordinates. */}
+          {(timing?.gaps ?? []).map((gap) => {
+            const left = timing ? replayTimeFraction(timing, gap.startAt) : 0;
+            const right = timing ? replayTimeFraction(timing, gap.endAt) : left;
+            return (
+              <span
+                key={`${gap.startAt}:${gap.endAt}`}
+                className="action-palette-replay-idle-band"
+                style={{ left: `${left * 100}%`, width: `${(right - left) * 100}%` }}
+                aria-hidden="true"
+                title={`${formatReplayDuration(gap.durationMs)} inactive · fast-forwarded at 100×`}
+              />
+            );
+          })}
+          {/* Every replay action contributes one bubble. Adjacent bubbles
+              merge when their timestamps are at most five seconds apart. */}
+          {(timing?.activity ?? []).map((activity) => {
+            const left = timing ? replayTimeFraction(timing, activity.startAt) : 0;
+            const right = timing ? replayTimeFraction(timing, activity.endAt) : left;
+            const isPoint = right <= left;
+            const deltaLabel = `${activity.actionCount} ${
+              activity.actionCount === 1 ? "delta" : "deltas"
+            }`;
+            const durationLabel = activity.durationMs <= 0
+              ? ""
+              : activity.durationMs < 1_000
+                ? " over <1s"
+                : ` over ${formatReplayDuration(activity.durationMs)}`;
             return (
               <button
-                key={g.afterIndex}
+                key={`${activity.startAt}:${activity.endAt}:${activity.actionCount}`}
                 type="button"
                 className={
-                  "sidebar-replay-band" + (index === target ? " is-current" : "")
+                  "action-palette-replay-activity-bubble" +
+                  (isPoint ? " is-point" : "")
                 }
-                style={{ left: `${left * 100}%`, width: `${width * 100}%` }}
-                // Stop propagation so clicking a band seeks instead of starting
-                // a track drag; disabled mid-playback to match the rest.
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  if (!playing) onStep(target);
+                style={
+                  isPoint
+                    ? { left: `${left * 100}%` }
+                    : { left: `${left * 100}%`, width: `${(right - left) * 100}%` }
+                }
+                // A click seeks to the opening action. The event then bubbles to
+                // the track so a drag can capture the pointer and continue.
+                onPointerDown={() => {
+                  onSeekAt(activity.startAt);
                 }}
                 aria-hidden="true"
                 tabIndex={-1}
-                title={`Skip ${label} idle → save point ${target + 1} of ${count}`}
-              >
-                {label}
-              </button>
+                title={`${deltaLabel}${durationLabel} · jump to burst start at ${new Date(activity.startAt).toLocaleString()}`}
+              />
             );
           })}
-          {/* Savepoint ticks: one per step, positioned along the time axis.
-              Dim so the thumb reads as the live position; pointer-events:none
-              so the track stays the only interactive layer. */}
+          {/* Position ticks: exactly one per real saved Step. Each centered line
+              has a wider, full-track-height pointer target for an exact seek. */}
           {count > 0 && (
-            <div className="sidebar-replay-ticks" aria-hidden="true">
+            <div className="action-palette-replay-ticks" aria-hidden="true">
               {Array.from({ length: count }, (_, i) => (
                 <span
                   key={i}
-                  className="sidebar-replay-tick"
+                  className="action-palette-replay-tick"
+                  data-step-index={i}
                   style={{ left: `${tf(i) * 100}%` }}
                 />
               ))}
             </div>
           )}
-          {/* Thumb: interpolates between the current tick and the next by
-              `playFraction` during playback, so it glides across the time axis
-              rather than snapping per save point. */}
+          {/* Thumb: panel content still changes only at real recorded actions,
+              but the marker traverses the elapsed playback time between them. */}
           {count > 0 && (
             <span
-              className="sidebar-replay-thumb"
+              key={
+                thumbAdvancing
+                  ? `playing:${currentAction}:${playheadAt}:${nextActionAt}:${playSpeed}`
+                  : `still:${playheadAt ?? index}`
+              }
+              className={
+                "action-palette-replay-thumb" +
+                (thumbAdvancing ? " is-advancing" : "")
+              }
               aria-hidden="true"
-              style={{
-                left: `${(tf(index) + (tf(Math.min(index + 1, count - 1)) - tf(index)) * frac) * 100}%`,
-              }}
+              style={thumbStyle}
             />
           )}
+          </div>
+          <span
+            className="action-palette-replay-status"
+            title={latestActionOutput}
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {latestActionOutput ? (
+              <span
+                className={
+                  "action-palette-replay-status-pulse" +
+                  (latestActionOutput.startsWith("Step ") ? " is-step" : "")
+                }
+              >
+                {latestActionOutput}
+              </span>
+            ) : null}
+          </span>
         </div>
       </div>
     </div>
@@ -3201,8 +3860,8 @@ const EYE_SPEECH = "👁️\u200d🗨️";
 // The voice new text is attributed to — resolved to the keychain's AUTHOR key
 // pubkey at edit time (see keys-store.ts), so switching the AUTHOR key in the
 // ActionPalette changes who subsequent edits are attributed to without a reload.
-// Pre-keychain this was the hardcoded "author-1". Resolved live at each call site
-// rather than captured once at module load (a module-level const would freeze
+// Resolve live at each call site rather than capturing once at module load (a
+// module-level const would freeze
 // the attribution to whatever key was AUTHOR when the bundle loaded).
 //
 // Per-panel override: each editor also carries a `voiceFacet` set to that
@@ -3886,6 +4545,12 @@ function FileEditor({
   onCopySelectionRef.current = onCopySelection;
   const onPasteSelectionRef = useRef(onPasteSelection);
   onPasteSelectionRef.current = onPasteSelection;
+  const citationDropMarkupRef = useRef(citationDropMarkup);
+  citationDropMarkupRef.current = citationDropMarkup;
+  const onCitationDropRef = useRef(onCitationDrop);
+  onCitationDropRef.current = onCitationDrop;
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
 
   // Reject flash: a rejected keystroke (read-only replay gate) pulses the
   // editor red for 0.9s. Rapid rejects keep the pulse lit (the timer re-arms)
@@ -3968,6 +4633,70 @@ function FileEditor({
       onView?.(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // CodeMirror mounts its document DOM imperatively beneath the React-owned
+  // host. React's delegated drag events do not reliably recover the host Fiber
+  // when the native target is one of those inner nodes, so a real drop on a
+  // `.cm-line` can bypass JSX `onDropCapture` entirely. Native capture
+  // listeners at the boundary see both CodeMirror content and the React
+  // portals; chrome targets are excluded so the citation row keeps its own
+  // drop semantics.
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+
+    const dragHitsDocumentChrome = (target: EventTarget | null) =>
+      target instanceof Element && target.closest(".editor-chrome-slot") !== null;
+
+    const citationDragOver = (event: DragEvent) => {
+      const resolveMarkup = citationDropMarkupRef.current;
+      const dataTransfer = event.dataTransfer;
+      if (!resolveMarkup || !dataTransfer || dragHitsDocumentChrome(event.target)) return;
+      if (!isZinePathDrag(dataTransfer)) return;
+      const srcPath = zinePathFromDataTransfer(dataTransfer);
+      // WebKit may hide getData() until drop. Accept the known custom drag
+      // during hover, then make the coin-only decision with the real path.
+      if (srcPath && !resolveMarkup(srcPath)) return;
+      event.preventDefault();
+      dataTransfer.dropEffect = "copy";
+    };
+
+    const citationDrop = (event: DragEvent) => {
+      const resolveMarkup = citationDropMarkupRef.current;
+      const dataTransfer = event.dataTransfer;
+      if (!resolveMarkup || !dataTransfer || dragHitsDocumentChrome(event.target)) return;
+      const srcPath = zinePathFromDataTransfer(dataTransfer);
+      if (!srcPath) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const markup = resolveMarkup(srcPath);
+      if (!markup) return;
+      if (readOnlyRef.current) {
+        triggerRejectRef.current();
+        return;
+      }
+      const view = viewRef.current;
+      if (!view) return;
+      const coords = { x: event.clientX, y: event.clientY };
+      // Preserve the exact character under a visible pointer. Only fall back
+      // to CodeMirror's estimate for blank line space or virtualized DOM.
+      const pos = view.posAtCoords(coords) ?? view.posAtCoords(coords, false);
+      view.dispatch({
+        changes: { from: pos, insert: markup },
+        selection: { anchor: pos + markup.length },
+        scrollIntoView: true,
+      });
+      onCitationDropRef.current?.();
+      view.focus();
+    };
+
+    host.addEventListener("dragover", citationDragOver, true);
+    host.addEventListener("drop", citationDrop, true);
+    return () => {
+      host.removeEventListener("dragover", citationDragOver, true);
+      host.removeEventListener("drop", citationDrop, true);
+    };
   }, []);
 
   // FileState is the cross-component handoff boundary for the KEdit log. A
@@ -4214,52 +4943,11 @@ function FileEditor({
     return () => observer.disconnect();
   }, [chromeSlots.top, chromeSlots.bottom, topChrome, bottomChrome]);
 
-  const dragHitsDocumentChrome = (target: EventTarget | null) =>
-    target instanceof Element && target.closest(".editor-chrome-slot") !== null;
-
-  function citationDragOver(e: React.DragEvent<HTMLDivElement>) {
-    if (!citationDropMarkup || dragHitsDocumentChrome(e.target)) return;
-    if (!isZinePathDrag(e.dataTransfer)) return;
-    const srcPath = zinePathFromDataTransfer(e.dataTransfer);
-    // WebKit may hide getData() until drop. Accept the known custom drag during
-    // hover, then make the coin-only decision with the real path at drop time.
-    if (srcPath && !citationDropMarkup(srcPath)) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "copy";
-  }
-
-  function citationDrop(e: React.DragEvent<HTMLDivElement>) {
-    if (!citationDropMarkup || dragHitsDocumentChrome(e.target)) return;
-    const srcPath = zinePathFromDataTransfer(e.dataTransfer);
-    if (!srcPath) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const markup = citationDropMarkup(srcPath);
-    if (!markup) return;
-    if (readOnly) {
-      triggerRejectRef.current();
-      return;
-    }
-    const view = viewRef.current;
-    if (!view) return;
-    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
-    if (pos === null) return;
-    view.dispatch({
-      changes: { from: pos, insert: markup },
-      selection: { anchor: pos + markup.length },
-      scrollIntoView: true,
-    });
-    onCitationDrop?.();
-    view.focus();
-  }
-
   return (
     <>
       <div
         ref={hostRef}
         className={"editor-host" + (rejecting ? " editor-host-reject" : "")}
-        onDragOverCapture={citationDragOver}
-        onDropCapture={citationDrop}
       />
       {chromeSlots.top && topChrome ? createPortal(topChrome, chromeSlots.top) : null}
       {chromeSlots.bottom && bottomChrome ? createPortal(bottomChrome, chromeSlots.bottom) : null}
@@ -4272,9 +4960,8 @@ function FileEditor({
 // The named list of traces this one cites — every `q` edge on its current head,
 // resolved to a name by `resolveNodeName`. Each chip explicitly says whether
 // the target is quoted in the document body or cited without a body quote.
-// `FileState.taggedTraces` remains the compatibility storage name for the
-// latter because changing that wire meaning is a protocol change; the UI calls
-// both forms citations.
+// `FileState.citationIds` stores the explicit no-body subset; the UI calls both
+// forms citations.
 // --- inbound tracker ---------------------------------------------------
 //
 // The traces that fork or cite this one — the INBOUND direction. Protocol-level
@@ -4322,7 +5009,7 @@ function InboundRow({
         <span className="panel-inbound-group-label">{label}</span>
         {entries.map((e) => (
           <button
-            key={`${e.kind}:${e.sourceTraceId ?? e.sourceEventId}:${e.fromNodeId}`}
+            key={`${e.kind}:${e.sourceTraceId}:${e.fromNodeId}`}
             type="button"
             className="panel-inbound-chip"
             title={
@@ -4332,7 +5019,7 @@ function InboundRow({
             }
             onMouseDown={(ev) => {
               ev.stopPropagation();
-              onOpen(e.sourceTraceId ?? e.sourceEventId);
+              onOpen(e.sourceTraceId);
             }}
           >
             <span className="panel-inbound-chip-name">{fallback(e)}</span>
@@ -4373,6 +5060,15 @@ function InboundRow({
           {renderGroup("cite", Quote, "cited by", incomingCitations)}
         </>
       )}
+    </div>
+  );
+}
+
+function AttestationRow({ count }: { count: number }) {
+  const label = `${count} reachable attestation${count === 1 ? "" : "s"}`;
+  return (
+    <div className="panel-attestation-row" aria-label={label} title={label}>
+      <span>ATTESTATIONS: {count}</span>
     </div>
   );
 }
@@ -4485,9 +5181,8 @@ interface TraceCandidate {
 //
 // The button after the outgoing citation list opens an autocomplete over the
 // current folder's file basenames; selecting one adds its head nodeId to
-// FileState.taggedTraces, the protocol's existing no-body citation
-// representation (`q` + `tag-add`). The internal name is retained for wire
-// compatibility; the reader-facing concept is a citation.
+// FileState.citationIds, the protocol's no-body citation representation
+// (`q` + `tag-add`).
 //
 // Disabled for read-only/foreign folders and for
 // files that haven't stepped yet (no nodeId to cite). Candidates with no nodeId
@@ -4571,7 +5266,7 @@ function CitationPicker({
                     className="panel-cite-picker-item"
                     onClick={() => pick(c)}
                   >
-                    {basename(c.path)}
+                    {systemPathDisplayName(c.path)}
                   </button>
                 </li>
               ))}
@@ -4603,7 +5298,7 @@ function EventMetaBar({ meta }: { meta: SampleEventMeta }) {
       <span className={"event-meta-chip event-kind" + (meta.compatible ? "" : " foreign")}>
         {kindLabel}
       </span>
-      <span className="event-meta-chip">{meta.pubkey.slice(0, 8)}</span>
+      <PubkeyDisplay pubkey={meta.pubkey} className="event-meta-chip event-meta-pubkey" />
       <span className="event-meta-chip">{date}</span>
       {meta.relays.map((r) => (
         <span key={r} className="event-meta-chip event-relay">
@@ -4621,7 +5316,16 @@ function EventMetaBar({ meta }: { meta: SampleEventMeta }) {
 // their operations. The selected AUTHOR key is the "pen" new typed text is
 // attributed to; MODEL operations run as the selected model voice.
 
-type SummonStatus = { state: "idle" | "running" | "done" | "error"; msg?: string; op?: OpKind };
+type PaletteStatusOp = OpKind | "scan" | "reify" | "fork";
+type SummonStatus = {
+  state: "idle" | "running" | "done" | "error";
+  msg?: string;
+  op?: PaletteStatusOp;
+};
+
+function isOpKind(op?: PaletteStatusOp): op is OpKind {
+  return op !== undefined && op !== "scan" && op !== "reify" && op !== "fork";
+}
 
 const VOICE_OPS: { op: OpKind; label: string; title: string; cls: string }[] = [
   { op: "receive", label: "Receive", title: "Analyze the writing process from the delta + limelight logs into a new audit doc", cls: "op-receive" },
@@ -4648,6 +5352,32 @@ const PALETTE_DELIVER: { op: "send" | "attest"; label: string; title: string; cl
   { op: "attest", label: "Attest", title: "Mark this sent node as your published position — pin a geohash + acknowledge the timestamp", cls: "op-attest" },
 ];
 
+function PaletteStatus({
+  row,
+  status,
+}: {
+  row: PaletteStatusRow;
+  status: SummonStatus;
+}) {
+  if (paletteStatusRow(status.op) !== row) return null;
+  if (status.state === "error" && status.msg) {
+    return (
+      <span className="action-palette-action-error" title={status.msg} role="status">
+        {status.msg}
+      </span>
+    );
+  }
+  if (status.state === "done") {
+    const message = paletteStatusMessage(status.op, status.msg);
+    return message ? (
+      <span className="action-palette-action-done" title="Op completed" role="status">
+        {message}
+      </span>
+    ) : null;
+  }
+  return null;
+}
+
 // The AUTHOR row's leftmost label is itself a control — click it to re-roll the
 // alias that names the typing voice. Purely cosmetic (the underlying key is
 // unaffected); a small piece of personality for the press. Clicking picks a
@@ -4657,6 +5387,15 @@ const AUTHOR_LABEL_KEY = "zine.authorLabel";
 const AUTHOR_ALIASES = ["AUTHOR", "USER", "OPERATOR", "WRITER", "MANUAL", "HUMAN", "YOU", "ME"] as const;
 function rollAuthorAlias(excluding: string): string {
   const others = AUTHOR_ALIASES.filter((a) => a !== excluding);
+  return others[Math.floor(Math.random() * others.length)];
+}
+
+// The unconfigured MODEL row has the same small naming affordance as AUTHOR.
+// Once a provider exists, its actual card label replaces this generic alias.
+const MODEL_LABEL_KEY = "zine.modelLabel";
+const MODEL_ALIASES = ["MODEL", "AUTOMATIC", "AUTOMATON", "AI", "LLM"] as const;
+function rollModelAlias(excluding: string): string {
+  const others = MODEL_ALIASES.filter((alias) => alias !== excluding);
   return others[Math.floor(Math.random() * others.length)];
 }
 
@@ -4679,22 +5418,381 @@ function nextSubstrate(cur: Substrate): Substrate {
   return SUBSTRATES[(i + 1) % SUBSTRATES.length];
 }
 
+// --- voice key selector ------------------------------------------------
+//
+// Native <select> option rendering is controlled by the OS/browser, so an
+// option's per-voice color and font are unreliable or ignored altogether.
+// This listbox keeps the same compact closed control while rendering every
+// prospective voice in its own visual identity. It is shared by the AUTHOR,
+// MODEL, and substrate rows so all three role assignments behave identically.
+function VoiceKeySelect({
+  keys,
+  selectedId,
+  onSelect,
+  ariaLabel,
+}: {
+  keys: KeyEntry[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  ariaLabel: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const listboxId = useId();
+  const selectedIndex = keys.findIndex((key) => key.id === selectedId);
+  const selected = selectedIndex >= 0 ? keys[selectedIndex] : null;
+  function openListbox(preferredIndex = selectedIndex >= 0 ? selectedIndex : 0) {
+    if (keys.length === 0) return;
+    setActiveIndex(Math.max(0, Math.min(preferredIndex, keys.length - 1)));
+    setOpen(true);
+  }
+
+  function closeListbox({ restoreFocus = false } = {}) {
+    setOpen(false);
+    if (restoreFocus) triggerRef.current?.focus();
+  }
+
+  function focusOption(index: number) {
+    if (keys.length === 0) return;
+    setActiveIndex(Math.max(0, Math.min(index, keys.length - 1)));
+  }
+
+  function choose(key: KeyEntry) {
+    onSelect(key.id);
+    closeListbox({ restoreFocus: true });
+  }
+
+  // Close on an outside press. Escape and Tab are handled on the focused
+  // trigger/option so focus restoration follows the correct interaction.
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(event: PointerEvent) {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
+        closeListbox();
+      }
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  // The options use roving tab focus. Focusing the selected option on open
+  // makes Arrow/Home/End navigation work without introducing extra tab stops.
+  useLayoutEffect(() => {
+    if (open && activeIndex >= 0) optionRefs.current[activeIndex]?.focus();
+  }, [activeIndex, open]);
+
+  function onTriggerKeyDown(event: React.KeyboardEvent<HTMLButtonElement>) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const fallback = event.key === "ArrowDown" ? 0 : keys.length - 1;
+      openListbox(selectedIndex >= 0 ? selectedIndex : fallback);
+    } else if (event.key === "Escape" && open) {
+      event.preventDefault();
+      closeListbox({ restoreFocus: true });
+    }
+  }
+
+  function onOptionKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, index: number) {
+    switch (event.key) {
+      case "ArrowDown":
+        event.preventDefault();
+        focusOption(index + 1);
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        focusOption(index - 1);
+        break;
+      case "Home":
+        event.preventDefault();
+        focusOption(0);
+        break;
+      case "End":
+        event.preventDefault();
+        focusOption(keys.length - 1);
+        break;
+      case "Enter":
+      case " ":
+        event.preventDefault();
+        choose(keys[index]);
+        break;
+      case "Escape":
+        event.preventDefault();
+        closeListbox({ restoreFocus: true });
+        break;
+      case "Tab":
+        closeListbox();
+        break;
+      default: {
+        // Preserve the native selector's quick letter navigation. Repeated
+        // letters cycle through voices whose labels share that initial.
+        if (event.key.length !== 1 || event.metaKey || event.ctrlKey || event.altKey) break;
+        const needle = event.key.toLocaleLowerCase();
+        const ordered = [...keys.slice(index + 1), ...keys.slice(0, index + 1)];
+        const match = ordered.find((key) => key.label.trim().toLocaleLowerCase().startsWith(needle));
+        if (!match) break;
+        event.preventDefault();
+        focusOption(keys.findIndex((key) => key.id === match.id));
+      }
+    }
+  }
+
+  return (
+    <div
+      ref={rootRef}
+      className={`action-palette-key-picker${open ? " is-open" : ""}`}
+    >
+      <VoiceChip
+        ref={triggerRef}
+        className="action-palette-key-control"
+        label={selected?.label || "choose voice…"}
+        pubkey={selected?.pubkey}
+        identity={selected?.identity}
+        leading={<span className="action-palette-key-chevron" aria-hidden="true">▾</span>}
+        actionProps={{
+          "aria-label": ariaLabel,
+          "aria-haspopup": "listbox",
+          "aria-expanded": open,
+          "aria-controls": listboxId,
+          disabled: keys.length === 0,
+          onClick: () => (open ? closeListbox() : openListbox()),
+        }}
+        actionClassName="action-palette-key-trigger"
+        onKeyDown={onTriggerKeyDown}
+      />
+      {open && (
+        <div
+          id={listboxId}
+          className="action-palette-key-listbox"
+          role="listbox"
+          aria-label={`${ariaLabel} choices`}
+        >
+          {keys.map((key, index) => {
+            const isSelected = key.id === selectedId;
+            return (
+              <VoiceChip
+                key={key.id}
+                ref={(node) => { optionRefs.current[index] = node; }}
+                className="action-palette-key-option"
+                label={key.label || "Voice"}
+                pubkey={key.pubkey}
+                identity={key.identity}
+                selected={isSelected}
+                actionProps={{
+                  role: "option",
+                  "aria-selected": isSelected,
+                  tabIndex: index === activeIndex ? 0 : -1,
+                  onFocus: () => setActiveIndex(index),
+                  onClick: () => choose(key),
+                }}
+                copyTabIndex={-1}
+                onKeyDown={(event) => onOptionKeyDown(event, index)}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- AI model selector -------------------------------------------------
+//
+// Mirrors VoiceKeySelect's chip + upward-opening listbox instead of falling
+// back to browser-native <select> chrome. Models do not carry voice identity,
+// but sharing VoiceChip keeps both palette selectors visually and behaviorally
+// aligned.
+function ModelProviderSelect({
+  providers,
+  selectedId,
+  onSelect,
+}: {
+  providers: ProviderConfig[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const listboxId = useId();
+  const selectedIndex = providers.findIndex((provider) => provider.id === selectedId);
+  const selected = selectedIndex >= 0 ? providers[selectedIndex] : null;
+  const providerLabel = (provider: ProviderConfig) =>
+    provider.label || provider.modelId || provider.id;
+
+  function openListbox(preferredIndex = selectedIndex >= 0 ? selectedIndex : 0) {
+    if (providers.length === 0) return;
+    setActiveIndex(Math.max(0, Math.min(preferredIndex, providers.length - 1)));
+    setOpen(true);
+  }
+
+  function closeListbox({ restoreFocus = false } = {}) {
+    setOpen(false);
+    if (restoreFocus) triggerRef.current?.focus();
+  }
+
+  function focusOption(index: number) {
+    if (providers.length === 0) return;
+    setActiveIndex(Math.max(0, Math.min(index, providers.length - 1)));
+  }
+
+  function choose(provider: ProviderConfig) {
+    onSelect(provider.id);
+    closeListbox({ restoreFocus: true });
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(event: PointerEvent) {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
+        closeListbox();
+      }
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (open && activeIndex >= 0) optionRefs.current[activeIndex]?.focus();
+  }, [activeIndex, open]);
+
+  function onTriggerKeyDown(event: React.KeyboardEvent<HTMLButtonElement>) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const fallback = event.key === "ArrowDown" ? 0 : providers.length - 1;
+      openListbox(selectedIndex >= 0 ? selectedIndex : fallback);
+    } else if (event.key === "Escape" && open) {
+      event.preventDefault();
+      closeListbox({ restoreFocus: true });
+    }
+  }
+
+  function onOptionKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, index: number) {
+    switch (event.key) {
+      case "ArrowDown":
+        event.preventDefault();
+        focusOption(index + 1);
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        focusOption(index - 1);
+        break;
+      case "Home":
+        event.preventDefault();
+        focusOption(0);
+        break;
+      case "End":
+        event.preventDefault();
+        focusOption(providers.length - 1);
+        break;
+      case "Enter":
+      case " ":
+        event.preventDefault();
+        choose(providers[index]);
+        break;
+      case "Escape":
+        event.preventDefault();
+        closeListbox({ restoreFocus: true });
+        break;
+      case "Tab":
+        closeListbox();
+        break;
+      default: {
+        if (event.key.length !== 1 || event.metaKey || event.ctrlKey || event.altKey) break;
+        const needle = event.key.toLocaleLowerCase();
+        const ordered = [
+          ...providers.slice(index + 1),
+          ...providers.slice(0, index + 1),
+        ];
+        const match = ordered.find((provider) =>
+          providerLabel(provider).trim().toLocaleLowerCase().startsWith(needle),
+        );
+        if (!match) break;
+        event.preventDefault();
+        focusOption(providers.findIndex((provider) => provider.id === match.id));
+      }
+    }
+  }
+
+  return (
+    <div
+      ref={rootRef}
+      className={`action-palette-key-picker action-palette-model-picker${open ? " is-open" : ""}`}
+    >
+      <VoiceChip
+        ref={triggerRef}
+        className="action-palette-key-control action-palette-model-control"
+        label={selected ? providerLabel(selected) : "Choose a model…"}
+        leading={<span className="action-palette-key-chevron" aria-hidden="true">▾</span>}
+        actionProps={{
+          "aria-label": "Model for AI ops",
+          "aria-haspopup": "listbox",
+          "aria-expanded": open,
+          "aria-controls": listboxId,
+          title: "Model for AI ops",
+          disabled: providers.length === 0,
+          onClick: () => (open ? closeListbox() : openListbox()),
+        }}
+        actionClassName="action-palette-key-trigger action-palette-model-trigger"
+        onKeyDown={onTriggerKeyDown}
+      />
+      {open && (
+        <div
+          id={listboxId}
+          className="action-palette-key-listbox action-palette-model-listbox"
+          role="listbox"
+          aria-label="Model for AI ops choices"
+        >
+          {providers.map((provider, index) => {
+            const isSelected = provider.id === selectedId;
+            return (
+              <VoiceChip
+                key={provider.id}
+                ref={(node) => { optionRefs.current[index] = node; }}
+                className="action-palette-key-option action-palette-model-option"
+                label={providerLabel(provider)}
+                selected={isSelected}
+                actionProps={{
+                  role: "option",
+                  "aria-selected": isSelected,
+                  tabIndex: index === activeIndex ? 0 : -1,
+                  onFocus: () => setActiveIndex(index),
+                  onClick: () => choose(provider),
+                }}
+                onKeyDown={(event) => onOptionKeyDown(event, index)}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 // --- action palette ----------------------------------------------------
 //
-// The single always-visible palette at the bottom of the press. Three rows in
-// a shared column grid — identity/model left, actions, then status right:
+// The single always-visible palette at the bottom of the press. Three voice
+// groups keep identity/model controls at the left and wrap their actions at the
+// right; Replay follows them as the final row:
 //   AUTHOR:    | pen | Step/Mint Send Attest · · | — | — | err | —
-//   model▾     | inj | Receive Reply Extend Stir Settle Run | — | 1.2k | err | —
-//   FILESYSTEM | key | Scan Reify · · · · | — | — | — | —
-// The MODEL row's leftmost cell holds the model selector itself (the chosen
-// model name reads as the row's label — no separate "MODEL:" text). Five equal
-// action tracks; AUTHOR uses the first three, MODEL fills all five. An
+//   MODEL:     | inj | model▾ Receive Reply Extend Stir Settle Run · 1.2k
+//   FILESYSTEM | key | Scan File Scan Folder Reify Trace Open Trace | — | — | — | —
+//   REPLAY:    | targets | ▶ N× [slider]
+//              |         | ⏮ ◀ [n/latest] ▶ ⏭ · current frame
+// The MODEL row leads with its role label, then its voice; the provider selector
+// is the first inline control to the voice's right. Five equal action tracks;
+// AUTHOR uses the first three, MODEL fills all five. An
 // in-flight op re-renders its OWN button as the stop control (accent + pulse;
 // click again to abort) instead of a separate Stop button, so the affordance
 // stays where the click that started it landed. Ops gate on the outlined
 // target.
 function ActionPalette({
+  replayTransport,
   keys,
   authorKeyId,
   modelKeyId,
@@ -4722,16 +5820,18 @@ function ActionPalette({
   stepAvailable,
   /** Wrap the selected loose passage in double square brackets. */
   onPreserve,
-  onScopeToTarget,
   substrate,
   onChooseSubstrate,
   substrateKeyId,
   onChooseSubstrateKey,
   onScan,
   onReifyOp,
+  onOpenTrace,
   replayFrozen,
   onForkReplay,
 }: {
+  /** Replay slider + stepper, rendered as the palette's first row. */
+  replayTransport: React.ReactNode;
   keys: KeyEntry[];
   /** The AUTHOR (typing + Save/send) voice's key id. */
   authorKeyId: string | null;
@@ -4747,7 +5847,7 @@ function ActionPalette({
   /** Pin which provider LLM ops run against (the MODEL voice's). */
   onSelectProvider: (providerId: string) => void;
   /** The currently-outlined trace, or null. Drives which actions are live. */
-  selection: SelectionRef | null;
+  selection: UiFocus | null;
   /** Which op kind is in flight on the target panel, or null when idle. The
    *  button for this op re-renders as the live stop control — click it again
    *  to abort — instead of spawning a separate Stop button. */
@@ -4768,9 +5868,8 @@ function ActionPalette({
   attestPlan: AttestationPlan;
   /** Whether the focused/target file is inside the scope subtree. When false,
    *  write ops (Step/Send/Extend/Stir/Settle/Reply) disable — content must not
-   *  travel without its orchestration — and the palette surfaces a "scope to this
-   *  file's folder" affordance via `onScopeToTarget`. Read actions are
-   *  unaffected. Attest only requires scope when it must create a new Step;
+   *  travel without its orchestration. Read actions are unaffected. Attest only
+   *  requires scope when it must create a new Step;
    *  endorsing or ensuring reachability of an existing exact node does not
    *  write into the target content. */
   targetInScope: boolean;
@@ -4782,10 +5881,6 @@ function ActionPalette({
   stepAvailable: boolean;
   /** Preserve the live loose-text selection by wrapping it in `[[ ]]`. */
   onPreserve: () => void;
-  /** Scope the stepper/context to the focused file's parent folder, lifting the
-   *  out-of-scope block on write ops. Wired to a one-click affordance shown when
-   *  `targetInScope` is false. */
-  onScopeToTarget: () => void;
   /** The currently-selected external substrate (the lower bar). */
   substrate: Substrate;
   /** Cycle/pick the substrate. */
@@ -4798,8 +5893,10 @@ function ActionPalette({
   onChooseSubstrateKey: (id: string) => void;
   /** Open the matching native picker and acquire a foreign snapshot. */
   onScan: (kind: "file" | "folder") => void;
-  /** Reify: flush a trace out to a picked destination folder. */
+  /** Reify exact stepped snapshots to a picked destination folder. */
   onReifyOp: () => void;
+  /** Open a signed trace locator for verified, read-only inspection. */
+  onOpenTrace: () => void;
   /** True when the op-target panel is parked on a replay-frozen historical
    *  step. Gates the AUTHOR row's Fork action — the only way to edit a
    *  read-only historical version (seeds a new trace from that step). */
@@ -4814,6 +5911,10 @@ function ActionPalette({
     const stored = localStorage.getItem(AUTHOR_LABEL_KEY);
     return stored && (AUTHOR_ALIASES as readonly string[]).includes(stored) ? stored : "AUTHOR";
   });
+  const [modelAlias, setModelAlias] = useState<string>(() => {
+    const stored = localStorage.getItem(MODEL_LABEL_KEY);
+    return stored && (MODEL_ALIASES as readonly string[]).includes(stored) ? stored : "MODEL";
+  });
 
   // --- ACTIONS gating ---------------------------------------------------
   const kind = selection?.kind;
@@ -4822,9 +5923,7 @@ function ActionPalette({
   const allowDeliver = kind === "file" || kind === "folder";
   const immutableMint = kind === "file" && !!selection?.path && isMint(selection.path);
   // Focus-∈-scope invariant: write ops need both the right selection KIND and
-  // the target to be inside the scope subtree. Out-of-scope → the affordance
-  // surfaces; the user re-scopes deliberately rather than having content
-  // injected without its orchestration.
+  // the target to be inside the scope subtree.
   const scopedText = allowTextOps && targetInScope;
   const scopedReply = allowReply && targetInScope;
   const scopedDeliver = allowDeliver && targetInScope;
@@ -4837,80 +5936,17 @@ function ActionPalette({
   const attestAutoSends =
     attestPlan === "append-send-attest" || attestPlan === "send-attest";
 
-  // Key <select> for a row, styled in the chosen voice's font/color.
-  function KeySelect({
-    selectedId,
-    onSelect,
-    ariaLabel,
-  }: {
-    selectedId: string | null;
-    onSelect: (id: string) => void;
-    ariaLabel: string;
-  }) {
-    const entry = keys.find((k) => k.id === selectedId) ?? null;
-    const { fg, bg } = entry
-      ? identityColors(entry.identity, 0.22)
-      : { fg: "var(--ink)", bg: "transparent" };
-    return (
-      <select
-        className="action-palette-select action-palette-key-select"
-        value={selectedId ?? ""}
-        onChange={(e) => onSelect(e.target.value)}
-        aria-label={ariaLabel}
-        style={entry ? { color: fg, background: bg, fontFamily: entry.identity.font } : undefined}
-      >
-        <optgroup label="Keys">
-          {keys.map((k) => (
-            <option key={k.id} value={k.id} style={{ fontFamily: k.identity.font }}>
-              {k.label}
-            </option>
-          ))}
-        </optgroup>
-      </select>
-    );
-  }
-
-  // Model select — sole assignment for which provider LLM ops use. Option
-  // text is the Models-card label (the editable name on each card), under a
-  // Models optgroup. Not modelId — that's the API id field on the card.
-  function ModelSelect() {
-    return (
-      <select
-        className="action-palette-select action-palette-model-select"
-        value={resolvedModelProviderId}
-        onChange={(e) => onSelectProvider(e.target.value)}
-        title="Model for AI ops"
-        aria-label="Model for AI ops"
-        disabled={providers.length === 0}
-      >
-        {providers.length === 0 ? (
-          <option value="">add a model…</option>
-        ) : (
-          <optgroup label="Models">
-            {providers.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label || p.modelId || p.id}
-              </option>
-            ))}
-          </optgroup>
-        )}
-      </select>
-    );
-  }
-
-  // Columns: label | key | 5 action tracks | model | tokens | error | slot.
-  // AUTHOR Step/Send/Attest occupy the first three tracks; MODEL ops fill all
-  // five (Receive/Reply/Extend/Stir/Settle). An in-flight op re-renders its own
-  // button as the live stop control (accent + pulse; click again to abort)
-  // rather than spawning a separate Stop button — so the affordance stays
-  // where the click happened.
+  // Every group keeps label + voice in two stable columns, then places its
+  // buttons in a wrapping flex region. An in-flight op re-renders its own
+  // button as the live stop control (accent + pulse; click again to abort), so
+  // the affordance stays where the click happened even after wrapping.
   return (
     <div className="action-palette">
       <div className="action-palette-group">
         <button
           type="button"
           className="action-palette-label action-palette-label-clickable"
-          title={`Click to rename the typing voice — currently ${authorAlias}`}
+          title="Click to update label in view; no effect on behavior"
           onClick={() => {
             const next = rollAuthorAlias(authorAlias);
             localStorage.setItem(AUTHOR_LABEL_KEY, next);
@@ -4919,223 +5955,192 @@ function ActionPalette({
         >
           {authorAlias}:
         </button>
-        <KeySelect
+        <VoiceKeySelect
+          keys={keys}
           selectedId={authorKeyId}
           onSelect={onChooseAuthorKey}
           ariaLabel="Author voice"
         />
-        {(() => {
-          const isRunning = runningOp === "step";
-          const enabled =
-            isRunning ||
-            (!runningOp &&
-              primaryAction.actionable &&
-              (hasMintablePassage || stepAvailable) &&
-              (hasMintablePassage ? targetInScope : scopedDeliver) &&
-              !immutableMint);
-          return (
-            <button
-              type="button"
-              className={`action-palette-action op-save action-palette-primary action-palette-primary--${primaryAction.tone}${isRunning ? " running" : ""}`}
-              data-palette-selection={authorSelectionState}
-              disabled={!enabled}
-              title={
-                isRunning
-                  ? `${primaryAction.label} — running, click to stop`
-                  : authorSelectionState === "none" && !stepAvailable
-                    ? "No updates since the last Step"
-                    : primaryAction.title
-              }
-              onClick={() => (isRunning ? onStop() : onOp("step"))}
-            >
-              {primaryAction.label}
-            </button>
-          );
-        })()}
-        {PALETTE_DELIVER.map((v) => {
-          if (v.op === "send" && secondaryActions.preserve) {
+        <div className="action-palette-actions">
+          {(() => {
+            const isRunning = runningOp === "step";
+            const enabled =
+              !runningOp &&
+                primaryAction.actionable &&
+                (hasMintablePassage || stepAvailable) &&
+                (hasMintablePassage ? targetInScope : scopedDeliver) &&
+                !immutableMint &&
+                !replayFrozen;
             return (
               <button
-                key="preserve"
                 type="button"
-                className="action-palette-action op-preserve"
-                disabled={!!runningOp || immutableMint || replayFrozen}
-                title="Wrap the selected passage in [[ ]] so it endures"
-                onClick={onPreserve}
+                className={`action-palette-action op-save action-palette-primary action-palette-primary--${primaryAction.tone}${isRunning ? " running" : ""}`}
+                data-palette-selection={authorSelectionState}
+                disabled={isRunning || !enabled}
+                title={
+                  isRunning
+                    ? `${primaryAction.label} in progress`
+                    : primaryAction.title
+                }
+                onClick={() => onOp("step")}
               >
-                Preserve
+                {isRunning ? "Stepping…" : primaryAction.label}
               </button>
             );
-          }
-          const visible = v.op === "send" ? secondaryActions.send : secondaryActions.attest;
-          if (!visible) {
-            return <span key={v.op} className="action-palette-slot" aria-hidden="true" />;
-          }
-          // This op is the one in flight: the button becomes the stop control.
-          const isRunning = runningOp === v.op;
-          // Attest can compose its own Step/Send prerequisites. A composed Step
-          // still obeys the same scope and replay gates as the explicit action.
-          const deliverGate =
-            v.op === "attest"
-              ? (allowDeliver || authorSelectionState === "coin") &&
-                (!attestCreatesStep || (scopedDeliver && !immutableMint && !replayFrozen))
-              : v.op === "send" && immutableMint
-                ? true
-                : scopedDeliver && !immutableMint;
-          const enabled =
-            isRunning ||
-            (!runningOp && deliverGate && (v.op !== "attest" || attestPlan !== "unavailable"));
-          const createsStep =
-            (v.op === "send" && sendAutoSteps) ||
-            (v.op === "attest" && attestCreatesStep);
-          const sends = v.op === "send" || (v.op === "attest" && attestAutoSends);
-          return (
+          })()}
+          {PALETTE_DELIVER.map((v) => {
+            if (v.op === "send" && secondaryActions.preserve) {
+              return (
+                <button
+                  key="preserve"
+                  type="button"
+                  className="action-palette-action op-preserve"
+                  disabled={!!runningOp || immutableMint || replayFrozen}
+                  title="Wrap the selected passage in [[ ]] so it endures"
+                  onClick={onPreserve}
+                >
+                  Preserve
+                </button>
+              );
+            }
+            const visible = v.op === "send" ? secondaryActions.send : secondaryActions.attest;
+            if (!visible) return null;
+            // This op is the one in flight: the button becomes the stop control.
+            const isRunning = runningOp === v.op;
+            // Attest can compose its own Step/Send prerequisites. A composed Step
+            // still obeys the same scope and replay gates as the explicit action.
+            const deliverGate =
+              v.op === "attest"
+                ? (allowDeliver || authorSelectionState === "coin") &&
+                  (!attestCreatesStep || (scopedDeliver && !immutableMint && !replayFrozen))
+                : v.op === "send" && immutableMint
+                  ? true
+                  : scopedDeliver && !immutableMint;
+            const enabled =
+              isRunning ||
+              (!runningOp && deliverGate && (v.op !== "attest" || attestPlan !== "unavailable"));
+            const createsStep =
+              (v.op === "send" && sendAutoSteps) ||
+              (v.op === "attest" && attestCreatesStep);
+            const sends = v.op === "send" || (v.op === "attest" && attestAutoSends);
+            return (
+              <button
+                key={v.op}
+                type="button"
+                className={`action-palette-action ${v.cls}${isRunning ? " running" : ""}${createsStep ? " action-palette-action--auto-step" : ""}${sends ? " action-palette-action--sends" : ""}`}
+                disabled={!enabled}
+                title={
+                  isRunning
+                    ? `${v.label} — running, click to stop`
+                    : v.op === "send" && sendAutoSteps
+                      ? "Step the pending trace, then Send it for discussion"
+                      : v.op === "attest" && attestPlan === "append-send-attest"
+                        ? "Step and Send this draft, then Attest that exact version"
+                        : v.op === "attest" && attestPlan === "send-attest"
+                          ? "Send this Step, then Attest that exact version"
+                      : v.title
+                }
+                onClick={() => (isRunning ? onStop() : onOp(v.op))}
+              >
+                {v.label}
+              </button>
+            );
+          })}
+          {/* Fork is contextual: mounting it only on a replay-frozen step keeps
+              the normal AUTHOR row to the same three fixed tracks as FILESYSTEM. */}
+          {replayFrozen && (
             <button
-              key={v.op}
               type="button"
-              className={`action-palette-action ${v.cls}${isRunning ? " running" : ""}${createsStep ? " action-palette-action--auto-step" : ""}${sends ? " action-palette-action--sends" : ""}`}
-              disabled={!enabled}
-              title={
-                isRunning
-                  ? `${v.label} — running, click to stop`
-                  : v.op === "send" && sendAutoSteps
-                    ? "Step the pending trace, then Send it for discussion"
-                    : v.op === "attest" && attestPlan === "append-send-attest"
-                      ? "Step and Send this draft, then Attest that exact version"
-                      : v.op === "attest" && attestPlan === "send-attest"
-                        ? "Send this Step, then Attest that exact version"
-                    : v.title
-              }
-              onClick={() => (isRunning ? onStop() : onOp(v.op))}
+              className="action-palette-action action-palette-action-fork"
+              title="Fork this historical version into a new editable trace"
+              onClick={onForkReplay}
             >
-              {v.label}
+              Fork
             </button>
-          );
-        })}
-        {/* Fork: the AUTHOR row's escape hatch from a replay-frozen historical
-            view. The panel is read-only while parked on a past step; Fork seeds
-            a new editable trace from that step's node. Disabled (invisible to
-            action) unless the op-target panel is frozen on a historical step. */}
-        <button
-          type="button"
-          className="action-palette-action action-palette-action-fork"
-          disabled={!replayFrozen}
-          title={
-            replayFrozen
-              ? "Fork this historical version into a new editable trace"
-              : "Fork is available when replay is paused on a past step"
-          }
-          onClick={onForkReplay}
-        >
-          Fork
-        </button>
-        <span className="action-palette-slot" aria-hidden="true" />
-        <span className="action-palette-slot" aria-hidden="true" />
-        <span className="action-palette-slot" aria-hidden="true" />
-        <span className="action-palette-slot" aria-hidden="true" />
-        <span className="action-palette-slot" aria-hidden="true" />
+          )}
+          <PaletteStatus row="author" status={opStatus} />
+        </div>
       </div>
 
-      <div className="action-palette-group">
-        {/* The model selector IS the row's label — the chosen model's name
-            reads where the voice is declared, at the left edge. Moved from the
-            row's end so the active model is visible at a glance instead of
-            tucked after the op buttons. The grid cell it vacated becomes a
-            action-palette-slot to keep the two rows' shared column template aligned.
-            A trailing colon mirrors the AUTHOR: label on the row above. */}
-        <span className="action-palette-model-cell">
-          <ModelSelect />
-          <span className="action-palette-model-colon" aria-hidden="true">:</span>
-        </span>
-        <KeySelect
+      <div className="action-palette-group action-palette-model-row">
+        <button
+          type="button"
+          className="action-palette-label action-palette-label-clickable"
+          title="Click to update label in view; no effect on behavior"
+          onClick={() => {
+            const next = rollModelAlias(modelAlias);
+            localStorage.setItem(MODEL_LABEL_KEY, next);
+            setModelAlias(next);
+          }}
+        >
+          {modelAlias}:
+        </button>
+        <VoiceKeySelect
+          keys={keys}
           selectedId={modelKeyId}
           onSelect={onChooseModelKey}
           ariaLabel="Model voice"
         />
-        {VOICE_OPS.map((v) => {
-          const isRunning = runningOp === v.op;
-          // extend/stir/settle write INTO the existing file, so they obey the
-          // focus-∈-scope invariant (must not mutate content whose chain isn't
-          // in context). receive/reply/run create NEW docs/subfolders (analysis /
-          // citing doc / agent run), so they're gated by kind only, not by scope.
-          const createsDoc = v.op === "receive" || v.op === "reply" || v.op === "run";
-          const mutatesTarget = !createsDoc;
-          const baseGate = v.op === "receive" ? allowReply : mutatesTarget ? scopedText : scopedReply;
-          const enabled =
-            isRunning ||
-            (!runningOp && hasProviders && baseGate);
-          return (
+        <div className="action-palette-actions">
+          <div className="action-palette-model-cell">
+            <ModelProviderSelect
+              providers={providers}
+              selectedId={resolvedModelProviderId}
+              onSelect={onSelectProvider}
+            />
+          </div>
+          {VOICE_OPS.map((v) => {
+            const isRunning = runningOp === v.op;
+            // extend/stir/settle write INTO the existing file, so they obey the
+            // focus-∈-scope invariant (must not mutate content whose chain isn't
+            // in context). receive/reply/run create NEW docs/subfolders (analysis /
+            // citing doc / agent run), so they're gated by kind only, not by scope.
+            const createsDoc = v.op === "receive" || v.op === "reply" || v.op === "run";
+            const mutatesTarget = !createsDoc;
+            const baseGate = v.op === "receive" ? allowReply : mutatesTarget ? scopedText : scopedReply;
+            const enabled =
+              isRunning ||
+              (!runningOp && hasProviders && baseGate);
+            return (
+              <button
+                key={v.op}
+                type="button"
+                className={`action-palette-action ${v.cls}${isRunning ? " running" : ""}`}
+                disabled={!enabled}
+                title={
+                  isRunning
+                    ? `${v.label} — running, click to stop`
+                    : !hasProviders
+                      ? "Configure a model in Models to use AI operations"
+                      : v.title
+                }
+                onClick={() => (isRunning ? onStop() : onOp(v.op))}
+              >
+                {v.label}
+              </button>
+            );
+          })}
+          {tokenEstimate != null && (
             <button
-              key={v.op}
               type="button"
-              className={`action-palette-action ${v.cls}${isRunning ? " running" : ""}`}
-              disabled={!enabled}
-              title={isRunning ? `${v.label} — running, click to stop` : v.title}
-              onClick={() => (isRunning ? onStop() : onOp(v.op))}
+              className="action-palette-token-count"
+              onClick={onInspect}
+              title="Click to inspect the prompt an op would send · approximate prompt size for an op on the selected file"
             >
-              {v.label}
+              {formatTokens(tokenEstimate)}
             </button>
-          );
-        })}
-        {/* Model selector moved to the row's label cell (left edge); this slot
-            keeps the shared two-row grid template aligned. */}
-        <span className="action-palette-slot" aria-hidden="true" />
-        {!targetInScope && selection?.kind === "file" && !immutableMint && !isOblivion(selection.path ?? "") ? (
-          // Out-of-scope nudge: write ops are blocked because the focused file
-          // isn't in derived scope. One click mounts its folder (a deliberate
-          // act — tab focus never silently changes mounts).
-          <button
-            type="button"
-            className="action-palette-action action-palette-rescope"
-            onClick={onScopeToTarget}
-            title="Write ops need the target inside scope. Mount this file's folder."
-          >
-            Mount folder
-          </button>
-        ) : tokenEstimate != null ? (
-          <button
-            type="button"
-            className="action-palette-token-count"
-            onClick={onInspect}
-            title="Click to inspect the prompt an op would send · approximate prompt size for an op on the selected file"
-          >
-            {formatTokens(tokenEstimate)}
-          </button>
-        ) : (
-          <span className="action-palette-slot" aria-hidden="true" />
-        )}
-        {opStatus.state === "error" && opStatus.msg ? (
-          <span className="action-palette-action-error" title={opStatus.msg}>
-            {opStatus.msg}
-          </span>
-        ) : opStatus.state === "done" && opStatus.op ? (
-          <span className="action-palette-action-done" title="Op completed">
-            {opStatus.op === "step"
-              ? "stepped"
-              : opStatus.op === "send"
-                ? "sent"
-                : opStatus.op === "attest"
-                  ? "attested"
-                  : opStatus.op === "receive"
-                    ? "received"
-                    : "stepped"}
-          </span>
-        ) : (
-          <span className="action-palette-slot" aria-hidden="true" />
-        )}
-        {/* Former Stop-button slot: now empty. The stop affordance lives on the
-            running op's own button (see .running above), so this track is a
-            permanent placeholder to keep the grid's column alignment. */}
-        <span className="action-palette-slot" aria-hidden="true" />
+          )}
+          <PaletteStatus row="model" status={opStatus} />
+        </div>
       </div>
 
       <div className="action-palette-group">
         {/* The SUBSTRATE row: mirrors the AUTHOR row but cycles the EXTERNAL
             substrate (the foreign party a scan reads from / a reify writes to)
             instead of the internal typing voice. Click the label to cycle
-            (FILESYSTEM → LAPTOP → DESKTOP → EXTERNAL). Scan and Reify are the
-            two instants against it. Desktop-only conceptually; on the webapp
-            there is no disk substrate, so both buttons are inert. */}
+            (FILESYSTEM → LAPTOP → DESKTOP → EXTERNAL). Scan File, Scan
+            Folder, and Reify Trace are desktop-only substrate actions. Open Trace
+            verifies a signed locator without importing it. */}
         <button
           type="button"
           className="action-palette-label action-palette-label-clickable"
@@ -5145,46 +6150,54 @@ function ActionPalette({
           {substrate}:
         </button>
         {/* The substrate's pen/voice/key: which keychain key signs scans from
-            this substrate. Mirrors the AUTHOR row's KeySelect. Null until the
+            this substrate. Mirrors the AUTHOR row's voice selector. Null until the
             user picks one or the first scan auto-provisions. */}
-        <KeySelect
+        <VoiceKeySelect
+          keys={keys}
           selectedId={substrateKeyId}
           onSelect={onChooseSubstrateKey}
           ariaLabel={`Signer for ${substrate}`}
         />
-        <button
-          type="button"
-          className="action-palette-action op-scan"
-          disabled={!isTauri()}
-          title={isTauri() ? "Scan File: acquire one file as a new trace under the scope; repeated scans add copies" : "Scanning is desktop-only (the substrate is the local disk)"}
-          onClick={() => onScan("file")}
-        >
-          Scan File
-        </button>
-        <button
-          type="button"
-          className="action-palette-action op-scan"
-          disabled={!isTauri()}
-          title={isTauri() ? "Scan Folder: recursively acquire a folder as new traces under the scope; repeated scans add copies" : "Scanning is desktop-only (the substrate is the local disk)"}
-          onClick={() => onScan("folder")}
-        >
-          Scan Folder
-        </button>
-        <button
-          type="button"
-          className="action-palette-action op-reify"
-          disabled={!isTauri()}
-          title={isTauri() ? "Reify: flush a trace out to a picked destination folder" : "Reifying is desktop-only (the substrate is the local disk)"}
-          onClick={onReifyOp}
-        >
-          Reify
-        </button>
-        <span className="action-palette-slot" aria-hidden="true" />
-        <span className="action-palette-slot" aria-hidden="true" />
-        <span className="action-palette-slot" aria-hidden="true" />
-        <span className="action-palette-slot" aria-hidden="true" />
-        <span className="action-palette-slot" aria-hidden="true" />
+        <div className="action-palette-actions">
+          <button
+            type="button"
+            className="action-palette-action op-scan"
+            disabled={!isTauri()}
+            title={isTauri() ? "Scan File: acquire one file as a new trace in the private Scan inbox; repeated scans add copies" : "Scanning is desktop-only (the substrate is the local disk)"}
+            onClick={() => onScan("file")}
+          >
+            Scan File
+          </button>
+          <button
+            type="button"
+            className="action-palette-action op-scan"
+            disabled={!isTauri()}
+            title={isTauri() ? "Scan Folder: preserve one picked folder as a new batch in the private Scan inbox" : "Scanning is desktop-only (the substrate is the local disk)"}
+            onClick={() => onScan("folder")}
+          >
+            Scan Folder
+          </button>
+          <button
+            type="button"
+            className="action-palette-action op-reify"
+            disabled={!isTauri() || (opStatus.state === "running" && opStatus.op === "reify")}
+            title={isTauri() ? "Reify exact stepped snapshots to ordinary files" : "Reifying is desktop-only (the substrate is the local disk)"}
+            onClick={onReifyOp}
+          >
+            {opStatus.state === "running" && opStatus.op === "reify" ? "Reifying…" : "Reify Trace"}
+          </button>
+          <button
+            type="button"
+            className="action-palette-action op-open-trace"
+            title="Open and verify a signed trace without importing it"
+            onClick={onOpenTrace}
+          >
+            Open Trace
+          </button>
+          <PaletteStatus row="substrate" status={opStatus} />
+        </div>
       </div>
+      {replayTransport}
     </div>
   );
 }
@@ -5194,11 +6207,17 @@ function Panel({
   tabs,
   activePath,
   file,
+  directCoinComposer,
   folderId,
   replayStepText,
   replayPrevText,
   replayLiveText,
+  replayNodeId,
+  replayActionStatus,
+  onReplaySend,
+  onReplayAttest,
   active,
+  focused,
   collapsed,
   onFocusPanel,
   onSelectTab,
@@ -5239,6 +6258,7 @@ function Panel({
   taggedChips,
   inbound,
   inboundFreshness,
+  attestationCount,
   onOpenCitation,
   traceCandidates,
   pickerDisabled,
@@ -5259,6 +6279,14 @@ function Panel({
   tabs: string[];
   activePath: string;
   file?: FileState;
+  directCoinComposer: {
+    phrase: string;
+    busy: boolean;
+    error: string | null;
+    onPhraseChange: (phrase: string) => void;
+    onMint: () => void;
+    onClose: () => void;
+  };
   /** The attached folder's id — needed to fetch this file's step chain for the
    *  in-place Diff surface. "" when no folder is attached. */
   folderId: string;
@@ -5267,9 +6295,16 @@ function Panel({
   replayStepText?: string | null;
   /** In replay mode, the previous content-step of this file (vs prev). */
   replayPrevText?: string | null;
-  /** In replay mode, the live working buffer parked in replay.snapshot. */
+  /** In replay mode, the untouched live working buffer. */
   replayLiveText?: string | null;
+  /** Exact immutable node displayed by this replay tab. */
+  replayNodeId?: string;
+  replayActionStatus?: HistoricalActionStatus;
+  onReplaySend?: () => void;
+  onReplayAttest?: () => void;
   active: boolean;
+  /** This live panel's active tab owns the singular semantic focus. */
+  focused: boolean;
   /** The sidebar's collapsed-folder set, so a folder tab's icon can mirror the
    *  tree (open vs closed). Optional — omitted/empty reads as "all open". */
   collapsed?: Set<string>;
@@ -5287,8 +6322,8 @@ function Panel({
   draggingTab: { fromPanel: number; path: string } | null;
   dropTargetTab: { panel: number; path: string | null } | null;
   onTabDragStart: (path: string) => void;
-  onTabDragEnterTarget: (path: string) => void;
-  onTabDragLeaveTarget: (path: string) => void;
+  onTabDragEnterTarget: (path: string | null) => void;
+  onTabDragLeaveTarget: (path: string | null) => void;
   onDropOnTab: (path: string) => void;
   onDropOnListEnd: () => void;
   /** Drop on this panel's right edge → spawn a new column to its right. */
@@ -5336,8 +6371,8 @@ function Panel({
   onReplayEditAttempt?: () => void;
   /** Every resolved `q` edge on this file's current head. */
   citations: CitationChip[];
-  /** Explicit no-body citations, still stored under the protocol-compatible
-   *  `taggedTraces` field. Resolved from the live id set so additions appear
+  /** Explicit no-body citations stored in `citationIds`. Resolved from the
+   *  live id set so additions appear
    *  before the next Step advances the head. */
   taggedChips: CitationChip[];
   /** Forks and citations that point into this trace. Rendered after the final
@@ -5345,6 +6380,9 @@ function Panel({
   inbound: TraceInbound[];
   /** Verification state for the inbound row. */
   inboundFreshness?: InboundFreshness;
+  /** Attestations on this tab's current Step that are reachable from the
+   *  configured read relays. Absent until the trace has a Step. */
+  attestationCount?: number;
   /** Clicking a cited-trace chip opens that trace's Steps modal pinned to the
    *  cited node. */
   onOpenCitation: (nodeId: string) => void;
@@ -5354,8 +6392,7 @@ function Panel({
   /** Whether the citation picker is disabled (foreign/read-only folder, or the
    *  active file hasn't stepped yet). */
   pickerDisabled: boolean;
-  /** Add/remove an explicit no-body citation. The backing field retains its
-   *  protocol name (`taggedTraces`) while the UI calls it a citation. */
+  /** Add/remove an explicit no-body citation. */
   onAddCitation: (nodeId: string) => void;
   onRemoveCitation: (nodeId: string) => void;
   /** Drag-from-tree → cite: gate whether a dragged tree file (by path) may be
@@ -5389,6 +6426,8 @@ function Panel({
    *  does not move scope, so the focused tab may legitimately return false. */
   tabIsInScope: (tabPath: string) => boolean;
 }) {
+  const coinComposerActive = isCoinComposerTab(activePath);
+  const coinActive = isCoinTab(activePath) && !!file && file.kind !== "folder";
   // One outgoing list, regardless of the protocol path that created the `q`.
   // Current body brackets are the source of truth for the visible "quoted"
   // marker; this updates immediately while the head's resolved q-list catches
@@ -5398,7 +6437,7 @@ function Panel({
       .map((bracket) => bracket.nodeId)
       .filter(Boolean),
   );
-  const explicitCitationIds = new Set(file?.taggedTraces ?? []);
+  const explicitCitationIds = new Set(file?.citationIds ?? []);
   const outgoingById = new Map<string, CitationChip>();
   for (const chip of [...citations, ...taggedChips]) {
     if (!outgoingById.has(chip.nodeId)) outgoingById.set(chip.nodeId, chip);
@@ -5489,7 +6528,8 @@ function Panel({
     onAddCitationByPath(path);
   }
 
-  const modeToggle = !draggingTab ? (
+  const modeToggle =
+    !draggingTab && !coinActive && !coinComposerActive && !isFolderTab(activePath) ? (
     <div className="tab-bar-mode" role="group" aria-label="View mode">
       <button
         type="button"
@@ -5531,7 +6571,7 @@ function Panel({
         <GitCompare size={13} aria-hidden="true" />
       </button>
     </div>
-  ) : null;
+    ) : null;
 
   const citationBar = file ? (
     <div
@@ -5559,7 +6599,7 @@ function Panel({
         />
         <CitationPicker
           candidates={traceCandidates}
-          alreadyCited={file.taggedTraces ?? []}
+          alreadyCited={file.citationIds ?? []}
           disabled={pickerDisabled || readOnly}
           onActivate={onFocusPanel}
           onPick={onAddCitation}
@@ -5570,24 +6610,29 @@ function Panel({
 
   const provenanceHeader = file ? (
     <>
-      {citationBar}
       <VoiceLegend runs={file.runs ?? []} onFocusVoice={setFocusedVoice} />
+      {citationBar}
     </>
   ) : null;
 
   const inboundFooter = file ? (
-    <InboundRow
-      inbound={inbound}
-      freshness={inboundFreshness}
-      onOpen={(nodeId) => {
-        onFocusPanel();
-        onOpenCitation(nodeId);
-      }}
-    />
+    <>
+      <InboundRow
+        inbound={inbound}
+        freshness={inboundFreshness}
+        onOpen={(nodeId) => {
+          onFocusPanel();
+          onOpenCitation(nodeId);
+        }}
+      />
+      {attestationCount !== undefined && <AttestationRow count={attestationCount} />}
+    </>
   ) : null;
 
-  // Replay is a mode, not a selection edge. Name the state directly in stable
-  // chrome so the top-scrollbar transform cannot invert or obscure it.
+  // Replay is a mode, not a selection edge. Name the read-only state directly
+  // in stable chrome so the top-scrollbar transform cannot invert or obscure
+  // it. REPLAY remains the transport/action name; READONLY describes what the
+  // mounted trace surface permits.
   const replayNotice = replayFrozen
     ? "Historical snapshot · Read-only · Fork to edit"
     : replayMounted
@@ -5624,7 +6669,7 @@ function Panel({
             // entering the list itself (not a child tab) → "drop at end"
             if (draggingTab && e.target === e.currentTarget) {
               e.preventDefault();
-              onDropOnListEnd();
+              onTabDragEnterTarget(null);
             }
           }}
           onDragOver={(e) => {
@@ -5632,6 +6677,10 @@ function Panel({
               e.preventDefault();
               e.dataTransfer.dropEffect = "move";
             }
+          }}
+          onDragLeave={(e) => {
+            if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+            onTabDragLeaveTarget(null);
           }}
           onDrop={(e) => {
             // child tabs stopPropagation on their own drops, so this fires only
@@ -5645,11 +6694,9 @@ function Panel({
         >
           {tabs.map((p) => {
             const isActive = p === activePath;
-            // The active trace is the single frontmost tab of the focused
-            // panel. Every panel has a front tab (isActive), but only the
-            // focused panel's front tab receives the top-border selection
-            // marker (.tab.trace-active).
-            const isTraceActive = isActive && active;
+            // Every panel has a front tab, but only the exact live UiFocus
+            // locus receives the gold top marker. Replay projections cannot.
+            const isTraceActive = isActive && focused;
             const isInScope = tabIsInScope(p);
             const isDragging = draggingTab?.path === p && draggingTab.fromPanel === panelIdx;
             const isBeforeTarget =
@@ -5657,11 +6704,16 @@ function Panel({
             const unsteppedEdits = unsteppedEditCounts.get(p) ?? 0;
             const hasUnsteppedChanges = unsteppedPathSet.has(p);
             const pendingLabel = unsteppedEdits > 999 ? "999+" : String(unsteppedEdits);
-            const replayTabDetail = replayFrozen && isActive
-              ? "Historical snapshot · Read-only · Fork to edit"
-              : replayMounted
-                ? "Playback in progress · Read-only"
-                : null;
+            const scanTab = isScan(isFolderTab(p) ? folderTabPath(p) : p);
+            const readOnlyTabDetail = isCoinTab(p)
+              ? "Immutable Coin"
+              : scanTab
+                ? "Scanned snapshot · Adopt to edit"
+              : replayFrozen && isActive
+                ? "Historical snapshot · Fork to edit"
+                : replayMounted
+                  ? "Playback in progress"
+                  : null;
             return (
               <div
                 key={p}
@@ -5669,6 +6721,7 @@ function Panel({
                   "tab" +
                   (isActive ? " active" : "") +
                   (isTraceActive ? " trace-active" : "") +
+                  (replayMounted ? " tab-replay" : "") +
                   (isInScope ? " tab-in-scope" : " tab-out-of-scope") +
                   (isDragging ? " tab-dragging" : "") +
                   (isBeforeTarget ? " tab-drop-before" : "") +
@@ -5692,7 +6745,10 @@ function Panel({
                     return;
                   }
                   onFocusPanel();
-                  if (!isActive) onSelectTab(p);
+                  // A tab press is also an explicit replay-selection gesture.
+                  // Call through even when this tab is already active so a
+                  // prior multi-selection in the tree is replaced by it.
+                  onSelectTab(p);
                 }}
                 onAuxClick={(e) => {
                   if (e.button === 1) {
@@ -5727,13 +6783,13 @@ function Panel({
                 }}
               >
                 <span className="tab-label">
-                  {replayTabDetail ? (
+                  {readOnlyTabDetail ? (
                     <span
-                      className="tab-replay-badge"
-                      aria-label={`Replay: ${replayTabDetail}`}
-                      title={`Replay · ${replayTabDetail}`}
+                      className="tab-readonly-badge"
+                      aria-label={`Read-only: ${readOnlyTabDetail}`}
+                      title={`Read-only · ${readOnlyTabDetail}`}
                     >
-                      REPLAY
+                      READONLY
                     </span>
                   ) : null}
                   {hasUnsteppedChanges && !isFolderTab(p) ? (
@@ -5753,27 +6809,101 @@ function Panel({
                       {unsteppedEdits > 0 ? pendingLabel : "+"}
                     </span>
                   ) : null}
-                  {/* Scope icon to the left of the title. A folder tab's icon
-                      mirrors the tree state of that folder: open (FolderOpen)
-                      when expanded, closed (Folder) when collapsed. A file tab
-                      shows a file glyph. Scope—not tab selection—controls its
-                      color: gold in scope, dulled outside it. */}
+                  {/* Scope icon to the left of the title. Ordinary folder tabs
+                      mirror expanded/collapsed state; scanned folders and files
+                      use the matching Input glyphs to identify their intake
+                      origin. Scope—not tab selection—controls color. */}
                   {isFolderTab(p) ? (
-                    collapsed?.has(folderTabPath(p)) ? (
+                    scanTab ? (
+                      <FolderInput size={12} className="tab-status tab-status-scan" aria-hidden="true" />
+                    ) : collapsed?.has(folderTabPath(p)) ? (
                       <Folder size={12} className="tab-status tab-status-folder" aria-hidden="true" />
                     ) : (
                       <FolderOpen size={12} className="tab-status tab-status-folder" aria-hidden="true" />
                     )
+                  ) : isCoinTab(p) || isCoinComposerTab(p) ? (
+                    <CircleDollarSign size={12} className="tab-status tab-status-coin" aria-hidden="true" />
+                  ) : scanTab ? (
+                    <FileInput size={12} className="tab-status tab-status-scan" aria-hidden="true" />
                   ) : (
                     <FileText size={12} className="tab-status tab-status-file" aria-hidden="true" />
                   )}
                   {tabLabel(p)}
                 </span>
+                {replayMounted && isActive && replayNodeId && (onReplaySend || onReplayAttest) ? (
+                  <span
+                    className="replay-tab-actions"
+                    role="group"
+                    aria-label={`Historical actions for ${tabLabel(p)}`}
+                  >
+                    <button
+                      type="button"
+                      className="replay-tab-action replay-tab-send"
+                      disabled={
+                        replayActionStatus?.send === "running" ||
+                        replayActionStatus?.attest === "running"
+                      }
+                      title={
+                        replayActionStatus?.send === "error"
+                          ? replayActionStatus.message
+                          : `Send exact historical node ${replayNodeId.slice(0, 8)}…`
+                      }
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                      }}
+                      onDragStart={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onReplaySend?.();
+                      }}
+                    >
+                      {replayActionStatus?.send === "running"
+                        ? "Sending…"
+                        : replayActionStatus?.send === "done"
+                          ? "Sent"
+                          : "Send"}
+                    </button>
+                    <button
+                      type="button"
+                      className="replay-tab-action replay-tab-attest"
+                      disabled={
+                        replayActionStatus?.send === "running" ||
+                        replayActionStatus?.attest === "running"
+                      }
+                      title={
+                        replayActionStatus?.attest === "error"
+                          ? replayActionStatus.message
+                          : `Attest exact historical node ${replayNodeId.slice(0, 8)}…`
+                      }
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                      }}
+                      onDragStart={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onReplayAttest?.();
+                      }}
+                    >
+                      {replayActionStatus?.attest === "running"
+                        ? "Attesting…"
+                        : replayActionStatus?.attest === "done"
+                          ? "Attested"
+                          : "Attest"}
+                    </button>
+                  </span>
+                ) : null}
                 <button
                   type="button"
                   className="tab-close"
                   aria-label={`Close ${tabLabel(p)}`}
-                  title="Close tab"
+                  title={
+                    isCoinComposerTab(p) && directCoinComposer.busy
+                      ? "Minting Coin…"
+                      : "Close tab"
+                  }
+                  disabled={isCoinComposerTab(p) && directCoinComposer.busy}
                   onMouseDown={(e) => e.stopPropagation()}
                   onDragStart={(e) => e.stopPropagation()}
                   onClick={(e) => {
@@ -5818,9 +6948,9 @@ function Panel({
       {replayNotice ? (
         <div
           className="panel-replay-notice"
-          aria-label={`Replay: ${replayNotice}`}
+          aria-label={`Read-only replay: ${replayNotice}`}
         >
-          <span className="panel-replay-notice-label">REPLAY</span>
+          <span className="panel-replay-notice-label">READONLY</span>
           <span className="panel-replay-notice-detail">{replayNotice}</span>
         </div>
       ) : null}
@@ -5833,7 +6963,7 @@ function Panel({
           candidate list is scoped to the focused panel's active path, so this
           renders only on the focused panel; hidden while the MergePanel overlay
           is already open (and on read-only foreign folders). */}
-      {file && active && mergeCandidates.length > 0 && !mergeSessionOpen && (
+      {file && !coinActive && active && mergeCandidates.length > 0 && !mergeSessionOpen && (
         <div className="merge-banner">
           {(() => {
             const candidateLabel = (c: MergeCandidate) => {
@@ -5898,8 +7028,24 @@ function Panel({
           })()}
         </div>
       )}
-      {file?.eventMeta && <EventMetaBar meta={file.eventMeta} />}
-      {file ? (
+      {!coinActive && file?.eventMeta && <EventMetaBar meta={file.eventMeta} />}
+      {coinComposerActive ? (
+        <DirectCoinComposerView
+          phrase={directCoinComposer.phrase}
+          busy={directCoinComposer.busy}
+          error={directCoinComposer.error}
+          onPhraseChange={directCoinComposer.onPhraseChange}
+          onMint={directCoinComposer.onMint}
+          onClose={directCoinComposer.onClose}
+        />
+      ) : coinActive ? (
+        <CoinView
+          key={activePath}
+          name={systemPathDisplayName(activePath)}
+          phrase={flatten(file.runs)}
+          nodeId={file.nodeId}
+        />
+      ) : file ? (
         // .panel-body positions the one CodeMirror surface that now serves
         // all three modes — LLM ops, palette citations, and Cmd+S step all hold
         // its view ref regardless of which mode is active. Preview vs Markdown
@@ -6235,54 +7381,30 @@ class ViewErrorBoundary extends Component<
 // --- provenance hook: editor → disk → relay ----------------------------
 //
 // On mount, asks Tauri to spawn the relay sidecar (no-op outside Tauri, e.g.
-// plain `npm run dev` in a browser). Then debounces edits: 1.5s after the
-// last change to a file, or immediately on Cmd+S, it writes the file to disk
-// via workspace.writeFile — which itself steps a kind-4290 node and republishes
-// the kind-34290 manifest, so disk and provenance never drift. The diff/state
-// bookkeeping lives in workspace.ts; this hook just owns the debounce timer.
+// plain `npm run dev` in a browser). Ordinary edits and MODEL results debounce
+// only into the crash pad. Step/Send are the sole paths that write and publish
+// a kind-4290 checkpoint; the diff/state bookkeeping lives in workspace.ts.
 
 function useProvenance(
   folder: AttachedFolder | null,
   files: Record<string, FileState>,
   replayActiveRef: MutableRefObject<boolean>,
-  // The folder-wide replay snapshot lives in `App` (it drives the transport,
-  // editor override, fork modal, …). `unsteppedPaths` needs it to skip the one
-  // frozen-historical path, so it's threaded in here rather than captured from a
-  // closure it can't see (the hook's own scope has no `replay`).
-  replay: {
-    steps: ReplayStep[];
-    index: number;
-    snapshot: Record<string, FileState>;
-  } | null,
 ) {
   const pendingTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   // Paths with a debounce step in flight. The external-change rescan reads
   // this to avoid clobbering a file the user is mid-edit on — their in-editor
   // content is newer than disk, so the pending step must win, not the rescan.
   const pendingPaths = useRef<Set<string>>(new Set());
-  // LLM-op step suppression. Set to true while an op (Extend/Settle/Stir/
-  // Reply) is streaming into the editor: the step effect skips entirely, so
-  // a burst of per-token state updates doesn't fire intermediate steps. Each
-  // op calls suppressStep(false) in its finally, and if anything was deferred
-  // it steps exactly once then — making the whole AI insert a single delta.
-  // Without this, a stream whose quiet gap exceeds the debounce (1500ms —
-  // model thinking, network hiccup) publishes a half-finished insert, then
-  // more tokens arrive and publish again, and the relay's per-connection
-  // rate-limit (khatru's ApplySaneDefaults) trips: "rate-limited: slow down".
+  // MODEL-operation crash-pad gate. App applies a buffered result in one editor
+  // transaction; the gate holds that render until endOp can attach the pending
+  // provenance metadata and mirror the complete unstepped result once.
   const stepSuppressionGate = useRef(new RefCountedStepGate<Uint8Array, LlmStepMeta>());
   const pendingStepPaths = useRef<Set<string>>(new Set());
-  // The AUTHOR key's secret, threaded in from App() so the debounced auto-save
-  // signs as the AUTHOR key (the ActionPalette AUTHOR control) rather than the hidden
-  // active-key default. Read lazily inside scheduleStep's timeout so a
-  // mid-debounce AUTHOR switch is honored at fire time. `undefined` means the
-  // AUTHOR key isn't in the keychain (deleted) and stepFile falls back to its
-  // signer default; the LLM-op catch-up step bypasses this ref and signs with
-  // the MODEL key (passed explicitly via suppressStep).
+  // The AUTHOR-key resolver is retained for explicit Step ownership. It is
+  // read at gesture time so a role switch never changes a captured operation.
   const authorSignerRef = useRef<(() => Uint8Array | undefined)>(() => undefined);
   // Content-stable dedup for stepFile: the last (content, tags) actually stepped
-  // per path, so a no-change step short-circuits before the relay round-trip.
-  // The motivating case is the trailing debounce after an LLM op's catch-up
-  // step (see stepFile), but it also collapses any other redundant step.
+  // per path, so a no-change non-forced write short-circuits before the relay.
   const lastSteppedRef = useRef<Map<string, FileStepBaseline>>(new Map());
   // Step-on-mount hydration flag: once workspace attach has populated `files`,
   // we don't want the first render's debounce effect to re-publish content
@@ -6309,17 +7431,12 @@ function useProvenance(
     };
   }, []);
 
-  // Debounced write+publish on file content changes.
+  // Debounced crash-pad mirroring on file content changes.
   useEffect(() => {
     if (!ready.current || !folder) return;
-    // Skip while an LLM op is mid-stream: those per-token state updates must
-    // not trigger intermediate steps (see the ref-counted step gate). Remember the paths
-    // so the op's release can step exactly once at the end — the AI insert
-    // then lands as a single delta instead of N checkpoints. Only unstepped paths
-    // (content/tags changed since last step) are buffered — a re-render that
-    // touches `files` for an unrelated reason (nodeId reflection, panel swap)
-    // must not drag every bystander file into the catch-up step, or the burst
-    // of relay publishes trips the hosted relay's IP rate-limit.
+    // Hold the MODEL transaction until its completion metadata is ready. Only
+    // genuinely unstepped paths are remembered; unrelated file renders never
+    // enter the operation's release set.
     if (stepSuppressionGate.current.suppressed) {
       for (const path of unsteppedPaths(files)) pendingStepPaths.current.add(path);
       return;
@@ -6354,7 +7471,7 @@ function useProvenance(
         tags: f.tags,
         nodeId: f.nodeId,
         runs: f.runs,
-        taggedTraces: f.taggedTraces,
+        citationIds: f.citationIds,
         kedits: keditLogToArray(f.kedits),
       });
     }, ms);
@@ -6366,36 +7483,17 @@ function useProvenance(
    *  root fix for the relay rate-limit fanout where one edit re-stepped every
    *  file in the folder. */
   function unsteppedPaths(currentFiles: Record<string, FileState>): string[] {
-    // The replay stepper overwrites one file's `runs` with historical content
-    // (replayStepTo → setFiles). That historical content legitimately differs
-    // from the live stepped baseline, but it is NOT a user edit — it must not
-    // arm the step debounce (which would mirror stale history to the crash
-    // pad) nor light the unstepped-count badge/title. Skip the one overridden
-    // path while parked on a historical step.
-    const replayFrozenPath =
-      replay && replay.index < replay.steps.length - 1 && !replay.steps[replay.index]?.membership
-        ? (replay.steps[replay.index]?.relativePath ?? null)
-        : null;
     const out: string[] = [];
     for (const [path, file] of Object.entries(currentFiles)) {
-      if (path === replayFrozenPath) continue;
+      if (isMint(path) || isScan(path) || isOblivion(path)) continue;
       const last = lastSteppedRef.current.get(path);
       if (fileHasUnsteppedChanges(file, last)) out.push(path);
     }
     return out;
   }
 
-  /** Gate the step pipeline while an LLM op is streaming (on = true) and
-   *  release it when it finishes. On release, any path the suppressed effect
-   *  deferred is stepped exactly once — the op's whole output becomes a single
-   *  delta. Safe to call true→true or false→false; only the true→false edge
-   *  triggers the catch-up step.
-   *
-   *  `signer` (used only on the release edge) is the voice that release step
-   *  is signed as — the LLM op's MODEL key, so the AI insert steps as that
-   *  voice instead of the AUTHOR key the user is typing under. The debounced
-   *  auto-save (scheduleStep) separately resolves the AUTHOR key via
-   *  authorSignerRef, so a non-op step also signs with the AUTHOR key. */
+  /** Gate crash-pad observation around one atomic MODEL apply. Release mirrors
+   * the completed buffer and stores metadata for a later explicit Step. */
   function suppressStep(
     on: boolean,
     signer?: Uint8Array,
@@ -6408,48 +7506,37 @@ function useProvenance(
     }
     const releases = stepSuppressionGate.current.release(path, signer, llmMeta);
     if (!releases) return;
-    // Step everything the suppressed window saw touched. Snapshot first —
-    // stepFile is async and may interleave with a new suppression turn.
+    // Snapshot the paths before another operation can begin.
     const paths = [...pendingStepPaths.current];
     pendingStepPaths.current.clear();
     for (const p of paths) {
       const release = releases.get(p);
-      const pathSigner = release?.signer;
       const pathLlmMeta = release?.meta;
-      if (isTauri()) {
-        // Desktop: the op's output buffers to the crash pad, same as a manual
-        // edit — the real file stays clean until the user Steps. Mirroring
-        // immediately (no debounce) so a mid-op crash isn't a total loss.
-        const f = files[p];
-        if (f && folder) {
-          if (pathLlmMeta) setPendingLlmMeta(p, pathLlmMeta);
-          mirrorPad(folder.id, p, {
-            content: flatten(f.runs),
-            tags: f.tags,
-            nodeId: f.nodeId,
-            runs: f.runs,
-            taggedTraces: f.taggedTraces,
-            kedits: keditLogToArray(f.kedits),
-          });
-        }
-      } else {
+      // MODEL output is always an unstepped local buffer. Preserve it in the
+      // crash pad on desktop and web, but never publish implicitly; the next
+      // explicit Step consumes the pending provenance metadata.
+      const f = files[p];
+      if (f && folder) {
         if (pathLlmMeta) setPendingLlmMeta(p, pathLlmMeta);
-        void stepFile(p, pathSigner)
-          .catch((e) =>
-            console.warn(`[provenance] suppressed-step catch-up failed for ${p}:`, e),
-          )
-          .finally(() => clearPendingLlmMeta(p));
+        mirrorPad(folder.id, p, {
+          content: flatten(f.runs),
+          tags: f.tags,
+          nodeId: f.nodeId,
+          runs: f.runs,
+          citationIds: f.citationIds,
+          kedits: keditLogToArray(f.kedits),
+        });
       }
     }
   }
 
   async function stepFile(path: string, signer?: Uint8Array, localOnly?: boolean, force?: boolean): Promise<string | undefined> {
     if (!folder) return;
-    // Coins and Oblivion entries are immutable in place. A Mint coin
-    // becomes editable only by forking it into Root; an Oblivion entry must be
-    // restored before authoring.
-    if (isMint(path) || isOblivion(path)) {
-      console.warn("step blocked: Mint and Oblivion are read-only");
+    // Private system entries are immutable in place. Mint and Scan become
+    // editable only through a lineage-preserving fork into Root; Oblivion must
+    // be restored before authoring.
+    if (isMint(path) || isScan(path) || isOblivion(path)) {
+      console.warn("step blocked: Mint, Scan, and Oblivion are read-only");
       return;
     }
     // Belt-and-suspenders: never step while replay is parked on a historical
@@ -6463,64 +7550,36 @@ function useProvenance(
     const file = files[path];
     if (!file) return;
     // Content-stable dedup: skip when nothing has changed since the last step
-    // for this path. The tail of an LLM op is the motivating case — the op's
-    // catch-up step (deferred in endOp) commits a new nodeId via setFiles,
-    // which retriggers the debounce effect; without this guard that trailing
-    // step re-runs writeFile, and on a laggy remote relay the manifest read
-    // may not yet reflect the catch-up write, so the content-hash dedup in
-    // writeFile misses and it republishes the same content. Short-circuiting
-    // here makes the trailing step a true no-op for every caller, no relay hop.
+    // for this path. Explicit checkpoints may use `force` because choosing a
+    // checkpoint is itself process evidence even when the body is unchanged.
     //
     // `force` bypasses this after the palette has authorized an explicit Step.
-    // The palette itself disables Step on a current trace; force only prevents
-    // a now-authorized user gesture from being swallowed by a baseline race.
-    // Debounced auto-save does not pass force, so redundant trailing steps
-    // still collapse.
+    // Explicit Step remains available on a current trace because the chosen
+    // checkpoint is itself process evidence; force prevents that gesture from
+    // being swallowed by this baseline dedup.
     if (!force) {
       const content = flatten(file.runs);
       const tags = file.tags;
-      const taggedTraces = file.taggedTraces ?? [];
+      const citationIds = file.citationIds ?? [];
       const last = lastSteppedRef.current.get(path);
       if (
         last &&
         last.content === content &&
         last.tags.length === tags.length &&
         last.tags.every((t, i) => t === tags[i]) &&
-        (last.taggedTraces ?? []).length === taggedTraces.length &&
-        (last.taggedTraces ?? []).every((t, i) => t === taggedTraces[i])
+        (last.citationIds ?? []).length === citationIds.length &&
+        (last.citationIds ?? []).every((t, i) => t === citationIds[i])
       ) {
         return file.nodeId;
       }
     }
-    // Resolve the step's signer to match the voice that actually wrote the
-    // net-new text in this commit, not just the caller's default. The
-    // debounced auto-save always passes the AUTHOR key, but an LLM op's
-    // streamed MODEL text has already landed in file.runs attributed to the
-    // MODEL voice by the time this step fires. A step node carries one
-    // `event.pubkey`; on reload, if the per-character `authors` map is ever
-    // lost (empty runs, sidecar drift, a misordered fetchChain), the reader
-    // falls back to attributing the node's whole net-new text to that single
-    // signer — collapsing MODEL text to the AUTHOR's color. Picking a signer
-    // that matches the new content's dominant voice means the signer-fallback
-    // path also attributes truthfully, independent of whether `authors`
-    // survives. The explicit signers from the op paths (pre-op baseline =
-    // AUTHOR, the catch-up step = MODEL) already match their content, so this
-    // only corrects a mismatch; when no secret is available for the dominant
-    // voice (e.g. a foreign/sampled voice), the passed signer is kept — safe
-    // degradation, no regression.
-    const prevContent = lastSteppedRef.current.get(path)?.content ?? "";
+    // The caller chooses the trace signer. Do not replace it with the dominant
+    // contributor voice: one trace has one owner, while mixed human/MODEL
+    // authorship is carried by `runs` and encoded into per-delta attribution.
+    // Substituting the MODEL key here makes fork-on-write correctly interpret
+    // an ordinary Step as an ownership change.
     const runs = file.runs;
     const content = flatten(file.runs);
-    const region = changedRegion(prevContent, content);
-    let effectiveSigner = signer;
-    if (region) {
-      const dominant = dominantVoiceInRegion(runs, region.from, region.to);
-      const signerPubkey = signer ? getPublicKey(signer) : null;
-      if (dominant && dominant !== signerPubkey) {
-        const resolved = secretKeyForVoice(dominant);
-        if (resolved) effectiveSigner = resolved;
-      }
-    }
     try {
       // Pass the live runs to the backend so per-voice attribution persists
       // alongside the content (webapp → LocalFile.runs; desktop → .zine/attribution
@@ -6538,12 +7597,12 @@ function useProvenance(
       // never a side effect of step. Resolved brackets this doc already cites
       // are mirrored as `q` tags by writeFile (findResolvedBrackets), so a
       // send-created citation flows to the relay on the next step for free.
-      // `taggedTraces` is the tagged-but-not-quoted set (the protocol's
+      // `citationIds` is the tagged-but-not-quoted set (the protocol's
       // `tag-add`); writeFile folds it into the same q-tag dedup and emits a
       // `tag-add` delta per id, so adding a trace to this list steps a new node
       // even when content is unchanged.
       const tags = file.tags;
-      const taggedTraces = file.taggedTraces ?? [];
+      const citationIds = file.citationIds ?? [];
       // Drain the keystroke log accumulated in the editor's keditField (mirrored
       // into FileState.kedits by editFile on every change). One KEdit per
       // discrete editor change since the previous step — every backspace,
@@ -6554,14 +7613,14 @@ function useProvenance(
         path,
         content,
         tags,
-        effectiveSigner,
+        signer,
         runs,
-        taggedTraces.length > 0 ? taggedTraces : undefined,
+        citationIds.length > 0 ? citationIds : undefined,
         kedits.length > 0 ? kedits : undefined,
         localOnly,
         force,
       );
-      lastSteppedRef.current.set(path, { content, tags: [...tags], taggedTraces: [...taggedTraces] });
+      lastSteppedRef.current.set(path, { content, tags: [...tags], citationIds: [...citationIds] });
       // Desktop crash pad: the file is now committed to disk, so its buffered
       // copy in the pad is stale — drop it. This is the single chokepoint for
       // every disk write (Cmd+S/Step/Send/Attest/direct backend), so clearing
@@ -6610,7 +7669,7 @@ function useProvenance(
       tags?: string[],
       signer?: Uint8Array,
       runs?: Run[],
-      taggedTraces?: string[],
+      citationIds?: string[],
       kedits?: KEdit[],
       localOnly?: boolean,
       force?: boolean,
@@ -6628,7 +7687,7 @@ function useProvenance(
       lastSteppedRef.current.set(path, {
         content: flatten(file.runs),
         tags: [...file.tags],
-        taggedTraces: [...(file.taggedTraces ?? [])],
+        citationIds: [...(file.citationIds ?? [])],
       });
     }
   };
@@ -6636,10 +7695,9 @@ function useProvenance(
   // Unstepped set: paths whose buffer differs from what was last stepped.
   // Drives the per-tab KEdit count and the window title. Memoized on
   // `files` — correct because every step updates lastSteppedRef before its
-  // setFiles, so the post-step re-render sees the path as clean. Also depends on
-  // `replay`: stepping the timeline changes which (single) path is frozen and
-  // must be skipped, without necessarily touching `files`.
-  const unsteppedPathSet = useMemo(() => new Set(unsteppedPaths(files)), [files, replay]);
+  // setFiles, so the post-step re-render sees the path as clean. Replay lives in
+  // panel-only state and therefore never enters this calculation.
+  const unsteppedPathSet = useMemo(() => new Set(unsteppedPaths(files)), [files]);
   const unsteppedEditCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const path of unsteppedPathSet) counts.set(path, files[path]?.kedits?.length ?? 0);
@@ -6680,6 +7738,152 @@ function App() {
   });
   const folderRef = useRef<AttachedFolder | null>(folder);
   folderRef.current = folder;
+  // The onboarding record is intentionally independent from Root state. A
+  // missing record only means "fresh" when no Root existed at launch; profiles
+  // created before onboarding shipped go straight to their ordinary workspace.
+  const onboardingResumeAtBoot = useRef(loadOnboardingResume(folder !== null));
+  const [onboardingStage, setOnboardingStage] = useState<OnboardingStage>(
+    onboardingResumeAtBoot.current.stage,
+  );
+  const [modelLessonResume, setModelLessonResume] = useState<ModelLessonResume | undefined>(
+    onboardingResumeAtBoot.current.lesson,
+  );
+  const [modelProbeSession, setModelProbeSession] = useState<{
+    providerId: string;
+    providerFingerprint: string;
+  } | null>(null);
+  const onboardingStageRef = useRef<OnboardingStage>(onboardingStage);
+  onboardingStageRef.current = onboardingStage;
+
+  function commitOnboardingStage(
+    stage: OnboardingStage,
+    lesson: ModelLessonResume | undefined = modelLessonResume,
+  ): void {
+    onboardingStageRef.current = stage;
+    saveOnboardingStage(stage, localStorage, lesson);
+    setOnboardingStage(stage);
+  }
+
+  function advanceOnboarding(event: Parameters<typeof reduceOnboardingStage>[1]): void {
+    const next = reduceOnboardingStage(onboardingStageRef.current, event);
+    if (next !== onboardingStageRef.current) commitOnboardingStage(next);
+  }
+
+  async function beginOnboarding(): Promise<void> {
+    if (!folder) return;
+    if (replayRef.current) endReplay();
+    const onboardingFolder = folder;
+    const demo = await loadOnboardingDemo(onboardingFolder.id);
+    setFiles((prev) => ({ ...prev, [demo.path]: demo.file }));
+    // Re-attaching schedules the demo's empty genesis + starter-body Steps.
+    // The callback advances React state after that background publication so
+    // Replay can resolve the new trace without requiring a reload.
+    void backendRef.current.attach(onboardingFolder, (path, file) => {
+      if (folderIdRef.current !== onboardingFolder.id) return;
+      setFiles((prev) => {
+        if (file) return { ...prev, [path]: file };
+        if (!(path in prev)) return prev;
+        const next = { ...prev };
+        delete next[path];
+        return next;
+      });
+      if (file) seedSteppedRef.current({ [path]: file });
+    }).catch((error) => {
+      console.warn("[onboarding] demo attach failed:", error);
+    });
+    commitOnboardingStage("awaiting-edit");
+    setActiveView("editor");
+    selectFile(demo.path);
+  }
+
+  const [modelLessonError, setModelLessonError] = useState<string | null>(null);
+
+  function beginModelOnboarding(): void {
+    advanceOnboarding("start-model");
+    setModelLessonError(null);
+    selectView("models");
+  }
+
+  async function ensureModelLesson(): Promise<ModelContextLesson> {
+    if (!folder) throw new Error("Open a workspace before starting the MODEL lesson");
+    const currentBodies = Object.fromEntries(
+      Object.entries(filesRef.current).map(([path, state]) => [path, flatten(state.runs)]),
+    );
+    const lesson = planModelContextLesson(currentBodies);
+    const signer = secretKeyForVoice(authorPubkey);
+    if (!signer) throw new Error("Unlock the AUTHOR key before creating the MODEL lesson");
+    const staged: Record<string, FileState> = {};
+    for (const artifact of lesson.artifacts) {
+      const existing = filesRef.current[artifact.path];
+      if (existing?.nodeId && flatten(existing.runs) === artifact.body) {
+        staged[artifact.path] = existing;
+        continue;
+      }
+      const runs = [{ voice: authorPubkey, text: artifact.body }];
+      const nodeId = await backendRef.current.writeFile(
+        artifact.path,
+        artifact.body,
+        [],
+        signer,
+        runs,
+      );
+      staged[artifact.path] = {
+        runs,
+        nodeId,
+        traceId: existing?.traceId ?? nodeId,
+        tags: [],
+        updatedAt: Date.now(),
+      };
+    }
+    filesRef.current = { ...filesRef.current, ...staged };
+    setFiles((current) => ({ ...current, ...staged }));
+    seedSteppedRef.current(staged);
+    const resume: ModelLessonResume = {
+      folderPath: lesson.folderPath,
+      targetPath: lesson.targetPath,
+      sourcePath: lesson.sourcePath,
+      excludedPath: lesson.excludedPath,
+    };
+    setModelLessonResume(resume);
+    return lesson;
+  }
+
+  async function completeModelSetup(): Promise<void> {
+    try {
+      setModelLessonError(null);
+      if (bootState !== "ready") throw new Error("Wait for the workspace to finish opening, then Test again");
+      const lesson = await ensureModelLesson();
+      const resume: ModelLessonResume = {
+        folderPath: lesson.folderPath,
+        targetPath: lesson.targetPath,
+        sourcePath: lesson.sourcePath,
+        excludedPath: lesson.excludedPath,
+      };
+      const next = reduceOnboardingStage(onboardingStageRef.current, "provider-probed");
+      commitOnboardingStage(next, resume);
+      scopeRef.current = [];
+      shieldedRef.current = new Set();
+      setScope([]);
+      setShielded(new Set());
+      if (folder) saveLocalShielded(folder.id, new Set());
+      selectView("editor");
+    } catch (error) {
+      setModelLessonError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function dismissOnboarding(): void {
+    commitOnboardingStage("dismissed");
+  }
+
+  function restartOnboarding(): void {
+    if (replayRef.current) endReplay();
+    commitOnboardingStage("welcome");
+    selectView("editor");
+  }
+  useEffect(() => {
+    if (onboardingStage === "model-setup") selectView("models");
+  }, [onboardingStage]); // eslint-disable-line react-hooks/exhaustive-deps
   // Incoming forks / sibling heads for the active file (branch detection).
   // Refreshed on folder/path change and after incorporate.
   const [mergeCandidates, setMergeCandidates] = useState<MergeCandidate[]>([]);
@@ -6742,15 +7946,33 @@ function App() {
     prevFolderIdRef.current = folderIdRef.current;
     lastFocusKeyRef.current = null;
   }
-  // Settings modal (opened from the sidebar's gear button). Holds the
-  // factory-reset action — clears browser state plus the desktop sidecar.
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Destructive local-app reset (opened from the directory tree's corner
+  // control). Clears browser state plus the desktop sidecar.
+  const [factoryResetOpen, setFactoryResetOpen] = useState(false);
+  const [traceLocatorOpen, setTraceLocatorOpen] = useState(false);
   const [resetBusy, setResetBusy] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
+  const [reifyPrompt, setReifyPrompt] = useState<{
+    includeTrace: boolean;
+    /** An explicit tree target bypasses the prompt-context mount. */
+    target?: ScopeRef;
+  } | null>(null);
   const [files, setFiles] = useState<Record<string, FileState>>({});
+  const [directCoinDraft, setDirectCoinDraft] = useState<DirectCoinDraft>(emptyDirectCoinDraft);
+  const [directCoinBusy, setDirectCoinBusy] = useState(false);
+  const [directCoinError, setDirectCoinError] = useState<string | null>(null);
+  const [oblivionModalPath, setOblivionModalPath] = useState<string | null>(null);
+  useEffect(() => {
+    if (
+      oblivionModalPath &&
+      (!files[oblivionModalPath] || !isOblivion(oblivionModalPath))
+    ) {
+      setOblivionModalPath(null);
+    }
+  }, [oblivionModalPath, files]);
   // Per-node attestation totals visible from the configured read relays. The
-  // map deliberately includes zeroes once loaded so every stepped trace gets a
-  // stable badge; the badge says "reachable", never "global".
+    // map deliberately includes zeroes once loaded so every stepped trace gets a
+    // stable tab-footer row; the row says "reachable", never "global".
   const [attestationCounts, setAttestationCounts] = useState<Record<string, number>>({});
   // Reachability of nodes considered by the Attest palette action. Missing
   // means unknown and is conservatively planned as requiring Send; a focused
@@ -6812,6 +8034,31 @@ function App() {
   const [panels, setPanels] = useState<PanelState[]>([{ tabs: [], active: "" }]);
   const panelsRef = useRef<PanelState[]>(panels);
   panelsRef.current = panels;
+  const [activePanel, setActivePanel] = useState<number>(0);
+  // Explorer operation selection is independent from focus. It exists only for
+  // drag, right-click, and batch directory operations; author gestures and
+  // replay never read it.
+  const [directorySelection, setDirectorySelectionState] = useState<TraceRef[]>([]);
+  const directorySelectionRef = useRef<readonly TraceRef[]>(directorySelection);
+  directorySelectionRef.current = directorySelection;
+  function chooseDirectorySelection(next: readonly TraceRef[]) {
+    const deduped = next.filter(
+      (item, index) => next.findIndex((other) => other.path === item.path) === index,
+    );
+    directorySelectionRef.current = deduped;
+    setDirectorySelectionState(deduped);
+  }
+  // Focus is the one semantic subject routed to AUTHOR, MODEL, and replay.
+  // Its locus is always a live tab: replay projections may become frontmost
+  // for viewing, but never steal or rewrite this value.
+  const [uiFocus, setUiFocusState] = useState<UiFocus | null>(null);
+  const uiFocusRef = useRef<UiFocus | null>(uiFocus);
+  uiFocusRef.current = uiFocus;
+  function commitUiFocus(next: UiFocus | null) {
+    if (sameUiFocus(uiFocusRef.current, next)) return;
+    uiFocusRef.current = next;
+    setUiFocusState(next);
+  }
   // The cited traces for each open file — every `q` tag on the file's current
   // head node, resolved to a name and exact-step distance via
   // `resolveCitationChip`. This subsumes the old
@@ -6828,7 +8075,7 @@ function App() {
   // a cited trace advances, so `citationHeadByPath` alone is not enough to keep
   // the behind-count current.
   const [citationResolutionByPath, setCitationResolutionByPath] = useState<Record<string, string>>({});
-  // The tagged-trace chips for each open file — `file.taggedTraces` (the
+  // The tagged-trace chips for each open file — `file.citationIds` (the
   // `tag-add` subset of the head's `q` edges) resolved to named chips. Keyed on
   // the cited id set, NOT on the head node, so a fresh citation appears
   // instantly — before the debounce steps a new head (which is what the
@@ -6838,7 +8085,13 @@ function App() {
   const [taggedResolutionByPath, setTaggedResolutionByPath] = useState<Record<string, string>>({});
   const hasVisibleCitations = panels.some((panel) => {
     const path = panel.active;
-    return !!path && !isFolderTab(path) && files[path]?.kind !== "folder";
+    return (
+      !!path &&
+      !isFolderTab(path) &&
+      !isCoinTab(path) &&
+      !isCoinComposerTab(path) &&
+      files[path]?.kind !== "folder"
+    );
   });
   useEffect(() => {
     if (!hasVisibleCitations) return;
@@ -6865,7 +8118,7 @@ function App() {
   >({});
   // A move into Oblivion updates `files` synchronously, while its relay-side
   // import+tombstone lands in the background. Hide those source heads from the
-  // already-cached inbound rows during that window; findInbound applies the
+  // already-cached inbound rows during that window; findInboundSnapshot applies the
   // same lifecycle rule once the relay catches up.
   const oblivionInboundSourceIds = useMemo(
     () =>
@@ -6879,19 +8132,15 @@ function App() {
   // The Steps history/diff modal (Part B): set when the user clicks a panel's
   // "Steps" button, or the "replying to ↑" chip (which additionally pins a
   // specific historical node). null when closed.
-  // Folder-wide delta replay (step-to-step), sticky at last. `index === last`
-  // is the live editor (no override — edits and steps flow, and a new step
-  // appends a step the follow effect advances to); `index < last` overrides
-  // that one step's file with its reconstructed content (frozen — the override
-  // is a setRunsEffect write `liftRuns` exempts, so no debounce arms) and gates
-  // stepping off. `snapshot` captures the live FileState of a file the moment
-  // it's frozen so stepping back to last (or exiting) can restore it; only the
-  // active historical step's file is ever overridden at a time.
+  // Folder-wide delta replay. Every cursor index names one real saved Step.
+  // Historical content lives in `replayDisplay`, never in the live file store.
   const [replay, setReplay] = useState<{
     steps: ReplayStep[];
     index: number;
-    snapshot: Record<string, FileState>;
   } | null>(null);
+  const [replayDisplay, setReplayDisplay] = useState<ReplayDisplay | null>(null);
+  const [replayTiming, setReplayTiming] = useState<ReplayTiming | null>(null);
+  const [replaySkipNotice, setReplaySkipNotice] = useState<string | null>(null);
 
   // Fork-from-snapshot modal: surfaced when the user tries to edit while
   // replay-frozen on a historical step. `stepIndex` is the replay step they're
@@ -6902,6 +8151,9 @@ function App() {
   // closed. A file target may not have a node id yet: confirmation composes
   // the first Step and Send before it appends the Attestation.
   const [attestTarget, setAttestTarget] = useState<AttestTarget | null>(null);
+  const [historicalActionStatus, setHistoricalActionStatus] = useState<
+    Record<string, HistoricalActionStatus>
+  >({});
   // Run-modal open state. Opens from the MODEL row's Run button; onStart kicks
   // off startAgentRun with the composed goal + chosen root provider.
   const [runOpen, setRunOpen] = useState(false);
@@ -6953,33 +8205,31 @@ function App() {
   const replayRef = useRef<{
     steps: ReplayStep[];
     index: number;
-    snapshot: Record<string, FileState>;
   } | null>(null);
   // Each path's genesis→head chain, captured in beginReplay so keystroke
   // playback can expand edits without refetching. Cleared
   // in endReplay. Kept in a ref (not state) — it's read imperatively by the
   // play builder and doesn't drive render.
   const replayChainsRef = useRef<Record<string, Event[]>>({});
-  // Paths owned by the current kedit-playback mount. Replay panels themselves
-  // carry `replayOwned`, so ownership survives live-panel closes and index shifts.
-  // Null after playback teardown.
-  const replayPlaybackPathsRef = useRef<Set<string> | null>(null);
-  // True when the editor is showing a frozen (non-live) state: parked on a
-  // historical Step, OR mid-keystroke-playback. Gates stepFile so a stray
-  // Cmd+S can't step historical/partial content as a new node. On `last` with
-  // play stopped the editor is live, so steps flow (the follow effect appends
-  // them). The Sidebar's disabled state uses `replay !== null` directly.
+  // True only while the replay panel owns focus. The live file store remains
+  // untouched, but this gates global authoring gestures so Cmd+S cannot turn a
+  // read-only historical view into a new live Step.
   const replayActiveRef = useRef(false);
   // Per-keystroke playback has a separate cursor from the Step timeline. The
   // stepper/slider stay at save-point granularity while edit frames advance;
   // pausing snaps the step cursor to the current frame's enclosing step.
   const REPLAY_SPEEDS = [1, 2, 4, 8, 16] as const;
+  const [replayLoading, setReplayLoading] = useState(false);
+  const replayLoadSequenceRef = useRef(0);
   const [playing, setPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState<number>(1);
   const [playTimeline, setPlayTimeline] = useState<PlayFrame[] | null>(null);
   const [playCursor, setPlayCursor] = useState(0);
   const playTimelineRef = useRef<PlayFrame[] | null>(null);
   const playCursorRef = useRef(0);
+  const [replayPlayheadAt, setReplayPlayheadAt] = useState<number | undefined>();
+  const replayDisplayRef = useRef<ReplayDisplay | null>(null);
+  const replayPanelSignatureRef = useRef("");
   useEffect(() => {
     playTimelineRef.current = playTimeline;
   }, [playTimeline]);
@@ -6987,41 +8237,104 @@ function App() {
     playCursorRef.current = playCursor;
   }, [playCursor]);
   useEffect(() => {
-    replayActiveRef.current =
-      (replay !== null && replay.index < replay.steps.length - 1) || playing;
-  }, [replay, playing]);
-  // The play tick: one character per beat (60ms ÷ speed) via setTimeout. Each
-  // tick advances the char cursor one frame and renders that frame's file. The
-  // sentinel final frame restores the live document and stops playback.
+    replayDisplayRef.current = replayDisplay;
+  }, [replayDisplay]);
+  useEffect(() => {
+    replayActiveRef.current = panels[activePanel]?.replayOwned === true;
+  }, [panels, activePanel]);
+  useEffect(() => {
+    if (!replaySkipNotice) return;
+    const id = window.setTimeout(() => setReplaySkipNotice(null), 1_800);
+    return () => window.clearTimeout(id);
+  }, [replaySkipNotice]);
+  // The play tick uses the recorded KEdit/checkpoint timestamps. At 1× every
+  // ordinary interval is literal wall time; inactivity over 20 seconds is the
+  // sole exception and plays at 100× the selected speed with an aria-live notice.
+  // The panel and transport advance together only when the next recorded frame
+  // lands. There is no between-frame thumb position because no panel content
+  // exists for one.
   useEffect(() => {
     if (!playing) return;
     const tl = playTimelineRef.current;
-    if (!tl) return;
-    // Reached the end (sentinel/live frame already rendered): stop + teardown.
+    if (!tl || tl.length === 0) return;
     if (playCursorRef.current >= tl.length - 1) {
       setPlaying(false);
-      setPlayTimeline(null);
-      playTimelineRef.current = null;
-      // Snap the step cursor to the last real frame's step so the stepper/
-      // slider rest at the final save point (one before live).
-      const lastReal = tl[tl.length - 2];
-      if (lastReal) replayStepTo(lastReal.stepIndex);
-      // Remove only the ephemeral replay panels. Any live-layout changes made
-      // during playback remain intact.
-      teardownReplayPanels();
+      const lastFrame = tl[tl.length - 1];
+      if (lastFrame) {
+        setReplayPlayheadAt(lastFrame.at);
+        setReplayCursor(lastFrame.stepIndex);
+      }
       return;
+    }
+    const current = tl[playCursorRef.current];
+    const nextFrame = tl[playCursorRef.current + 1];
+    if (!current || !nextFrame) return;
+    const transition = replayTransition(
+      current.at,
+      nextFrame.at,
+      playSpeed,
+      replayTiming?.idleThresholdMs ?? REPLAY_IDLE_THRESHOLD_MS,
+    );
+    const delayMs = transition.delayMs;
+    if (transition.fastForwardedMs > 0) {
+      setReplaySkipNotice(
+        `Fast-forwarding ${formatReplayDuration(transition.fastForwardedMs)} of inactivity at 100×`,
+      );
     }
     const id = setTimeout(() => {
       const next = playCursorRef.current + 1;
       const frame = tl[next];
       if (!frame) return;
-      renderPlayFrame(frame, tl[playCursorRef.current] ?? null);
+      // The inactivity notice owns the gap only. The arriving action must get
+      // its own pulse, especially when that frame is a saved Step marker.
+      setReplaySkipNotice(null);
+      renderPlayFrame(frame);
+      setReplayPlayheadAt(frame.at);
       playCursorRef.current = next;
       setPlayCursor(next);
-      // One full edit per beat, scaled by the selected playback speed.
-    }, 150 / playSpeed);
+    }, delayMs);
     return () => clearTimeout(id);
-  }, [playing, playCursor, playSpeed, playTimeline]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [playing, playCursor, playSpeed, playTimeline, replayTiming]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Completion is earned by reaching the end of a real replay. Pausing midway
+  // leaves the coachmark in place and resumes from the same frame; no arbitrary
+  // "Next" action can manufacture the activation moment.
+  useEffect(() => {
+    if (
+      (onboardingStage !== "replaying" && onboardingStage !== "context-replay") ||
+      playing ||
+      !playTimeline ||
+      playTimeline.length === 0 ||
+      playCursor < playTimeline.length - 1
+    ) {
+      return;
+    }
+    if (onboardingStage === "replaying") {
+      commitOnboardingStage("complete");
+      return;
+    }
+    const lesson = modelLessonResume;
+    const resultStep = lesson?.resultNodeId
+      ? replayRef.current?.steps.find((step) => step.event.id === lesson.resultNodeId)
+      : undefined;
+    const spanVerified = Boolean(
+      resultStep &&
+      lesson?.resultSpanHash &&
+      resultStep.runsUpToHere.some((run) =>
+        contentFingerprint(run.text) === lesson.resultSpanHash ||
+        contentFingerprint(run.text.replace(/^\n/, "")) === lesson.resultSpanHash),
+    );
+    if (
+      resultStep &&
+      spanVerified &&
+      uiFocusRef.current?.path === lesson?.targetPath
+    ) {
+      commitOnboardingStage(
+        reduceOnboardingStage(onboardingStageRef.current, "result-replayed"),
+        lesson,
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onboardingStage, playing, playTimeline, playCursor, modelLessonResume]);
   const {
     stepFile,
     ready,
@@ -7033,7 +8346,7 @@ function App() {
     authorSignerRef,
     unsteppedPathSet,
     unsteppedEditCounts,
-  } = useProvenance(folder, files, replayActiveRef, replay);
+  } = useProvenance(folder, files, replayActiveRef);
   const unsteppedPathSetRef = useRef(unsteppedPathSet);
   unsteppedPathSetRef.current = unsteppedPathSet;
   const snapshotCoordinatorRef = useRef(new SnapshotCoordinator());
@@ -7043,6 +8356,8 @@ function App() {
   // so a stale folder id's entries must not survive into the new one.
   useEffect(() => {
     clearChainMemo();
+    snapshotCoordinatorRef.current.invalidate();
+    preparedApprovalRef.current.invalidate();
   }, [folder?.id]);
   // End replay when the folder changes (switch/detach): the replay steps and
   // snapshot are keyed to the prior folder's chains and would otherwise drive
@@ -7055,9 +8370,9 @@ function App() {
       endReplay();
     }
   }, [folder?.id]);
-  // Auto-bootstrap the replay timeline once the folder finishes loading, so the
-  // stepper isn't empty on page load — it lands on the very last save point
-  // (beginReplay sets index: last, which is the live document, no freezing).
+  // Auto-bootstrap replay metadata once the folder finishes loading, so the
+  // stepper paints immediately at the newest real save point. No panel opens
+  // and no live editor state changes until the user makes a replay gesture.
   // Fires once per folder attach: the `bootState === "ready"` edge arrives after
   // openScanned for every load path (the [folder?.id] re-attach), and the
   // folder-id guard dedupes across the boot's re-attach. A manual
@@ -7085,17 +8400,19 @@ function App() {
   // fetchEventById fires only when a nodeId is genuinely new to the timeline.
   useEffect(() => {
     if (!replay) return;
+    if (replayDisplay) return;
     const last = replay.steps.length - 1;
     if (replay.index !== last) return;
     const knownIds = new Set(replay.steps.map((s) => s.event.id));
-    // Discover only heads inside the mounted effective scope. A background tab
-    // can Step while replay is mounted elsewhere; that unrelated head must not
-    // move this counter or slider.
-    const fresh = freshMountedReplayHeads(
+    // Discover only heads inside the focused replay subject. Directory
+    // operation selection must never move this counter or slider.
+    const target = focusReplayTarget(uiFocusRef.current);
+    const selected = target ? [target] : [];
+    const fresh = freshSelectedReplayHeads(
       files,
       knownIds,
-      scopeRef.current,
-      shieldedRef.current,
+      selected,
+      new Set(),
     );
     if (fresh.length === 0) return;
     let cancelled = false;
@@ -7143,7 +8460,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [files, replay]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [files, replay, replayDisplay]); // eslint-disable-line react-hooks/exhaustive-deps
   // Bump the orchestration refresh key whenever the folder's membership set or
   // any file's nodeId changes. Those are exactly the signals that a new
   // FolderDelta (add/remove/rename/import) has landed on the folder chain and
@@ -7190,12 +8507,9 @@ function App() {
   // Thread the backend's write fn into the hook so stepFile routes through the
   // right storage (disk on desktop, localStorage on webapp) instead of the
   // hardwired Tauri disk path.
-  writeRef.current = (path, content, tags, signer, runs, taggedTraces, kedits, localOnly, force) => {
-    return backendRef.current.writeFile(path, content, tags, signer, runs, undefined, taggedTraces, kedits, localOnly, force);
+  writeRef.current = (path, content, tags, signer, runs, citationIds, kedits, localOnly, force) => {
+    return backendRef.current.writeFile(path, content, tags, signer, runs, undefined, citationIds, kedits, localOnly, force);
   };
-  const [activePanel, setActivePanel] = useState<number>(0);
-  const activePanelRef = useRef(activePanel);
-  activePanelRef.current = activePanel;
   // Branch detection: rescan incoming forks / sibling heads for the active file.
   // Fires on folder switch, tab focus, foreign-flag change, and after steps that
   // advance the head (nodeId). Debounced slightly so rapid tab flips don't spam.
@@ -7270,39 +8584,58 @@ function App() {
       document.removeEventListener("keydown", onKey);
     };
   }, [globalCtx]);
-  // The unified "active trace" — the single thing the action palette operates
-  // on. Sticky: it only moves when the user explicitly selects something else
-  // (a file, a folder, a palette span, or an editor [[ span ]]); clicking empty
-  // space never clears it, so "the last selected trace" is always available.
-  const [selection, setSelection] = useState<SelectionRef | null>(null);
-  const selectionRef = useRef<SelectionRef | null>(selection);
-  selectionRef.current = selection;
-  // This ordered set stores explicit tree mounts. Effective scope is derived
-  // from their folder closures minus shielded boundaries. Mounts are independent
-  // from panel/tab focus and change only through explicit mount gestures or
-  // commands. Root is the default mount.
-  const [scope, setScope] = useState<ScopeRef[]>(() =>
+  // Prompt context has at most one explicit mount. Effective scope is derived
+  // from its folder closure minus shielded boundaries. Only tree
+  // icon gestures change it; row/tab selection and playback are independent.
+  const [scope, setScope] = useState<ContextMounts>(() =>
     folder ? [{ kind: "folder", path: ROOT }] : [],
   );
-  // Imperative-handler mirror (same pattern as replayRef) so beginReplay and
-  // op dispatchers can read the current mount roots without a stale closure.
-  const scopeRef = useRef<readonly ScopeRef[]>(scope);
+  // Imperative-handler mirror used by context gathering and operation dispatch.
+  const scopeRef = useRef<ContextMounts>(scope);
   scopeRef.current = scope;
   // Shielded paths are persistent traversal boundaries. A shielded folder protects
-  // its subtree from a parent scope; an explicit mount at/inside it starts a
-  // new inclusion root.
+  // its subtree from the active folder mount; mounting a path there replaces the
+  // active root and clears the conflicting boundary.
   const [shielded, setShielded] = useState<Set<string>>(() =>
     folder ? loadLocalShielded(folder.id) : new Set(),
   );
   const shieldedRef = useRef<Set<string>>(shielded);
   shieldedRef.current = shielded;
-  // Reset mounts when the attached folder changes: paths pointing into the old
-  // folder's subtree are meaningless in the new one. Mounting the new root
+  useEffect(() => {
+    const lesson = modelLessonResume;
+    if (!lesson) return;
+    if (
+      onboardingStage === "context-focus" &&
+      uiFocus?.kind === "file" &&
+      uiFocus.path === lesson.targetPath
+    ) {
+      advanceOnboarding("target-focused");
+      return;
+    }
+    if (
+      onboardingStage === "context-mount" &&
+      scope[0]?.kind === "folder" &&
+      scope[0].path === lesson.folderPath
+    ) {
+      advanceOnboarding("folder-mounted");
+      return;
+    }
+    if (
+      onboardingStage === "context-shield" &&
+      shielded.has(lesson.excludedPath)
+    ) {
+      advanceOnboarding("note-shielded");
+    }
+  }, [onboardingStage, modelLessonResume, uiFocus, scope, shielded]);
+  // Reset the context mount when the attached folder changes: a path into the old
+  // folder's subtree is meaningless in the new one. Mounting the new root
   // restores the pre-split "scope = whole folder" behavior.
   // The shielded set reloads from the new folder's own record.
   useEffect(() => {
     setScope(folder ? [{ kind: "folder", path: ROOT }] : []);
     setShielded(folder ? loadLocalShielded(folder.id) : new Set());
+    chooseDirectorySelection([]);
+    commitUiFocus(null);
   }, [folder?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The SUBSTRATE bar's currently-selected foreign substrate — the party a
@@ -7318,29 +8651,26 @@ function App() {
     localStorage.setItem(SUBSTRATE_LABEL_KEY, s);
     setSubstrate(s);
   }
-  // Re-bootstrap the timeline when scope/shielded membership changes so its
-  // selected union is recomputed. Skip the initial mount (handled by the
-  // auto-bootstrap above) and only fire when
-  // a replay already exists or the folder is ready — otherwise the auto-
-  // bootstrap covers it. endReplay first so live state is restored cleanly.
-  const scopeBootRef = useRef(`${scopeKey(scope)}|${[...shielded].sort().join(",")}`);
+  // Re-bootstrap playback when focus changes. Context
+  // mounts and shields intentionally do not participate in this key.
+  const playbackBootRef = useRef("");
   useEffect(() => {
-    const nextKey = `${scopeKey(scope)}|${[...shielded].sort().join(",")}`;
-    if (scopeBootRef.current === nextKey) return;
-    scopeBootRef.current = nextKey;
-    if (!folder || bootState !== "ready") return;
+    const target = focusReplayTarget(uiFocus);
+    const nextKey = traceRefsKey(target ? [target] : []);
+    if (playbackBootRef.current === nextKey) return;
+    playbackBootRef.current = nextKey;
     if (replay) endReplay();
+    if (!folder || bootState !== "ready" || !target) return;
     void beginReplay().catch((e) => {
-      console.warn("[replay] scope re-bootstrap failed:", e);
+      console.warn("[replay] focus re-bootstrap failed:", e);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope, shielded]);
+  }, [uiFocus]);
   // The keychain. There is no separate "active key" — the two user-facing
   // roles are the **AUTHOR** key and the **MODEL** key, each chosen in the
   // ActionPalette (the AUTHOR-row key and the MODEL-row key). Both default to the
   // first keychain key when the user hasn't picked one, and persist per-browser
-  // so a chosen AUTHOR/MODEL survives reload. The localStorage slot strings
-  // keep their legacy pen/inject names (stable storage keys, not renamed).
+  // so a chosen AUTHOR/MODEL survives reload.
   const [keys, setKeys] = useState<KeyEntry[]>(() => loadKeys());
   // The two voice roles: the **AUTHOR** key types new text and signs Save/
   // auto-save/send; the **MODEL** key runs the LLM ops (Extend/Settle/Stir/
@@ -7348,11 +8678,11 @@ function App() {
   // independent key selection — they can overlap (same key for both) or
   // diverge. Both default to the first keychain key and persist per-browser.
   const [authorKeyId, setAuthorKeyId] = useState<string | null>(() => {
-    const stored = localStorage.getItem("zine.roles.pen");
+    const stored = localStorage.getItem("zine.roles.author");
     return stored && loadKeys().some((k) => k.id === stored) ? stored : loadKeys()[0]?.id ?? null;
   });
   const [modelKeyId, setModelKeyId] = useState<string | null>(() => {
-    const stored = localStorage.getItem("zine.roles.inject");
+    const stored = localStorage.getItem("zine.roles.model");
     return stored && loadKeys().some((k) => k.id === stored) ? stored : loadKeys()[0]?.id ?? null;
   });
   // The effective signer key id for the current substrate, for the bar's
@@ -7380,8 +8710,9 @@ function App() {
   // a user pin, so this never overrides a choice. Refresh the keychain state
   // afterwards so substrateKeyId (which reads React `keys`) reflects the entry.
   useEffect(() => {
-    getSubstrateVoice(substrate);
-    setKeys(loadKeys());
+    void getSubstrateVoice(substrate)
+      .then(() => setKeys(loadKeys()))
+      .catch((error) => console.error("[keys] could not provision substrate voice:", error));
   }, [substrate]);
   // The first keychain key's pubkey — the fallback both roles resolve to when
   // no AUTHOR/MODEL has been picked (or its key was deleted), then "author-1".
@@ -7392,8 +8723,6 @@ function App() {
   const authorPubkey = authorKey?.pubkey ?? fallbackPubkey;
   const modelKey = keys.find((k) => k.id === modelKeyId) ?? null;
   const modelPubkey = modelKey?.pubkey ?? fallbackPubkey;
-  const modelPubkeyRef = useRef(modelPubkey);
-  modelPubkeyRef.current = modelPubkey;
   // Hand the debounced auto-save a resolver for the AUTHOR key's secret, so
   // the 1500ms debounce step signs as the AUTHOR key — not a hidden active key.
   // Read at fire time (see scheduleStep), so an AUTHOR switch mid-debounce wins.
@@ -7451,9 +8780,8 @@ function App() {
   // effect above (write-on-change to localStorage).
   useEffect(() => {
     if (!folder || !ready.current) return;
-    // Replay columns are session-owned animation surfaces, not the user's
-    // workspace. Project them out before saving while preserving any live tab
-    // closes/resizes the user made alongside playback.
+    // The replay panel is session-owned, not part of the user's workspace.
+    // Project it out before saving while preserving live layout changes.
     const live = removeReplayPanels(panels, activePanel);
     const livePanels: PanelState[] =
       live.panels.length > 0 ? live.panels : [{ tabs: [], active: "" }];
@@ -7556,6 +8884,12 @@ function App() {
     saveSocialQuery(socialQuery);
   }, [socialQuery]);
   const [theme, setTheme] = useState<Theme>(() => readTheme());
+  const [directorySort, setDirectorySort] = useState<DirectorySortOrder>(() =>
+    loadDirectorySort(),
+  );
+  useEffect(() => {
+    saveDirectorySort(directorySort);
+  }, [directorySort]);
   const [railExpanded, setRailExpanded] = useState<boolean>(() => readRailExpanded());
   // Persist the nav rail's expanded/collapsed state across reloads.
   useEffect(() => {
@@ -7636,8 +8970,8 @@ function App() {
     });
   }
   const summonAbort = useRef<(AbortController | null)[]>([null]);
-  // Per-panel operation contexts retain each target path and MODEL signer until
-  // the ref-counted gate releases every concurrently streaming panel.
+  // Per-panel operation contexts retain each target path and trace-owner signer
+  // until the ref-counted gate releases every concurrently streaming panel.
   const opContextsRef = useRef<Map<number, { path: string; signer?: Uint8Array }>>(new Map());
   const activeOpPathsRef = useRef<Set<string>>(new Set());
   // When the active panel changes, point the palette's editor handle at the
@@ -7656,97 +8990,24 @@ function App() {
   // follow effect uses it to discover newly published structural steps while
   // parked at the live end of the unified ReplayTransport timeline.
   const [folderReplayRefreshKey, setFolderReplayRefreshKey] = useState(0);
+  const folderReplayRefreshSeenRef = useRef(0);
 
-  // Follow-newest for FOLDER MEMBERSHIP events: the file-follow effect (above,
-  // near the replay state) only sees file nodeIds. A folder's composition
-  // history (add/remove/rename, kind 4292) advances on a separate chain with no
-  // FileState.nodeId to watch, so without this a folder-scope mount parked on
-  // `last` goes silent when a collaborator adds/removes a file — the broken
-  // promise this closes. Piggybacks on `folderReplayRefreshKey` (bumped by the
-  // effect above this block): when it bumps while parked on `last`, refetch the
-  // folder nodes, walk the chain for structural deltas not already in the
-  // timeline, and append them — same merge/sort/advance as the file follow.
-  // Scope-filtered to match beginReplay, so a file/subfolder scope only appends
-  // events touching its subtree.
+  // Follow-newest for selected folder traces. Re-running the same genesis-rooted
+  // loader keeps initial selection and live refresh semantics identical,
+  // including nested folder selections and one-real-node-per-Step numbering.
   useEffect(() => {
     if (!replay || !folder) return;
+    if (replayDisplay) return;
     if (folderReplayRefreshKey === 0) return; // never bumped yet
     const last = replay.steps.length - 1;
     if (replay.index !== last) return;
-    let cancelled = false;
-    void (async () => {
-      let nodes: Event[];
-      try {
-        nodes = await fetchFolderNodes(folder.id);
-      } catch {
-        return; // best-effort; the next refresh-key bump retries.
-      }
-      if (cancelled) return;
-      const byId = new Map(nodes.map((e) => [e.id, e]));
-      const citedAsPrev = new Set<string>();
-      for (const e of nodes) {
-        const pt = e.tags.find((t) => t[0] === "e" && t[3] === "prev");
-        if (pt) citedAsPrev.add(pt[1]);
-      }
-      let cursor: string | undefined = nodes.find((e) => !citedAsPrev.has(e.id))?.id;
-      const chain: Event[] = [];
-      const guard = new Set<string>();
-      while (cursor && !guard.has(cursor)) {
-        guard.add(cursor);
-        const ev = byId.get(cursor);
-        if (!ev) break;
-        chain.push(ev);
-        cursor = ev.tags.find((t) => t[0] === "e" && t[3] === "prev")?.[1];
-      }
-      chain.reverse();
-      const appended: ReplayStep[] = [];
-      for (const event of chain) {
-        const meta = eventMeta(event);
-        let deltas: Array<{ type: string; relativePath?: string; fromPath?: string; toPath?: string }>;
-        try {
-          const parsed = JSON.parse(event.content) as { deltas?: typeof deltas };
-          deltas = parsed.deltas ?? [];
-        } catch {
-          continue;
-        }
-        for (const d of deltas) {
-          if (d.type !== "add" && d.type !== "remove" && d.type !== "rename") continue;
-          const affected = d.type === "rename" ? d.toPath : d.relativePath;
-          if (!affected) continue;
-          const sc = scopeRef.current;
-          if (!pathInEffectiveScopes(sc, shieldedRef.current, affected)) continue;
-          appended.push({
-            event,
-            relativePath: affected,
-            meta,
-            contentUpToHere: "",
-            runsUpToHere: [],
-            changeRange: null,
-            membership: { type: d.type, path: affected },
-          });
-        }
-      }
-      if (cancelled || appended.length === 0) return;
-      setReplay((prev) => {
-        if (!prev) return prev;
-        const next = appendReplayStepsAtLiveEnd(
-          prev,
-          appended,
-          (step) => step.membership
-            ? `${step.event.id}:${step.membership.type}:${step.membership.path}`
-            : step.event.id,
-          (step) => step.meta.steppedAtMs,
-        );
-        if (next === prev) return prev;
-        replayRef.current = next;
-        return next;
-      });
-    })();
-    return () => {
-      cancelled = true;
-    };
+    if (folderReplayRefreshSeenRef.current === folderReplayRefreshKey) return;
+    folderReplayRefreshSeenRef.current = folderReplayRefreshKey;
+    void beginReplay().catch((error) => {
+      console.warn("[replay] selected trace refresh failed:", error);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [folderReplayRefreshKey, replay, folder?.id]);
+  }, [folderReplayRefreshKey, replay, replayDisplay, folder?.id]);
 
   /** Wrap the active editor's current selection in `[[ ]]` (pending). The menu's
    *  bracket action and Cmd/Ctrl+S-over-a-selection both call this. Pure wrap —
@@ -7782,7 +9043,7 @@ function App() {
       : flatten(file.runs) === content
         ? file.runs
         : [{ voice: authorPubkey, text: content }];
-    const taggedTraces = file.taggedTraces ?? [];
+    const citationIds = file.citationIds ?? [];
     const steppedKedits = view.state.field(keditField, false) ?? file.kedits ?? EMPTY_KEDIT_LOG;
     const kedits = keditLogToArray(steppedKedits);
     const nodeId = await backendRef.current.writeFile(
@@ -7792,7 +9053,7 @@ function App() {
       signer,
       runs,
       undefined,
-      taggedTraces.length > 0 ? taggedTraces : undefined,
+      citationIds.length > 0 ? citationIds : undefined,
       kedits.length > 0 ? kedits : undefined,
       true,
     );
@@ -7826,10 +9087,9 @@ function App() {
    * gesture does; provenance-aware Copy deliberately does not). */
   async function mintCoinTrace(
     phrase: string,
-    originNodeId: string,
-    sourceContentHash: string,
-    sourceRange: { start: number; end: number },
+    origin: CoinOrigin,
     signer?: Uint8Array,
+    kedits?: KEdit[],
   ): Promise<{ path: string; nodeId: string; runs: Run[] }> {
     if (!folder) throw new Error("Cannot mint a coin without an attached press.");
     const sourceFolderId = folder.id;
@@ -7842,16 +9102,25 @@ function App() {
     try {
       const mintFolderId = await getOrCreateMintFolder(sourceFolderId, signer);
       const mintMemberName = newPath.slice(`${MINT}/`.length);
-      const coin = await publishHardenedSpan({
-        folderId: mintFolderId,
-        relativePath: mintMemberName,
-        phrase,
-        originNodeId,
-        sourceContentHash,
-        sourceRange,
-        signer,
-        localOnly: true,
-      });
+      const coin = origin.kind === "direct"
+        ? await publishDirectCoin({
+            folderId: mintFolderId,
+            relativePath: mintMemberName,
+            phrase,
+            signer,
+            kedits,
+            localOnly: true,
+          })
+        : await publishHardenedSpan({
+            folderId: mintFolderId,
+            relativePath: mintMemberName,
+            phrase,
+            originNodeId: origin.sourceNodeId,
+            sourceContentHash: origin.sourceContentHash,
+            sourceRange: origin.range,
+            signer,
+            localOnly: true,
+          });
       const parsed = JSON.parse(coin.content) as { contentHash?: string };
       await upsertManifestEntry(
         mintFolderId,
@@ -7888,6 +9157,34 @@ function App() {
     }
   }
 
+  /** Mint the text entered in the Mint header composer without claiming that
+   * it was extracted from another trace, then open the immutable result. */
+  async function mintDirectCoin(phrase: string, kedits: KEdit[]): Promise<void> {
+    setDirectCoinBusy(true);
+    setDirectCoinError(null);
+    const signer = secretKeyForVoice(authorPubkey) ?? undefined;
+    try {
+      const coin = await mintCoinTrace(phrase, { kind: "direct" }, signer, kedits);
+      setEditorSelection(null);
+      const composerPanel = panelsRef.current.findIndex((panel) =>
+        panel.tabs.includes(DIRECT_COIN_COMPOSER_TAB),
+      );
+      const focusPanel = composerPanel >= 0 ? composerPanel : Math.min(activePanel, panels.length - 1);
+      replaceDirectCoinComposerTab(coin.path);
+      chooseDirectorySelection([]);
+      commitUiFocus(locateFocus(
+        { kind: "coin", path: coin.path, nodeId: coin.nodeId, phrase },
+        focusPanel,
+        coin.path,
+      ));
+      setDirectCoinDraft(emptyDirectCoinDraft());
+    } catch (error) {
+      setDirectCoinError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDirectCoinBusy(false);
+    }
+  }
+
   /** Mint a selection as a named, immutable trace in the dedicated Mint folder, then
    *  resolve the source bracket to cite it. Both source checkpoints and the
    *  new Mint member are stepped only to the home relay. Send remains a later,
@@ -7896,8 +9193,7 @@ function App() {
    *  `from`/`to` are the current selection in `view`. If the selection is
    *  already inside a pending `[[ phrase ]]`, that phrase is used as-is;
    *  otherwise the selection is wrapped first and the just-wrapped phrase is
-   *  used. The new coin opens in the adjacent panel (or the same one when only
-   *  a single column is open). */
+   *  used. The new Coin opens in a read-only tab. */
   async function zinePhrase(
     path: string,
     view: EditorView,
@@ -7905,7 +9201,7 @@ function App() {
     to: number,
     stepSigner?: Uint8Array,
   ): Promise<boolean> {
-    if (!folder || isMint(path) || isOblivion(path)) return false;
+    if (!folder || isMint(path) || isScan(path) || isOblivion(path)) return false;
     // Step mints either a loose-text highlight or the entire unresolved bracket
     // containing the selection. Resolved/cross-boundary selections are not new
     // mint targets.
@@ -7917,6 +9213,9 @@ function App() {
       if (!wrapSelection(view)) return false;
     }
 
+    // The source receipt addresses the exact bytes in the exact snapshot that
+    // flushEditorLocally captures synchronously below. Re-read after wrapping
+    // so loose selections include their new bracket markup in the source hash.
     const sourceSnapshot = view.state.doc.toString();
     const expectedMatchStart = targetSelection.bracket?.matchStart ?? Math.min(from, to);
     const sourceBracket = findPendingBrackets(sourceSnapshot).find(
@@ -7934,9 +9233,12 @@ function App() {
       const sourceContentHash = await sourceContentHashPromise;
       const coin = await mintCoinTrace(
         phrase,
-        originNodeId,
-        sourceContentHash,
-        { start: sourceBracket.phraseStart, end: sourceBracket.phraseEnd },
+        {
+          kind: "extracted",
+          sourceNodeId: originNodeId,
+          sourceContentHash,
+          range: { start: sourceBracket.phraseStart, end: sourceBracket.phraseEnd },
+        },
         signer,
       );
 
@@ -7954,22 +9256,21 @@ function App() {
       }
       // The source's next local checkpoint now carries the paired q edge.
       await flushEditorLocally(path, view, signer);
-      // Open the new file in the panel immediately right of its origin if one
-      // exists, else the origin panel itself. The reader sees the new trace
-      // alongside its origin. (This reuses an existing neighbor — it does not
-      // spawn a fresh column; only "Open to side" and tab edge-drop spawn.)
-      const originPanel = panels.findIndex((p) => p.tabs.includes(path));
-      const destPanel = originPanel === -1 ? activePanel : originPanel + 1;
-      if (destPanel < panels.length) {
-        openInPanel(coin.path, destPanel);
-      } else {
-        openInPanel(coin.path, Math.max(0, originPanel));
-      }
+      // Coins use the normal tab lifecycle but render a dedicated read-only
+      // surface instead of mounting CodeMirror.
+      setEditorSelection(null);
+      chooseDirectorySelection([]);
+      activateLiveTab(coin.path, {
+        kind: "coin",
+        path: coin.path,
+        nodeId: coin.nodeId,
+        phrase,
+      });
       return true;
     } catch (e) {
       console.warn(`[mint] failed for phrase in ${path}:`, e);
       const originPanel = panels.findIndex((p) => p.tabs.includes(path));
-      setOpStatus(originPanel === -1 ? activePanel : originPanel, "error", e instanceof Error ? e.message : String(e));
+      setOpStatus(originPanel === -1 ? activePanel : originPanel, "error", e instanceof Error ? e.message : String(e), "step");
       // Leave the bracket pending — the user can retry.
       return false;
     }
@@ -8008,6 +9309,9 @@ function App() {
         return { phrase, nodeId: file.nodeId };
       }
       originNodeId = file.nodeId;
+    } else if (isScan(path)) {
+      if (!file.nodeId) throw new Error("The scanned source has no stepped nucleus.");
+      originNodeId = file.nodeId;
     } else {
       originNodeId = await flushEditorLocally(path, view, signer);
     }
@@ -8015,9 +9319,12 @@ function App() {
     const sourceContentHash = await sha256HexLocal(docText);
     const coin = await mintCoinTrace(
       phrase,
-      originNodeId,
-      sourceContentHash,
-      { start: from, end: to },
+      {
+        kind: "extracted",
+        sourceNodeId: originNodeId,
+        sourceContentHash,
+        range: { start: from, end: to },
+      },
       signer,
     );
     void appendToPalette({
@@ -8123,8 +9430,7 @@ function App() {
   // the editor, modal text fields, read-only <pre>, and empty chrome. The
   // native menu is suppressed everywhere it catches; empty surfaces get no menu.
   // Clipboard uses document.execCommand for native fields (textarea/input) and
-  // CM6's selection/replace APIs for the editor — the legacy execCommand path
-  // still works inside CodeMirror's contentDOM.
+  // CM6's selection/replace APIs for the editor.
   function openGlobalContextMenu(e: React.MouseEvent) {
     // Tree/tab surfaces already handled their own menus + stopPropagation; if we
     // still see one of their containers, skip (don't double-open).
@@ -8208,10 +9514,6 @@ function App() {
   // Which one ops use is chosen under Press model select (voice-provider-store).
   const [providers, setProviders] = useState<ProviderConfig[]>(() => loadProviders());
   const [opLenses, setOpLenses] = useState(() => loadOpLensSelections());
-  const providersRef = useRef(providers);
-  providersRef.current = providers;
-  const opLensesRef = useRef(opLenses);
-  opLensesRef.current = opLenses;
   useEffect(() => {
     if (activeView === "editor") setProviders(loadProviders());
   }, [activeView]);
@@ -8227,7 +9529,7 @@ function App() {
       ...input,
       workspaceId: folder.id,
       ...(folder.label ? { workspaceLabel: folder.label } : {}),
-      scopes: scopeRef.current.map((item) => ({ kind: item.kind, path: item.path })),
+      scopes: automationScopesFor(scopeRef.current),
     });
     setAutomationRecipes(loadAutomationRecipes());
     return saved;
@@ -8237,10 +9539,11 @@ function App() {
     setAutomationRecipes(removeAutomationRecipe(id));
   }
 
-  function automationScopesAvailable(scopes: readonly AutomationScope[]): boolean {
+  function automationScopesAvailable(scopes: AutomationScopes): boolean {
     const current = filesRef.current;
     const paths = Object.keys(current);
     return scopes.length > 0 && scopes.every((item) => {
+      if (isMint(item.path) || isScan(item.path) || isOblivion(item.path)) return false;
       if (item.kind === "file") return !!current[item.path] && current[item.path]?.kind !== "folder";
       return item.path === ROOT || current[item.path]?.kind === "folder" ||
         paths.some((path) => path.startsWith(`${item.path}/`));
@@ -8315,13 +9618,13 @@ function App() {
   /** Set the AUTHOR (typing + Save/send) voice. Persisted per-browser. */
   function chooseAuthorKey(id: string) {
     setAuthorKeyId(id);
-    localStorage.setItem("zine.roles.pen", id);
+    localStorage.setItem("zine.roles.author", id);
   }
 
   /** Set the MODEL (LLM ops) voice. Persisted per-browser. */
   function chooseModelKey(id: string) {
     setModelKeyId(id);
-    localStorage.setItem("zine.roles.inject", id);
+    localStorage.setItem("zine.roles.model", id);
   }
 
   /** Resolve the provider a voice's ops should use. Sole source of truth:
@@ -8345,23 +9648,23 @@ function App() {
     setVoiceProviderTick((k) => k + 1);
   }
 
-  /** Set the per-panel op status (shared by all four ops). The `op` kind is
-   *  stashed when an op starts so the action button can re-render as the live
-   *  stop control (click it again to abort); it's carried through to `done` so
-   *  the status slot can show op-specific feedback ("stepped"/"sent"), then
-   *  auto-clears to `idle` after a beat. Errors persist (no auto-reset) so the
-   *  user sees what went wrong. */
+  /** Set per-panel palette status. The operation identifies both the live stop
+   *  button and the AUTHOR, MODEL, or substrate row that owns terminal feedback.
+   *  Success auto-clears after a beat; errors persist so the user can read them. */
   function setOpStatus(
     idx: number,
     state: SummonStatus["state"],
     msg?: string,
-    op?: OpKind,
+    op?: PaletteStatusOp,
   ) {
     setSummonStatus((prev) => {
       const next = [...prev];
-      // Carry the op kind through "running" and "done" (so the status slot can
-      // render "stepped"/"sent"); drop it on idle/error.
-      next[idx] = op && (state === "running" || state === "done") ? { state, msg, op } : { state, msg };
+      // Terminal updates usually follow a running update. Preserve its owner so
+      // success and error feedback stays in the row where the action started.
+      const statusOp = op ?? prev[idx]?.op;
+      next[idx] = state === "idle" || !statusOp
+        ? { state, msg }
+        : { state, msg, op: statusOp };
       return next;
     });
     // Auto-reset a "done" flash to idle so the success text doesn't linger.
@@ -8377,48 +9680,18 @@ function App() {
 
   /** Resolve + guard the provider for a voice's op (MODEL model select).
    *  Returns it or sets an error and null. */
-  function resolveOpProvider(idx: number, pubkey: string): ProviderConfig | null {
+  function resolveOpProvider(idx: number, pubkey: string, op: OpKind): ProviderConfig | null {
     const provider = resolveVoiceProvider(pubkey);
     if (!provider) {
-      setOpStatus(idx, "error", "no provider — add one in Models");
+      setOpStatus(idx, "error", "no provider — add one in Models", op);
       return null;
     }
     return provider;
   }
 
-  /** Imperative counterpart of opTargetPanel for provider-time revalidation. */
-  function liveOpTargetPanel(): number {
-    const livePanels = panelsRef.current;
-    const selectedPath = selectionRef.current?.path;
-    if (selectedPath) {
-      const activeHit = livePanels.findIndex((panel) => panel.active === selectedPath);
-      if (activeHit !== -1) return activeHit;
-      const tabHit = livePanels.findIndex((panel) => panel.tabs.includes(selectedPath));
-      if (tabHit !== -1) return tabHit;
-    }
-    return Math.min(activePanelRef.current, livePanels.length - 1);
-  }
-
-  function liveTargetBody(idx: number, path: string, file: FileState): string {
-    const view = panelViews.current[idx];
-    return view && panelsRef.current[idx]?.active === path
-      ? view.state.doc.toString()
-      : flatten(file.runs);
-  }
-
-  function modelFocusIdentity(idx: number, path: string): string {
-    return JSON.stringify({
-      panelIndex: idx,
-      activePanel: activePanelRef.current,
-      path,
-      selectionKind: selectionRef.current?.kind ?? null,
-      selectionPath: selectionRef.current?.path ?? null,
-    });
-  }
-
   /** Gather and freeze the one request object shared by estimate, Inspector,
-   * approval, and transport. The current multi-mount union remains the context
-   * authority; panel/selection focus remains the write authority. */
+   *  approval, and transport. Focus is a hard prerequisite: selection and a
+   *  merely-active fallback panel never silently become MODEL authority. */
   async function prepareModelOperation(
     idx: number,
     operation: PromptOpKind,
@@ -8427,14 +9700,16 @@ function App() {
     signal?: AbortSignal,
     lensId: OpLensId = opLenses[operation],
   ): Promise<PreparedOperation> {
-    const liveFolder = folderRef.current;
-    if (!liveFolder) throw new Error("Open a workspace before running a MODEL operation");
-    const path = panelsRef.current[idx]?.active ?? "";
+    if (!folder) throw new Error("Open a workspace before running a MODEL operation");
+    const focus = uiFocusRef.current;
+    const path = panels[idx]?.active ?? "";
     if (
-      !path ||
-      isFolderTab(path) ||
-      liveOpTargetPanel() !== idx ||
-      replayActiveRef.current
+      !focus ||
+      focus.kind !== "file" ||
+      !focus.path ||
+      focus.path !== path ||
+      focus.panelIndex !== idx ||
+      focus.tabPath !== path
     ) {
       throw new Error("Focus a live file before running a MODEL operation");
     }
@@ -8442,22 +9717,26 @@ function App() {
     if (!file || file.kind === "folder") {
       throw new Error("The focused MODEL target is not an editable file");
     }
-    const body = liveTargetBody(idx, path, file);
+    const providerFingerprint = providerProfileFingerprint(provider);
     const voicePrompt = getVoicePrompt(modelPubkey) ?? "";
-    const mounts = scopeRef.current.map((scope) => `${scope.kind}:${scope.path}`).sort();
-    const focusIdentity = modelFocusIdentity(idx, path);
     const dependencies: SnapshotDependencies = {
-      focus: focusIdentity,
+      focus: JSON.stringify({
+        kind: focus.kind,
+        path: focus.path,
+        nodeId: focus.nodeId ?? null,
+        panelIndex: focus.panelIndex,
+        tabPath: focus.tabPath,
+      }),
       targetRevision: JSON.stringify({
-        folderId: liveFolder.id,
+        folderId: folder.id,
         path,
         traceId: file.traceId ?? null,
         headId: file.nodeId || null,
-        contentHash: contentFingerprint(body),
+        contentHash: contentFingerprint(flatten(file.runs)),
       }),
-      mounts,
+      mount: JSON.stringify(scopeRef.current),
       shields: [...shieldedRef.current].sort(),
-      providerFingerprint: providerProfileFingerprint(provider),
+      providerFingerprint,
       modelVoicePromptHash: contentFingerprint(voicePrompt),
       lensId,
       operation,
@@ -8467,17 +9746,14 @@ function App() {
         `prepared-operation:v${PREPARED_OPERATION_VERSION}`,
       ],
     };
-    const snapshotFiles = filesRef.current;
-    const snapshotScopes = scopeRef.current.map((scope) => ({ ...scope }));
-    const snapshotShields = new Set(shieldedRef.current);
     const snapshot = await snapshotCoordinatorRef.current.request(
       dependencies,
       (gatherSignal) => gatherContextSnapshot(
-        liveFolder,
-        snapshotFiles,
-        snapshotScopes,
+        folder,
+        filesRef.current,
+        scopeRef.current,
         path,
-        snapshotShields,
+        shieldedRef.current,
         { signal: gatherSignal },
       ),
       signal,
@@ -8490,14 +9766,13 @@ function App() {
       modelVoicePubkey: modelPubkey,
       voicePrompt,
       lensId,
-      focusFingerprint: contentFingerprint(focusIdentity),
       dirtyTarget: unsteppedPathSetRef.current.has(path),
     });
   }
 
   /** Re-prepare current dependencies only to locate the exact session object
-   * approved in Inspector. Transport receives that object, never the freshly
-   * rebuilt comparison object. */
+   *  approved in Inspector. Transport receives that object, never the freshly
+   *  rebuilt comparison object. */
   async function approvedModelOperation(
     idx: number,
     operation: PromptOpKind,
@@ -8517,17 +9792,17 @@ function App() {
 
   // Approximate prompt-size estimate for the token indicator beside the LLM
   // buttons. The number reflects the payload an op would send against the
-  // op-target panel's active file. It uses the same prepared object path as
-  // Inspector and transport, so fail-closed context or provenance state has no
-  // misleading context-free estimate. Debounced so typing does not thrash the
-  // async gather.
+  // op-target panel's active file (the same target Extend/Settle/Stir/Reply
+  // run against). The estimate uses the same assembler and provider-system
+  // preparation as a live Extend call, with an empty seed; the context block
+  // still dominates. Debounced so typing doesn't thrash the async gather.
   const [tokenEstimate, setTokenEstimate] = useState<number | null>(null);
   useEffect(() => {
     if (!folder) {
       setTokenEstimate(null);
       return;
     }
-    const panelIdx = opTargetPanel();
+    const panelIdx = uiFocus?.panelIndex ?? Math.min(activePanel, panels.length - 1);
     const path = panelIdx >= 0 ? panels[panelIdx]?.active : undefined;
     if (!path) {
       setTokenEstimate(null);
@@ -8539,21 +9814,10 @@ function App() {
         try {
           const provider = resolveVoiceProvider(modelPubkey);
           if (!provider) throw new Error("No MODEL provider configured");
-          const file = filesRef.current[path];
-          if (!file || file.kind === "folder") throw new Error("No editable MODEL target");
-          const view = panelViews.current[panelIdx];
-          const doc = view?.state.doc.toString() ?? flatten(file.runs);
-          const selection = view?.state.selection.main;
-          const hasSelection = Boolean(selection && selection.from !== selection.to);
-          const seed = hasSelection
-            ? view!.state.sliceDoc(selection!.from, selection!.to)
-            : doc.slice(-4000);
-          const rangeFrom = hasSelection ? selection!.from : doc.length;
-          const rangeTo = hasSelection ? selection!.to : doc.length;
           const prepared = await prepareModelOperation(
             panelIdx,
             "extend",
-            { seed, hasSelection, rangeFrom, rangeTo },
+            { seed: "", hasSelection: false },
             provider,
           );
           if (!cancelled) setTokenEstimate(prepared.budget.estimatedTokens);
@@ -8567,13 +9831,15 @@ function App() {
       clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [folder, files, panels, activePanel, selection, modelPubkey, scope, shielded, providers, opLenses]);
+  }, [folder, files, panels, activePanel, uiFocus, modelPubkey, scope, shielded, providers, opLenses]);
 
   // ─── Prompt inspector ──────────────────────────────────────────────────────
   // Clicking the token-count indicator opens a modal showing exactly what a
   // single-shot op would send. `inspectOp` is null when closed; non-null is
-  // the default op to show first (Extend). Each tab requests a frozen prepared
-  // operation from the same path transport uses; the modal never rebuilds it.
+  // the default op to show first (Extend). The inputs + context block are
+  // gathered once on open (against the op-target panel + scope, mirroring what
+  // the live ops gather) and held in state so the modal can switch op tabs
+  // without re-fetching the (memoized) context block.
   const [inspectOp, setInspectOp] = useState<PromptOpKind | null>(null);
   const [inspectContext, setInspectContext] = useState("");
   const [inspectInputs, setInspectInputs] = useState<Partial<Record<PromptOpKind, OpInputs>>>({});
@@ -8591,113 +9857,105 @@ function App() {
     preparedApprovalRef.current.invalidate();
     setApprovedRequestHash(null);
     setInspectPrepared({});
-  }, [folder?.id, files, panels, activePanel, selection, scope, shielded, providers, modelPubkey, opLenses]);
+  }, [folder?.id, files, uiFocus, scope, shielded, providers, modelPubkey, opLenses]);
 
-  function operationFocusMatches(prepared: PreparedOperation, idx: number): boolean {
-    if (prepared.operation === "receive") return true;
-    const file = filesRef.current[prepared.targetRevision.path];
-    if (!file || file.kind === "folder") return false;
-    const view = panelViews.current[idx];
-    const body = liveTargetBody(idx, prepared.targetRevision.path, file);
-    const selection = view?.state.selection.main;
-    const hasSelection = Boolean(selection && selection.from !== selection.to);
-    if (prepared.operation === "extend") {
-      const from = hasSelection ? selection!.from : body.length;
-      const to = hasSelection ? selection!.to : body.length;
-      return prepared.operationInputs.hasSelection === hasSelection &&
-        prepared.operationInputs.rangeFrom === from &&
-        prepared.operationInputs.rangeTo === to;
-    }
-    const from = hasSelection ? selection!.from : 0;
-    const to = hasSelection ? selection!.to : body.length;
-    return prepared.operationInputs.rangeFrom === from &&
-      prepared.operationInputs.rangeTo === to;
-  }
-
-  function preparedDependenciesStillCurrent(prepared: PreparedOperation, idx: number): boolean {
-    if (
-      contentFingerprint(modelFocusIdentity(idx, prepared.targetRevision.path)) !==
-      prepared.provenance.focusFingerprint
-    ) return false;
-    if (modelPubkeyRef.current !== prepared.provenance.modelVoicePubkey) return false;
-    if (opLensesRef.current[prepared.operation] !== prepared.provenance.lensId) return false;
-    if (
-      contentFingerprint(getVoicePrompt(modelPubkeyRef.current) ?? "") !==
-      prepared.provenance.voicePromptHash
-    ) return false;
-    const pinnedProviderId = getVoiceProvider(modelPubkeyRef.current);
-    const currentProvider = (
-      pinnedProviderId
-        ? providersRef.current.find((provider) => provider.id === pinnedProviderId)
-        : undefined
-    ) ?? providersRef.current[0];
-    if (
-      !currentProvider ||
-      providerProfileFingerprint(currentProvider) !== prepared.providerFingerprint
-    ) return false;
-
-    const currentMounts = scopeRef.current
-      .map((scope) => ({ ...scope }))
-      .sort((left, right) => left.kind.localeCompare(right.kind) || left.path.localeCompare(right.path));
-    if (JSON.stringify(currentMounts) !== JSON.stringify(prepared.contextSnapshot.mounts)) return false;
-
-    const targetPath = prepared.targetRevision.path;
-    const currentInputPaths = Object.keys(filesRef.current)
-      .filter((path) => filesRef.current[path]?.kind !== "folder")
-      .filter((path) =>
-        path === targetPath ||
-        pathInEffectiveScopes(scopeRef.current, shieldedRef.current, path))
-      .sort();
-    if (
-      JSON.stringify(currentInputPaths) !==
-      JSON.stringify(prepared.contextSnapshot.inputs.map((input) => input.path))
-    ) return false;
-
-    for (const input of prepared.contextSnapshot.inputs) {
-      const state = filesRef.current[input.path];
-      if (!state || state.kind === "folder" || unsteppedPathSetRef.current.has(input.path)) {
-        return false;
-      }
-      const body = flatten(state.runs);
-      const citations = [...new Set([
-        ...(state.taggedTraces ?? []),
-        ...findResolvedBrackets(body).map((citation) => citation.nodeId),
-      ])].sort();
-      if (
-        (state.traceId ?? null) !== input.traceId ||
-        (state.nodeId || null) !== input.headId ||
-        contentFingerprint(body) !== input.contentHash ||
-        JSON.stringify(citations) !== JSON.stringify(input.citations)
-      ) return false;
-    }
-    return true;
-  }
-
-  function readCurrentModelTarget(
-    prepared: PreparedOperation,
-    idx: number,
-  ): CurrentModelTarget | null {
+  function readCurrentModelTarget(prepared: PreparedOperation): CurrentModelTarget | null {
     const liveFolder = folderRef.current;
     const liveFile = filesRef.current[prepared.targetRevision.path];
     if (!liveFolder || !liveFile || liveFile.kind === "folder") return null;
+    const focus = uiFocusRef.current;
     return {
       folderId: liveFolder.id,
       path: prepared.targetRevision.path,
       traceId: liveFile.traceId ?? "",
       headId: liveFile.nodeId,
-      contentHash: contentFingerprint(
-        liveTargetBody(idx, prepared.targetRevision.path, liveFile),
-      ),
+      contentHash: contentFingerprint(flatten(liveFile.runs)),
       focused: Boolean(
-        liveOpTargetPanel() === idx &&
-        panelsRef.current[idx]?.active === prepared.targetRevision.path &&
-        !panelsRef.current[idx]?.replayOwned &&
-        !replayActiveRef.current &&
-        operationFocusMatches(prepared, idx) &&
-        preparedDependenciesStillCurrent(prepared, idx)
+        focus?.kind === "file" &&
+        focus.path === prepared.targetRevision.path &&
+        panelsRef.current[focus.panelIndex]?.active === prepared.targetRevision.path &&
+        !panelsRef.current[focus.panelIndex]?.replayOwned
       ),
     };
   }
+
+  function recordModelLessonResult(prepared: PreparedOperation, response: string): void {
+    const lesson = modelLessonResume;
+    if (
+      onboardingStageRef.current !== "context-run" ||
+      !lesson ||
+      (prepared.operation !== "extend" && prepared.operation !== "settle" && prepared.operation !== "stir") ||
+      prepared.targetRevision.path !== lesson.targetPath
+    ) return;
+    const nextLesson: ModelLessonResume = {
+      ...lesson,
+      resultSpanHash: contentFingerprint(response),
+    };
+    setModelLessonResume(nextLesson);
+    const nextStage = reduceOnboardingStage(onboardingStageRef.current, "result-applied");
+    commitOnboardingStage(nextStage, nextLesson);
+  }
+
+  useEffect(() => {
+    const lesson = modelLessonResume;
+    if (!lesson || !onboardingStage.startsWith("context-") && onboardingStage !== "model-setup") return;
+    const template = modelContextLessonForFolder(lesson.folderPath);
+    const target = files[lesson.targetPath];
+    const source = files[lesson.sourcePath];
+    const excluded = files[lesson.excludedPath];
+    const expectedSource = template.artifacts.find((artifact) => artifact.role === "source")!;
+    const expectedExcluded = template.artifacts.find((artifact) => artifact.role === "excluded")!;
+    const expectedTarget = template.artifacts.find((artifact) => artifact.role === "target")!;
+    const lessonValid = Boolean(
+      target?.nodeId && source?.nodeId && excluded?.nodeId &&
+      flatten(source.runs) === expectedSource.body &&
+      flatten(excluded.runs) === expectedExcluded.body &&
+      (lesson.resultSpanHash || flatten(target.runs) === expectedTarget.body),
+    );
+    const testedProvider = modelProbeSession
+      ? providers.find((provider) => provider.id === modelProbeSession.providerId)
+      : undefined;
+    const providerProbed = Boolean(
+      testedProvider &&
+      providerProfileFingerprint(testedProvider) === modelProbeSession?.providerFingerprint,
+    );
+    const resultBuffered = Boolean(
+      lesson.resultSpanHash &&
+      target &&
+      unsteppedPathSet.has(lesson.targetPath) &&
+      target.runs.some((run) =>
+        contentFingerprint(run.text) === lesson.resultSpanHash ||
+        contentFingerprint(run.text.replace(/^\n/, "")) === lesson.resultSpanHash),
+    );
+    const next = reconcileModelOnboardingStage(onboardingStage, {
+      providerProbed,
+      lessonValid,
+      targetFocused: uiFocus?.kind === "file" && uiFocus.path === lesson.targetPath,
+      folderMounted: scope[0]?.kind === "folder" && scope[0].path === lesson.folderPath,
+      noteShielded: shielded.has(lesson.excludedPath),
+      requestApproved: approvedRequestHash !== null,
+      resultBuffered,
+      resultStepped: Boolean(lesson.resultNodeId && target?.nodeId === lesson.resultNodeId),
+    });
+    if (next !== onboardingStage) {
+      commitOnboardingStage(next, lesson);
+      if (next === "model-setup") {
+        setModelProbeSession(null);
+        selectView("models");
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    onboardingStage,
+    modelLessonResume,
+    modelProbeSession,
+    providers,
+    files,
+    uiFocus,
+    scope,
+    shielded,
+    approvedRequestHash,
+  ]);
 
   /** Derive the per-op `OpInputs` from the op-target panel's live editor state,
    *  the same way the ops themselves do. Extend seeds from the selection or doc
@@ -8708,29 +9966,26 @@ function App() {
     const idx = opTargetPanel();
     const path = panels[idx]?.active;
     const view = panelViews.current[idx];
-    const state = path ? files[path] : null;
-    if (!path || !state || state.kind === "folder") return {};
-    const doc = view?.state.doc.toString() ?? flatten(state.runs);
-    const sel = view?.state.selection.main;
-    const hasSel = Boolean(sel && sel.from !== sel.to);
+    if (!path || !view) return {};
+    const doc = view.state.doc.toString();
+    const sel = view.state.selection.main;
+    const hasSel = sel.from !== sel.to;
     // Extend: seed from selection, else doc tail (matches extendLLM).
-    const seed = hasSel ? view!.state.sliceDoc(sel!.from, sel!.to) : doc.slice(-4000);
+    const seed = hasSel ? view.state.sliceDoc(sel.from, sel.to) : doc.slice(-4000);
     // Stir: gather commands + loose prose + anchor count over the selection
     // (or whole doc), mirroring shakeLLM.
-    const stirText = hasSel ? view!.state.sliceDoc(sel!.from, sel!.to) : doc;
+    const stirText = hasSel ? view.state.sliceDoc(sel.from, sel.to) : doc;
     const cmds = findCommands(stirText);
     const stripped = stripRanges(stirText, cmds.map((c) => [c.matchStart, c.matchEnd] as [number, number]));
     const loose = partitionDoc(stripped).filter((p) => p.kind === "loose").map((p) => p.text).join("\n").trim();
     const anchorCount = [...iterBrackets(stirText)].length;
-    const from = hasSel ? sel!.from : 0;
-    const to = hasSel ? sel!.to : doc.length;
     const settlePrompt = encodeSettleAnchors(stirText).promptText;
     return {
-      extend: { seed, hasSelection: hasSel, rangeFrom: hasSel ? from : doc.length, rangeTo: hasSel ? to : doc.length },
-      settle: { loose: settlePrompt, rangeFrom: from, rangeTo: to },
-      stir: { loose, anchorCount, commands: cmds.map((c) => c.command), rangeFrom: from, rangeTo: to },
+      extend: { seed, hasSelection: hasSel, rangeFrom: hasSel ? sel.to : doc.length, rangeTo: hasSel ? sel.to : doc.length },
+      settle: { loose: settlePrompt, rangeFrom: hasSel ? sel.from : 0, rangeTo: hasSel ? sel.to : doc.length },
+      stir: { loose, anchorCount, commands: cmds.map((c) => c.command), rangeFrom: hasSel ? sel.from : 0, rangeTo: hasSel ? sel.to : doc.length },
       // Reply/Receive relay-backed bodies are filled by openInspector.
-      reply: { source: stirText, rangeFrom: from, rangeTo: to },
+      reply: { source: stirText },
       receive: {},
     };
   }
@@ -8813,50 +10068,33 @@ function App() {
     await prepareInspectorOperation(defaultOperation, inputs);
   }
 
-  /** Begin an op: mark running and arm an AbortController. The op voice is
-   *  NOT adopted on the editor facet here — each streamed change instead
-   *  carries an `opVoiceEffect` with the exact voice (see voiceField), so
-   *  attribution can't drift if the facet is reconfigured mid-stream (pen
-   *  switch) or restored by a prior op. Returns the controller, or null if
-   *  the editor isn't mounted.
-   *
-   *  `signer` is the voice the op's release step should be signed as — the
-   *  MODEL key's secret for an LLM op, so the AI insert steps as that voice
-   *  instead of the AUTHOR key the user is typing under. Stashed for
-   *  endOp to pass through the gate's catch-up
-   *  step. The op's pre-stream baseline step is signed by the AUTHOR key
-   *  separately; this only governs the release step.
-   *
-   *  Also arms the step gate: while the op streams, the debounce step effect
-   *  is suppressed (see useProvenance.suppressStep). Each streamed token's
-   *  setFiles would otherwise re-arm the 1500ms step; a quiet gap mid-stream
-   *  (model thinking, network hiccup) then fires an intermediate step,
-   *  publishing a half-finished AI insert — and more tokens publish again,
-   *  tripping the relay's per-connection rate-limit. The gate collapses the
-   *  whole op to a single step, released in endOp. */
+  /** Begin an in-place op: mark running, reserve the focused path, arm
+   * cancellation, and hold crash-pad observation until the one atomic apply.
+   * The MODEL voice is carried by opVoiceEffect on that transaction; the
+   * later explicit Step remains owned by the trace's AUTHOR key. */
   function beginOp(
     idx: number,
-    signer?: Uint8Array,
-    op?: "extend" | "settle" | "stir",
+    signer: Uint8Array | undefined,
+    op: "extend" | "settle" | "stir",
   ): { controller: AbortController } | null {
     const view = panelViews.current[idx];
     if (!view) {
-      // Without a mounted editor view there's nowhere to stream into — extend/
-      // settle/stir all dispatch via view.dispatch. Surface this instead of
+      // Without a mounted editor view there is nowhere to apply the buffered
+      // result. Surface this instead of
       // silently no-oping (the old `return null` left the button looking dead:
       // no "running", no "error", nothing). opTargetPanel normally steers ops
       // at a panel whose active tab is the file, but a stale layout, a folder
       // tab, or a not-yet-mounted editor (right after reload) can still miss.
-      setOpStatus(idx, "error", "no editor mounted for this panel — click the file's tab first");
+      setOpStatus(idx, "error", "no editor mounted for this panel — click the file's tab first", op);
       return null;
     }
     const path = panels[idx]?.active ?? "";
     if (!path) {
-      setOpStatus(idx, "error", "no file active in this panel");
+      setOpStatus(idx, "error", "no file active in this panel", op);
       return null;
     }
     if (activeOpPathsRef.current.has(path)) {
-      setOpStatus(idx, "error", "another model operation is already writing this file");
+      setOpStatus(idx, "error", "another model operation is already writing this file", op);
       return null;
     }
     setOpStatus(idx, "running", undefined, op);
@@ -8868,20 +10106,9 @@ function App() {
     return { controller };
   }
 
-  /** End an op: clear the controller and release the step gate. The facet was
-   *  never touched, so there's nothing to restore — terminal status is handled
-   *  by the caller. Releasing the gate fires one catch-up step per path the
-   *  suppressed window saw touched, signed with the voice beginOp armed, so
-   *  the op's whole output steps as a single delta under the right voice.
-   *
-   *  Deferred one macrotask so React has committed the op's final setFiles
-   *  before the catch-up step reads `files`. Without this, endOp's finally
-   *  runs synchronously on await resume — the last token's state is still
-   *  pending — so the catch-up step would publish partial content, then the
-   *  debounce effect would re-step the remainder a beat later as the active
-   *  key (scheduleStep always passes no signer). With the deferral the
-   *  catch-up step sees complete content and the debounce dedups against it:
-   *  one step, inject-signed, complete. */
+  /** End an op after React commits its atomic transaction. Release mirrors the
+   * complete unstepped buffer and pins MODEL metadata for the next explicit
+   * Step; it never publishes on its own. */
   function endOp(idx: number, llmMeta?: LlmStepMeta | null) {
     summonAbort.current[idx] = null;
     const context = opContextsRef.current.get(idx);
@@ -8893,12 +10120,8 @@ function App() {
     }, 0);
   }
 
-  /** §3.7: prepare the LLM-call metadata (rule trace + scope citations + model
-   *  config) for the op's path-keyed write-back Step. Called
-   *  by every LLM op just before its provider call — the step happens after the
-   *  model replies, but the scope is pinned to call time (what was in scope
-   *  when the model was invoked), so gathering it here is correct. The scope is
-   *  the folder's members' heads + the active file's head + the rule trace id. */
+  /** §3.7: prepare rule/scope/model metadata for the later explicit Step.
+   * Scope is pinned to call time even though publication is deferred. */
   async function prepareLlmMeta(
     idx: number,
     op: "extend" | "settle" | "stir" | "reply" | "receive",
@@ -8923,7 +10146,7 @@ function App() {
       const members = await fetchManifest(folder.id);
       const effectiveMembers = members.filter(
         (member) =>
-          pathInEffectiveScopes(scopeRef.current, shieldedRef.current, member.relativePath),
+          isInScope(scopeRef.current, shieldedRef.current, member.relativePath),
       );
       const activeNodeId =
         activePath && isInScope(scopeRef.current, shieldedRef.current, activePath)
@@ -8953,17 +10176,13 @@ function App() {
     }
   }
 
-  /** EXTEND — append an AI continuation. With a selection, seeds from the
-   *  selected text and streams the continuation right after it; otherwise seeds
-   *  from the end of the document and appends at doc.length. Each delta is
-   *  attributed to `pubkey` via an op-voice effect carried on the change
-   *  transaction (see voiceField) — not via the live editor facet, so the
-   *  attribution can't drift if the AUTHOR key is switched mid-stream. */
+  /** EXTEND — buffer one continuation, revalidate the captured target, then
+   * append it in one MODEL-attributed editor transaction. */
   async function extendLLM(idx: number) {
     const pubkey = modelPubkey;
-    const provider = resolveOpProvider(idx, pubkey);
+    const provider = resolveOpProvider(idx, pubkey, "extend");
     if (!provider) return;
-    const started = beginOp(idx, secretKeyForVoice(pubkey) ?? undefined, "extend");
+    const started = beginOp(idx, secretKeyForVoice(authorPubkey) ?? undefined, "extend");
     if (!started) return;
     const { controller } = started;
     let llmMeta: LlmStepMeta | null = null;
@@ -8978,7 +10197,7 @@ function App() {
       const inputs: OpInputs = {
         seed,
         hasSelection: hasSel,
-        rangeFrom: hasSel ? sel.from : anchor,
+        rangeFrom: anchor,
         rangeTo: anchor,
       };
       const prepared = await approvedModelOperation(
@@ -8994,10 +10213,10 @@ function App() {
         provider,
         maxTokens: 4096,
         signal: controller.signal,
-        readCurrentTarget: () => readCurrentModelTarget(prepared, idx),
+        readCurrentTarget: () => readCurrentModelTarget(prepared),
         onStale: (recovery) => setStaleModelResult(recovery),
         apply: (response) => {
-          const insertAt = prepared.operationInputs.rangeTo ?? anchor;
+          const insertAt = prepared.operationInputs.rangeFrom ?? anchor;
           const prefix = insertAt > 0 && view.state.doc.sliceString(insertAt - 1, insertAt) !== "\n"
             ? "\n"
             : "";
@@ -9012,28 +10231,38 @@ function App() {
         return;
       }
       if (result.status === "stale") {
-        setOpStatus(idx, "error", "MODEL response held because focus or the file changed");
+        setOpStatus(idx, "error", "MODEL response held because focus or the file changed", "extend");
         return;
       }
+      recordModelLessonResult(prepared, result.response);
       setOpStatus(idx, "done", undefined, "extend");
     } catch (e) {
       if (controller.signal.aborted) {
         setOpStatus(idx, "idle");
         return;
       }
-      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e), "extend");
     } finally {
       endOp(idx, llmMeta);
     }
   }
 
-  /** Folder Settle is withheld until one reviewed batch can capture every
-   * provider call, keeper revision, and deletion before the first network hop. */
+  /** Settle (de-dupe mode): collapse near-duplicate files in the scope subtree
+   *  into one voiced revision. Triggered when Settle runs with a FOLDER in scope
+   *  (the whole-subtree target) rather than a single file focus. Candidate
+   *  duplicates are grouped by a cheap content signature (normalized prefix);
+   *  each group of 2+ is sent to the LLM to merge, the merged result overwrites
+   *  the first (keeper) file, and the redundant copies are deleted.
+   *
+   *  This is the deliberate gesture that collapses adopted/imported
+   *  redundancy after source material has entered Root. Nothing happens
+   *  between gestures. */
   function settleDeDupeLLM(idx: number) {
     setOpStatus(
       idx,
       "error",
-      "Folder Settle needs a dedicated reviewed batch; focus one stepped file for now",
+      "Folder focus is available for replay; MODEL Settle needs one focused, stepped file",
+      "settle",
     );
   }
 
@@ -9044,9 +10273,9 @@ function App() {
    *  One CM6 transaction -> one undo restores. */
   async function settleLLM(idx: number) {
     const pubkey = modelPubkey;
-    const provider = resolveOpProvider(idx, pubkey);
+    const provider = resolveOpProvider(idx, pubkey, "settle");
     if (!provider) return;
-    const started = beginOp(idx, secretKeyForVoice(pubkey) ?? undefined, "settle");
+    const started = beginOp(idx, secretKeyForVoice(authorPubkey) ?? undefined, "settle");
     if (!started) return;
     const { controller } = started;
     let llmMeta: LlmStepMeta | null = null;
@@ -9076,7 +10305,7 @@ function App() {
         provider,
         maxTokens: 512,
         signal: controller.signal,
-        readCurrentTarget: () => readCurrentModelTarget(prepared, idx),
+        readCurrentTarget: () => readCurrentModelTarget(prepared),
         onStale: (recovery) => setStaleModelResult(recovery),
         apply: (response) => {
           const next = restoreSettleAnchors(response, encoded.anchors);
@@ -9096,16 +10325,17 @@ function App() {
         return;
       }
       if (result.status === "stale") {
-        setOpStatus(idx, "error", "MODEL response held because focus or the file changed");
+        setOpStatus(idx, "error", "MODEL response held because focus or the file changed", "settle");
         return;
       }
+      recordModelLessonResult(prepared, result.response);
       setOpStatus(idx, "done", undefined, "settle");
     } catch (e) {
       if (controller.signal.aborted) {
         setOpStatus(idx, "idle");
         return;
       }
-      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e), "settle");
     } finally {
       endOp(idx, llmMeta);
     }
@@ -9118,9 +10348,9 @@ function App() {
    *  transaction → one undo restores everything (loose prose, anchors, commands). */
   async function stirLLM(idx: number) {
     const pubkey = modelPubkey;
-    const provider = resolveOpProvider(idx, pubkey);
+    const provider = resolveOpProvider(idx, pubkey, "stir");
     if (!provider) return;
-    const started = beginOp(idx, secretKeyForVoice(pubkey) ?? undefined, "stir");
+    const started = beginOp(idx, secretKeyForVoice(authorPubkey) ?? undefined, "stir");
     if (!started) return;
     const { controller } = started;
     let llmMeta: LlmStepMeta | null = null;
@@ -9166,7 +10396,7 @@ function App() {
         provider,
         maxTokens: 1024,
         signal: controller.signal,
-        readCurrentTarget: () => readCurrentModelTarget(prepared, idx),
+        readCurrentTarget: () => readCurrentModelTarget(prepared),
         onStale: (recovery) => setStaleModelResult(recovery),
         apply: (response) => {
           const next = reweaveAnchors(response, text);
@@ -9185,64 +10415,46 @@ function App() {
         return;
       }
       if (result.status === "stale") {
-        setOpStatus(idx, "error", "MODEL response held because focus or the file changed");
+        setOpStatus(idx, "error", "MODEL response held because focus or the file changed", "stir");
         return;
       }
+      recordModelLessonResult(prepared, result.response);
       setOpStatus(idx, "done", undefined, "stir");
     } catch (e) {
       if (controller.signal.aborted) {
         setOpStatus(idx, "idle");
         return;
       }
-      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e), "stir");
     } finally {
       endOp(idx, llmMeta);
     }
   }
 
-  /** RESPOND — buffer an AI response, then write it into a NEW sibling doc after
-   * the approved source revision and focus are revalidated. It may cite existing
+  /** RESPOND — buffer an AI response into a NEW unstepped sibling doc, citing existing
    *  coins via [[ phrase | nodeId ]], and citing the source itself
    *  via `replyingTo` (spec §reply-to delta type) so the reply chain
    *  stays legible from the trace alone. Placement: the sibling opens in a fresh
    *  column immediately to the right of the source panel (`idx`) — auto-spawning
    *  that column first so the reply always lands alongside its origin.
    *  The model names the file via a leading `TITLE:` line (see
-   *  RESPOND_MESSAGES); the TITLE line is stripped from the stepped body. */
+   *  RESPOND_MESSAGES); the TITLE line is stripped before the atomic apply. */
   async function replyLLM(idx: number) {
     if (!folder) return;
-    // Reply writes into a new file (not the live editor) so there's no facet
-    // to reconfigure — the MODEL voice's pubkey is baked into the run we write.
     const modelVoice = modelPubkey;
-    const provider = resolveOpProvider(idx, modelVoice);
+    const provider = resolveOpProvider(idx, modelVoice, "reply");
     if (!provider) return;
     setOpStatus(idx, "running", undefined, "reply");
-    // The MODEL voice's secret — signs both the genesis writeFile below and
-    // the release catch-up step, so the response lands on the relay as the
-    // MODEL voice, not the keychain's active (AUTHOR) key.
-    const signer = secretKeyForVoice(modelVoice) ?? undefined;
     const controller = new AbortController();
     summonAbort.current[idx] = controller;
-    // Hoisted so the finally block can release the rescan-pending hold even
-    // if we throw before assigning it. May be rebased mid-stream when the
-    // model supplies a TITLE.
-    let newPath = "";
-    let llmMeta: LlmStepMeta | null = null;
     try {
       const view = panelViews.current[idx];
       const srcRel = panels[idx].active || "";
-      // Reply to just the selected passage when there is one; otherwise the
-      // whole document. The response always lands in a new sibling file.
-      // Selection requires the live CM view; the whole-doc case reads from
-      // `files` state so Reply still works when the view isn't mounted (the
-      // model would otherwise see an empty source, then go fish in the context
-      // block for something to answer).
       const sel = view?.state.selection.main;
       const hasSel = !!sel && sel.from !== sel.to;
       const sourceText = hasSel
         ? view!.state.sliceDoc(sel!.from, sel!.to)
-        : (srcRel && files[srcRel] ? flatten(files[srcRel].runs) : "");
-      // Pull the palette so the model can cite coins by nodeId.
+        : (srcRel && filesRef.current[srcRel] ? flatten(filesRef.current[srcRel].runs) : "");
       let palette: PaletteItem[] = [];
       try {
         palette = await fetchPalette();
@@ -9250,12 +10462,7 @@ function App() {
         /* no palette is fine — the response just won't carry citations */
       }
       const traces = palette.slice(0, 20).map((p) => `- "${p.text}" (nodeId ${p.nodeId})`).join("\n");
-      const inputs: OpInputs = {
-        source: sourceText,
-        traces,
-        rangeFrom: hasSel ? sel!.from : 0,
-        rangeTo: hasSel ? sel!.to : sourceText.length,
-      };
+      const inputs: OpInputs = { source: sourceText, traces };
       const prepared = await approvedModelOperation(
         idx,
         "reply",
@@ -9263,60 +10470,42 @@ function App() {
         provider,
         controller.signal,
       );
-      llmMeta = await prepareLlmMeta(idx, "reply", provider, sourceText, 1024);
-      // Keep the source's directory so the response lands next to its origin
-      // (e.g. notes/essay.md -> notes/<title>.md).
-      const sourceName = srcRel || "doc.md";
-      // The source's stepped head at the moment Reply runs — pinned into the
-      // response's own genesis node via `replyingTo` below, so the citation
-      // stays honest even if the source is edited further afterward.
-      const sourceNodeId = prepared.targetRevision.headId || undefined;
-      const slash = sourceName.lastIndexOf("/");
-      const srcDir = slash >= 0 ? sourceName.slice(0, slash + 1) : "";
-      const stem = sourceName.replace(/\.md$/, "").split("/").pop() || "doc";
-      // Shared local second-precision prefix (YYYY-MM-DD_HHMMSS) so generated docs sort
-      // chronologically and stay timestamped even after the LLM rewrites the
-      // title below. Second precision (not minute) so two replies in the same
-      // minute don't collide on the prefix. No colons to stay filesystem-safe.
-      const datePrefix = formatLocalSecondStamp(new Date());
-
+      const sourceNodeId = filesRef.current[srcRel]?.nodeId || undefined;
+      const llmMeta = await prepareLlmMeta(idx, "reply", provider, sourceText, 1024);
+      if (llmMeta && sourceNodeId) llmMeta.replyingTo = sourceNodeId;
       const result = await executePreparedOperation({
         prepared,
         provider,
         maxTokens: 1024,
         signal: controller.signal,
-        readCurrentTarget: () => readCurrentModelTarget(prepared, idx),
+        readCurrentTarget: () => readCurrentModelTarget(prepared),
         onStale: (recovery) => setStaleModelResult(recovery),
-        apply: async (response) => {
-          const parsed = parseReplyOutput(response);
+        apply: (response) => {
+          const parsed = parseReplyOutput(response, true);
+          const sourceName = srcRel || "doc.md";
+          const slash = sourceName.lastIndexOf("/");
+          const srcDir = slash >= 0 ? sourceName.slice(0, slash + 1) : "";
+          const stem = sourceName.replace(/\.md$/, "").split("/").pop() || "doc";
+          const datePrefix = formatLocalSecondStamp(new Date());
           const label = parsed.title
             ? slugifyFilename(parsed.title.replace(/\.md$/i, ""))
             : `${stem}-reply`;
-          newPath = uniquePath(
+          const newPath = uniquePath(
             `${srcDir}${datePrefix}-${label}.md`,
             new Set(Object.keys(filesRef.current)),
           );
           const runs = [{ voice: modelVoice, text: parsed.body }];
-          pendingPaths.current.add(newPath);
           editFile(newPath, runs);
+          if (llmMeta) setPendingLlmMeta(newPath, llmMeta);
+          mirrorPad(folder.id, newPath, {
+            content: parsed.body,
+            tags: [],
+            nodeId: "",
+            runs,
+          });
           const destIdx = idx + 1;
           spawnPanel(destIdx);
           openInPanel(newPath, destIdx);
-          try {
-            if (llmMeta) setPendingLlmMeta(newPath, llmMeta);
-            await backendRef.current.writeFile(
-              newPath,
-              parsed.body,
-              [],
-              signer,
-              runs,
-              sourceNodeId,
-            );
-          } catch (error) {
-            console.warn(`[reply] writeFile failed for ${newPath}:`, error);
-          } finally {
-            clearPendingLlmMeta(newPath);
-          }
         },
       });
       if (result.status === "cancelled") {
@@ -9324,44 +10513,38 @@ function App() {
         return;
       }
       if (result.status === "stale") {
-        setOpStatus(idx, "error", "MODEL response held because focus or the source changed");
+        setOpStatus(idx, "error", "MODEL response held because focus or the source changed", "reply");
         return;
       }
+      recordModelLessonResult(prepared, result.response);
       setOpStatus(idx, "done", undefined, "reply");
     } catch (e) {
       if (controller.signal.aborted) {
         setOpStatus(idx, "idle");
         return;
       }
-      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e), "reply");
     } finally {
       summonAbort.current[idx] = null;
-      // Release the rescan-pending hold once the stream + persist have
-      // settled (success or abort/error). Subsequent rescans then reconcile
-      // from disk normally.
-      if (newPath) pendingPaths.current.delete(newPath);
     }
   }
 
-  /** Receive: run the analyst persona over the folder's delta + limelight logs,
-   *  buffer it, then create a sibling only after source revalidation. It is a
+  /** Receive: run the analyst persona over the folder's delta + limelight logs
+   *  and stream the process analysis into a new sibling file. Structurally a
    *  trimmed Reply (no palette, no source citation, no `replyingTo`): the
    *  model reads the whole context block — delta log + file contents — plus a
    *  rendered limelight log (panel-occupancy history from focusTimeline, which
    *  lives on the folder's chain but is surfaced to a prompt nowhere else).
-   *  Output is an audit doc the user can check, named via the model's `TITLE:`
-   *  line, same convention as Reply. Stepped as the MODEL voice. */
+   *  Output is an unstepped audit doc the user can check, named via the model's
+   *  `TITLE:` line, same convention as Reply. */
   async function receiveLLM(idx: number) {
     if (!folder) return;
     const modelVoice = modelPubkey;
-    const provider = resolveOpProvider(idx, modelVoice);
+    const provider = resolveOpProvider(idx, modelVoice, "receive");
     if (!provider) return;
     setOpStatus(idx, "running", undefined, "receive");
-    const signer = secretKeyForVoice(modelVoice) ?? undefined;
     const controller = new AbortController();
     summonAbort.current[idx] = controller;
-    let newPath = "";
-    let llmMeta: LlmStepMeta | null = null;
     try {
       const srcRel = panels[idx].active || "";
       // Pull the folder's focus chain (panel-occupancy history) and render it
@@ -9383,50 +10566,40 @@ function App() {
         provider,
         controller.signal,
       );
-      llmMeta = await prepareLlmMeta(idx, "receive", provider, limelightLog, 2048);
-      const sourceName = srcRel || "doc.md";
-      const slash = sourceName.lastIndexOf("/");
-      const srcDir = slash >= 0 ? sourceName.slice(0, slash + 1) : "";
-      const stem = sourceName.replace(/\.md$/, "").split("/").pop() || "doc";
-      const datePrefix = formatLocalSecondStamp(new Date());
-
+      const llmMeta = await prepareLlmMeta(idx, "receive", provider, limelightLog, 2048);
       const result = await executePreparedOperation({
         prepared,
         provider,
         maxTokens: 2048,
         signal: controller.signal,
-        readCurrentTarget: () => readCurrentModelTarget(prepared, idx),
+        readCurrentTarget: () => readCurrentModelTarget(prepared),
         onStale: (recovery) => setStaleModelResult(recovery),
-        apply: async (response) => {
-          const parsed = parseReplyOutput(response);
+        apply: (response) => {
+          const parsed = parseReplyOutput(response, true);
+          const sourceName = srcRel || "doc.md";
+          const slash = sourceName.lastIndexOf("/");
+          const srcDir = slash >= 0 ? sourceName.slice(0, slash + 1) : "";
+          const stem = sourceName.replace(/\.md$/, "").split("/").pop() || "doc";
+          const datePrefix = formatLocalSecondStamp(new Date());
           const label = parsed.title
             ? slugifyFilename(parsed.title.replace(/\.md$/i, ""))
             : `${stem}-receive`;
-          newPath = uniquePath(
+          const newPath = uniquePath(
             `${srcDir}${datePrefix}-${label}.md`,
             new Set(Object.keys(filesRef.current)),
           );
           const runs = [{ voice: modelVoice, text: parsed.body }];
-          pendingPaths.current.add(newPath);
           editFile(newPath, runs);
+          if (llmMeta) setPendingLlmMeta(newPath, llmMeta);
+          mirrorPad(folder.id, newPath, {
+            content: parsed.body,
+            tags: [],
+            nodeId: "",
+            runs,
+          });
           const destIdx = idx + 1;
           spawnPanel(destIdx);
           openInPanel(newPath, destIdx);
-          try {
-            if (llmMeta) setPendingLlmMeta(newPath, llmMeta);
-            await backendRef.current.writeFile(
-              newPath,
-              parsed.body,
-              [],
-              signer,
-              runs,
-              undefined,
-            );
-          } catch (error) {
-            console.warn(`[receive] writeFile failed for ${newPath}:`, error);
-          } finally {
-            clearPendingLlmMeta(newPath);
-          }
         },
       });
       if (result.status === "cancelled") {
@@ -9434,19 +10607,19 @@ function App() {
         return;
       }
       if (result.status === "stale") {
-        setOpStatus(idx, "error", "MODEL response held because focus or the source changed");
+        setOpStatus(idx, "error", "MODEL response held because focus or the source changed", "receive");
         return;
       }
+      recordModelLessonResult(prepared, result.response);
       setOpStatus(idx, "done", undefined, "receive");
     } catch (e) {
       if (controller.signal.aborted) {
         setOpStatus(idx, "idle");
         return;
       }
-      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e), "receive");
     } finally {
       summonAbort.current[idx] = null;
-      if (newPath) pendingPaths.current.delete(newPath);
     }
   }
 
@@ -9477,11 +10650,11 @@ function App() {
     );
   }
 
-  /** Dispatch a top-bar action to the op-target panel. The LLM ops step their
-   *  output as the MODEL voice; Save/zine step as the AUTHOR voice.
+  /** Dispatch a top-bar action to the op-target panel. MODEL ops apply dirty
+   *  attributed buffers; Step/Send later checkpoint them as the AUTHOR owner.
    *
-   *  Extend/Settle/Stir apply into the target panel's mounted CodeMirror view,
-   *  so they need that view live AND showing the selected
+   *  Extend/Settle/Stir stream into the target panel's mounted CodeMirror view
+   *  via view.dispatch, so they need that view live AND showing the selected
    *  file. opTargetPanel prefers a panel whose active tab is the file (view
    *  mounted there), but a file that's only a background tab — or a focused
    *  panel stuck on its empty/folder state — leaves no editor mounted, and
@@ -9491,7 +10664,12 @@ function App() {
    *  before dispatching. Reply/Step/Send/Attest don't stream into the view
    *  (Reply writes a sibling file; the rest step), so they're left as-is. */
   async function runOp(idx: number, op: OpKind) {
-    // Mint and Oblivion are read-only: no LLM/content op may write into either
+    if (!canSignWithSecrets()) {
+      setOpStatus(idx, "error", "authoring is available in the unlocked desktop press", op);
+      return;
+    }
+    // Mint, Scan, and Oblivion are read-only: no LLM/content op may write into
+    // any of them
     // system region. Send is allowed for an immutable Mint coin because it
     // changes reachability, not content; Attest is also non-mutating.
     if (op !== "attest") {
@@ -9499,14 +10677,14 @@ function App() {
       if (
         target &&
         !isFolderTab(target) &&
-        (isOblivion(target) || (isMint(target) && op !== "send"))
+        (isScan(target) || isOblivion(target) || (isMint(target) && op !== "send"))
       ) {
-        setOpStatus(idx, "error", "Mint and Oblivion are read-only — fork or restore into Root first");
+        setOpStatus(idx, "error", "Scan and Oblivion are read-only — adopt, fork, or restore into Root first", op);
         return;
       }
     }
     if (op === "extend" || op === "settle" || op === "stir") {
-      const path = selection?.path;
+      const path = uiFocus?.kind === "file" ? uiFocus.path : undefined;
       if (path && !isFolderTab(path) && panels[idx]?.tabs.includes(path)) {
         const needSwap = panels[idx].active !== path;
         if (needSwap) {
@@ -9516,7 +10694,7 @@ function App() {
           // Empty/folder panel: no editor yet — wait for the mount.
           const v = await awaitViewMount(idx);
           if (!v) {
-            setOpStatus(idx, "error", "no editor mounted for this panel — click the file's tab first");
+            setOpStatus(idx, "error", "no editor mounted for this panel — click the file's tab first", op);
             return;
           }
         } else if (needSwap) {
@@ -9529,7 +10707,7 @@ function App() {
     if (op === "extend") void extendLLM(idx);
     // Settle has two modes. When the op-target panel focuses a FOLDER tab,
     // run de-dupe: collapse near-duplicate files in the scope subtree into one
-    // voiced revision (the gesture that cleans up scan-introduced redundancy).
+    // voiced revision (the gesture that cleans up adopted/imported redundancy).
     // Otherwise the intra-file condenser (condense loose prose, keep brackets).
     else if (op === "settle") {
       const active = panels[idx]?.active;
@@ -9576,7 +10754,7 @@ function App() {
       recipeId?: string;
       recipeLabel?: string;
       workspaceId?: string;
-      scopes?: readonly AutomationScope[];
+      scopes?: AutomationScopes;
     } = { trigger: "manual" },
   ) {
     const idx = opTargetPanel();
@@ -9585,17 +10763,17 @@ function App() {
       setOpStatus(idx, "error", "open the recipe's bound workspace before running it", "run");
       return;
     }
-    const runScopes: AutomationScope[] = (launch.scopes?.length
-      ? launch.scopes
-      : scopeRef.current
-    ).map((item) => ({ kind: item.kind, path: item.path }));
+    const sourceScope = launch.scopes?.[0] ?? scopeRef.current[0];
+    const runScopes: AutomationScopes = sourceScope
+      ? [{ kind: sourceScope.kind, path: sourceScope.path }]
+      : [];
     if (!automationScopesAvailable(runScopes)) {
       setOpStatus(idx, "error", "the recipe's bound scope no longer exists — update the recipe", "run");
       return;
     }
     const provider = providers.find((p) => p.id === providerId) ?? null;
     if (!provider) {
-      setOpStatus(idx, "error", "no provider — add one in Models");
+      setOpStatus(idx, "error", "no provider — add one in Models", "run");
       return;
     }
     const startedAtMs = Date.now();
@@ -9624,7 +10802,7 @@ function App() {
     const runId = `run-${startedAtMs.toString(36)}-${short}`;
     const modelRootSecret = modelSecretKey();
     if (!modelRootSecret) {
-      setOpStatus(idx, "error", "unlock a MODEL signing key before running");
+      setOpStatus(idx, "error", "unlock a MODEL signing key before running", "run");
       return;
     }
     const modelVoice = ensureModelVoice(modelRootSecret, provider.modelId, provider.label);
@@ -9633,7 +10811,7 @@ function App() {
     const isRunPath = (path: string) => path === runPath || path.startsWith(`${runPath}/`);
     const stillInWorkspace = () => folderIdRef.current === runWorkspaceId;
     const scopedRead = (path: string) =>
-      isRunPath(path) || pathInEffectiveScopes(runScopes, runShielded, path);
+      isRunPath(path) || isInScope(runScopes, runShielded, path);
 
     const ctx: AgentCtx = {
       nostrSecret: modelRootSecret,
@@ -9755,11 +10933,11 @@ function App() {
     const contextPath = panelPath &&
       !isFolderTab(panelPath) &&
       filesRef.current[panelPath]?.kind !== "folder" &&
-      pathInEffectiveScopes(runScopes, runShielded, panelPath)
+      isInScope(runScopes, runShielded, panelPath)
       ? panelPath
       : Object.keys(filesRef.current).find((path) =>
         filesRef.current[path]?.kind !== "folder" &&
-        pathInEffectiveScopes(runScopes, runShielded, path),
+        isInScope(runScopes, runShielded, path),
       );
     if (contextPath && stillInWorkspace()) {
       ctx.seedContext = await gatherContextBlock(
@@ -9802,29 +10980,23 @@ function App() {
     }
   }
 
-  /** Resolve which panel an op should target given the current selection.
-   *  Prefer a panel where the selected file is the *active* tab — that's the
-   *  panel whose CodeMirror view is actually mounted (FileEditor mounts only
-   *  for a panel's active tab), so extend/settle/stir (which stream via
-   *  view.dispatch) get a live editor. Only fall back to a panel that holds
-   *  the file as a background tab, then to the focused panel. A folder/span
-   *  selection has no file tab to match, so it goes straight to the focused
-   *  panel. Clamped to a valid index. The action palette's ACTIONS row calls this to
-   *  point ops at the selected trace. */
+  /** Route every AUTHOR/MODEL gesture through the exact live focus locus.
+   * Replay projections can be frontmost, but they never become op targets. */
   function opTargetPanel(): number {
-    const sp = selection?.path;
-    if (sp) {
-      // Active-tab match wins: the editor is mounted there.
-      const activeHit = panels.findIndex((p) => p.active === sp);
-      if (activeHit !== -1) return activeHit;
-      // Otherwise any panel holding the file as a background tab. The view may
-      // not be mounted here (the panel's active tab is something else), in
-      // which case beginOp will surface a clear error rather than silently
-      // no-oping — better than guessing wrong with no feedback.
-      const tabHit = panels.findIndex((p) => p.tabs.includes(sp));
-      if (tabHit !== -1) return tabHit;
+    const focus = uiFocusRef.current;
+    if (focus) {
+      const panel = panels[focus.panelIndex];
+      if (
+        panel &&
+        !panel.replayOwned &&
+        panel.active === focus.tabPath &&
+        panel.tabs.includes(focus.tabPath)
+      ) {
+        return focus.panelIndex;
+      }
     }
-    return Math.min(activePanel, panels.length - 1);
+    const live = removeReplayPanels(panels, activePanel);
+    return live.panels.length > 0 ? live.activePanel : 0;
   }
 
   /** Derive the AUTHOR primary slot from the focused editor selection. An
@@ -9844,7 +11016,7 @@ function App() {
         );
       }
     }
-    return selection?.kind === "coin" ? "coin" : "none";
+    return uiFocus?.kind === "coin" ? "coin" : "none";
   }
 
   /** Resolve the selected Coin from either editor markup (Markdown or Preview)
@@ -9867,10 +11039,10 @@ function App() {
         path: panels[targetPanel]?.active ?? "",
       };
     }
-    if (selection?.kind !== "coin" || !selection.nodeId) return null;
+    if (uiFocus?.kind !== "coin" || !uiFocus.nodeId) return null;
     return {
-      nodeId: selection.nodeId,
-      phrase: selection.phrase ?? "",
+      nodeId: uiFocus.nodeId,
+      phrase: uiFocus.phrase ?? "",
       path: panels[targetPanel]?.active ?? "",
     };
   }
@@ -9885,9 +11057,9 @@ function App() {
       const label = coin.phrase ? `Coin: ${coin.phrase}` : `Coin ${coin.nodeId.slice(0, 8)}`;
       return { path: label, kind: "coin", nodeId: coin.nodeId };
     }
-    if (selection?.kind === "folder") {
-      const path = selection.path ?? ROOT;
-      const nodeId = selection.nodeId ?? files[path]?.nodeId;
+    if (uiFocus?.kind === "folder") {
+      const path = uiFocus.path ?? ROOT;
+      const nodeId = uiFocus.nodeId ?? files[path]?.nodeId;
       return nodeId ? { path, kind: "folder", nodeId } : null;
     }
     const path = panels[opTargetPanel()]?.active;
@@ -9950,18 +11122,32 @@ function App() {
   function paletteSendAutoSteps(): boolean {
     const path = panels[opTargetPanel()]?.active;
     const file = path ? files[path] : undefined;
-    if (!path || !file || file.kind === "folder" || isMint(path) || isOblivion(path)) {
+    if (
+      !path ||
+      !file ||
+      file.kind === "folder" ||
+      isMint(path) ||
+      isScan(path) ||
+      isOblivion(path)
+    ) {
       return false;
     }
     return planDelivery("send", unsteppedPathSet.has(path), file.nodeId) === "append-and-send";
   }
 
-  /** A current trace has nothing for Step to record. A missing head remains
-   *  Step-able because the gesture creates the trace's first node. */
+  /** Every writable trace permits an explicit Step. Even an unchanged buffer
+   *  records a deliberate checkpoint, while a missing head creates genesis. */
   function paletteStepIsAvailable(): boolean {
     const path = panels[opTargetPanel()]?.active;
     const file = path ? files[path] : undefined;
-    if (!path || !file || file.kind === "folder" || isMint(path) || isOblivion(path)) {
+    if (
+      !path ||
+      !file ||
+      file.kind === "folder" ||
+      isMint(path) ||
+      isScan(path) ||
+      isOblivion(path)
+    ) {
       return false;
     }
     return planDelivery("step", unsteppedPathSet.has(path), file.nodeId) !== "unavailable";
@@ -9993,12 +11179,12 @@ function App() {
     if (op === "send") setSendFailure(null);
     const signer = secretKeyForVoice(pubkey);
     if (!signer) {
-      const error = new Error(`no key for voice ${pubkey.slice(0, 8)}…`);
-      setOpStatus(idx, "error", error.message);
+      const error = new Error(`no key for voice ${formatPubkey(pubkey)}`);
+      setOpStatus(idx, "error", error.message, op);
       if (op === "send") setSendFailure(describeSendFailure(error));
       return;
     }
-    if (op === "step" && !isMint(path) && !isOblivion(path)) {
+    if (op === "step" && !isMint(path) && !isScan(path) && !isOblivion(path)) {
       const view = panelViews.current[idx];
       if (view) {
         const { from, to } = view.state.selection.main;
@@ -10018,41 +11204,43 @@ function App() {
           return;
         }
         if (paletteState === "coin") {
-          setOpStatus(idx, "error", "This passage is already an immutable Coin");
+          setOpStatus(idx, "error", "This passage is already an immutable Coin", op);
           return;
         }
         if (paletteState === "invalid") {
-          setOpStatus(idx, "error", "Select loose text or one pending [[ bracket ]] to Mint");
+          setOpStatus(idx, "error", "Select loose text or one pending [[ bracket ]] to Mint", op);
           return;
         }
       }
-      if (selection?.kind === "coin") {
-        setOpStatus(idx, "error", "This passage is already an immutable Coin");
-        return;
-      }
-      if (planDelivery("step", unsteppedPathSet.has(path), files[path].nodeId) === "unavailable") {
-        setOpStatus(idx, "error", "No updates since the last Step");
+      if (uiFocus?.kind === "coin") {
+        setOpStatus(idx, "error", "This passage is already an immutable Coin", op);
         return;
       }
     }
     setOpStatus(idx, "running", undefined, op);
     try {
+      if (isScan(path)) {
+        throw new Error("Scanned sources are immutable; adopt into Root before authoring or sending");
+      }
       if (isMint(path) && op === "step") {
         throw new Error("Mint coins are immutable; Send the existing trace or fork it into Root");
       }
       const plan = isMint(path)
         ? "send-latest"
         : planDelivery(op, unsteppedPathSet.has(path), files[path].nodeId);
-      if (plan === "unavailable") {
-        throw new Error("No updates since the last Step");
-      }
       const createsStep = plan !== "send-latest";
       let steppedId: string | undefined;
       if (plan === "append-local-step") {
         steppedId = await stepFile(path, signer, true, true);
       } else if (plan === "append-and-send") {
-        // Pending state: append one Step and publish it to every write relay.
-        steppedId = await stepFile(path, signer, false, false);
+        // Pending state is always made durable at home first. Publication is a
+        // second, independently failing phase, so a dead external relay cannot
+        // erase the Step the author just requested.
+        steppedId = await stepFile(path, signer, true, false);
+        if (!steppedId) throw new Error("Step did not produce a durable node");
+        const event = await fetchEventById(steppedId);
+        if (!event) throw new Error("new Step is unavailable on the home relay");
+        await sendStep(event, signer);
       } else if (plan === "send-latest") {
         // Current state: Send the latest Step without manufacturing another.
         steppedId = files[path].nodeId;
@@ -10080,9 +11268,31 @@ function App() {
       }
       setOpStatus(idx, "done", undefined, op);
       flashPanelFn(idx);
+      if (
+        op === "step" &&
+        steppedId &&
+        onboardingStageRef.current === "awaiting-step"
+      ) {
+        commitOnboardingStage("awaiting-replay");
+      } else if (
+        op === "step" &&
+        steppedId &&
+        onboardingStageRef.current === "context-step" &&
+        path === modelLessonResume?.targetPath
+      ) {
+        const nextLesson: ModelLessonResume = {
+          ...modelLessonResume,
+          resultNodeId: steppedId,
+        };
+        setModelLessonResume(nextLesson);
+        commitOnboardingStage(
+          reduceOnboardingStage(onboardingStageRef.current, "result-stepped"),
+          nextLesson,
+        );
+      }
     } catch (e) {
       console.warn(`[deliver] step failed for ${path} as ${pubkey.slice(0, 8)}…:`, e);
-      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e), op);
       if (op === "send") setSendFailure(describeSendFailure(e));
     }
   }
@@ -10104,7 +11314,7 @@ function App() {
     const statusIdx = idx === -1 ? Math.min(activePanel, panels.length - 1) : idx;
     const signer = secretKeyForVoice(pubkey);
     if (!signer) {
-      setOpStatus(statusIdx, "error", `no key for voice ${pubkey.slice(0, 8)}…`);
+      setOpStatus(statusIdx, "error", `no key for voice ${formatPubkey(pubkey)}`, "attest");
       return;
     }
     setOpStatus(statusIdx, "running", undefined, "attest");
@@ -10120,7 +11330,8 @@ function App() {
           file.nodeId,
         );
         if (delivery === "append-and-send") {
-          citedId = await stepFile(path, signer, false, false);
+          // Preserve the exact candidate locally before attempting Send.
+          citedId = await stepFile(path, signer, true, false);
           createsStep = true;
         } else {
           citedId = file.nodeId;
@@ -10150,10 +11361,100 @@ function App() {
         [citedId]: (prev[citedId] ?? 0) + 1,
       }));
       setSentNodeStatus((prev) => ({ ...prev, [citedId]: true }));
-      setOpStatus(statusIdx, "done");
+      setOpStatus(statusIdx, "done", undefined, "attest");
     } catch (e) {
       console.warn(`[attest] failed for ${path} as ${pubkey.slice(0, 8)}…:`, e);
-      setOpStatus(statusIdx, "error", e instanceof Error ? e.message : String(e));
+      setOpStatus(statusIdx, "error", e instanceof Error ? e.message : String(e), "attest");
+    }
+  }
+
+  function updateHistoricalAction(
+    nodeId: string,
+    action: "send" | "attest",
+    phase: HistoricalActionPhase,
+    message?: string,
+  ) {
+    setHistoricalActionStatus((prev) => ({
+      ...prev,
+      [nodeId]: {
+        send: prev[nodeId]?.send ?? "idle",
+        attest: prev[nodeId]?.attest ?? "idle",
+        [action]: phase,
+        ...(message ? { message } : {}),
+      },
+    }));
+  }
+
+  /** Replay-local Send publishes the exact displayed immutable event. It does
+   * not Step, move TraceHead, switch tabs, or alter UiFocus. */
+  async function sendHistoricalNode(nodeId: string) {
+    updateHistoricalAction(nodeId, "send", "running");
+    try {
+      if (!canSignWithSecrets()) {
+        throw new Error("Historical Send is available in the unlocked desktop press");
+      }
+      const event = await fetchEventById(nodeId);
+      if (!event) throw new Error("Historical Step is unavailable on the home relay");
+      if (!secretKeyForVoice(event.pubkey)) {
+        throw new Error("Historical Send is only available for a locally owned Step");
+      }
+      await sendHistoricalStep(event);
+      setSentNodeStatus((prev) => ({ ...prev, [nodeId]: true }));
+      updateHistoricalAction(nodeId, "send", "done");
+    } catch (error) {
+      updateHistoricalAction(
+        nodeId,
+        "send",
+        "error",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  /** Historical Attest composes only the exact node's reachability prerequisite.
+   * It can Send that old event, but it can never append a live Step. */
+  async function attestHistoricalNode(
+    nodeId: string,
+    geohash?: string,
+    message?: string,
+  ) {
+    updateHistoricalAction(nodeId, "attest", "running");
+    const signer = secretKeyForVoice(authorPubkey);
+    if (!signer) {
+      updateHistoricalAction(
+        nodeId,
+        "attest",
+        "error",
+        `no key for voice ${formatPubkey(authorPubkey)}`,
+      );
+      return;
+    }
+    try {
+      if (!(await isTraceNodeSent(nodeId))) {
+        updateHistoricalAction(nodeId, "send", "running");
+        const event = await fetchEventById(nodeId);
+        if (!event) throw new Error("Historical Step is unavailable on the home relay");
+        await sendHistoricalStep(event);
+        setSentNodeStatus((prev) => ({ ...prev, [nodeId]: true }));
+        updateHistoricalAction(nodeId, "send", "done");
+      }
+      await attestNode(nodeId, undefined, {
+        signer,
+        ...(message ? { message } : {}),
+        ...(geohash ? { geohash } : {}),
+      });
+      setAttestationCounts((prev) => ({
+        ...prev,
+        [nodeId]: (prev[nodeId] ?? 0) + 1,
+      }));
+      updateHistoricalAction(nodeId, "attest", "done");
+    } catch (error) {
+      updateHistoricalAction(
+        nodeId,
+        "attest",
+        "error",
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
@@ -10248,22 +11549,17 @@ function App() {
   }
 
   /** Factory reset is a first-run boundary, not a workspace preference reset.
-   *  Desktop first purges the local sidecar's event store + old peer ACL; only
-   *  after that succeeds do we clear the webview's entire localStorage and
-   *  reload. Clearing `zine.root` makes boot mint a new root genesis, and its
-   *  virtual oblivion region therefore starts empty too. Remote relay copies
-   *  are outside this machine and cannot be recalled. */
+   *  Desktop purges the local sidecar, releases and deletes the secure vault,
+   *  clears the webview's entire localStorage, and reloads into vault creation.
+   *  Clearing `zine.root` makes boot mint a new root genesis, and its virtual
+   *  oblivion region therefore starts empty too. Remote relay copies are
+   *  outside this machine and cannot be recalled. */
   async function factoryReset() {
     if (resetBusy) return;
     setResetBusy(true);
     setResetError(null);
     try {
-      if (isTauri()) {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("factory_reset");
-      }
-      localStorage.clear();
-      window.location.reload();
+      await resetLocalApp();
     } catch (e) {
       setResetError(e instanceof Error ? e.message : String(e));
       setResetBusy(false);
@@ -10355,16 +11651,16 @@ function App() {
         ? [{ voice: candidate.ownerPubkey, text: snapshot, src: candidate.headId }]
         : [{ voice: authorVoice(), text: snapshot }]);
     const tags = files[path]?.tags ?? [];
-    const taggedTraces = files[path]?.taggedTraces;
+    const citationIds = files[path]?.citationIds;
     const nextFile: FileState = {
       ...(files[path] ?? { tags: [], runs: [], nodeId: "" }),
       runs,
       nodeId: event.id,
       tags,
-      taggedTraces,
+      citationIds,
     };
     setFiles((prev) => ({ ...prev, [path]: nextFile }));
-    await backendRef.current.writeFile(path, snapshot, tags, undefined, runs, undefined, taggedTraces);
+    await backendRef.current.writeFile(path, snapshot, tags, undefined, runs, undefined, citationIds);
     const local = loadLocalFolder(folder!.id);
     const cur = local?.files[path];
     if (cur) {
@@ -10374,7 +11670,7 @@ function App() {
         nodeId: event.id,
         runs,
         voicePubkey: cur.voicePubkey,
-        taggedTraces: cur.taggedTraces,
+        citationIds: cur.citationIds,
       });
     }
     seedSteppedRef.current({ [path]: nextFile });
@@ -10495,16 +11791,16 @@ function App() {
         staged.merged,
       ) ?? [{ voice: authorVoice(), text: staged.merged }];
       const tags = files[staged.path]?.tags ?? [];
-      const taggedTraces = files[staged.path]?.taggedTraces;
+      const citationIds = files[staged.path]?.citationIds;
       const nextFile: FileState = {
         ...(files[staged.path] ?? { tags: [], runs: [], nodeId: "" }),
         runs,
         nodeId: event.id,
         tags,
-        taggedTraces,
+        citationIds,
       };
       setFiles((prev) => ({ ...prev, [staged.path]: nextFile }));
-      await backendRef.current.writeFile(staged.path, staged.merged, tags, undefined, runs, undefined, taggedTraces);
+      await backendRef.current.writeFile(staged.path, staged.merged, tags, undefined, runs, undefined, citationIds);
       const local = loadLocalFolder(folder.id);
       const cur = local?.files[staged.path];
       if (cur) {
@@ -10514,7 +11810,7 @@ function App() {
           nodeId: event.id,
           runs,
           voicePubkey: cur.voicePubkey,
-          taggedTraces: cur.taggedTraces,
+          citationIds: cur.citationIds,
         });
       }
       seedSteppedRef.current({ [staged.path]: nextFile });
@@ -10546,7 +11842,19 @@ function App() {
         // instantly and background-pulls the relay for any newer content. Disk
         // is never read here — it's touched only by Scan (acquire) and Reify
         // (emit) gestures, never on boot.
-        const scanned = (await backendRef.current.attach(folder)).files;
+        const scanned = (
+          await backendRef.current.attach(folder, (path, file) => {
+            if (cancelled) return;
+            setFiles((prev) => {
+              if (file) return { ...prev, [path]: file };
+              if (!(path in prev)) return prev;
+              const next = { ...prev };
+              delete next[path];
+              return next;
+            });
+            if (file) seedSteppedRef.current({ [path]: file });
+          })
+        ).files;
         if (cancelled) return;
         setFiles(scanned);
         openScanned(scanned, folder.id);
@@ -10648,17 +11956,10 @@ function App() {
   }, [tabCtxMenu]);
 
 
-  /** Scan: acquire a foreign snapshot from a substrate. The user picks a file
-   *  or folder (an external disk path); each scanned file lands as a NEW trace
-   *  under the scope-folder. Always additive — scanning the same path twice
-   *  yields two copies (counter-suffixed via uniquePath), never an overwrite.
-   *  A held trace is never mutated by a scan; that's the whole point.
-   *
-   *  The picked snapshot is read OUTSIDE the attached root (scan_external does
-   *  not confine to root — that's the substrate-acquisition contract). Each
-   *  file is stepped to disk-under-root + the relay, attributed to the SUBSTRATE's
-   *  own voice — the substrate is a peer with a keypair, so scanned content is
-   *  signed by it, not the authoring key. Desktop-only. */
+  /** Scan: acquire a foreign snapshot into the private Scan inbox. A folder
+   *  retains its picked outer directory and repeated scans suffix that wrapper
+   *  as one batch. Every imported file is a new substrate-signed trace; Scan's
+   *  membership remains author-owned and local-only, separate from Root. */
   async function onScan(kind: "file" | "folder") {
     if (!folder) return;
     const idx = opTargetPanel();
@@ -10668,37 +11969,22 @@ function App() {
     try {
       scanned = await scanExternal(picked);
     } catch (e) {
-      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e), "scan");
       return;
     }
     if (scanned.length === 0) return;
     // The substrate speaks with its own voice: content scanned in from it is
     // signed by its key, never the authoring key. Auto-provisions on first use.
-    const substrateVoice = getSubstrateVoice(substrate);
+    const substrateVoice = await getSubstrateVoice(substrate);
     const voice = substrateVoice.publicKey;
     const signer = substrateVoice.secretKey;
-    // Land under the primary scope item: inside a folder, beside a file, or at
-    // ROOT when scope is empty. Multi-scope context remains a union, but Scan
-    // needs one deterministic destination.
-    const primaryScope = scopeRef.current[0];
-    const destFolder =
-      primaryScope?.kind === "folder"
-        ? primaryScope.path
-        : primaryScope?.kind === "file"
-          ? parentPath(primaryScope.path)
-          : ROOT;
-    const taken = new Set(Object.keys(files));
-    const created: { path: string; content: string }[] = [];
-    for (const f of scanned) {
-      // Clean the relative name so it satisfies the folder-name constraints
-      // (folder segments must be valid nostr t-tags). Slugify each segment.
-      const segs = f.relativePath.split("/").map((s) => slugifyFilename(s, s) || "file");
-      const clean = segs.join("/");
-      const candidate = destFolder === ROOT ? clean : `${destFolder}/${clean}`;
-      const unique = uniquePath(candidate, taken);
-      taken.add(unique);
-      created.push({ path: unique, content: f.content });
-    }
+    const sourceRootId = folder.id;
+    const created = planScanIntake(
+      kind,
+      picked,
+      scanned,
+      new Set([...Object.keys(filesRef.current), ...pendingPaths.current]),
+    );
     // Optimistic insert: each new trace appears immediately, attributed to the
     // substrate voice, marked pending so any in-flight op's hold can't drop it.
     setFiles((prev) => {
@@ -10709,60 +11995,223 @@ function App() {
       }
       return next;
     });
-    // Step each: writes the file under the attached root (the import lands on
-    // disk under root too, as a free reify-on-import) and steps the relay node,
-    // signed by the substrate's key.
+    const completed = new Set<string>();
     try {
+      const rootOwner = await fetchFolderOwner(sourceRootId);
+      if (!rootOwner) throw new Error("cannot verify the Root owner for Scan intake");
+      const rootSigner = folderWriteSigner(rootOwner, signer);
+      if (!rootSigner) throw new Error("the Root owner key is unavailable for Scan intake");
+      const scanFolderId = await getOrCreateScanFolder(sourceRootId, rootSigner);
+      const scanOwner = await fetchFolderOwner(scanFolderId);
+      if (!scanOwner) throw new Error("cannot verify the Scan folder owner");
+      const folderSigner = folderWriteSigner(scanOwner, rootSigner);
+      if (!folderSigner) throw new Error("the Scan folder owner key is unavailable");
       for (const c of created) {
-        await backendRef.current.writeFile(c.path, c.content, [], signer, [{ voice, text: c.content }]);
+        const relativePath = c.path.slice(`${SCAN}/`.length);
+        const contentHash = await sha256HexLocal(c.content);
+        const runs: Run[] = c.content ? [{ voice, text: c.content }] : [];
+        const event = await publishEdit({
+          prevEventId: null,
+          relativePath,
+          folderId: scanFolderId,
+          deltas: diffToDeltas("", c.content),
+          snapshot: c.content,
+          contentHash,
+          action: "import",
+          authors: runs,
+          signer,
+          localOnly: true,
+        });
+        await upsertManifestEntry(
+          scanFolderId,
+          {
+            kind: "file",
+            relativePath,
+            latestNodeId: event.id,
+            contentHash,
+          },
+          folderSigner,
+          { localOnly: true },
+        );
+        saveLocalFile(sourceRootId, c.path, {
+          content: c.content,
+          tags: [],
+          nodeId: event.id,
+          runs,
+          voicePubkey: voice,
+        });
+        seedSteppedRef.current({
+          [c.path]: { runs, nodeId: event.id, tags: [] },
+        });
         pendingPaths.current.delete(c.path);
+        completed.add(c.path);
+        if (folderIdRef.current === sourceRootId) {
+          setFiles((prev) => ({
+            ...prev,
+            [c.path]: { runs, nodeId: event.id, tags: [] },
+          }));
+        }
       }
       // Open the first imported file in the active panel.
       if (created.length > 0) openInActivePanel(created[0].path);
-      setOpStatus(idx, "done", `${created.length} scanned`);
+      setOpStatus(idx, "done", `${created.length} scanned`, "scan");
     } catch (e) {
-      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
+      for (const c of created) {
+        if (!completed.has(c.path)) pendingPaths.current.delete(c.path);
+      }
+      setFiles((prev) => {
+        const next = { ...prev };
+        for (const c of created) {
+          if (!completed.has(c.path) && next[c.path]?.nodeId === "") delete next[c.path];
+        }
+        return next;
+      });
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e), "scan");
     }
   }
 
-  /** Reify: the emission instant — flush a trace out to a picked destination
-   *  folder on disk. The inverse of scan. The trace's content (reconstructed
-   *  from the in-memory runs the app holds) is written to the destination
-   *  under its relative path. The app keeps its trace; reify serializes a copy
-   *  out to a substrate. Desktop-only.
+  /** Reify: materialize exact stepped nuclei under ordinary paths. The inverse
+   *  of Scan. Live editor runs are intentionally excluded: each file body is
+   *  parsed from the signed node named by FileState.nodeId. Pending work can be
+   *  stepped first as an explicit option, but is never folded into the export
+   *  implicitly. Desktop-only.
    *
-   *  Every scoped file is emitted; scoped folders expand recursively; shielded
-   *  descendants below each explicit scope root are omitted. */
-  async function onReifyOp() {
+   *  Palette requests emit every scoped file and honor shielded descendants.
+   *  Tree-menu requests emit the explicitly chosen file or recursive folder,
+   *  including Scan and Mint. The trace is a separate opt-in .zine sidecar
+   *  because it can disclose private Steps. */
+  function scopedReifyTargets(explicitTarget?: ScopeRef): {
+    path: string;
+    relativePath: string;
+    nodeId: string;
+  }[] {
+    // The palette Reifies the exact effective prompt scope. A context-menu
+    // request instead targets the clicked tree item directly, including the
+    // otherwise-unmountable Scan and Mint regions.
+    const scopes = scopeRef.current;
+    const soleFolder = explicitTarget?.kind === "folder"
+      ? explicitTarget
+      : !explicitTarget && scopes[0]?.kind === "folder"
+        ? scopes[0]
+        : null;
+    const prefix = soleFolder && soleFolder.path !== ROOT ? `${soleFolder.path}/` : "";
+    // A tree-menu target names the live directory row. Historical export stays
+    // available through the palette while replay is active.
+    const candidates = replayDisplay && !explicitTarget
+      ? Object.entries(replayDisplay.files)
+          // A global historical cursor may predate a file's genesis. Omit that
+          // file rather than smuggling its live/future head into the export.
+          .filter(([path, file]) => !isFolderTab(path) && !!file.nodeId)
+          .map(([path, file]) => ({ path, nodeId: file.nodeId }))
+      : Object.entries(files)
+          .filter(([, file]) => file.kind !== "folder")
+          .map(([path, file]) => ({ path, nodeId: file.nodeId }));
+    const usedRelativePaths = new Set<string>();
+    return candidates
+      .filter(({ path }) => {
+        if (!explicitTarget) return isInScope(scopes, shieldedRef.current, path);
+        if (explicitTarget.kind === "file") return path === explicitTarget.path;
+        if (explicitTarget.path === ROOT) {
+          return !isMint(path) && !isScan(path) && !isOblivion(path);
+        }
+        return path.startsWith(`${explicitTarget.path}/`);
+      })
+      .map(({ path, nodeId }) => {
+        const relativePath = explicitTarget?.kind === "file"
+          ? systemPathDisplayName(path)
+          : soleFolder && soleFolder.path !== ROOT
+            ? path.slice(prefix.length)
+            : path;
+        return {
+          path,
+          // Mint's storage timestamp is identity metadata, not part of the
+          // ordinary filename the user sees or Reifies.
+          relativePath:
+            explicitTarget && isMint(path) ? systemPathDisplayName(path) : relativePath,
+          nodeId,
+        };
+      })
+      .sort(
+        (a, b) =>
+          a.relativePath.localeCompare(b.relativePath) || a.path.localeCompare(b.path),
+      )
+      .map((target) => {
+        const relativePath = uniquePath(target.relativePath, usedRelativePaths);
+        usedRelativePaths.add(relativePath);
+        return relativePath === target.relativePath ? target : { ...target, relativePath };
+      });
+  }
+
+  async function onReifyOp(options: {
+    stepCurrent: boolean;
+    includeTrace: boolean;
+    target?: ScopeRef;
+  }) {
     if (!folder) return;
     const idx = opTargetPanel();
-    // Reify the exact effective-scope union. A sole folder keeps the prior
-    // relative-to-folder output shape; mixed scopes keep workspace-relative
-    // paths so distinct roots cannot collide.
-    const scopes = scopeRef.current;
-    const soleFolder = scopes.length === 1 && scopes[0].kind === "folder" ? scopes[0] : null;
-    const prefix = soleFolder && soleFolder.path !== ROOT ? `${soleFolder.path}/` : "";
-    const entries: { relativePath: string; content: string }[] = Object.entries(files)
-      .filter(
-        ([p, s]) =>
-          s.kind !== "folder" &&
-          pathInEffectiveScopes(scopes, shieldedRef.current, p),
-      )
-      .map(([p, s]) => ({
-        relativePath: soleFolder && soleFolder.path !== ROOT ? p.slice(prefix.length) : p,
-        content: flatten(s.runs),
-      }));
-    if (entries.length === 0) {
-      setOpStatus(idx, "error", "Scope folder has no files to reify");
+    const targets = scopedReifyTargets(options.target);
+    if (targets.length === 0) {
+      setOpStatus(
+        idx,
+        "error",
+        options.target
+          ? "Selected item has no files to reify"
+          : "Scope folder has no files to reify",
+        "reify",
+      );
       return;
     }
     const dest = await chooseFolder();
     if (!dest) return; // user cancelled
+    setReifyPrompt(null);
+    setOpStatus(idx, "running", undefined, "reify");
     try {
+      if (options.includeTrace) {
+        const reserved = new Set([".zine/trace.json", ".zine/report.md"]);
+        const collision = targets.find((target) =>
+          reserved.has(target.relativePath.toLowerCase()),
+        );
+        if (collision) {
+          throw new Error(`${collision.relativePath} conflicts with the trace sidecar`);
+        }
+      }
+
+      if (options.stepCurrent) {
+        const signer = secretKeyForVoice(authorPubkey);
+        if (!signer) throw new Error(`no key for voice ${formatPubkey(authorPubkey)}`);
+        for (const target of targets) {
+          if (!unsteppedPathSet.has(target.path) && target.nodeId) continue;
+          const steppedId = await stepFile(target.path, signer, true, false);
+          if (!steppedId) throw new Error(`${target.path} did not produce a durable Step`);
+          target.nodeId = steppedId;
+          queueStepAnchor(steppedId, signer);
+        }
+      }
+
+      const missingStep = targets.find((target) => !target.nodeId);
+      if (missingStep) {
+        throw new Error(`${missingStep.path} has no Step; choose “Step current & Reify”`);
+      }
+      const exported = await prepareReifyExport(
+        targets.map((target) => ({
+          relativePath: target.relativePath,
+          nucleusId: target.nodeId,
+        })),
+        fetchEventById,
+        options.includeTrace,
+      );
+      const entries = exported.trace
+        ? [...exported.entries, ...traceSidecarEntries(exported.trace)]
+        : exported.entries;
       await reifyToDisk(dest, entries);
-      setOpStatus(idx, "done", `${entries.length} reified`);
+      setOpStatus(
+        idx,
+        "done",
+        `${exported.entries.length} reified${exported.trace ? " + trace" : ""}`,
+        "reify",
+      );
     } catch (e) {
-      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
+      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e), "reify");
     }
   }
 
@@ -10777,46 +12226,189 @@ function App() {
     );
   }
 
-  // The three "make this the active trace" entry points. Files additionally
-  // open into the active panel so the editor can display them; folders and
-  // coins just record the selection (folders are not editors; a coin
-  // may belong to a file that is already open). The file's kind-4290 nodeId is
-  // pulled from its FileState when present so ops can address the nucleus.
-  function selectFile(path: string) {
-    openInActivePanel(path);
-    const nodeId = files[path]?.nodeId;
-    setSelection({ kind: "file", path, nodeId });
+  function focusRefForTab(path: string): FocusRef | null {
+    if (!path || isCoinComposerTab(path)) return null;
+    if (isFolderTab(path)) {
+      const folderPath = folderTabPath(path);
+      return { kind: "folder", path: folderPath, nodeId: files[folderPath]?.nodeId };
+    }
+    if (isCoinTab(path)) {
+      const coin = files[path];
+      return {
+        kind: "coin",
+        path,
+        nodeId: coin?.nodeId,
+        phrase: coin ? flatten(coin.runs) : "",
+      };
+    }
+    return { kind: "file", path, nodeId: files[path]?.nodeId };
   }
-  /** Focus a file without moving scope, for non-tree navigation such as replay
-   *  and citation links. The Sidebar owns tree scope gestures separately. */
-  function focusFile(path: string) {
-    openInActivePanel(path);
-    setSelection({ kind: "file", path, nodeId: files[path]?.nodeId });
+
+  /** Open a real tab and make it the sole focus. If replay projections are
+   * mounted, compact them away first and target the corresponding live panel. */
+  function activateLiveTab(path: string, trace = focusRefForTab(path)) {
+    const current = panelsRef.current;
+    const live = removeReplayPanels(current, activePanel);
+    const targetPanel = live.panels.length > 0 ? live.activePanel : 0;
+    if (current.some((panel) => panel.replayOwned)) endReplay();
+    openInPanel(path, targetPanel);
+    setActivePanel(targetPanel);
+    commitUiFocus(trace ? locateFocus(trace, targetPanel, path) : null);
+  }
+
+  /** Open the one session-owned direct-Coin draft. Repeated activation focuses
+   * the existing tab so switching away and back never discards typed bytes. */
+  function openDirectCoinComposer() {
+    const current = panelsRef.current;
+    const existingPanel = current.findIndex((panel) =>
+      panel.tabs.includes(DIRECT_COIN_COMPOSER_TAB),
+    );
+    const targetPanel = existingPanel >= 0
+      ? existingPanel
+      : Math.min(activePanel, current.length - 1);
+    const next = mapPanel(current, targetPanel, (panel) => ({
+      ...panel,
+      tabs: panel.tabs.includes(DIRECT_COIN_COMPOSER_TAB)
+        ? panel.tabs
+        : [...panel.tabs, DIRECT_COIN_COMPOSER_TAB],
+      active: DIRECT_COIN_COMPOSER_TAB,
+    }));
+    if (existingPanel < 0) {
+      setDirectCoinDraft(emptyDirectCoinDraft());
+      setDirectCoinError(null);
+    }
+    panelsRef.current = next;
+    setPanels(next);
+    setActivePanel(targetPanel);
+    setEditorSelection(null);
+    chooseDirectorySelection([]);
+    commitUiFocus(null);
+  }
+
+  /** Keep direct-Coin KEdits in App state so the draft survives ordinary tab
+   * switches even though Panel only mounts its active surface. */
+  function editDirectCoinDraft(phrase: string) {
+    setDirectCoinError(null);
+    setDirectCoinDraft((draft) => {
+      const deltas = diffToDeltas(draft.phrase, phrase);
+      if (deltas.length === 0) return draft;
+      const tx = draft.nextTx;
+      const kedits = deltas.map((delta): KEdit => ({
+        op: delta.type === "insert" ? "ins" : delta.type === "delete" ? "del" : "repl",
+        from: delta.positionStart,
+        to: delta.positionEnd,
+        text: delta.newValue ?? "",
+        voice: authorPubkey,
+        t: delta.timestamp,
+        tx,
+      }));
+      return {
+        phrase,
+        kedits: [...draft.kedits, ...kedits],
+        nextTx: tx + 1,
+      };
+    });
+  }
+
+  /** Atomically turn the draft tab into the immutable Coin it produced. */
+  function replaceDirectCoinComposerTab(path: string) {
+    const current = panelsRef.current;
+    const composerPanel = current.findIndex((panel) =>
+      panel.tabs.includes(DIRECT_COIN_COMPOSER_TAB),
+    );
+    const targetPanel = composerPanel >= 0
+      ? composerPanel
+      : Math.min(activePanel, current.length - 1);
+    const next = mapPanel(current, targetPanel, (panel) => {
+      const draftIndex = panel.tabs.indexOf(DIRECT_COIN_COMPOSER_TAB);
+      const withoutDraftOrCoin = panel.tabs.filter(
+        (tab) => tab !== DIRECT_COIN_COMPOSER_TAB && tab !== path,
+      );
+      const at = draftIndex >= 0
+        ? Math.min(draftIndex, withoutDraftOrCoin.length)
+        : withoutDraftOrCoin.length;
+      const tabs = [
+        ...withoutDraftOrCoin.slice(0, at),
+        path,
+        ...withoutDraftOrCoin.slice(at),
+      ];
+      return { ...panel, tabs, active: path };
+    });
+    panelsRef.current = next;
+    setPanels(next);
+    setActivePanel(targetPanel);
+  }
+
+  // The four "make this the focused trace" entry points. Root files, folders,
+  // and Mint Coins open in real tabs; Oblivion remains a read-only inspection
+  // modal. The file's
+  // kind-4290 nodeId is pulled from its FileState when present so ops can
+  // address the nucleus.
+  function selectFile(path: string) {
+    const nodeId = files[path]?.nodeId;
+    chooseDirectorySelection([]);
+    activateLiveTab(path, { kind: "file", path, nodeId });
+  }
+  function selectCoin(path: string) {
+    const coin = files[path];
+    if (!coin || coin.kind === "folder" || !isCoinTab(path)) return;
+    const phrase = flatten(coin.runs);
+    setEditorSelection(null);
+    chooseDirectorySelection([]);
+    activateLiveTab(path, { kind: "coin", path, nodeId: coin.nodeId, phrase });
+  }
+  function selectOblivion(path: string) {
+    const file = files[path];
+    if (!file || file.kind === "folder" || !isOblivion(path)) return;
+    setEditorSelection(null);
+    chooseDirectorySelection([]);
+    setOblivionModalPath(path);
   }
   function selectFolder(path: string) {
     // Under nesting (spec §3.2), a folder-member FileState carries the
     // subfolder's genesis as nodeId. Carrying it on the selection lets ops
     // (Send, tag, cite) address a folder-member nucleus, symmetric with
-    // selectFile. Legacy/synthesized folders have no nodeId — undefined is fine.
+    // selectFile. Path-derived folders have no nodeId — undefined is fine.
     const nodeId = files[path]?.nodeId;
-    setSelection({ kind: "folder", path, nodeId });
+    const current = panelsRef.current;
+    const live = removeReplayPanels(current, activePanel);
+    const targetPanel = live.panels.length > 0 ? live.activePanel : 0;
+    const targetTab = live.panels[targetPanel]?.active ?? "";
+    if (current.some((panel) => panel.replayOwned)) endReplay();
+    chooseDirectorySelection([]);
+    setActivePanel(targetPanel);
+    commitUiFocus(locateFocus({ kind: "folder", path, nodeId }, targetPanel, targetTab));
+  }
+  function openFolder(path: string) {
+    const nodeId = files[path]?.nodeId;
+    chooseDirectorySelection([]);
+    activateLiveTab(folderTab(path), { kind: "folder", path, nodeId });
   }
   function selectSpan(nodeId: string, phrase: string) {
-    setSelection({ kind: "coin", nodeId, phrase });
+    // A node-only Coin has no directory row to highlight. Keep the semantic
+    // focus, but clear path-backed Explorer focus so the UI does not imply that
+    // the previously focused directory trace still owns it.
+    chooseDirectorySelection([]);
+    const host = uiFocusRef.current;
+    if (!host) return;
+    commitUiFocus(locateFocus({ kind: "coin", nodeId, phrase }, host.panelIndex, host.tabPath));
   }
-  /** Toggle a path's persistent shielded status. A folder excludes its subtree. */
-  function toggleShielded(path: string) {
+  /** Replace, clear, or exclude within the one prompt-context mount. */
+  function setContextMount(target: ScopeRef, mounted: boolean) {
     if (!folder) return;
-    setShielded((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) {
-        next.delete(path);
-      } else {
-        next.add(path);
-      }
-      saveLocalShielded(folder.id, next);
-      return next;
-    });
+    const next = applyContextMount(
+      scopeRef.current,
+      shieldedRef.current,
+      target,
+      mounted,
+    );
+    // Update refs at event time so a second rapid icon click observes the first
+    // gesture even before React commits the render.
+    scopeRef.current = next.mounts;
+    shieldedRef.current = next.shielded;
+    setScope(next.mounts);
+    setShielded(next.shielded);
+    saveLocalShielded(folder.id, next.shielded);
   }
   /** Curate a coin into the palette. Triggered by the copy button on
    *  a citation chip (Preview mode) — the chip still owns its own clipboard
@@ -10833,98 +12425,93 @@ function App() {
     }).catch((e) => console.warn("[zine] palette append failed:", e));
   }
 
-  // Keep the selected *file* trace's nodeId fresh: a sampled file, for instance,
-  // is selected before its FileState (and thus its kind-4290 nodeId) has loaded.
-  // Once that state arrives, promote the selection so ops can address the
-  // nucleus. Folder/span selections carry no path and are left untouched.
+  // Keep the focused path-backed trace's head fresh without changing its exact
+  // live panel/tab locus.
   useEffect(() => {
-    if (selection?.kind !== "file" || !selection.path) return;
-    const nodeId = files[selection.path]?.nodeId;
-    if (nodeId && nodeId !== selection.nodeId) {
-      setSelection({ ...selection, nodeId });
+    const focus = uiFocusRef.current;
+    if (!focus?.path) return;
+    const file = files[focus.path];
+    const nodeId = file?.nodeId;
+    const phrase = focus.kind === "coin"
+      ? (file ? flatten(file.runs) : focus.phrase)
+      : undefined;
+    const next = refreshFocusNode(focus, nodeId);
+    const currentPhrase = focus.kind === "coin" ? focus.phrase : undefined;
+    if (next !== focus || phrase !== currentPhrase) {
+      commitUiFocus({ ...next, ...(focus.kind === "coin" ? { phrase } : {}) });
     }
-  }, [selection, files]);
+  }, [files]);
 
-  // Mirror the focused panel's active tab into the trace selection so the
-  // MODEL op buttons (Extend/Settle/Stir/Reply) follow what the user is
-  // actually looking at. Selection is otherwise only set by explicit entry
-  // points (sidebar, palette, tab click), so without this it desyncs from focus
-  // — fresh boot left selection null (all ops disabled), and clicking into a
-  // background panel left it pointing at a stale/folder trace. Scope remains
-  // independently owned by the tree and is untouched by this effect.
-  //
-  // A span selection (from the palette) is preserved until the focused tab
-  // actually changes — selecting a span does not move the focus, so it survives
-  // here; the file/nodeId-freshness effect above keeps its host doc addressed.
+  // A live panel/tab switch is a focus gesture. Replay-owned panels are only
+  // projections and therefore leave the live locus untouched. The locus key
+  // also preserves a node-only Coin focus while its host tab remains stable.
+  const liveTabFocusKeyRef = useRef("");
   useEffect(() => {
-    const tab = panels[activePanel]?.active;
-    if (!tab) return;
-    if (isFolderTab(tab)) {
-      const folderPath = folderTabPath(tab);
-      if (selection?.kind !== "folder" || selection.path !== folderPath) {
-        setSelection({ kind: "folder", path: folderPath });
-      }
-    } else {
-      const nodeId = files[tab]?.nodeId;
-      if (
-        selection?.kind !== "file" ||
-        selection.path !== tab ||
-        (nodeId && selection.nodeId !== nodeId)
-      ) {
-        setSelection({ kind: "file", path: tab, nodeId });
-      }
-    }
+    const panel = panels[activePanel];
+    const tab = panel?.active;
+    if (!panel || panel.replayOwned) return;
+    const nextKey = `${activePanel}:${tab}`;
+    if (liveTabFocusKeyRef.current === nextKey) return;
+    liveTabFocusKeyRef.current = nextKey;
+    chooseDirectorySelection([]);
+    const trace = focusRefForTab(tab);
+    commitUiFocus(trace ? locateFocus(trace, activePanel, tab) : null);
   }, [activePanel, panels, files]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Span focus remains a selection observation for replaying a reading session.
+  // Coin focus remains a selection observation for replaying a reading session.
   // File/folder panel occupancy is
   // recorded by the transition effect below so switches and every close path
   // produce paired unmount/mount deltas exactly once.
   useEffect(() => {
-    if (!selection || selection.kind !== "coin") return;
-    const hostTab = panels[activePanel]?.active ?? "";
+    if (!uiFocus || uiFocus.kind !== "coin") return;
+    const hostTab = uiFocus.tabPath;
     const focusSel: FocusSelection = {
-      // Legacy wire token retained for existing replay data; product language
-      // and the live SelectionRef call this full trace a coin.
-      kind: "span",
-      nodeId: selection.nodeId ?? "",
-      phrase: selection.phrase ?? "",
+      kind: "coin",
+      nodeId: uiFocus.nodeId ?? "",
+      phrase: uiFocus.phrase ?? "",
       originPath: isFolderTab(hostTab) ? "" : hostTab,
     };
     const focusPath = focusSel.originPath || null;
-    const mounted = activeMounted(folder?.id ?? null, Object.keys(files));
+    const rootPaths = Object.keys(files).filter(
+      (path) => !isMint(path) && !isScan(path) && !isOblivion(path),
+    );
+    const mounted = activeMount(folder?.id ?? null, rootPaths);
     const owner = focusPath ? ownerFolderOf(focusPath, mounted) : folderIdRef.current;
     if (!owner) return;
-    const key = JSON.stringify({ focusSel, panelIndex: activePanel });
+    const key = JSON.stringify({ focusSel, panelIndex: uiFocus.panelIndex });
     if (lastFocusKeyRef.current === key) return;
     lastFocusKeyRef.current = key;
     const handle = window.setTimeout(() => {
       const stillOwned = focusPath
-        ? ownerFolderOf(focusPath, activeMounted(folder?.id ?? null, Object.keys(files))) === owner
+        ? ownerFolderOf(focusPath, activeMount(folder?.id ?? null, rootPaths)) === owner
         : folderIdRef.current === owner;
       if (!stillOwned) return;
       bufferFocus(owner, {
         type: "focus",
         op: "mount",
         selection: focusSel,
-        panelIndex: activePanel,
+        panelIndex: uiFocus.panelIndex,
         timestamp: Date.now(),
       });
     }, 1000);
     return () => window.clearTimeout(handle);
-  }, [selection, activePanel, panels, files, folder]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [uiFocus, panels, files, folder]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Record the editor panels as folder-owned mount state. Comparing the whole
   // occupancy vector catches every way it can change—tab switch, individual or
   // bulk close, drag between panels, panel creation, and panel collapse—without
   // scattering provenance calls through UI handlers.
   useEffect(() => {
-    const mounted = activeMounted(folder?.id ?? null, Object.keys(files));
+    const rootPaths = Object.keys(files).filter(
+      (path) => !isMint(path) && !isScan(path) && !isOblivion(path),
+    );
+    const mounted = activeMount(folder?.id ?? null, rootPaths);
     const next: (PanelOccupancy | null)[] = panels.map((panel) => {
       const tab = panel.active;
-      if (!tab) return null;
+      if (!tab || isCoinComposerTab(tab)) return null;
       if (isFolderTab(tab)) {
         const path = folderTabPath(tab);
+        if (isMint(path) || isScan(path) || isOblivion(path)) return null;
         const ownerFolderId = folder?.id ?? "";
         if (!ownerFolderId) return null;
         const nodeId = path === ROOT ? folder?.id : files[path]?.nodeId;
@@ -10972,7 +12559,7 @@ function App() {
               tags: f.tags,
               nodeId: f.nodeId,
               runs: f.runs,
-              taggedTraces: f.taggedTraces,
+              citationIds: f.citationIds,
               kedits: keditLogToArray(f.kedits),
             });
           }
@@ -11064,7 +12651,7 @@ function App() {
   ]);
 
   // Resolve the live local citation set for each active file: explicit
-  // `taggedTraces` plus body brackets. Unlike `citationsByPath` (which reads the
+  // `citationIds` plus body brackets. Unlike `citationsByPath` (which reads the
   // stepped relay head), this keeps pinned citations visible while the relay is
   // offline and before the debounce publishes a new head.
   // A cited trace may be an unpublished local savepoint or a published zine —
@@ -11077,7 +12664,7 @@ function App() {
       const file = files[p];
       const ids = [
         ...new Set([
-          ...(file?.taggedTraces ?? []),
+          ...(file?.citationIds ?? []),
           ...findResolvedBrackets(flatten(file?.runs ?? [])).map((bracket) => bracket.nodeId),
         ].filter(Boolean)),
       ];
@@ -11099,7 +12686,7 @@ function App() {
         const file = files[path];
         const ids = [
           ...new Set([
-            ...(file?.taggedTraces ?? []),
+            ...(file?.citationIds ?? []),
             ...findResolvedBrackets(flatten(file?.runs ?? [])).map((bracket) => bracket.nodeId),
           ].filter(Boolean)),
         ];
@@ -11155,7 +12742,12 @@ function App() {
         const resolutionKey = `${file?.traceId ?? headId}:${headId}:${citationResolutionVersion}`;
         resolutionUpdates[path] = resolutionKey;
         try {
-          const snapshot = await findInboundSnapshot(folder!.id, path, file?.traceId);
+          const traceId = file?.traceId ?? (headId ? await resolveTraceIdentity(headId) : null);
+          if (!traceId) {
+            freshnessUpdates[path] = "unavailable";
+            continue;
+          }
+          const snapshot = await findInboundSnapshot(traceId);
           if (snapshot.complete) {
             const entries = [...snapshot.entries];
             // A local Oblivion/restore move runs ahead of its debounced relay Step.
@@ -11168,23 +12760,23 @@ function App() {
                 ([, candidate]) =>
                   candidate.kind !== "folder" &&
                   (candidate.traceId ?? candidate.nodeId) ===
-                    (cached.sourceTraceId ?? cached.sourceEventId),
+                    cached.sourceTraceId,
               );
               if (!localSource) continue;
               const [sourcePath, sourceFile] = localSource;
               const stillSupports =
                 cached.kind === "fork" ||
                 isOblivion(sourcePath) ||
-                (sourceFile.taggedTraces ?? []).includes(cached.fromNodeId) ||
+                (sourceFile.citationIds ?? []).includes(cached.fromNodeId) ||
                 findResolvedBrackets(flatten(sourceFile.runs ?? [])).some(
                   (bracket) => bracket.nodeId === cached.fromNodeId,
                 );
               if (!stillSupports) continue;
-              const key = `${cached.kind}:${cached.sourceTraceId ?? cached.sourceEventId}:${cached.fromNodeId}`;
+              const key = `${cached.kind}:${cached.sourceTraceId}:${cached.fromNodeId}`;
               if (
                 entries.some(
                   (entry) =>
-                    `${entry.kind}:${entry.sourceTraceId ?? entry.sourceEventId}:${entry.fromNodeId}` ===
+                    `${entry.kind}:${entry.sourceTraceId}:${entry.fromNodeId}` ===
                     key,
                 )
               ) continue;
@@ -11280,8 +12872,8 @@ function App() {
    *  path (from its `file`/`F` tag, via eventMeta) and open that file in the
    *  press. The chronological Steps modal that used to open here is gone — the
    *  step-to-step review now happens in Diff mode while scrubbing the stepper.
-   *  A legacy nameless coin has no `file` path, so there's nothing
-   *  to open as a document — the chip is display-only in that case. */
+   *  A malformed node with no `F` path cannot open as a document, so its chip
+   *  remains display-only. */
   async function openCitedTrace(nodeId: string) {
     let traceId: string | null = null;
     for (const chips of [
@@ -11298,7 +12890,7 @@ function App() {
       try {
         traceId = await resolveTraceIdentity(nodeId);
       } catch {
-        // Fall through to exact-node/path compatibility below.
+        // A locally mounted exact node may still open below.
       }
     }
     const localPath = Object.entries(files).find(
@@ -11307,61 +12899,86 @@ function App() {
         (!!traceId && (file.traceId ?? file.nodeId) === traceId),
     )?.[0];
     if (localPath) {
-      selectFile(localPath);
+      if (isCoinTab(localPath)) selectCoin(localPath);
+      else selectFile(localPath);
       return;
     }
-    if (traceId) {
-      try {
-        const resolution = await resolveTraceChain(traceId);
-        if (resolution.status === "resolved") {
-          const head = resolution.chain[resolution.chain.length - 1];
-          const currentPath = head ? eventMeta(head).relativePath : undefined;
-          if (currentPath) {
-            selectFile(currentPath);
-            return;
-          }
+    if (!traceId) return;
+    try {
+      const resolution = await resolveTraceChain(traceId);
+      if (resolution.status === "resolved") {
+        const head = resolution.chain[resolution.chain.length - 1];
+        const currentPath = head ? eventMeta(head).relativePath : undefined;
+        if (currentPath) {
+          if (isCoinTab(currentPath)) selectCoin(currentPath);
+          else selectFile(currentPath);
         }
-      } catch {
-        // Legacy exact-node fallback below.
       }
+    } catch {
+      // The current trace chain is unavailable.
     }
-    const event = await fetchEventById(nodeId);
-    if (!event) return;
-    const relativePath = eventMeta(event).relativePath;
-    if (!relativePath) return;
-    selectFile(relativePath);
   }
 
   // --- folder-wide delta replay (step-to-step) ---------------------------
   //
-  // Mounts a single interleaved timeline across every file's steps and steps
-  // the live editor through historical states. The timeline is "sticky at
-  // last": the resting position (`index === last`) is the live, editable
-  // document — new steps while on last append a step and the bar auto-advances
-  // to the new last (the follow effect). Stepping back (`index < last`)
-  // overrides that one step's file with its reconstructed content (the chain
-  // replayed genesis→that node via reconstructUpTo) and freezes it: the user-
-  // edit path is inert (the override is a setRunsEffect write `liftRuns`
-  // exempts) and stepFile is gated on `replayActiveRef`, which is true only on a
-  // historical step. At most one file is overridden at a time — the active
-  // historical step's — so capture/restore is cheap and edits to other files
-  // are never disturbed. `endReplay` restores the overridden path (if any).
+  // One interleaved sequence spans every selected trace and folder membership
+  // event. Every cursor index is a real Step. Historical runs are projected
+  // into a session-owned read-only panel, so the live editor remains untouched
+  // and manual scrubbing follows the same routing as Play.
 
-  /** Begin replay for the attached folder. Fetches every FileTraceNode in the
+  /** Resolve selected replay while exposing one transport-level loading state.
+   *  The sequence guard prevents an older request from hiding the spinner while
+   *  a newer mount is still resolving. */
+  async function beginReplay(): Promise<boolean> {
+    const sequence = ++replayLoadSequenceRef.current;
+    setReplayLoading(true);
+    try {
+      return await loadReplay(sequence);
+    } finally {
+      if (replayLoadSequenceRef.current === sequence) setReplayLoading(false);
+    }
+  }
+
+  /** Load replay for the attached folder. Fetches every FileTraceNode in the
    *  folder, groups by file, fetches each file's chain once, and precomputes
    *  each step's reconstructed content so stepping is O(1). Best-effort: a
    *  slow/unreachable relay yields an empty timeline rather than throwing —
    *  auto-bootstrap on folder load must never reject unhandled. */
-  async function beginReplay() {
-    if (!folder) return;
+  async function loadReplay(sequence: number): Promise<boolean> {
+    if (!folder) return false;
     let activity: Event[];
     try {
       activity = await fetchFolderActivity(folder.id);
     } catch (e) {
       console.warn("[replay] fetchFolderActivity failed:", e);
-      return;
+      activity = [];
     }
-    if (activity.length === 0) return;
+    const target = focusReplayTarget(uiFocusRef.current);
+    const playbackScopes = target ? [target] : [];
+    if (playbackScopes.length === 0) return false;
+    // Aggregate activity can lag directly-addressed relay storage immediately
+    // after the first Step. Backfill every novel selected live head by exact id
+    // before deciding the timeline is empty, so the first durable Step paints
+    // 1 / 1 without waiting for another edit or another click.
+    const knownActivityIds = new Set(activity.map((event) => event.id));
+    const liveHeads = freshSelectedReplayHeads(
+      filesRef.current,
+      knownActivityIds,
+      playbackScopes,
+      new Set(),
+    );
+    for (const { path, nodeId } of liveHeads) {
+      try {
+        const event = await fetchEventById(nodeId);
+        if (!event) continue;
+        const meta = eventMeta(event);
+        if (meta.folderId !== folder.id || meta.relativePath !== path) continue;
+        activity.push(event);
+        knownActivityIds.add(event.id);
+      } catch (e) {
+        console.warn(`[replay] live-head fetch failed for ${path}:`, e);
+      }
+    }
     // Group events by relative path so each file's chain is fetched once.
     const byPath = new Map<string, Event[]>();
     for (const event of activity) {
@@ -11371,22 +12988,24 @@ function App() {
       if (list) list.push(event);
       else byPath.set(path, [event]);
     }
-    // Narrow to the exact effective-scope union. Shielded descendants inherited
-    // from a broader parent scope are absent unless explicitly scoped.
-    const sc = scopeRef.current;
+    // A selected file contributes only itself; a selected folder contributes
+    // its complete subtree. Prompt-context shields do not affect playback.
+    const sc = playbackScopes;
+    const selectedPaths = new Set(
+      selectedReplayPaths([...byPath.keys()], sc, new Set()),
+    );
     for (const path of [...byPath.keys()]) {
-      if (!pathInEffectiveScopes(sc, shieldedRef.current, path)) {
+      if (!selectedPaths.has(path)) {
         byPath.delete(path);
       }
     }
-    if (byPath.size === 0) return;
     // Per file: fetch the genesis→latest chain (authoritative order, never
     // created_at), then for each of that file's events find its index in the
     // chain and reconstruct content up to it. Retain each chain on a ref so
     // Keystroke playback can expand the recorded edits without refetching.
     const steps: ReplayStep[] = [];
     const chains: Record<string, Event[]> = {};
-    for (const [relativePath, fileEvents] of byPath) {
+    for (const [relativePath] of byPath) {
       let chain: Event[];
       try {
         chain = await fetchChain(folder.id, relativePath);
@@ -11396,10 +13015,11 @@ function App() {
       }
       if (chain.length === 0) continue;
       chains[relativePath] = chain;
-      const indexById = new Map(chain.map((e, i) => [e.id, i]));
-      for (const event of fileEvents) {
-        const idx = indexById.get(event.id);
-        if (idx === undefined) continue; // event not on the resolved head chain (forked/deleted)
+      // The resolved genesis→head chain is authoritative for replay positions.
+      // Aggregate folder activity can briefly expose only the directly-fetched
+      // live head; filtering back through that lagging list would hide genesis
+      // and make a real two-node, one-Step trace look unsteppable.
+      for (const [idx, event] of chain.entries()) {
         const meta = eventMeta(event);
         const contentUpToHere = reconstructUpTo(chain, idx);
         // The footprint of *this step's* deltas: diff against the previous step
@@ -11420,91 +13040,60 @@ function App() {
         });
       }
     }
-    // Folder membership events (kind 4292): walk the folder's own chain and
-    // emit one step per STRUCTURAL delta (add/remove/rename). Focus deltas are
-    // observations, not membership, so they're skipped. A membership step has
-    // no content/runs/changeRange — it's a labeled station ("added X") on the
-    // same timeline, and scrubbing onto it doesn't freeze a file. This closes
-    // the folder-scope promise: mounting a folder lets you step through its
-    // composition history, not just its files' prose. Filtered to the scope
-    // subtree so a file/subfolder scope only shows membership events touching
-    // that subtree. (spec §3.3 — FolderDelta.)
-    try {
-      const folderNodes = await fetchFolderNodes(folder.id);
-      const byId = new Map(folderNodes.map((e) => [e.id, e]));
-      // Resolve the uncited head (the event nobody cites as `prev`) and walk
-      // prev-pointers back, then reverse: genesis→head so deltas read in publish
-      // order. This is the folder-chain counterpart to the file chain walk.
-      const citedAsPrev = new Set<string>();
-      for (const e of folderNodes) {
-        const pt = e.tags.find((t) => t[0] === "e" && t[3] === "prev");
-        if (pt) citedAsPrev.add(pt[1]);
-      }
-      let cursor: string | undefined = folderNodes.find((e) => !citedAsPrev.has(e.id))?.id;
-      const chain: Event[] = [];
-      const guard = new Set<string>();
-      while (cursor && !guard.has(cursor)) {
-        guard.add(cursor);
-        const ev = byId.get(cursor);
-        if (!ev) break;
-        chain.push(ev);
-        cursor = ev.tags.find((t) => t[0] === "e" && t[3] === "prev")?.[1];
-      }
-      chain.reverse();
-      for (const event of chain) {
-        const meta = eventMeta(event);
-        let deltas: Array<{ type: string; relativePath?: string; fromPath?: string; toPath?: string }>;
-        try {
-          const parsed = JSON.parse(event.content) as { deltas?: typeof deltas };
-          deltas = parsed.deltas ?? [];
-        } catch {
-          continue;
+    // A selected folder is itself a trace. Include its complete
+    // genesis-rooted chain, not just post-genesis membership deltas. That makes
+    // an empty folder and a folder with no explicit user Step both playable at
+    // Step 0, while descendants still contribute their own file timelines via
+    // the effective-scope file loop above.
+    const seenFolderTraceIds = new Set<string>();
+    for (const mounted of sc) {
+      if (mounted.kind !== "folder") continue;
+      try {
+        const state = mounted.path === ROOT ? undefined : filesRef.current[mounted.path];
+        const traceId =
+          mounted.path === ROOT
+            ? folder.id
+            : state?.traceId ??
+              (state?.nodeId ? await resolveFolderTraceIdentity(state.nodeId) : null);
+        if (!traceId || seenFolderTraceIds.has(traceId)) continue;
+        seenFolderTraceIds.add(traceId);
+
+        const folderNodes = await fetchFolderNodes(traceId);
+        const chain = orderReplayTraceChain(folderNodes, traceId);
+        if (chain.length === 0) continue;
+        chains[`folder:${traceId}`] = chain;
+        for (const event of chain) {
+          steps.push(folderReplayStep(event, mounted.path));
         }
-        for (const d of deltas) {
-          if (d.type !== "add" && d.type !== "remove" && d.type !== "rename") continue;
-          // For rename, the affected path is toPath; for add/remove, relativePath.
-          const affected = d.type === "rename" ? d.toPath : d.relativePath;
-          if (!affected) continue;
-          // Scope-union filter (mirror of the file byPath filter above).
-          const sc = scopeRef.current;
-          if (!pathInEffectiveScopes(sc, shieldedRef.current, affected)) continue;
-          steps.push({
-            event,
-            relativePath: affected,
-            meta,
-            contentUpToHere: "",
-            runsUpToHere: [],
-            changeRange: null,
-            membership: { type: d.type, path: affected },
-          });
-        }
+      } catch (e) {
+        // One unavailable selection must not suppress the other selected traces.
+        console.warn(`[replay] folder trace failed for ${mounted.path || "Root"}:`, e);
       }
-    } catch (e) {
-      // Membership events are a nicety — a relay hiccup shouldn't block the
-      // file-timeline build that already succeeded above.
-      console.warn("[replay] fetchFolderNodes failed:", e);
     }
-    if (steps.length === 0) return;
+    if (sequence !== replayLoadSequenceRef.current || steps.length === 0) return false;
     // Step-time order, ascending. stable tie-break keeps same-ms steps in
     // their original activity order rather than shuffling them.
     steps.sort((a, b) => a.meta.steppedAtMs - b.meta.steppedAtMs);
-    // `last` is sticky: the resting position is the most recent step, which is
-    // the live editor (no override). Snapshot the live FileState of every path
-    // so stepping back into history can capture/restore on demand — `last`
-    // itself shows live content, and new steps while on last advance the bar to
-    // the new last automatically (follow effect below).
-    const snapshot: Record<string, FileState> = {};
-    for (const path of byPath.keys()) {
-      if (files[path]) snapshot[path] = files[path];
-    }
+    // Bootstrap the transport at the newest real Step. This does not open or
+    // alter an editor tab; the replay panel is created only by a replay gesture.
     const last = steps.length - 1;
-    setReplay({ steps, index: last, snapshot });
-    // Land on `last` without overriding — show the live document. No file is
-    // frozen at entry, so stepping stays enabled and edits flow normally.
-    replayRef.current = { steps, index: last, snapshot };
+    setReplay({ steps, index: last });
+    replayRef.current = { steps, index: last };
     replayChainsRef.current = chains;
     setPlaying(false);
-    setPlayTimeline(null);
+    const timingFrames = buildKeditTimeline() ?? [];
+    const loadedTimeline = timingFrames.length > 0 ? timingFrames : null;
+    const loadedCursor = Math.max(0, timingFrames.length - 1);
+    playTimelineRef.current = loadedTimeline;
+    setPlayTimeline(loadedTimeline);
+    playCursorRef.current = loadedCursor;
+    setPlayCursor(loadedCursor);
+    setReplayTiming(
+      buildReplayTiming([
+        ...timingFrames.map((frame) => frame.at),
+        ...steps.map((step) => step.meta.steppedAtMs),
+      ], timingFrames.map((frame) => frame.at)),
+    );
     // Attribution debug: with localStorage `zine.debug.attribution` set,
     // reconstructRunsFromChain tallies how many nodes per chain hit each tier
     // (authors-adopted / wholesale-signer-reset / delta-signer-insert / no-op).
@@ -11524,169 +13113,267 @@ function App() {
         { collapsedSigners: dbg.collapsedSigners, voices: dbg.voices },
       );
     }
+    return true;
   }
 
-  /** Re-read the mounted timeline after a structural gesture becomes durable.
+  /** Re-read the selected timeline after a structural gesture becomes durable.
    *  Structural backends update paths optimistically, before their file/folder
    *  nodes exist on the relay, so the ordinary state signature can fire too
    *  early. The completion callback closes that race without disturbing a user
    *  who is deliberately parked on a historical step. */
   function refreshMountedReplay() {
     const current = replayRef.current;
+    if (replayDisplay) return;
     if (current && current.index !== current.steps.length - 1) return;
     void beginReplay().catch((error) => {
       console.warn("[replay] live structural refresh failed:", error);
     });
   }
 
-  /** Advance/seek replay to step `n`. The step's file is shown when `n` points
-   *  at a historical step: its reconstructed content overrides `file.runs`
-   *  (frozen, read-only-ish — the sync effect writes it as a setRunsEffect run
-   *  that `liftRuns` exempts, and `stepFile` is gated off while on a historical
-   *  step). `n === last` shows the live document: no override, edits and steps
-   *  flow, and the follow effect appends any new step as a step and re-points
-   *  `last` at it.
-   *
-   *  Capture/restore is per-path and only ever touches the one file being left
-   *  or entered: leaving a historical step restores its snapshot; entering a
-   *  new historical file captures the live state into the snapshot first so a
-   *  later return (to `last` or that step) restores it. Other files are never
-   *  touched, so editing file B while stepping through historical-A is safe. */
-  function replayStepTo(n: number) {
-    const r = replayRef.current;
-    if (!r) return;
-    const last = r.steps.length - 1;
-    const clamped = Math.max(0, Math.min(n, last));
-    // Which file (if any) is currently frozen, and which will be after this
-    // step. `last` is live → null. A historical FILE step → its file's path.
-    // A historical MEMBERSHIP step → null too: there's no content to freeze,
-    // so scrubbing onto one leaves the editor showing whatever it was showing
-    // (scope stays sticky, focus stays put). This is the guard that makes a
-    // membership step a labeled-only station, not a content-override target.
-    const oldStep = r.index < last ? r.steps[r.index] : null;
-    const newStep = clamped < last ? r.steps[clamped] : null;
-    const oldOverridden = oldStep && !oldStep.membership ? oldStep.relativePath : null;
-    const newOverridden = newStep && !newStep.membership ? newStep.relativePath : null;
-    // Work on a snapshot copy so capture updates persist into replay state.
-    const snapshot = { ...r.snapshot };
-    setFiles((prev) => {
-      const next = { ...prev };
-      // Restore the file we're leaving, if it was frozen and we're not staying
-      // on it. Its snapshot holds the live state captured before freezing.
-      if (oldOverridden && oldOverridden !== newOverridden) {
-        const snap = snapshot[oldOverridden];
-        if (snap) next[oldOverridden] = snap;
-      }
-      // Capture the live state of the file we're about to freeze, unless it's
-      // already frozen (historical→historical on the same file) — in that case
-      // the snapshot is already correct and we must not overwrite it with the
-      // frozen content currently in the editor.
-      if (newOverridden && newOverridden !== oldOverridden) {
-        const live = prev[newOverridden];
-        if (live) snapshot[newOverridden] = live;
-      }
-      // Freeze the new historical step's file with its reconstructed content
-      // and per-author runs. reconstructRunsUpTo prefers a node's `authors` map
-      // (per-character attribution keyed by authors[].v) and only falls back to
-      // per-node-signer attribution when a node carries no map or one that
-      // fails the length-sum integrity check — so stepping colors text by who
-      // actually authored each span when the chain records it. Foreign voices
-      // receive their published identity or a stable per-pubkey fallback.
-      // Any real edit after returning to `last` splices in the live voice.
-      if (newOverridden) {
-        const step = r.steps[clamped];
-        const existing = next[newOverridden];
-        if (step && existing) {
-          next[newOverridden] = { ...existing, runs: step.runsUpToHere };
-        }
-      }
-      return next;
-    });
-    // Switch the active panel to the step's file so the frozen content is the
-    // thing the user sees (matches the old "land on this step" intent). On
-    // `last`, prefer staying on whatever the user is viewing. A MEMBERSHIP step
-    // never swaps tabs — it has no content to land on, so focus stays put and
-    // the structural change is read from the stepper label instead.
-    const step = r.steps[clamped];
-    const activePath = panels[activePanel]?.active;
-    if (clamped < last && step && !step.membership && activePath !== step.relativePath) {
-      focusFile(step.relativePath);
-    }
-    setReplay((prev) => {
-      if (!prev) return prev;
-      const next = { ...prev, index: clamped, snapshot };
-      replayRef.current = next;
-      return next;
-    });
+  function setReplayCursor(n: number) {
+    const current = replayRef.current;
+    if (!current || current.steps.length === 0) return;
+    const index = Math.max(0, Math.min(n, current.steps.length - 1));
+    if (current.index === index) return;
+    const next = { ...current, index };
+    replayRef.current = next;
+    setReplay(next);
   }
 
-  /** Exit replay and restore the live `FileState` of the file currently frozen
-   *  on a historical step (if any). On `last` there is nothing frozen — the
-   *  editor already shows live content (possibly with unsaved edits) — so exit
-   *  is a pure state teardown. Restoring only the overridden path means edits
-   *  made to any other file while replay was open are preserved. */
-  function endReplay() {
+  /** Seek to a real saved Step and render it in the shared replay panel. */
+  function replayStepTo(n: number) {
     const r = replayRef.current;
-    if (r) {
-      const last = r.steps.length - 1;
-      // A membership step overrides nothing (no frozen file), so exit from one
-      // restores nothing — same null as `last`.
-      const step = r.index < last ? r.steps[r.index] : null;
-      const overridden = step && !step.membership ? step.relativePath : null;
-      const snap = overridden ? r.snapshot[overridden] : undefined;
-      if (overridden && snap) {
-        setFiles((prev) => ({ ...prev, [overridden]: snap }));
-      }
+    if (!r || r.steps.length === 0) return;
+    const clamped = Math.max(0, Math.min(n, r.steps.length - 1));
+    const display = replayDisplayAt(r.steps, clamped);
+    replayDisplayRef.current = display;
+    setReplayDisplay(display);
+    const target = r.steps[clamped];
+    const targetPath = target?.folder ? "" : target?.relativePath ?? "";
+    syncReplayPanels(
+      display,
+      targetPath,
+      targetPath ? display.panelIndexByPath[targetPath] : undefined,
+    );
+    const playheadAt = target?.meta.steppedAtMs;
+    setReplayPlayheadAt(playheadAt);
+    const timeline = playTimelineRef.current ?? buildKeditTimeline();
+    if (timeline && timeline.length > 0 && playheadAt !== undefined) {
+      const cursor = Math.max(0, replayFrameIndexAtOrBefore(timeline, playheadAt));
+      playTimelineRef.current = timeline;
+      setPlayTimeline(timeline);
+      playCursorRef.current = cursor;
+      setPlayCursor(cursor);
     }
+    setReplayCursor(clamped);
+  }
+
+  /** Seek to an exact replay action and rebuild replay-only editor/focus state.
+   *  The action index remains unambiguous when multiple events share a clock. */
+  function seekReplayToAction(n: number) {
+    const r = replayRef.current;
+    if (!r || r.steps.length === 0) return;
+    const timeline = playTimelineRef.current ?? buildKeditTimeline();
+    if (!timeline || timeline.length === 0) return;
+    const cursor = Math.max(0, Math.min(timeline.length - 1, Math.trunc(n)));
+    const target = timeline[cursor];
+    if (!target) return;
+    const display = replayDisplayThroughFrame(
+      timeline,
+      cursor,
+      r.steps.map((step) => step.event.id),
+    );
+
+    setReplaySkipNotice(null);
+    replayDisplayRef.current = display;
+    setReplayDisplay(display);
+    playTimelineRef.current = timeline;
+    setPlayTimeline(timeline);
+    playCursorRef.current = cursor;
+    setPlayCursor(cursor);
+    setReplayPlayheadAt(target.at);
+    let checkpointFrame: PlayFrame | undefined;
+    for (let i = cursor; i >= 0; i--) {
+      const frame = timeline[i];
+      if (frame?.kind === "focus") continue;
+      checkpointFrame = frame;
+      break;
+    }
+    if (checkpointFrame) setReplayCursor(checkpointFrame.stepIndex);
+
+    if (target.kind === "file" && target.path) {
+      syncReplayPanels(display, target.path, target.panelIndex);
+    } else if (target.kind === "focus" && target.focus) {
+      if (target.focus.op === "mount" && target.path) {
+        syncReplayPanels(display, target.path, target.panelIndex);
+      } else {
+        syncReplayPanels(display, "", undefined, target.focus.panelIndex);
+      }
+    } else {
+      syncReplayPanels(display);
+    }
+  }
+
+  /** Activity-bubble clicks seek by wall clock to the last action at the bubble's
+   * opening rather than snapping forward to the next save point. */
+  function seekReplayToTime(at: number) {
+    const timeline = playTimelineRef.current ?? buildKeditTimeline();
+    if (!timeline || timeline.length === 0) return;
+    seekReplayToAction(Math.max(0, replayFrameIndexAtOrBefore(timeline, at)));
+  }
+
+  /** Exit replay. Live files need no restoration because replay never mutates them. */
+  function endReplay() {
+    replayLoadSequenceRef.current += 1;
     replayRef.current = null;
     replayChainsRef.current = {};
+    replayDisplayRef.current = null;
     setReplay(null);
+    setReplayDisplay(null);
+    setReplayPlayheadAt(undefined);
+    setReplayTiming(null);
+    setReplaySkipNotice(null);
+    setReplayLoading(false);
+    setHistoricalActionStatus({});
     setPlaying(false);
     setPlayTimeline(null);
     playTimelineRef.current = null;
     teardownReplayPanels();
   }
 
-  /** Pre-mount involved files into replay-owned panels for kedit playback.
-   *  Existing panels stay in place and usable. Up to REPLAY_PANEL_CAP animation
-   *  columns are appended; extra paths share the last column as real tabs.
-   *  Ownership lives on each panel instead of being inferred from its index, so
-   *  manually closing live or replay tabs cannot corrupt the mapping. */
-  function mountReplayPanels(tl: PlayFrame[]) {
-    // Collect unique paths in first-appearance order.
-    const pathsInOrder: string[] = [];
-    const seen = new Set<string>();
-    for (const f of tl) {
-      if (f.path && !seen.has(f.path)) {
-        seen.add(f.path);
-        pathsInOrder.push(f.path);
-      }
-    }
-    const REPLAY_PANEL_CAP = 3;
-    replayPlaybackPathsRef.current = new Set(pathsInOrder);
-    const available = Math.max(0, MAX_PANELS - panels.length);
-    const mounted = createReplayPanels(
-      pathsInOrder,
-      Math.min(REPLAY_PANEL_CAP, available),
+  /** Project replay-only files into columns. Folder checkpoints never enter
+   *  this function as paths. Recorded focus slots group files into the panels
+   *  they historically occupied; files without focus evidence each receive a
+   *  fresh column. */
+  function syncReplayPanels(
+    display: ReplayDisplay,
+    activePath = "",
+    activeRecordedPanel?: number,
+    clearRecordedPanel?: number,
+  ) {
+    const entries: ReplayPanelPath[] = Object.entries(display.files)
+      .filter(([, file]) => !!file.nodeId)
+      .map(([path]) => ({
+        path,
+        panelIndex: display.panelIndexByPath[path],
+      }));
+    const liveIndices = replayLivePanelIndices(panels, entries.length > 0);
+    const livePanels = liveIndices.map((index) => panels[index]);
+    let mounted = createReplayPanels(
+      entries,
+      Math.max(0, MAX_PANELS - livePanels.length),
     ) as PanelState[];
-    if (mounted.length === 0) return;
 
-    const firstSpawnAt = panels.length;
-    setPanels([...panels, ...mounted]);
-    setSummonStatus([
-      ...summonStatus,
+    mounted = mounted.map((panel) => {
+      const occupied = panel.replayPanelIndex === undefined
+        ? ""
+        : display.panels[panel.replayPanelIndex] ?? "";
+      const active = panel.tabs.includes(occupied) ? occupied : panel.active;
+      return { ...panel, active };
+    });
+    const targetInMounted = (panel: PanelState) =>
+      panel.tabs.includes(activePath) &&
+      (activeRecordedPanel === undefined ||
+        panel.replayPanelIndex === activeRecordedPanel);
+    let targetMountedIndex = activePath
+      ? mounted.findIndex(targetInMounted)
+      : -1;
+    if (targetMountedIndex < 0 && activePath) {
+      targetMountedIndex = mounted.findIndex((panel) => panel.tabs.includes(activePath));
+    }
+    if (targetMountedIndex >= 0) {
+      mounted[targetMountedIndex] = {
+        ...mounted[targetMountedIndex],
+        active: activePath,
+      };
+    }
+    if (clearRecordedPanel !== undefined) {
+      const clearAt = mounted.findIndex(
+        (panel) => panel.replayPanelIndex === clearRecordedPanel,
+      );
+      if (clearAt >= 0) mounted[clearAt] = { ...mounted[clearAt], active: "" };
+    }
+
+    const signature = JSON.stringify(
+      mounted.map((panel) => ({
+        tabs: panel.tabs,
+        replayPanelIndex: panel.replayPanelIndex,
+      })),
+    );
+    const existingReplay = panels.filter((panel) => panel.replayOwned);
+    if (
+      signature === replayPanelSignatureRef.current &&
+      existingReplay.length === mounted.length
+    ) {
+      if (targetMountedIndex >= 0) {
+        let panelIndex = panels.findIndex(targetInMounted);
+        if (panelIndex < 0) {
+          panelIndex = panels.findIndex(
+            (panel) => panel.replayOwned && panel.tabs.includes(activePath),
+          );
+        }
+        if (panelIndex >= 0) {
+          setPanels((prev) =>
+            mapPanel(prev, panelIndex, (panel) => ({ ...panel, active: activePath })),
+          );
+          setActivePanel(panelIndex);
+        }
+      } else if (clearRecordedPanel !== undefined) {
+        const panelIndex = panels.findIndex(
+          (panel) =>
+            panel.replayOwned && panel.replayPanelIndex === clearRecordedPanel,
+        );
+        if (panelIndex >= 0) {
+          setPanels((prev) =>
+            mapPanel(prev, panelIndex, (panel) => ({ ...panel, active: "" })),
+          );
+        }
+      }
+      return;
+    }
+
+    replayPanelSignatureRef.current = signature;
+    const nextPanels: PanelState[] =
+      livePanels.length > 0 || mounted.length > 0
+        ? [...livePanels, ...mounted]
+        : [{ tabs: [], active: "" }];
+    const nextStatuses = [
+      ...liveIndices.map((index) => summonStatus[index] ?? { state: "idle" as const }),
       ...mounted.map(() => ({ state: "idle" as const })),
-    ]);
-    panelViews.current = [...panelViews.current, ...mounted.map(() => null)];
-    summonAbort.current = [...summonAbort.current, ...mounted.map(() => null)];
-    setPanelWeights([...panelWeights, ...mounted.map(() => 1)]);
-    setActivePanel(firstSpawnAt);
+    ];
+    const nextViews = [
+      ...liveIndices.map((index) => panelViews.current[index] ?? null),
+      ...mounted.map(() => null),
+    ];
+    const nextAborts = [
+      ...liveIndices.map((index) => summonAbort.current[index] ?? null),
+      ...mounted.map(() => null),
+    ];
+    let nextWeights = [
+      ...liveIndices.map((index) => panelWeights[index] ?? 1),
+      ...mounted.map(() => 1),
+    ];
+    if (nextPanels.length === 1) nextWeights = [1];
+
+    const previousLiveActive = liveIndices.indexOf(activePanel);
+    const nextActivePanel = targetMountedIndex >= 0
+      ? livePanels.length + targetMountedIndex
+      : previousLiveActive >= 0
+        ? previousLiveActive
+        : mounted.length > 0
+          ? livePanels.length
+          : 0;
+    setPanels(nextPanels);
+    setSummonStatus(nextStatuses.length > 0 ? nextStatuses : [{ state: "idle" }]);
+    panelViews.current = nextViews.length > 0 ? nextViews : [null];
+    summonAbort.current = nextAborts.length > 0 ? nextAborts : [null];
+    setPanelWeights(nextWeights.length > 0 ? nextWeights : [1]);
+    setActivePanel(nextActivePanel);
   }
 
-  /** Remove only replay-owned panels after playback. Live layout is read at
-   *  teardown time, so manual tab closes and resizes made during replay persist. */
+  /** Remove only the replay surface on explicit close/scope teardown. */
   function teardownReplayPanels() {
-    replayPlaybackPathsRef.current = null;
+    replayPanelSignatureRef.current = "";
     const live = removeReplayPanels(panels, activePanel);
     if (live.keptIndices.length === panels.length) return;
 
@@ -11717,119 +13404,90 @@ function App() {
     setActivePanel(hasLivePanels ? live.activePanel : 0);
   }
 
-  /** Build a per-keystroke play timeline: one frame per editor transaction, the
-   *  document state after every discrete action (backspace, highlight-delete,
-   *  type-over, undo, redo, IME commit) in the order the author made them.
-   *  Multi-range transactions are grouped by `tx` and applied atomically because
-   *  every member's from/to offsets address the same pre-transaction state.
-   *
-   *  The chains in `replayChainsRef` are already scope-filtered by `beginReplay`,
-   *  so when scope is a single file this produces a single-path timeline (no
-   *  multi-panel spawning needed); a folder scope interleaves every edited file.
-   *  Legacy KEdits without `tx` replay as one-entry transactions. */
+  /** Expand the scope-filtered chains into one wall-clock replay. */
   function buildKeditTimeline(): PlayFrame[] | null {
     const r = replayRef.current;
     if (!r) return null;
-    const chains = replayChainsRef.current;
-    const stepIndexByEventId = new Map(r.steps.map((s, i) => [s.event.id, i]));
-    const all: PlayFrame[] = [];
-    for (const [path, chain] of Object.entries(chains)) {
-      const frames: PlayFrame[] = [];
-      // Running voiced state, carried across steps within this file (each
-      // step's kedits build on the document state left by the prior step).
-      let runs: Run[] = [];
-      for (const event of chain) {
-        const stepIndex = stepIndexByEventId.get(event.id);
-        if (stepIndex === undefined) continue; // not a step (e.g. forked-off)
-        const parsed = JSON.parse(event.content) as { snapshot?: string; kedits?: KEdit[] };
-        const kedits = Array.isArray(parsed.kedits) ? parsed.kedits : [];
-        if (kedits.length > 0) {
-          // Replay each editor transaction. The helper clamps malformed offsets
-          // and applies multi-range changes from high to low so their shared
-          // pre-state coordinates remain valid.
-          for (const transaction of groupKEditsByTransaction(kedits)) {
-            runs = applyKEditTransaction(runs, transaction);
-            frames.push({ path, stepIndex, runs });
-          }
-        } else if (typeof parsed.snapshot === "string") {
-          // No kedits on this node (pre-kedits chain, forced no-op Step, or a
-          // relay-pulled node with no buffer). Fall back to the snapshot as one
-          // wholesale frame so older chains remain replayable.
-          const snapText = parsed.snapshot;
-          if (snapText !== flatten(runs)) {
-            runs = snapText.length > 0 ? [{ voice: event.pubkey, text: snapText }] : [];
-            frames.push({ path, stepIndex, runs });
-          }
-        }
-      }
-      if (frames.length > 0) all.push(...frames);
-    }
-    if (all.length === 0) return null;
-    // Interleave every path's frames by enclosing-step timestamp; stable sort
-    // preserves intra-step kedit order.
-    all.sort((a, b) => {
-      const ta = r.steps[a.stepIndex]?.meta.steppedAtMs ?? 0;
-      const tb = r.steps[b.stepIndex]?.meta.steppedAtMs ?? 0;
-      return ta - tb;
-    });
-    // Sentinel used by the playback tick as its stop signal.
-    all.push({ path: "", stepIndex: r.steps.length, runs: [] });
-    return all;
+    return buildReplayTimeline(r.steps, replayChainsRef.current);
   }
 
-  /** Render one play frame into the editor: override the frame's file runs,
-   *  capturing live state first if that path isn't already frozen. If the frame
-   *  is for a different path than the previous one, restore the previous path's
-   *  live state so at most one file is frozen at a time. Sentinel frames (empty
-   *  path) are a no-op render — the tick handles live restore on stop. */
-  function renderPlayFrame(frame: PlayFrame, prev: PlayFrame | null) {
+  /** Start replay after the selected traces have resolved. Kept as one shared
+   *  path so an empty-state Play click can await beginReplay and immediately
+   *  continue into playback instead of requiring a second click. */
+  function startReplayPlayback(): boolean {
+    if (!replayRef.current) return false;
+    const existing = playTimelineRef.current;
+    if (existing && playCursorRef.current < existing.length - 1 && replayDisplay) {
+      setPlaying(true);
+      if (onboardingStageRef.current === "awaiting-replay") {
+        commitOnboardingStage("replaying");
+      }
+      return true;
+    }
+    const tl = buildKeditTimeline();
+    if (!tl || tl.length === 0) return false;
+    const initialDisplay = emptyReplayDisplay();
+    replayDisplayRef.current = initialDisplay;
+    setReplayDisplay(initialDisplay);
+    syncReplayPanels(initialDisplay);
+    const steps = replayRef.current.steps;
+    setReplayTiming(
+      buildReplayTiming([
+        ...tl.map((frame) => frame.at),
+        ...steps.map((step) => step.meta.steppedAtMs),
+      ], tl.map((frame) => frame.at)),
+    );
+    const first = tl[0];
+    if (first) {
+      renderPlayFrame(first);
+      setReplayPlayheadAt(first.at);
+    }
+    playTimelineRef.current = tl;
+    setPlayTimeline(tl);
+    playCursorRef.current = 0;
+    setPlayCursor(0);
+    setPlaying(true);
+    if (onboardingStageRef.current === "awaiting-replay") {
+      commitOnboardingStage("replaying");
+    }
+    return true;
+  }
+
+  /** Pause on the exact rendered edit frame. The replay panel stays mounted. */
+  function pauseReplayPlayback() {
+    const frame = playTimelineRef.current?.[playCursorRef.current];
+    if (frame) setReplayPlayheadAt(frame.at);
+    setPlaying(false);
+  }
+
+  /** Render one play frame into replay-only state, never the live file store. */
+  function renderPlayFrame(frame: PlayFrame) {
     const r = replayRef.current;
     if (!r) return;
-    if (!frame.path) return; // sentinel — nothing to render
-    const snapshot = { ...r.snapshot };
-    // If switching files, restore the one we're leaving (if it was frozen).
-    if (prev && prev.path && prev.path !== frame.path) {
-      const snap = snapshot[prev.path];
-      if (snap) {
-        setFiles((p) => (p[prev.path] ? { ...p, [prev.path]: snap } : p));
+    // Focus observations ride on a later structural checkpoint but retain
+    // their earlier session timestamp. They animate panel occupancy without
+    // pretending to be their own Step or jumping the save-point cursor ahead.
+    if (frame.kind !== "focus") setReplayCursor(frame.stepIndex);
+    const nextDisplay = replayDisplayWithFrame(
+      replayDisplayRef.current ?? emptyReplayDisplay(),
+      frame,
+      r.steps[frame.stepIndex]?.event.id ?? "",
+    );
+    replayDisplayRef.current = nextDisplay;
+    setReplayDisplay(nextDisplay);
+    if (frame.kind === "file" && frame.path) {
+      // Editing is the strongest focus signal: the affected tab is always
+      // brought to the front, using the recorded slot when one exists.
+      syncReplayPanels(nextDisplay, frame.path, frame.panelIndex);
+    } else if (frame.kind === "focus" && frame.focus) {
+      if (frame.focus.op === "mount" && frame.path) {
+        syncReplayPanels(nextDisplay, frame.path, frame.panelIndex);
+      } else {
+        // Folder focus and explicit unmounts empty the recorded slot without
+        // inventing a synthetic folder tab.
+        syncReplayPanels(nextDisplay, "", undefined, frame.focus.panelIndex);
       }
     }
-    // Capture live state the first time we freeze this path.
-    setFiles((prev) => {
-      if (!prev[frame.path]) return prev;
-      // Capture once: if the path isn't in the snapshot yet, it's still live.
-      if (!snapshot[frame.path]) {
-        snapshot[frame.path] = prev[frame.path];
-      }
-      return { ...prev, [frame.path]: { ...prev[frame.path], runs: frame.runs } };
-    });
-    // Focus the frame's file so the typed text is visible. Kedit mode resolves
-    // the replay-owned panel from the CURRENT layout on every frame; closing a
-    // panel therefore cannot leave a stale numeric index behind. If the user
-    // closed that replay tab, respect the close and keep animating offscreen.
-    if (replayPlaybackPathsRef.current) {
-      const panelIdx = panels.findIndex(
-        (panel) => panel.replayOwned && panel.tabs.includes(frame.path),
-      );
-      if (panelIdx >= 0) {
-        if (panels[panelIdx].active !== frame.path) {
-          setPanels((prev) =>
-            mapPanel(prev, panelIdx, (panel) =>
-              panel.tabs.includes(frame.path)
-                ? { ...panel, active: frame.path }
-                : panel,
-            ),
-          );
-        }
-        if (activePanel !== panelIdx) setActivePanel(panelIdx);
-      }
-    } else {
-      // Character mode keeps its original tab-switch behavior.
-      const activePath = panels[activePanel]?.active;
-      if (activePath !== frame.path) focusFile(frame.path);
-    }
-    // Persist the refreshed snapshot so a later restore/endReplay can use it.
-    replayRef.current = { ...r, snapshot };
   }
 
   /** Insert a fresh empty column at index `at` and reconcile all five parallel
@@ -12133,6 +13791,17 @@ function App() {
   // neighboring tab (right preferred, else left). If this empties a panel (and
   // others remain), that panel collapses out of the layout.
   function closeTab(idx: number, path: string) {
+    if (isCoinComposerTab(path) && directCoinBusy) return;
+    if (panels[idx]?.replayOwned) {
+      setPlaying(false);
+      setPlayTimeline(null);
+      playTimelineRef.current = null;
+      replayDisplayRef.current = null;
+      setReplayDisplay(null);
+      setReplaySkipNotice(null);
+      teardownReplayPanels();
+      return;
+    }
     const next = mapPanel(panels, idx, (p) => {
       const i = p.tabs.indexOf(path);
       if (i === -1) return p;
@@ -12150,6 +13819,11 @@ function App() {
   function closeOthers(idx: number, keep: string) {
     const panel = panels[idx];
     if (!panel || !panel.tabs.includes(keep)) return;
+    if (
+      directCoinBusy &&
+      keep !== DIRECT_COIN_COMPOSER_TAB &&
+      panel.tabs.includes(DIRECT_COIN_COMPOSER_TAB)
+    ) return;
     const next = mapPanel(panels, idx, (p) => ({ ...p, tabs: [keep], active: keep }));
     if (next === panels) return;
     commitWithCollapse(next, activePanel);
@@ -12163,6 +13837,10 @@ function App() {
     if (!panel) return;
     const i = panel.tabs.indexOf(path);
     if (i === -1) return;
+    if (
+      directCoinBusy &&
+      panel.tabs.slice(i + 1).includes(DIRECT_COIN_COMPOSER_TAB)
+    ) return;
     const tabs = panel.tabs.slice(0, i + 1);
     if (tabs.length === panel.tabs.length) return; // nothing to the right
     const active = panel.tabs.slice(i + 1).includes(panel.active) ? path : panel.active;
@@ -12174,6 +13852,7 @@ function App() {
   // remain, this column collapses; otherwise it's left as an empty single panel
   // (commitWithCollapse always keeps the last panel standing).
   function closeAllInPanel(idx: number) {
+    if (directCoinBusy && panels[idx]?.tabs.includes(DIRECT_COIN_COMPOSER_TAB)) return;
     const next = mapPanel(panels, idx, (p) => ({ ...p, tabs: [], active: "" }));
     if (next === panels) return;
     commitWithCollapse(next, activePanel);
@@ -12267,6 +13946,14 @@ function App() {
   }
 
   function editFile(path: string, runs: Run[], kedits?: KEditLog) {
+    const previous = filesRef.current[path];
+    if (
+      onboardingStageRef.current === "awaiting-edit" &&
+      previous &&
+      flatten(previous.runs) !== flatten(runs)
+    ) {
+      commitOnboardingStage("awaiting-step");
+    }
     setFiles((prev) => ({
       ...prev,
       [path]: {
@@ -12276,6 +13963,7 @@ function App() {
         // read file.tags / file.nodeId never see undefined.
         ...prev[path],
         runs,
+        updatedAt: Date.now(),
         nodeId: prev[path]?.nodeId ?? "",
         tags: prev[path]?.tags ?? [],
         // Mirror the keystroke log into FileState so stepFile (in a different
@@ -12285,8 +13973,8 @@ function App() {
     }));
   }
 
-  // Explicit citation edits land in FileState.taggedTraces — the protocol's
-  // compatibility name for a `q` edge with no body quote. A pure citation
+  // Explicit citation edits land in FileState.citationIds — a `q` edge with no
+  // body quote. A pure citation
   // change (content unchanged) still
   // steps because unsteppedPaths and each backend's no-op gate include the
   // citation set in their change check.
@@ -12298,39 +13986,38 @@ function App() {
             ...prev,
             [path]: {
               ...prev[path],
-              taggedTraces: ids.length > 0 ? ids : undefined,
+              updatedAt: Date.now(),
+              citationIds: ids.length > 0 ? ids : undefined,
             },
           }
         : prev,
     );
   }
 
-  /** Open a tree item (file or folder) into a fresh column inserted
+  /** Open an ordinary tree item (file or folder) into a fresh column inserted
    *  immediately to the right of the active panel. This is the tree context
    *  menu's "Open to side": a folder is opened as a folder tab, a file as a
    *  normal editor tab. Always spawns a new column (up to the MAX_PANELS safety
    *  cap) so the user can open as many side-by-side panels as the row will fit;
    *  spawnPanel reconciles all parallel per-panel structures. */
   function openToSide(relPath: string) {
-    const tab = folderPaths.has(relPath) ? folderTab(relPath) : relPath;
+    if (isOblivion(relPath)) {
+      selectOblivion(relPath);
+      return;
+    }
+    const tab =
+      relPath === ROOT || isSystemRootPath(relPath) || folderPaths.has(relPath)
+        ? folderTab(relPath)
+        : relPath;
     const at = activePanel + 1;
     spawnPanel(at);
     openInPanel(tab, at);
     setActivePanel(at);
   }
 
-  /** Open a folder as a folder tab in the *active* panel (the context menu's
-   *  "Open"), not as a file tab. Mirrors selectFile for files: the folder://
-   *  sentinel is added as a tab (or activated if already open) and becomes the
-   *  active trace. Distinct from openToSide, which spawns a fresh column. */
-  function openFolder(relPath: string) {
-    openInActivePanel(folderTab(relPath));
-    setSelection({ kind: "folder", path: relPath });
-  }
-
   function createStart(kind: "file" | "folder", parent = "") {
     setCreateError(null);
-    if (isMint(parent) || isOblivion(parent)) return;
+    if (isMint(parent) || isScan(parent) || isOblivion(parent)) return;
     setCreating({ kind, parent });
     // Make sure the parent folder is expanded so the inline phantom row (the
     // name input) is visible while typing. Includes ROOT: the synthetic root
@@ -12383,10 +14070,17 @@ function App() {
     // typed name. The disk layer (write_text_file / create_folder) already
     // creates intermediate dirs via create_dir_all, so nested paths just work.
     const fullName = parent ? `${parent}/${cleanName}` : cleanName;
-    // Mint and Oblivion are system-managed. Mint receives only the mint
-    // gesture; Oblivion receives only delete-moves and restores.
-    if (isMint(parent) || isMint(fullName) || isOblivion(parent) || isOblivion(fullName)) {
-      setCreateError("Mint and Oblivion are managed by their own gestures.");
+    // Mint, Scan, and Oblivion are system-managed. Their contents arrive only
+    // through mint, scan, and delete/restore gestures respectively.
+    if (
+      isMint(parent) ||
+      isMint(fullName) ||
+      isScan(parent) ||
+      isScan(fullName) ||
+      isOblivion(parent) ||
+      isOblivion(fullName)
+    ) {
+      setCreateError("Mint, Scan, and Oblivion are managed by their own gestures.");
       return;
     }
 
@@ -12398,7 +14092,10 @@ function App() {
       if (!files[path]) {
         // Optimistically add an empty file so the editor is immediately
         // usable; the disk write + import node happen via createFile below.
-        setFiles((prev) => ({ ...prev, [path]: { runs: [], nodeId: "", tags: [] } }));
+        setFiles((prev) => ({
+          ...prev,
+          [path]: { runs: [], nodeId: "", tags: [], updatedAt: Date.now() },
+        }));
         void (async () => {
           try {
             const nodeId = await backendRef.current.createFile(path);
@@ -12431,11 +14128,23 @@ function App() {
         });
         return next;
       });
-      // Create the directory on disk too (no provenance node — folders are
-      // implicit in file paths until they gain members).
-      void backendRef.current.createFolder(fullName).catch((e) =>
-        console.warn(`[workspace] createFolder failed for ${fullName}:`, e),
-      );
+      void (async () => {
+        try {
+          const nodeId = await backendRef.current.createFolder(fullName);
+          setFiles((prev) => ({
+            ...prev,
+            [fullName]: { kind: "folder", runs: [], nodeId, traceId: nodeId, tags: [] },
+          }));
+          setEmptyFolders((prev) => {
+            if (!prev.has(fullName)) return prev;
+            const next = new Set(prev);
+            next.delete(fullName);
+            return next;
+          });
+        } catch (e) {
+          console.warn(`[workspace] createFolder failed for ${fullName}:`, e);
+        }
+      })();
     }
   }
 
@@ -12444,7 +14153,7 @@ function App() {
    *  destination, `forked-from` the immutable Mint node; the original remains
    *  in Mint and every existing citation keeps resolving to it. */
   async function forkMintedNodes(srcs: string[], destFolder: string) {
-    if (!folder || isMint(destFolder) || isOblivion(destFolder)) return;
+    if (!folder || isMint(destFolder) || isScan(destFolder) || isOblivion(destFolder)) return;
     const signer = secretKeyForVoice(authorPubkey) ?? undefined;
     const taken = new Set(Object.keys(files));
     let lastForkPath = "";
@@ -12492,11 +14201,116 @@ function App() {
       }
       if (lastForkPath) {
         openInActivePanel(lastForkPath);
-        setOpStatus(activePanel, "done", "forked coin");
+        setOpStatus(activePanel, "done", "forked coin", "fork");
       }
     } catch (error) {
       console.warn("[mint] fork-on-drop failed:", error);
-      setOpStatus(activePanel, "error", error instanceof Error ? error.message : String(error));
+      setOpStatus(activePanel, "error", error instanceof Error ? error.message : String(error), "fork");
+    }
+  }
+
+  /** Adopt selected Scan entries into Root by forking their exact imported
+   *  nuclei under the active AUTHOR. The private substrate-signed originals
+   *  remain in Scan; folder selections preserve their wrapper and subtree. */
+  async function adoptScannedNodes(srcs: string[], destFolder: string) {
+    if (
+      !folder ||
+      isMint(destFolder) ||
+      isScan(destFolder) ||
+      isOblivion(destFolder)
+    ) return;
+    const signer = secretKeyForVoice(authorPubkey);
+    if (!signer) {
+      setOpStatus(activePanel, "error", `no key for voice ${formatPubkey(authorPubkey)}`, "fork");
+      return;
+    }
+    const sourceRootId = folder.id;
+    const topSources = srcs.filter(
+      (path) =>
+        isScan(path) &&
+        path !== SCAN &&
+        !srcs.some((other) => other !== path && isDescendantOrSelf(other, path)),
+    );
+    let lastForkPath = "";
+    try {
+      const rootOwner = await fetchFolderOwner(sourceRootId);
+      if (!rootOwner) throw new Error("cannot verify the Root owner for scan adoption");
+      const folderSigner = folderWriteSigner(rootOwner, signer);
+      if (!folderSigner) throw new Error("the Root owner key is unavailable for scan adoption");
+      for (const src of topSources) {
+        const descendants = Object.entries(filesRef.current)
+          .filter(([path, file]) =>
+            file.kind !== "folder" &&
+            (path === src || path.startsWith(`${src}/`)),
+          )
+          .sort(([a], [b]) => a.localeCompare(b));
+        if (descendants.length === 0) continue;
+        const sourceIsFolder = descendants.some(([path]) => path !== src);
+        const destinationRoot = destFolder === ROOT
+          ? basename(src)
+          : `${destFolder}/${basename(src)}`;
+        const destinationOccupied = [
+          ...Object.keys(filesRef.current),
+          ...emptyFolders,
+        ].some((path) =>
+          path === destinationRoot || path.startsWith(`${destinationRoot}/`),
+        );
+        if (destinationOccupied) continue;
+
+        for (const [sourcePath, source] of descendants) {
+          if (!source.nodeId) continue;
+          const destPath = sourceIsFolder
+            ? destinationRoot + sourcePath.slice(src.length)
+            : destinationRoot;
+          const content = flatten(source.runs);
+          const event = await forkFileFromNode(source.nodeId, sourceRootId, destPath, {
+            signer,
+            localOnly: true,
+          });
+          const parsed = JSON.parse(event.content) as { contentHash?: string };
+          await upsertManifestEntry(
+            sourceRootId,
+            {
+              kind: "file",
+              relativePath: destPath,
+              latestNodeId: event.id,
+              contentHash: parsed.contentHash ?? "",
+            },
+            folderSigner,
+            { localOnly: true },
+          );
+          const runs: Run[] = content
+            ? [{ voice: authorPubkey, text: content, src: source.nodeId }]
+            : [];
+          saveLocalFile(sourceRootId, destPath, {
+            content,
+            tags: [],
+            nodeId: event.id,
+            runs,
+            voicePubkey: authorPubkey,
+          });
+          seedSteppedRef.current({
+            [destPath]: { runs, nodeId: event.id, tags: [] },
+          });
+          setFiles((prev) => ({
+            ...prev,
+            [destPath]: { runs, nodeId: event.id, tags: [] },
+          }));
+          lastForkPath = destPath;
+        }
+      }
+      if (lastForkPath) {
+        openInActivePanel(lastForkPath);
+        setOpStatus(activePanel, "done", "adopted scan", "fork");
+      }
+    } catch (error) {
+      console.warn("[scan] adopt-on-drop failed:", error);
+      setOpStatus(
+        activePanel,
+        "error",
+        error instanceof Error ? error.message : String(error),
+        "fork",
+      );
     }
   }
 
@@ -12516,10 +14330,12 @@ function App() {
   // carries it) so we never move the same subtree twice.
   function moveNodes(srcs: string[], destFolder: string) {
     if (!folder) return;
-    if (isMint(destFolder)) return;
+    if (isMint(destFolder) || isScan(destFolder)) return;
     const mintedSources = srcs.filter((src) => isMint(src) && src !== MINT);
     if (mintedSources.length > 0) void forkMintedNodes(mintedSources, destFolder);
-    srcs = srcs.filter((src) => !isMint(src));
+    const scannedSources = srcs.filter((src) => isScan(src) && src !== SCAN);
+    if (scannedSources.length > 0) void adoptScannedNodes(scannedSources, destFolder);
+    srcs = srcs.filter((src) => !isMint(src) && !isScan(src));
     if (srcs.length === 0) return;
     // The synthetic root (the mounted folder) can never be a move source.
     // The UI never offers it as draggable, but this is the trust boundary.
@@ -12647,11 +14463,13 @@ function App() {
       return next;
     });
 
-    // Mounts name tree coordinates, so they must follow the identities being
-    // moved. Without this pass the files land in the destination but the gold
-    // mounted rows disappear and scope keeps pointing at paths that no longer
-    // exist. Descendant mounts under a moved folder follow that folder too.
-    setScope((prev) => rebaseMountsAfterMove(prev, movable, destFolder));
+    // Context, directory operation selection, and semantic focus all follow
+    // the same trace identities through a move.
+    setScope((prev) => rebaseContextMountAfterMove(prev, movable, destFolder));
+    chooseDirectorySelection(
+      rebaseTraceRefsAfterMove(directorySelectionRef.current, movable, destFolder),
+    );
+    commitUiFocus(rebaseUiFocus(uiFocusRef.current, rebaser, tabRebaser));
 
     // Storage + provenance: extend each file's existing trace at the new path
     // and update membership. Carry user tags through so they survive the
@@ -12685,7 +14503,14 @@ function App() {
     // Deleting something already in Oblivion is a real hard delete (emptying
     // the bin). This keeps the recycle-bin contract: root→oblivion is
     // reversible, oblivion→nothing is permanent.
-    const inRoot = paths.filter((p) => !isMint(p) && !isOblivion(p) && p !== ROOT && p !== OBLIVION);
+    const inRoot = paths.filter(
+      (path) =>
+        !isMint(path) &&
+        !isScan(path) &&
+        !isOblivion(path) &&
+        path !== ROOT &&
+        path !== OBLIVION,
+    );
     const inOblivion = paths.filter((p) => isOblivion(p));
     const fileSet = new Set(Object.keys(files));
     const folderSet = new Set(emptyFolders);
@@ -12800,6 +14625,10 @@ function App() {
       for (const p of prev) if (!under(p)) next.add(p);
       return next;
     });
+    chooseDirectorySelection(directorySelectionRef.current.filter((item) => !under(item.path)));
+    if (uiFocusRef.current?.path && under(uiFocusRef.current.path)) {
+      commitUiFocus(null);
+    }
 
     // Disk delete + delete node + manifest tombstone. Each top-level path is an
     // independent backend delete, so partial failures don't block the rest.
@@ -12824,7 +14653,7 @@ function App() {
     const traceId = file.traceId ?? (await resolveTraceIdentity(file.nodeId));
     if (!traceId) throw new Error("The trace identity could not be verified.");
     const result = await revokeTrace(traceId, "Revoked by the author from zine", {
-      fallback: { folderId: folder.id, relativePath: path },
+      exactHeadId: file.nodeId,
     });
     setCitationRefreshEpoch((epoch) => epoch + 1);
     const requested = result.requestedNodeIds.length;
@@ -12847,7 +14676,9 @@ function App() {
   // path rewrite, no disk rename, no provenance delta.
   function renameNode(path: string, newName: string): string | null {
     if (!folder) return null;
-    if (isMint(path) || isOblivion(path)) return "Mint and Oblivion are read-only.";
+    if (isMint(path) || isScan(path) || isOblivion(path)) {
+      return "Mint, Scan, and Oblivion are read-only.";
+    }
     const cleanName = newName.trim();
     if (!cleanName) return "Name cannot be empty.";
     if (cleanName.includes("/"))
@@ -12926,6 +14757,11 @@ function App() {
       return next;
     });
 
+    chooseDirectorySelection(
+      directorySelectionRef.current.map((item) => ({ ...item, path: rebaser(item.path) })),
+    );
+    commitUiFocus(rebaseUiFocus(uiFocusRef.current, rebaser, renameTabRebaser));
+
     // Storage rename + an identity-preserving provenance step. Carry each
     // affected file's user tags through, same as moveNodes.
     const userTagsByPath: Record<string, string[]> = {};
@@ -12954,7 +14790,7 @@ function App() {
       // the user Steps it. Cmd+B remains the protection-only bracket gesture.
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
-        void deliverAsVoice(activePanel, "step");
+        void deliverAsVoice(opTargetPanel(), "step");
       }
     }
     window.addEventListener("keydown", onKeyDown);
@@ -12976,13 +14812,9 @@ function App() {
     [emptyFolders, files],
   );
 
-  // The focused panel's active tab mapped back to its directory-tree path. A
-  // folder tab (`folder://<relpath>`) maps to the folder's relpath; null keeps
-  // an empty panel from accidentally marking the synthetic root row.
-  const activeTab = panels[activePanel]?.active ?? "";
-  const focusedTabPath = activeTab
-    ? (isFolderTab(activeTab) ? folderTabPath(activeTab) : activeTab)
-    : null;
+  // Directory gold follows semantic focus, not whichever live or projected
+  // panel happens to be frontmost.
+  const focusedTabPath = focusDirectoryPath(uiFocus);
 
   // The root's display name — shown as the sidebar header and as the label of
   // the synthetic root node in the tree. The root is pathless, so the label is
@@ -12993,33 +14825,59 @@ function App() {
     return folder.label ?? DEFAULT_ROOT_LABEL;
   }, [folder]);
 
+  const replayTargets = useMemo(
+    () => {
+      const target = focusReplayTarget(uiFocus);
+      return target ? [{
+        kind: target.kind,
+        path: target.path,
+        label: target.path === ROOT ? rootLabel : systemPathDisplayName(target.path),
+        title: target.path === ROOT ? rootLabel : target.path,
+      }] : [];
+    },
+    [uiFocus, rootLabel],
+  );
+
   const tree = useMemo(() => {
     // Under nesting (spec §3.2), a FileState with kind: "folder" is a real
     // folder-member (a subfolder trace), not a file. Split the entries so the
-    // tree renders folder-members as folders and files as files. Legacy/flat
-    // folders have no kind: "folder" entries, so this is byte-identical to the
-    // old behavior for them.
+    // tree renders folder-members as folders and files as files. Path-derived
+    // directories remain implicit in the file entries.
     const fileEntries = Object.entries(files)
       .filter(([, f]) => f.kind !== "folder")
       .map(([p, f]) => ({
         path: p,
         type: "file" as const,
-        ...(f.nodeId ? { attestations: attestationCounts[f.nodeId] ?? 0 } : {}),
+        updatedAt: f.updatedAt,
       }));
     const folderMemberEntries = Object.entries(files)
       .filter(([, f]) => f.kind === "folder")
       .map(([p, f]) => ({
         path: p,
         type: "folder" as const,
-        ...(f.nodeId ? { attestations: attestationCounts[f.nodeId] ?? 0 } : {}),
+        updatedAt: f.updatedAt,
       }));
     const allEntries: TreeEntry[] = [
       ...fileEntries,
       ...folderMemberEntries,
       ...[...emptyFolders].map((p) => ({ path: p, type: "folder" as const })),
     ];
-    return buildDirectoryTree(allEntries, rootLabel);
-  }, [files, emptyFolders, rootLabel, attestationCounts]);
+    return buildDirectoryTree(allEntries, rootLabel, directorySort);
+  }, [files, emptyFolders, rootLabel, directorySort]);
+
+  const currentReplayFrame = playTimeline?.[playCursor];
+  const latestActionOutput = replaySkipNotice ?? (replay
+    ? (() => {
+        const stepIndex = currentReplayFrame?.stepIndex ?? replay.index;
+        return replayActionLabel(
+          currentReplayFrame,
+          replay.steps[stepIndex],
+          Math.max(0, replay.steps.length - 1),
+          rootLabel,
+          replayTargets[0]?.kind === "folder",
+        );
+      })()
+    : undefined);
 
   return (
     <div className="app-shell" onContextMenu={openGlobalContextMenu}>
@@ -13040,19 +14898,32 @@ function App() {
           )}
           {activeView === "editor" ? (
           folder && bootState === "ready" ? (
-            <div className="press-content">
+            onboardingStage === "welcome" ? (
+              <OnboardingWelcome
+                onStart={beginOnboarding}
+                onDismiss={dismissOnboarding}
+              />
+            ) : (
+            <div className={`press-content onboarding-stage-${onboardingStage}`}>
               <div className="press-top">
               <Sidebar
                 tree={tree}
                 collapsed={collapsed}
                 onToggleFolder={toggleFolder}
                 focusedTabPath={focusedTabPath}
+                selectedItems={directorySelection}
+                onSelectionChange={chooseDirectorySelection}
                 scopes={scope}
-                onScopesChange={setScope}
                 shielded={shielded}
-                onToggleShielded={toggleShielded}
+                onSetMountState={setContextMount}
                 onActivateFile={selectFile}
+                onActivateCoin={selectCoin}
+                onActivateOblivion={selectOblivion}
                 onActivateFolder={selectFolder}
+                onOpenFolder={openFolder}
+                onMintCoin={openDirectCoinComposer}
+                onScan={(kind) => void onScan(kind)}
+                onReify={(target) => setReifyPrompt({ includeTrace: false, target })}
                 creating={creating}
                 createError={createError}
                 onCreateStart={createStart}
@@ -13105,84 +14976,12 @@ function App() {
                   />
                 }
                 onOpenToSide={openToSide}
-                onBeginReplay={() =>
-                  void beginReplay().catch((e) => console.warn("[replay] begin failed:", e))
-                }
-                replayStep={replay ? replay.steps[replay.index] ?? null : null}
-                replayIndex={
-                  playing && playTimeline && playCursor < playTimeline.length
-                    ? playTimeline[playCursor]?.stepIndex ?? replay?.index ?? 0
-                    : replay?.index ?? 0
-                }
-                replayCount={replay?.steps.length ?? 0}
-                stepTimes={
-                  replay ? replay.steps.map((s) => s.meta.steppedAtMs) : undefined
-                }
-                playFraction={
-                  playing && playTimeline ? stepPlayFraction(playTimeline, playCursor) : 0
-                }
-                playing={playing}
-                playSpeed={playSpeed}
-                replayActive={
-                  (replay !== null && replay.index < replay.steps.length - 1) ||
-                  playing
-                }
-                onStep={(n) => {
-                  // Manual stepping pauses playback and tears down its
-                  // timeline so the stepper lands on a clean step boundary.
-                  setPlaying(false);
-                  setPlayTimeline(null);
-                  playTimelineRef.current = null;
-                  teardownReplayPanels();
-                  replayStepTo(n);
-                }}
-                onTogglePlay={() => {
-                  if (!replay) return;
-                  if (playing) {
-                    // Pause: tear down the edit timeline and snap the step
-                    // cursor to the last rendered frame's enclosing step, so
-                    // the stepper/slider rest where playback stopped.
-                    const tl = playTimelineRef.current;
-                    const cur = playCursorRef.current;
-                    const frame = tl?.[cur];
-                    setPlaying(false);
-                    setPlayTimeline(null);
-                    playTimelineRef.current = null;
-                    if (frame && frame.stepIndex < replay.steps.length) {
-                      replayStepTo(frame.stepIndex);
-                    }
-                    // Remove only the ephemeral replay panels.
-                    teardownReplayPanels();
-                  } else {
-                    // Build the keystroke timeline, render its first frame, and
-                    // start the tick. Playback always
-                    // animates the whole scope (genesis→live) — resuming mid-
-                    // edit isn't supported.
-                    const tl = buildKeditTimeline();
-                    if (!tl || tl.length <= 1) return; // nothing to animate
-                    // Pre-mount involved files into spawned panels so the tick
-                    // can switch activePanel per-frame (one file per column)
-                    // instead of cramming every file into one panel's tabs.
-                    mountReplayPanels(tl);
-                    const first = tl[0];
-                    if (first) renderPlayFrame(first, null);
-                    playTimelineRef.current = tl;
-                    setPlayTimeline(tl);
-                    playCursorRef.current = 0;
-                    setPlayCursor(0);
-                    setPlaying(true);
-                  }
-                }}
-                onCycleSpeed={() =>
-                  setPlaySpeed((s) => {
-                    const i = REPLAY_SPEEDS.indexOf(s as (typeof REPLAY_SPEEDS)[number]);
-                    return REPLAY_SPEEDS[(i + 1) % REPLAY_SPEEDS.length];
-                  })
-                }
-                onOpenFolder={openFolder}
-                onOpenSettings={() => {
+                directorySort={directorySort}
+                onDirectorySortChange={setDirectorySort}
+                onOpenOnboarding={restartOnboarding}
+                onOpenFactoryReset={() => {
                   setResetError(null);
-                  setSettingsOpen(true);
+                  setFactoryResetOpen(true);
                 }}
               />
               {/* Horizontal resize handle for the press: drag to change the
@@ -13201,6 +15000,98 @@ function App() {
                 onPointerUp={onSidebarResizerPointerUp}
                 onDoubleClick={onSidebarResizerDoubleClick}
               />
+              {reifyPrompt && (() => {
+                const targets = scopedReifyTargets(reifyPrompt.target);
+                const unsteppedCount = replayDisplay && !reifyPrompt.target
+                  ? 0
+                  : targets.filter((target) => unsteppedPathSet.has(target.path)).length;
+                const missingStepCount = targets.filter((target) => !target.nodeId).length;
+                const needsStep = unsteppedCount > 0 || missingStepCount > 0;
+                const latestLabel = targets.length === 1
+                  ? "Reify latest Step"
+                  : "Reify latest Steps";
+                return (
+                  <div className="confirm-overlay" onClick={() => setReifyPrompt(null)}>
+                    <div
+                      className="confirm-dialog reify-export-dialog"
+                      onClick={(event) => event.stopPropagation()}
+                      role="dialog"
+                      aria-modal="true"
+                      aria-labelledby="reify-export-title"
+                    >
+                      <h2 id="reify-export-title" className="create-modal-title">
+                        Reify stepped snapshot
+                      </h2>
+                      <p className="confirm-message reify-export-message">
+                        Writes {targets.length} exact signed {targets.length === 1 ? "nucleus" : "nuclei"} to ordinary files. Provenance is never embedded in their Markdown.
+                      </p>
+                      {needsStep && (
+                        <p className="reify-export-warning">
+                          {unsteppedCount > 0
+                            ? `${unsteppedCount} ${unsteppedCount === 1 ? "file has" : "files have"} changes outside the latest Step.`
+                            : `${missingStepCount} ${missingStepCount === 1 ? "file has" : "files have"} no Step yet.`}
+                          {missingStepCount === 0
+                            ? " Reify the latest Steps as-is, or Step the current state first."
+                            : " Step the current state before Reifying."}
+                        </p>
+                      )}
+                      <label className="reify-trace-option">
+                        <input
+                          type="checkbox"
+                          checked={reifyPrompt.includeTrace}
+                          onChange={(event) =>
+                            setReifyPrompt({
+                              ...reifyPrompt,
+                              includeTrace: event.target.checked,
+                            })
+                          }
+                        />
+                        <span>
+                          Include trace
+                          <small>.zine/trace.json + report.md</small>
+                        </span>
+                      </label>
+                      <p className="reify-trace-privacy">
+                        The trace can disclose private Steps, prompts, context, timing, and intermediate text.
+                      </p>
+                      <div className="confirm-actions reify-export-actions">
+                        <button
+                          type="button"
+                          className="confirm-cancel"
+                          onClick={() => setReifyPrompt(null)}
+                        >
+                          Cancel
+                        </button>
+                        {needsStep && missingStepCount === 0 && (
+                          <button
+                            type="button"
+                            className="confirm-skip"
+                            onClick={() => void onReifyOp({
+                              stepCurrent: false,
+                              includeTrace: reifyPrompt.includeTrace,
+                              target: reifyPrompt.target,
+                            })}
+                          >
+                            {latestLabel}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="confirm-fork"
+                          disabled={targets.length === 0}
+                          onClick={() => void onReifyOp({
+                            stepCurrent: needsStep,
+                            includeTrace: reifyPrompt.includeTrace,
+                            target: reifyPrompt.target,
+                          })}
+                        >
+                          {needsStep ? "Step current & Reify" : "Reify"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
               {/* Fork-from-snapshot modal: the user tried to edit while viewing
                   a historical replay step. Offer to fork the file trace from
                   that snapshot (spec §3.8), skip to the latest version, or
@@ -13307,48 +15198,33 @@ function App() {
                 >
                   {panels.map((panel, idx) => {
                     const path = panel.active;
-                    // Render-side mirror of replayActiveRef: true while replay
-                    // is frozen on a historical step or mid-playback. Drives
-                    // the per-panel read-only gate (the ⏭ button is the way out
-                    // → seeking to `last` flips this false, lifting read-only).
-                    const replayActive =
-                      (replay !== null &&
-                        replay.index < replay.steps.length - 1) ||
-                      playing;
                     const citationReadOnly =
-                      replayActive || isMint(path) || isOblivion(path);
-                    // The single path whose content is currently overridden by
-                    // the replay stepper (null on `last`, on membership steps,
-                    // or when not replaying). The panel showing this path gets
-                    // the provisional/read-only border; its tab gets a marker.
-                    const replayFrozenPath =
-                      replay !== null &&
-                      replay.index < replay.steps.length - 1 &&
-                      !replay.steps[replay.index]?.membership
-                        ? (replay.steps[replay.index]?.relativePath ?? null)
-                        : null;
-                    // Replay-driven diff inputs, computed only when THIS panel's
-                    // file is the one the stepper has frozen. replayStepText is
-                    // the frozen step's snapshot; replayPrevText walks the timeline
-                    // back to the previous content-step of the same file (skipping
-                    // membership steps and other files) so "vs prev" shows what
-                    // this step changed; replayLiveText is the live buffer parked
-                    // in replay.snapshot (file.runs has been overwritten by the
-                    // step snapshot, so flatten(file.runs) is NOT the live text).
-                    // All three are null when not frozen on this path.
-                    const replayFrozenHere = path === replayFrozenPath && replay !== null;
+                      panel.replayOwned === true ||
+                      isMint(path) ||
+                      isScan(path) ||
+                      isOblivion(path);
+                    const replayFile = panel.replayOwned ? replayDisplay?.files[path] : undefined;
+                    const panelFile = replayFile
+                      ? {
+                          ...(files[path] ?? { tags: [], nodeId: replayFile.nodeId }),
+                          nodeId: replayFile.nodeId,
+                          runs: replayFile.runs,
+                        }
+                      : files[path];
+                    const replayFrozenHere = panel.replayOwned === true && !!replayFile && !!replay;
                     let replayStepText: string | null = null;
                     let replayPrevText: string | null = null;
                     let replayLiveText: string | null = null;
                     if (replayFrozenHere) {
-                      const step = replay.steps[replay.index];
-                      replayStepText = step?.contentUpToHere ?? null;
-                      replayLiveText = replay.snapshot[path]
-                        ? flatten(replay.snapshot[path].runs ?? [])
-                        : flatten(files[path]?.runs ?? []);
-                      for (let i = replay.index - 1; i >= 0; i--) {
+                      replayStepText = flatten(replayFile.runs);
+                      replayLiveText = flatten(files[path]?.runs ?? []);
+                      const displayedStepIndex = replayStepIndexForPath(
+                        replay.steps,
+                        replay.index,
+                        path,
+                      );
+                      for (let i = displayedStepIndex - 1; i >= 0; i--) {
                         const prev = replay.steps[i];
-                        if (prev.membership) continue;
                         if (prev.relativePath !== path) continue;
                         replayPrevText = prev.contentUpToHere || null;
                         break;
@@ -13381,18 +15257,65 @@ function App() {
                             panelIdx={idx}
                             tabs={panel.tabs}
                             activePath={path}
-                            file={files[path]}
+                            file={panelFile}
+                            directCoinComposer={{
+                              phrase: directCoinDraft.phrase,
+                              busy: directCoinBusy,
+                              error: directCoinError,
+                              onPhraseChange: editDirectCoinDraft,
+                              onMint: () =>
+                                void mintDirectCoin(directCoinDraft.phrase, directCoinDraft.kedits),
+                              onClose: () => closeTab(idx, DIRECT_COIN_COMPOSER_TAB),
+                            }}
                             folderId={folder?.id ?? ""}
                             replayStepText={replayStepText}
                             replayPrevText={replayPrevText}
                             replayLiveText={replayLiveText}
+                            replayNodeId={replayFile?.nodeId}
+                            replayActionStatus={
+                              replayFile?.nodeId
+                                ? historicalActionStatus[replayFile.nodeId]
+                                : undefined
+                            }
+                            onReplaySend={
+                              replayFile?.nodeId && canSignWithSecrets()
+                                ? () => void sendHistoricalNode(replayFile.nodeId)
+                                : undefined
+                            }
+                            onReplayAttest={
+                              replayFile?.nodeId && canSignWithSecrets()
+                                ? () => setAttestTarget({
+                                    path: `${path} · historical ${replayFile.nodeId.slice(0, 8)}…`,
+                                    kind: "file",
+                                    nodeId: replayFile.nodeId,
+                                    plan: sentNodeStatus[replayFile.nodeId] === true
+                                      ? "attest-only"
+                                      : "send-attest",
+                                    historical: true,
+                                    panelIndex: idx,
+                                  })
+                                : undefined
+                            }
                             active={activePanel === idx}
+                            focused={
+                              panel.replayOwned !== true &&
+                              uiFocus?.panelIndex === idx &&
+                              uiFocus.tabPath === path
+                            }
                             collapsed={collapsed}
                             onFocusPanel={() => setActivePanel(idx)}
                             onSelectTab={(p) => {
+                              // An explicit click on a projected child exits
+                              // replay and focuses that trace in a real tab.
+                              if (panel.replayOwned) {
+                                chooseDirectorySelection([]);
+                                activateLiveTab(p, focusRefForTab(p));
+                                return;
+                              }
                               setPanels((prev) =>
                                 mapPanel(prev, idx, (pp) => ({ ...pp, active: p })),
                               );
+                              chooseDirectorySelection([]);
                               // The reconcile overlay is bound to a specific
                               // path. Switching to any other tab (folder, or a
                               // different file) leaves the panel pointing at a
@@ -13403,13 +15326,32 @@ function App() {
                                 setMergeError(null);
                               }
                               // Selecting a tab makes it the active trace target.
-                              // A folder tab targets the folder (no nodeId —
-                              // folders carry no provenance nucleus); a file tab
-                              // targets the file as before.
-                              if (isFolderTab(p)) {
-                                setSelection({ kind: "folder", path: folderTabPath(p) });
+                              // Folder, Coin, and ordinary file tabs retain their
+                              // distinct action-palette semantics.
+                              if (isCoinComposerTab(p)) {
+                                setEditorSelection(null);
+                                commitUiFocus(null);
+                              } else if (isFolderTab(p)) {
+                                commitUiFocus(locateFocus(
+                                  { kind: "folder", path: folderTabPath(p), nodeId: files[folderTabPath(p)]?.nodeId },
+                                  idx,
+                                  p,
+                                ));
+                              } else if (isCoinTab(p)) {
+                                const coin = files[p];
+                                setEditorSelection(null);
+                                commitUiFocus(locateFocus({
+                                  kind: "coin",
+                                  path: p,
+                                  nodeId: coin?.nodeId,
+                                  phrase: coin ? flatten(coin.runs) : "",
+                                }, idx, p));
                               } else {
-                                setSelection({ kind: "file", path: p, nodeId: files[p]?.nodeId });
+                                commitUiFocus(locateFocus(
+                                  { kind: "file", path: p, nodeId: files[p]?.nodeId },
+                                  idx,
+                                  p,
+                                ));
                               }
                             }}
                             onCloseTab={(p) => closeTab(idx, p)}
@@ -13417,7 +15359,7 @@ function App() {
                             onEdit={(runs, kedits) => editFile(path, runs, kedits)}
                             onRemoveCitation={(nodeId) => {
                               if (!path || citationReadOnly) return;
-                              const cur = files[path]?.taggedTraces ?? [];
+                              const cur = files[path]?.citationIds ?? [];
                               editCitations(path, cur.filter((i) => i !== nodeId));
                             }}
                             // Every panel's view is lifted into panelViews (so each
@@ -13442,21 +15384,24 @@ function App() {
                             // replay-stepped (frozen historical) one. Drives the
                             // provisional/out-of-date border. (The fork action
                             // itself lives in the AUTHOR row, not on the panel.)
-                            replayFrozen={!!replayFrozenPath && path === replayFrozenPath}
+                            replayFrozen={replayFrozenHere && !isFolderTab(path)}
                             replayMounted={panel.replayOwned === true}
                             voice={authorPubkey}
-                            // Folder tabs have no preview/markdown surface; pass
-                            // "preview" (ignored by FolderView) and never persist a
-                            // mode entry for a sentinel path.
-                            mode={isFolderTab(path) ? "preview" : tabModes[path] ?? "preview"}
+                            // Folder and Coin tabs have no editor mode surface;
+                            // pass preview (ignored) and never persist a mode.
+                            mode={
+                              isFolderTab(path) || isCoinTab(path) || isCoinComposerTab(path)
+                                ? "preview"
+                                : tabModes[path] ?? "preview"
+                            }
                             onSetMode={(m) => {
-                              if (isFolderTab(path)) return;
+                              if (isFolderTab(path) || isCoinTab(path) || isCoinComposerTab(path)) return;
                               setTabModes((prev) => ({ ...prev, [path]: m }));
                             }}
                             voiceAttribution={voiceAttribution}
                             selectedNodeId={
-                              selection?.kind === "coin"
-                                ? selection.nodeId ?? ""
+                              uiFocus?.kind === "coin"
+                                ? uiFocus.nodeId ?? ""
                                 : ""
                             }
                             // Folder replay drives a per-panel scroll: only the
@@ -13464,6 +15409,7 @@ function App() {
                             // target, so a background panel isn't yanked around.
                             scrollTarget={
                               replay &&
+                              panel.replayOwned === true &&
                               !isFolderTab(path) &&
                               replay.steps[replay.index]?.relativePath === path
                                 ? replay.steps[replay.index]?.changeRange ?? null
@@ -13482,17 +15428,15 @@ function App() {
                               pasteSelectionWithCoin(view, event)
                             }
                             onReplayEditAttempt={() => {
-                              // Only surface the fork modal when actually frozen on
-                              // a historical FILE step (not at `last`, where the
-                              // editor is live; and not on a membership step, which
-                              // freezes nothing — the editor is still live on
-                              // whatever file was showing).
                               if (
                                 replay &&
-                                replay.index < replay.steps.length - 1 &&
-                                !replay.steps[replay.index]?.membership
+                                panel.replayOwned === true &&
+                                !isFolderTab(path) &&
+                                replayStepIndexForPath(replay.steps, replay.index, path) >= 0
                               ) {
-                                setForkPrompt({ stepIndex: replay.index });
+                                setForkPrompt({
+                                  stepIndex: replayStepIndexForPath(replay.steps, replay.index, path),
+                                });
                               }
                             }}
                             citations={isFolderTab(path) ? [] : (citationsByPath[path] ?? [])}
@@ -13508,6 +15452,11 @@ function App() {
                             inboundFreshness={
                               isFolderTab(path) ? undefined : inboundFreshnessByPath[path]
                             }
+                            attestationCount={
+                              !isFolderTab(path) && files[path]?.nodeId
+                                ? attestationCounts[files[path].nodeId!] ?? 0
+                                : undefined
+                            }
                             onOpenCitation={(nodeId) => {
                               void openCitedTrace(nodeId);
                             }}
@@ -13520,7 +15469,7 @@ function App() {
                             }
                             onAddCitation={(nodeId) => {
                               if (!path || citationReadOnly) return;
-                              const cur = files[path]?.taggedTraces ?? [];
+                              const cur = files[path]?.citationIds ?? [];
                               if (cur.includes(nodeId)) return; // dedupe
                               editCitations(path, [...cur, nodeId]);
                             }}
@@ -13539,7 +15488,7 @@ function App() {
                               const src = files[srcPath];
                               if (!src || src.kind === "folder" || !src.nodeId)
                                 return false; // only stepped files and Mint coins
-                              const cur = files[path]?.taggedTraces ?? [];
+                              const cur = files[path]?.citationIds ?? [];
                               if (cur.includes(src.nodeId)) return false; // already cited
                               return true;
                             }}
@@ -13547,7 +15496,7 @@ function App() {
                               if (!path || citationReadOnly) return;
                               const src = files[srcPath];
                               if (!src || src.kind === "folder" || !src.nodeId) return;
-                              const cur = files[path]?.taggedTraces ?? [];
+                              const cur = files[path]?.citationIds ?? [];
                               if (cur.includes(src.nodeId)) return; // dedupe
                               editCitations(path, [...cur, src.nodeId]);
                             }}
@@ -13565,12 +15514,15 @@ function App() {
                             unsteppedPathSet={unsteppedPathSet}
                             unsteppedEditCounts={unsteppedEditCounts}
                             tabIsInScope={(tabPath) => {
+                              if (isCoinComposerTab(tabPath)) return true;
                               const tracePath = isFolderTab(tabPath)
                                 ? folderTabPath(tabPath)
                                 : tabPath;
                               return (
                                 !isOblivion(tracePath) &&
-                                pathInEffectiveScopes(scope, shielded, tracePath)
+                                !isMint(tracePath) &&
+                                !isScan(tracePath) &&
+                                pathInEffectiveScope(scope, shielded, tracePath)
                               );
                             }}
                             draggingTab={draggingTab}
@@ -13808,6 +15760,79 @@ function App() {
                   );
                 })()}
               <ActionPalette
+                replayTransport={
+                  <ReplayTransport
+                    targets={replayTargets}
+                    index={replay?.index ?? -1}
+                    count={replay?.steps.length ?? 0}
+                    ready={replay !== null}
+                    playing={playing}
+                    playSpeed={playSpeed}
+                    onBegin={() => {
+                      if (replayLoading) return;
+                      void beginReplay()
+                        .then((ready) => {
+                          if (ready) startReplayPlayback();
+                        })
+                        .catch((e) => console.warn("[replay] begin failed:", e));
+                    }}
+                    onStep={(n) => {
+                      setReplaySkipNotice(null);
+                      replayStepTo(n);
+                    }}
+                    onAction={seekReplayToAction}
+                    onSeekAt={seekReplayToTime}
+                    onTogglePlay={() => {
+                      if (playing) {
+                        pauseReplayPlayback();
+                      } else {
+                        // Resume a paused recording, or restart after it completed.
+                        startReplayPlayback();
+                      }
+                    }}
+                    onCycleSpeed={() =>
+                      setPlaySpeed((s) => {
+                        const i = REPLAY_SPEEDS.indexOf(s as (typeof REPLAY_SPEEDS)[number]);
+                        return REPLAY_SPEEDS[(i + 1) % REPLAY_SPEEDS.length];
+                      })
+                    }
+                    stepTimes={
+                      replay ? replay.steps.map((s) => s.meta.steppedAtMs) : undefined
+                    }
+                    actionTimes={playTimeline?.map((frame) => frame.at)}
+                    actionIndex={playCursor}
+                    timing={replayTiming}
+                    playheadAt={replayPlayheadAt}
+                    loading={replayLoading}
+                    latestActionOutput={latestActionOutput}
+                    containerTitle={
+                      replay
+                        ? (() => {
+                            const step = replay.steps[replay.index];
+                            if (!step) return undefined;
+                            if (step.membership) {
+                              return [
+                                step.membership.type,
+                                step.membership.path,
+                                new Date(step.meta.steppedAtMs).toLocaleString(),
+                              ]
+                                .filter(Boolean)
+                                .join(" · ");
+                            }
+                            return [
+                              step.meta.action ?? "edit",
+                              step.relativePath,
+                              new Date(step.meta.steppedAtMs).toLocaleString(),
+                              stepDescription(step.event).summary ??
+                                stepDescription(step.event).prompt,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ");
+                          })()
+                        : undefined
+                    }
+                  />
+                }
                 keys={keys}
                 authorKeyId={authorKeyId}
                 modelKeyId={modelKeyId}
@@ -13816,10 +15841,10 @@ function App() {
                 providers={providers}
                 resolvedModelProviderId={resolvedModelProviderId}
                 onSelectProvider={selectVoiceProvider}
-                selection={selection}
+                selection={uiFocus}
                 runningOp={(() => {
                   const s = summonStatus[opTargetPanel()] ?? { state: "idle" };
-                  return s.state === "running" ? (s.op ?? null) : null;
+                  return s.state === "running" && isOpKind(s.op) ? s.op : null;
                 })()}
                 onOp={(op) => runOp(opTargetPanel(), op)}
                 onStop={() => stopOp(opTargetPanel())}
@@ -13835,36 +15860,33 @@ function App() {
                 sendAutoSteps={paletteSendAutoSteps()}
                 stepAvailable={paletteStepIsAvailable()}
                 onPreserve={preservePaletteSelection}
-                onScopeToTarget={() => {
-                  // Mount the focused file's parent folder; derived scope and
-                  // stepper/context update from it automatically. A shielded file
-                  // boundary remains shielded until the file itself is mounted.
-                  const p = panels[opTargetPanel()]?.active;
-                  if (!p) return;
-                  const path = parentPath(p);
-                  setScope([{ kind: "folder", path }]);
-                  selectFolder(path);
-                }}
                 substrate={substrate}
                 onChooseSubstrate={chooseSubstrate}
                 substrateKeyId={substrateKeyId}
                 onChooseSubstrateKey={chooseSubstrateKey}
                 onScan={(kind) => void onScan(kind)}
-                onReifyOp={() => void onReifyOp()}
+                onReifyOp={() => setReifyPrompt({ includeTrace: false })}
+                onOpenTrace={() => setTraceLocatorOpen(true)}
                 // The AUTHOR row's Fork action is live only when the op-target
                 // panel is parked on a replay-frozen historical step — the one
                 // way to turn a read-only historical view into an editable trace.
                 replayFrozen={(() => {
-                  const p = panels[opTargetPanel()]?.active;
+                  const panel = panels[opTargetPanel()];
+                  const p = panel?.active ?? "";
                   return (
+                    panel?.replayOwned === true &&
+                    !isFolderTab(p) &&
                     replay !== null &&
-                    replay.index < replay.steps.length - 1 &&
-                    !replay.steps[replay.index]?.membership &&
-                    !!replay.steps[replay.index]?.relativePath &&
-                    replay.steps[replay.index]!.relativePath === p
+                    replayStepIndexForPath(replay.steps, replay.index, p) >= 0
                   );
                 })()}
-                onForkReplay={() => replay && setForkPrompt({ stepIndex: replay.index })}
+                onForkReplay={() => {
+                  if (!replay) return;
+                  const path = panels[opTargetPanel()]?.active ?? "";
+                  if (isFolderTab(path)) return;
+                  const stepIndex = replayStepIndexForPath(replay.steps, replay.index, path);
+                  if (stepIndex >= 0) setForkPrompt({ stepIndex });
+                }}
               />
               {attestTarget && (
                 <AttestModal
@@ -13880,10 +15902,14 @@ function App() {
                   onConfirm={(geohash, message) => {
                     const t = attestTarget;
                     setAttestTarget(null);
-                    void attestAsVoice(t.path, geohash, message, {
-                      kind: t.kind,
-                      nodeId: t.nodeId,
-                    });
+                    if (t.historical && t.nodeId) {
+                      void attestHistoricalNode(t.nodeId, geohash, message);
+                    } else {
+                      void attestAsVoice(t.path, geohash, message, {
+                        kind: t.kind,
+                        nodeId: t.nodeId,
+                      });
+                    }
                   }}
                 />
               )}
@@ -13892,7 +15918,7 @@ function App() {
                   providers={providers}
                   recipes={automationRecipes}
                   currentWorkspace={folder ? { id: folder.id, ...(folder.label ? { label: folder.label } : {}) } : null}
-                  currentScopes={scope.map((item) => ({ kind: item.kind, path: item.path }))}
+                  currentScopes={automationScopesFor(scope)}
                   defaultProviderId={
                     getVoiceProvider(modelPubkey) ?? providers[0]?.id ?? null
                   }
@@ -13933,9 +15959,7 @@ function App() {
                     <p className="run-blurb">
                       Focus or the source revision changed while the provider was working, so nothing was edited.
                     </p>
-                    <pre className="prompt-inspector-pre">
-                      {staleModelResult.response || "(No response was sent because the target was already stale.)"}
-                    </pre>
+                    <pre className="prompt-inspector-pre">{staleModelResult.response || "(No response was sent because the target was already stale.)"}</pre>
                     <div className="run-actions">
                       <button
                         type="button"
@@ -13988,12 +16012,34 @@ function App() {
                   onApprove={(prepared) => {
                     preparedApprovalRef.current.approve(prepared);
                     setApprovedRequestHash(prepared.preparedRequestHash);
+                    if (
+                      onboardingStageRef.current === "context-inspect" &&
+                      prepared.targetRevision.path === modelLessonResume?.targetPath
+                    ) {
+                      advanceOnboarding("request-approved");
+                    }
                   }}
                   estimateTokens={estimateTokens}
                   onClose={() => setInspectOp(null)}
                 />
               )}
+              {isOnboardingActive(onboardingStage) && (
+                <OnboardingGuide
+                  stage={onboardingStage}
+                  canBringFile={isTauri()}
+                  onDismiss={dismissOnboarding}
+                  onBringFile={() => {
+                    dismissOnboarding();
+                    void onScan("file");
+                  }}
+                  onConfigureModel={() => {
+                    beginModelOnboarding();
+                  }}
+                  lesson={modelLessonResume}
+                />
+              )}
             </div>
+            )
           ) : folder && bootState === "scanning" ? (
             <section className="view-placeholder">
               <span className="press-loading-spinner" aria-hidden="true" />
@@ -14027,7 +16073,20 @@ function App() {
           </ViewErrorBoundary>
         ) : activeView === "models" ? (
           <ViewErrorBoundary view="models">
-            <ModelsView onProvidersChange={setProviders} />
+            <ModelsView
+              onProvidersChange={setProviders}
+              modelLessonActive={onboardingStage === "model-setup"}
+              onProviderTested={(providerId, providerFingerprint) => {
+                if (onboardingStageRef.current === "model-setup") {
+                  setModelProbeSession({ providerId, providerFingerprint });
+                  selectVoiceProvider(providerId);
+                  void completeModelSetup();
+                }
+              }}
+            />
+            {modelLessonError ? (
+              <p className="sampler-status error" role="alert">{modelLessonError}</p>
+            ) : null}
           </ViewErrorBoundary>
         ) : activeView === "globe" ? (
           <ViewErrorBoundary view="globe">
@@ -14055,6 +16114,15 @@ function App() {
         </div>
       </div>
       <PinPanel />
+      {oblivionModalPath && files[oblivionModalPath] && (
+        <OblivionModal
+          name={systemPathDisplayName(oblivionModalPath)}
+          path={oblivionModalPath}
+          content={flatten(files[oblivionModalPath].runs)}
+          nodeId={files[oblivionModalPath].nodeId}
+          onClose={() => setOblivionModalPath(null)}
+        />
+      )}
       {sendFailure && (
         <SendFailureModal
           failure={sendFailure}
@@ -14065,52 +16133,56 @@ function App() {
           }}
         />
       )}
-      {settingsOpen && (
+      {factoryResetOpen && (
         <div
           className="confirm-overlay"
           onClick={() => {
-            if (!resetBusy) setSettingsOpen(false);
+            if (!resetBusy) setFactoryResetOpen(false);
           }}
         >
           <div
-            className="confirm-dialog settings-dialog"
+            className="confirm-dialog factory-reset-dialog"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
-            aria-label="Settings"
+            aria-labelledby="factory-reset-title"
+            aria-describedby="factory-reset-description"
+            aria-busy={resetBusy}
           >
-            <h2 className="settings-heading">Settings</h2>
-            <section className="settings-section" aria-busy={resetBusy}>
-              <h3 className="settings-section-heading">Factory reset</h3>
-              <p className="settings-section-blurb">
-                Erases all local app state, including the root binding, crash pads, keychain,
-                relay config, voices, models, and layout. On desktop it also deletes every event
-                from the local sidecar and resets peer access. The app reloads with a newly minted
-                root and an empty oblivion. Events already sent to remote relays cannot be erased
-                from those relays. There is no undo.
-              </p>
-              {resetError && <p className="create-error" role="alert">{resetError}</p>}
-              <div className="confirm-actions">
-                <button
-                  type="button"
-                  className="confirm-cancel"
-                  disabled={resetBusy}
-                  onClick={() => setSettingsOpen(false)}
-                >
-                  Close
-                </button>
-                <button
-                  type="button"
-                  className="confirm-delete"
-                  disabled={resetBusy}
-                  onClick={() => void factoryReset()}
-                >
-                  {resetBusy ? "Erasing…" : "Erase everything"}
-                </button>
-              </div>
-            </section>
+            <h2 id="factory-reset-title" className="create-modal-title factory-reset-title">
+              Factory Reset the Local App
+            </h2>
+            <p id="factory-reset-description" className="confirm-message factory-reset-message">
+              Erases all local app state, including the root binding, crash pads, secure key
+              vault, MODEL credentials, relay config, voices, models, and layout. On desktop it
+              also deletes every event from the local sidecar and resets peer access. The app
+              reloads into vault creation, then mints a new root with an empty oblivion. Events
+              already sent to remote relays cannot be erased from those relays. There is no undo.
+            </p>
+            {resetError && <p className="create-error" role="alert">{resetError}</p>}
+            <div className="confirm-actions">
+              <button
+                type="button"
+                className="confirm-cancel"
+                disabled={resetBusy}
+                onClick={() => setFactoryResetOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="confirm-delete"
+                disabled={resetBusy}
+                onClick={() => void factoryReset()}
+              >
+                {resetBusy ? "Erasing…" : "Erase everything"}
+              </button>
+            </div>
           </div>
         </div>
+      )}
+      {traceLocatorOpen && (
+        <TraceLocatorModal onClose={() => setTraceLocatorOpen(false)} />
       )}
       {operatorSetup !== "off" && (
         <OperatorSetupModal

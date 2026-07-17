@@ -27,16 +27,13 @@ import {
  * stepped here is readable by any spec-compliant reader (other presses, the
  * MCP headless press, the hosted relay).
  *
- * `oldValue` is intentionally OMITTED on delta serialization: the spec marks
- * it "removed," and `applyDeltas` ignores it either way. Older output that
- * carries it is still read correctly (see the snapshot fallback below).
+ * `oldValue` is intentionally omitted on delta serialization because it is
+ * recoverable from the preceding snapshot.
  */
 
-const FILE_TRACE_NODE_KIND = 4290;
-/** The single TraceNode kind (spec §1/§R11.3): file and folder nodes both use
- *  4290, discriminated by the `z` tag. Alias kept for readability at sites
- *  that mean "the trace-node kind" without caring about file vs folder. */
-const TRACE_NODE_KIND = 4290;
+/** The single TraceNode kind; `z` discriminates file and folder nodes. */
+export const TRACE_NODE_KIND = 4290;
+const HEX_64 = /^[0-9a-f]{64}$/;
 /** Spec §5A: append-only endorsement of one published TraceNode. This is a
  *  separate regular kind because an endorsement is not a body revision and
  *  therefore cannot truthfully carry TraceNode snapshot/delta/prev fields. */
@@ -48,8 +45,8 @@ const TRACE_HEAD_KIND = 34290;
 function authoringVoice(): { secretKey: Uint8Array; publicKey: string } {
   const secretKey = authorSecretKey();
   if (secretKey) return { secretKey, publicKey: getPublicKey(secretKey) };
-  // Headless/Node compatibility: those runtimes still install an in-memory
-  // authoring session and may not use the desktop key-profile bootstrap.
+  // The headless press owns a separate authoring session and does not use the
+  // desktop key-profile bootstrap.
   return loadOrCreateVoice();
 }
 
@@ -60,7 +57,7 @@ function authoringVoice(): { secretKey: Uint8Array; publicKey: string } {
  *  kinds are current-state caches, not bodies). See protocol/trace-provenance.md
  *  §Event kinds. */
 const TRACE_KINDS = new Set<number>([
-  FILE_TRACE_NODE_KIND, // 4290 — file AND folder nodes (z tag discriminates)
+  TRACE_NODE_KIND, // 4290 — file AND folder nodes (z tag discriminates)
 ]);
 
 /** Provenance for a sampled event, surfaced as an in-memory metadata strip in
@@ -133,9 +130,8 @@ export interface KEdit {
   t: number;
   /** Non-negative transaction id scoped to this node's `kedits` array. Every
    *  range changed by one editor transaction shares the same id and must be
-   *  applied atomically against the same pre-transaction document. Optional
-   *  only for backward compatibility with pre-grouping nodes. */
-  tx?: number;
+   *  applied atomically against the same pre-transaction document. */
+  tx: number;
   /** Present when CodeMirror identifies the transaction as a history action.
    *  This distinguishes Cmd/Ctrl+Z and redo from a manual inverse edit while
    *  `op`/`from`/`to`/`text` still carry the replayable document mutation. */
@@ -322,7 +318,7 @@ export function parseAuthors(authors: unknown, snapshot: string): Run[] | null {
   }
   // The integrity anchor: run lengths must sum to exactly the snapshot's
   // UTF-16 length. A mismatch means the map is stale or forged — drop it and
-  // let the caller attribute by signer, same as the legacy no-authors path.
+  // let the caller attribute by signer.
   if (total !== snapshot.length) return null;
   // Second pass: partition snapshot by the accumulated offsets into runs.
   // Adjacent same-voice runs merge only when `src` matches, so a merge node's
@@ -343,7 +339,7 @@ export function parseAuthors(authors: unknown, snapshot: string): Run[] | null {
  * Attribute each delta to its dominant voice and build the node-local voices
  * table (protocol §3.3, §3.6). For each insert/replace delta, find the dominant
  * voice in the delta's region of the post-edit runs. If it's the signer, no
- * authorIndex is set (wire stays byte-identical to legacy). If it's a non-signer
+ * authorIndex is set. If it's a non-signer
  * voice, the voices table is built with the signer at [0] and the delta gets
  * authorIndex pointing into it.
  *
@@ -396,15 +392,13 @@ export interface PublishEditInput {
   /** When true, step to the home relay only — don't fan out to external write
    *  relays. This is the Step gesture (protocol §8): a local checkpoint that
    *  doesn't leave the machine. The user later Sends (pushToExternalRelays)
-   *  if they want the node reachable by others. Default false (backward-compat:
-   *  existing callers fan out as before). */
+   *  if they want the node reachable by others. Default false. */
   localOnly?: boolean;
   /** Per-character attribution for `snapshot`, serialized into the node's
    *  `authors` field (protocol §FileTraceNode Content). Concatenating the runs'
    *  text in order MUST reproduce `snapshot` exactly; readers validate this and
    *  fall back to per-node-signer attribution on mismatch. Absent → the node is
-   *  stepped with signer-only attribution (the legacy behavior; old chains still
-   *  read correctly). This is the durable, reconstructable-from-chain carrier
+   *  stepped with signer-only attribution. This is the durable, reconstructable-from-chain carrier
    *  for "authorship provenance lives on that edge, not the signer field"
    *  (spec:236) — without it, every reload collapses a multi-author document to
    *  a single run. */
@@ -426,8 +420,7 @@ export interface PublishEditInput {
   /** Inline coin occurrences newly installed by this Step. Unlike `citations`
    * (the cumulative current q-set), these are gesture-local and become
    * `cite role:inline` deltas with the quote bytes, range, pinned coin id, and
-   * quote hash. Existing producers may omit this and remain readable through
-   * their body brackets + q tags. */
+   * quote hash. Omitted when the Step installs no inline citation. */
   inlineCitations?: {
     sourceEventId: string;
     newValue: string;
@@ -477,7 +470,7 @@ export interface PublishEditInput {
    *  doesn't double up) plus a `tag-add` delta carrying `sourceEventId`.
    *  `snapshot`/`contentHash` are untouched — a tag never alters the body, the
    *  same stance `reply-to` already takes. Absent on every non-tagging write. */
-  taggedTraces?: string[];
+  citationIds?: string[];
   /** The keystroke log since the previous step: one `KEdit` per discrete
    *  editor transaction change (every backspace, highlight-delete, type-over,
    *  undo, redo, IME commit, streamed LLM token). Like `deltas`, this is advisory
@@ -553,12 +546,12 @@ export function headUserTags(chain: Event[]): string[] {
 /** The tagged-but-not-quoted trace node ids on a file's chain head — the
  *  `tag-add` subset of the head's `q` tags, with every id the body cites via a
  *  resolved `[[ phrase | nodeId ]]` bracket removed. This is the read-back half
- *  of `PublishEditInput.taggedTraces`: on attach, a file's tagged traces are
+ *  of `PublishEditInput.citationIds`: on attach, a file's tagged traces are
  *  recovered as (head q-tags) minus (body brackets), so a tag survives reload
  *  without being re-added. `bracketNodeIds` is the caller's
  *  `findResolvedBrackets(content).map(b => b.nodeId)` — kept a parameter so this
  *  helper stays free of a brackets.js import. Returns [] for an empty chain. */
-export function headTaggedTraces(chain: Event[], bracketNodeIds: string[]): string[] {
+export function headCitationIds(chain: Event[], bracketNodeIds: string[]): string[] {
   if (chain.length === 0) return [];
   const targets = eventMeta(chain[chain.length - 1]).citationTargets;
   const bracket = new Set(bracketNodeIds);
@@ -632,12 +625,9 @@ async function connectWithAuth(url: string): Promise<Relay> {
   relay.onauth = async (evt) => {
     // The AUTH challenge is signed with the NODE (owner) key — the identity the
     // relay recognizes as owner (the `owner` field in peers.json). Before the
-    // NODE role existed this hardcoded loadOrCreateVoice(); that worked only
-    // because the builtin key was seeded from the same legacy slot. Routing
-    // through the node key keeps AUTH consistent with the onion derivation and
-    // the owner record, so networked mode honors whichever key the user designated
-    // as the machine identity. Falls back to the legacy voice when the keychain
-    // can't resolve a node key (headless/Node press, tests).
+    // Route through the NODE role so AUTH stays consistent with onion derivation
+    // and the owner record. Headless/browser presses use their session authoring
+    // identity because they do not have the desktop role keychain.
     const secret = nodeSecretKey() ?? authoringVoice().secretKey;
     const signed = finalizeEvent(evt, secret) as unknown as
       Awaited<ReturnType<NonNullable<Relay["onauth"]>>>;
@@ -879,6 +869,8 @@ export interface LlmStepMeta {
   injectRule: string;
   scopeCitations: string[];
   llm: { model: string; temperature: number | null; maxTokens: number; provider: string };
+  /** Reply pins its source now but publishes only on the later explicit Step. */
+  replyingTo?: string;
 }
 
 /** §3.7 metadata waiting for the write-back Step, isolated by destination
@@ -910,6 +902,7 @@ export function applyPendingLlmMeta(input: PublishEditInput): void {
     ...(input.scopeCitations ?? []),
     ...llmMeta.scopeCitations,
   ];
+  if (llmMeta.replyingTo) input.replyingTo = llmMeta.replyingTo;
   if (!input.llm) input.llm = llmMeta.llm;
 }
 
@@ -939,20 +932,9 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   const steppedAt = Date.now();
 
   const tags: string[][] = [
-    // Reification discriminator (protocol §3.1: REQUIRED on every node). `z`
-    // splits file-reified from folder-reified traces within the single
-    // TraceNode kind — once kinds consolidate (Phase 3), this is the only way
-    // to tell a file node from a folder node.
+    // Reification discriminator (protocol §3.1: REQUIRED on every node).
     ["z", "file"],
-    ["file", input.relativePath],
-    ["folder", input.folderId],
     ["F", input.relativePath],
-    ["D", input.folderId],
-    // Filterable folder-membership mirror (spec tag table). Single-letter `f`
-    // so `#f` queries can find every node in a folder by stable id — the
-    // queryable counterpart to the positional `["folder", folderId]` above,
-    // which NIP-01 `#` filters can't reach. Containment is composition (the
-    // folder's manifest edge); this is a lookup index, not a label.
     ["f", input.folderId],
     ["action", input.action ?? "edit"],
   ];
@@ -989,7 +971,7 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
 
   // q-tags: one per coin this trace cites (spec:189 — the origin doc's
   // cite of each minted node, mirrored at top level), the Reply source
-  // (replyingTo), and the tagged zines (taggedTraces) — all the same
+  // (replyingTo), and the tagged zines (citationIds) — all the same
   // "composition" edge, folded into one dedup so a trace cited more than one way
   // (quoted AND tagged, or tagged AND replied-to) never emits two q-tags.
   // NIP-18 quote shape, read back by `eventMeta` (citationCount +
@@ -997,7 +979,7 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   const qTargets = [
     ...(input.citations ?? []),
     ...(input.replyingTo ? [input.replyingTo] : []),
-    ...(input.taggedTraces ?? []),
+    ...(input.citationIds ?? []),
     // §3.7: an action:llm node also cites its full scope (folder members' heads,
     // the active file's nucleus, the rule trace) so a reader can reconstruct the
     // submitted prompt. Folded into the same dedup so a node cited as a body
@@ -1040,7 +1022,7 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
     : { deltas: input.deltas, voices: [] };
 
   const template: EventTemplate = {
-    kind: FILE_TRACE_NODE_KIND,
+    kind: TRACE_NODE_KIND,
     created_at: Math.floor(steppedAt / 1000),
     tags,
     content: JSON.stringify({
@@ -1069,7 +1051,7 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
         // body untouched. One entry per tagged zine; the pinned source is the
         // paired `q` tag above. `snapshot`/`contentHash` are untouched (a tag
         // never alters the body), so these are observations, like reply.
-        ...(input.taggedTraces ?? []).map((nodeId) => ({
+        ...(input.citationIds ?? []).map((nodeId) => ({
           type: "cite",
           role: "tag",
           op: "add",
@@ -1085,8 +1067,8 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
         ? { coin: { version: 1, origin: input.coinOrigin } }
         : {}),
       // Per-character attribution, validated against snapshot above. Absent on
-      // nodes whose caller had no run list (genesis from plain text, deletes,
-      // or the legacy signer-only path) — readers fall back to per-node-signer.
+      // nodes whose caller had no run list (genesis from plain text or deletes)
+      // — readers fall back to per-node-signer.
       ...(authors && authors.length > 0 ? { authors } : {}),
       ...(attributed.voices.length > 0 ? { voices: attributed.voices } : {}),
       // Keystroke log since the previous step. Advisory, like `deltas`: the
@@ -1154,20 +1136,52 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
 export function coinOriginFromEvent(event: Event): CoinOrigin | null {
   try {
     const parsed = JSON.parse(event.content) as {
+      snapshot?: unknown;
+      contentHash?: unknown;
       coin?: { version?: unknown; origin?: unknown };
     };
+    const tags = (name: string) => event.tags.filter((tag) => tag[0] === name);
+    const z = tags("z");
+    const fileName = tags("F");
+    const folder = tags("f");
+    const bodyHash = tags("x");
+    const action = tags("action");
+    const previous = event.tags.filter(
+      (tag) => tag[0] === "e" && tag[3] === "prev",
+    );
+    const extractedFrom = event.tags.filter(
+      (tag) => tag[0] === "e" && tag[3] === "extracted-from",
+    );
+    if (
+      event.kind !== TRACE_NODE_KIND ||
+      z.length !== 1 || z[0]?.[1] !== "file" ||
+      fileName.length !== 1 || !fileName[0]?.[1] || fileName[0][1].includes("/") ||
+      folder.length !== 1 || !HEX_64.test(folder[0]?.[1] ?? "") ||
+      bodyHash.length !== 1 || !HEX_64.test(bodyHash[0]?.[1] ?? "") ||
+      action.length !== 1 || action[0]?.[1] !== "import" ||
+      previous.length !== 0 ||
+      typeof parsed.snapshot !== "string" ||
+      typeof parsed.contentHash !== "string" ||
+      parsed.contentHash !== bodyHash[0]?.[1]
+    ) {
+      return null;
+    }
     const origin = parsed.coin?.origin;
     if (parsed.coin?.version === 1 && origin && typeof origin === "object") {
       const candidate = origin as Record<string, unknown>;
-      if (candidate.kind === "direct") return { kind: "direct" };
+      if (candidate.kind === "direct" && extractedFrom.length === 0) {
+        return { kind: "direct" };
+      }
       const range = candidate.range && typeof candidate.range === "object"
         ? candidate.range as Record<string, unknown>
         : null;
       if (
         candidate.kind === "extracted" &&
-        typeof candidate.sourceNodeId === "string" && candidate.sourceNodeId.length > 0 &&
+        typeof candidate.sourceNodeId === "string" && HEX_64.test(candidate.sourceNodeId) &&
         typeof candidate.sourceContentHash === "string" &&
-        /^[0-9a-f]{64}$/.test(candidate.sourceContentHash) &&
+        HEX_64.test(candidate.sourceContentHash) &&
+        extractedFrom.length === 1 &&
+        extractedFrom[0]?.[1] === candidate.sourceNodeId &&
         range &&
         Number.isInteger(range.start) &&
         Number.isInteger(range.end) &&
@@ -1222,6 +1236,20 @@ export async function sendStep(event: Event, signer?: Uint8Array): Promise<void>
     // failure must not turn successful distribution into a duplicate Step.
     console.warn(`[provenance] sent Step ${event.id} without TraceHead:`, error);
   }
+}
+
+/** Publish one exact historical node without moving the trace's replaceable
+ * head. Replay may expose an ancestor while the live trace has advanced; using
+ * the ordinary Send path there would incorrectly advertise that ancestor as
+ * current. Relay publication remains idempotent by event id. */
+export async function sendHistoricalStep(event: Event): Promise<void> {
+  const relays = await getPublicationRelays();
+  if (relays.length === 0) {
+    throw new Error(
+      "no publication relays available — configure a non-loopback write relay before Send",
+    );
+  }
+  await publishToMany(relays, event);
 }
 
 /** Publish the ordered local signed-event outbox to the current home relay.
@@ -1610,9 +1638,9 @@ export async function getOrCreateRuleTrace(
 export async function fetchChain(folderId: string, relativePath: string): Promise<Event[]> {
   const relays = await getReadRelays();
   const filter: Filter = {
-    kinds: [FILE_TRACE_NODE_KIND],
+    kinds: [TRACE_NODE_KIND],
     "#F": [relativePath],
-    "#D": [folderId],
+    "#f": [folderId],
   };
   const all = await queryMany(relays, filter);
   const byId = new Map(all.map((e) => [e.id, e]));
@@ -1638,7 +1666,7 @@ export async function fetchChain(folderId: string, relativePath: string): Promis
  * `prev` walk reaches `traceId`. Two incomparable maximal candidates are a
  * real branch and are never collapsed by relay order. */
 export type TraceChainResolution =
-  | { status: "resolved"; traceId: string; chain: Event[]; source: "trace-head" | "exact-head" | "legacy-coordinate" }
+  | { status: "resolved"; traceId: string; chain: Event[]; source: "trace-head" | "exact-head" }
   | { status: "missing" | "broken"; traceId: string; chain: []; candidateHeadIds: string[] }
   | { status: "conflict"; traceId: string; chain: []; candidateHeadIds: string[] };
 
@@ -1648,7 +1676,7 @@ async function loadTraceEventsByIds(ids: readonly string[]): Promise<Event[]> {
   if (ids.length === 0) return [];
   const relays = await getReadRelays();
   const out = await queryMany(relays, {
-    kinds: [FILE_TRACE_NODE_KIND],
+    kinds: [TRACE_NODE_KIND],
     ids: [...new Set(ids)],
   });
   return out.filter(isFileNode);
@@ -1754,8 +1782,8 @@ export async function resolveTraceChainCandidates(
 }
 
 /** Rebuild one exact immutable head's ancestry by id. Folder membership names
- *  an exact latest node, so this remains valid when a legacy trace has no
- *  TraceHead cache or its path tags changed after a rename. */
+ *  an exact latest node, so this remains valid when a TraceHead cache is stale
+ *  or unavailable. */
 export async function resolveTraceChainAtHead(
   traceId: string,
   headId: string,
@@ -1820,11 +1848,11 @@ async function traceHeadCandidateIds(traceId: string): Promise<string[]> {
   return [...ids];
 }
 
-/** Resolve a file chain by stable identity, optionally falling back to its
- * legacy folder/path coordinate when no usable file TraceHead exists yet. */
+/** Resolve a file chain by stable identity and, when supplied, one exact
+ * immutable head id from current folder membership. */
 export async function resolveTraceChain(
   traceId: string,
-  fallback?: { folderId: string; relativePath: string; headId?: string },
+  exactHeadId?: string,
 ): Promise<TraceChainResolution> {
   let candidates: string[] = [];
   try {
@@ -1834,22 +1862,12 @@ export async function resolveTraceChain(
       if (resolved.status === "resolved" || resolved.status === "conflict") return resolved;
     }
   } catch {
-    // The legacy coordinate fallback below preserves offline/back-compat reads.
+    // An exact folder-member head may still resolve the signed chain.
   }
-  if (fallback?.headId) {
+  if (exactHeadId) {
     try {
-      const resolved = await resolveTraceChainAtHead(traceId, fallback.headId);
+      const resolved = await resolveTraceChainAtHead(traceId, exactHeadId);
       if (resolved.status === "resolved") return resolved;
-    } catch {
-      // The coordinate fallback below may still recover legacy indexed nodes.
-    }
-  }
-  if (fallback) {
-    try {
-      const chain = await fetchChain(fallback.folderId, fallback.relativePath);
-      if (chain.length > 0 && chain[0].id === traceId) {
-        return { status: "resolved", traceId, chain, source: "legacy-coordinate" };
-      }
     } catch {
       // Fall through to a typed missing/broken result.
     }
@@ -1915,12 +1933,12 @@ export async function revokeTrace(
   reason: string,
   opts?: {
     signer?: Uint8Array;
-    fallback?: { folderId: string; relativePath: string };
+    exactHeadId?: string;
   },
 ): Promise<TraceRevocationResult> {
   const signer = opts?.signer ?? authoringVoice().secretKey;
   const signerPubkey = getPublicKey(signer);
-  const resolution = await resolveTraceChain(traceId, opts?.fallback);
+  const resolution = await resolveTraceChain(traceId, opts?.exactHeadId);
   if (resolution.status !== "resolved") {
     throw new Error(
       resolution.status === "conflict"
@@ -1959,8 +1977,8 @@ export async function fetchFolderActivity(
 ): Promise<Event[]> {
   const relays = await getReadRelays();
   const filter: Filter = {
-    kinds: [FILE_TRACE_NODE_KIND],
-    "#D": [folderId],
+    kinds: [TRACE_NODE_KIND],
+    "#f": [folderId],
     ...(opts.since != null ? { since: opts.since } : {}),
     ...(opts.until != null ? { until: opts.until } : {}),
     limit: opts.limit ?? 2000,
@@ -1973,9 +1991,9 @@ export async function fetchFolderActivity(
 }
 
 /** Relay-wide activity: every file-reified trace node the read relays hold,
- *  across all folders. Unlike `fetchFolderActivity`, no `#D` filter — the relay
+ *  across all folders. Unlike `fetchFolderActivity`, no `#f` filter — the relay
  *  is treated as the whole database, so Times can show something even with no
- *  folder attached. Each event's folder id is recoverable from its `#D` tag
+ *  folder attached. Each event's folder id is recoverable from its `#f` tag
  *  (see `eventMeta().folderId`). */
 export async function fetchRelayActivity(
   opts: { since?: number; until?: number; limit?: number; authors?: string[] } = {},
@@ -1983,7 +2001,7 @@ export async function fetchRelayActivity(
   if (opts.authors && opts.authors.length === 0) return [];
   const relays = await getReadRelays();
   const filter: Filter = {
-    kinds: [FILE_TRACE_NODE_KIND],
+    kinds: [TRACE_NODE_KIND],
     ...(opts.authors ? { authors: opts.authors } : {}),
     ...(opts.since != null ? { since: opts.since } : {}),
     ...(opts.until != null ? { until: opts.until } : {}),
@@ -2018,9 +2036,9 @@ export interface FolderIndexEntry {
 }
 
 /** Enumerate every distinct folder the read relays hold, with per-folder
- *  rollups. A relay-wide scan (no `#D` filter) grouped by `eventMeta().folderId`
+ *  rollups. A relay-wide scan (no `#f` filter) grouped by `eventMeta().folderId`
  *  — the same shape TimesView groups ad-hoc, lifted into a reusable read so
- *  the inbox reads one source of truth. Folders with no `#D` tag (foreign or
+ *  the inbox reads one source of truth. Folders with no `#f` tag (foreign or
  *  malformed events) are skipped, not counted under a synthetic bucket. */
 export async function fetchFolderIndex(
   opts: { since?: number; until?: number; limit?: number; authors?: string[] } = {},
@@ -2065,7 +2083,7 @@ export async function fetchFolderIndex(
 /** The parsed, Times-relevant fields of a kind-4290 event. Centralizes event-
  *  shape knowledge so the view never touches tag arrays or content JSON
  *  directly. `steppedAtMs` falls back to `created_at*1000` when the content
- *  lacks the ms-resolution field (older nodes). `userTags` is every `t` tag —
+ *  lacks the ms-resolution field. `userTags` is every `t` tag —
  *  all topical labels now, since containment is no longer expressed as a `t`.
  *  `citationTargets` is the raw node-id list of every `q` tag, in tag order —
  *  the traces this one composes (bracket quotes, the Reply source, and tagged
@@ -2076,14 +2094,12 @@ export interface EventMeta {
   userTags: string[];
   action?: string;
   relativePath?: string;
-  /** The folder this event belongs to, from its `#D` tag. Present on every
-   *  folder-scoped kind (manifest, FileTraceNode). Used by Times to group relay-
+  /** The folder this event belongs to, from its `#f` tag. Present on every
+   *  non-genesis folder-scoped TraceNode. Used by Times to group relay-
    *  wide activity by folder when no single folder is attached. */
   folderId?: string;
   /** Reification discriminator from the `z` tag (protocol §3.1): `"file"` or
-   *  `"folder"`. Once kinds consolidate this is the only way to tell a file
-   *  node from a folder node; undefined on legacy events minted before the tag
-   *  was emitted (callers fall back to kind). */
+   *  `"folder"`. */
   z?: "file" | "folder";
   citationCount: number;
   /** Every `q` tag's target node id, in declared (tag) order — the traces this
@@ -2091,10 +2107,6 @@ export interface EventMeta {
    *  citation-chip list reads body-quotes first, then Reply source, then
    *  tagged zines. Empty for a leaf. */
   citationTargets: string[];
-  /** Legacy-only uppercase-`Q` values retained so old events remain
-   *  inspectable. Current writers emit only lowercase-`q` trace targets and
-   *  current co-citation ignores this list (protocol §R11.26). */
-  contentCiteHashes: string[];
   steppedAtMs: number;
   createdAtSec: number;
 }
@@ -2107,7 +2119,6 @@ export function eventMeta(event: Event): EventMeta {
   let z: "file" | "folder" | undefined;
   let citationCount = 0;
   const citationTargets: string[] = [];
-  const contentCiteHashes: string[] = [];
   for (const tag of event.tags) {
     switch (tag[0]) {
       case "t":
@@ -2116,10 +2127,10 @@ export function eventMeta(event: Event): EventMeta {
       case "action":
         if (typeof tag[1] === "string") action = tag[1];
         break;
-      case "file":
+      case "F":
         if (typeof tag[1] === "string") relativePath = tag[1];
         break;
-      case "D":
+      case "f":
         if (typeof tag[1] === "string") folderId = tag[1];
         break;
       case "z":
@@ -2128,11 +2139,6 @@ export function eventMeta(event: Event): EventMeta {
       case "q":
         citationCount++;
         if (typeof tag[1] === "string") citationTargets.push(tag[1]);
-        break;
-      case "Q":
-        // Legacy read compatibility only. Current writers never emit Q and
-        // social discovery intersects ordinary trace-targeting q edges.
-        if (typeof tag[1] === "string") contentCiteHashes.push(tag[1]);
         break;
     }
   }
@@ -2152,7 +2158,6 @@ export function eventMeta(event: Event): EventMeta {
     z,
     citationCount,
     citationTargets,
-    contentCiteHashes,
     steppedAtMs,
     createdAtSec: event.created_at ?? 0,
   };
@@ -2179,7 +2184,7 @@ export interface CitationChip {
   kind: "file" | "coin";
   /** How many later Steps exist on this trace's currently resolved chain.
    *  Zero means the citation already pins the current head. Undefined means
-   *  the target chain could not be resolved (legacy/offline/foreign event). */
+   *  the target chain could not be resolved (offline, unavailable, or foreign). */
   stepsBehind?: number;
   /** Reachability/lifecycle of the pinned target. `in-oblivion` is added only
    * when this press has the local retained copy; a signed deletion observed
@@ -2309,17 +2314,16 @@ export async function resolveCitationChip(nodeId: string): Promise<CitationChip 
   if (revoked) return { ...base, availability: "revoked" };
   if (!liveEvent) return { ...base, availability: "unavailable" };
 
-  const citedEvent = liveEvent;
-  const { folderId, relativePath } = eventMeta(citedEvent);
-  if (!folderId || !relativePath) return { ...base, availability: "available" };
+  if (!traceId) return { ...base, availability: "available" };
 
   try {
-    const resolution = traceId
-      ? await resolveTraceChain(traceId, { folderId, relativePath })
-      : null;
-    const chain = resolution?.status === "resolved"
-      ? resolution.chain
-      : await fetchChain(folderId, relativePath);
+    // Resolve the mutable current head. The cited node remains the pinned
+    // nucleus used only to compute distance within that verified chain.
+    const resolution = await resolveTraceChain(traceId);
+    if (resolution.status !== "resolved") {
+      return { ...base, availability: "unavailable" };
+    }
+    const chain = resolution.chain;
     const stepsBehind = citationStepsBehind(chain, nodeId);
     const head = chain[chain.length - 1];
     const availability = head && eventMeta(head).action === "delete" ? "deleted" : "available";
@@ -2356,8 +2360,7 @@ interface FolderSnapshot {
 export type FocusSelection =
   | { kind: "file"; path: string; nodeId?: string }
   | { kind: "folder"; path: string; nodeId?: string }
-  // Legacy wire token: this focus target is the product-level coin category.
-  | { kind: "span"; nodeId: string; phrase: string; originPath: string };
+  | { kind: "coin"; nodeId: string; phrase: string; originPath: string };
 
 /** A single change since `prev.snapshot` on a FolderTraceNode (protocol §3.3).
  *  Membership deltas (`add`/`remove`/`rename`) are the three structural facts a
@@ -2371,39 +2374,63 @@ export type FocusSelection =
  *  folder-owned addressing — explicitly distinct from `TraceOpinion`'s display
  *  `name` (§5/§R6), which is author-scoped and deliberately history-less.
  *
- *  `focus` is an observation, not membership: it records panel occupancy
- *  (`op: 'mount'` = a trace entered a panel; `op: 'unmount'` = the trace that
- *  was there left), so a reading session can be replayed in the press editor.
- *  `op` defaults to `'mount'` and MAY be omitted. A `focus` node re-emits the
+ *  `focus` is an observation, not membership: it records foreground panel
+ *  occupancy (`op: 'mount'` = a trace became the visible tab in a panel;
+ *  `op: 'unmount'` = it stopped being the visible tab), so a reading session
+ *  can be replayed in the press editor. A background tab can remain open after
+ *  its focus unmount; these operations do not describe tab-strip membership.
+ *  `op` is required. A `focus` node re-emits the
  *  *same* `snapshot.members` as `prev` — `contentHash` is unaffected, exactly
  *  as a `quote`/`tag-add` delta never alters the file snapshot's text. */
 export type FolderDelta =
-  | { type: "add" | "remove"; kind?: "file" | "folder"; relativePath: string; nodeId?: string; timestamp: number }
-  | { type: "rename"; kind?: "file" | "folder"; fromPath: string; toPath: string; nodeId: string; timestamp: number }
-  | { type: "focus"; op?: "mount" | "unmount"; selection: FocusSelection; panelIndex: number; timestamp: number };
+  | { type: "add" | "remove"; kind: "file" | "folder"; relativePath: string; nodeId?: string; timestamp: number }
+  | { type: "rename"; kind: "file" | "folder"; fromPath: string; toPath: string; nodeId: string; timestamp: number }
+  | { type: "focus"; op: "mount" | "unmount"; selection: FocusSelection; panelIndex: number; timestamp: number };
+
+export function isFocusSelection(value: unknown): value is FocusSelection {
+  if (!value || typeof value !== "object") return false;
+  const selection = value as Record<string, unknown>;
+  if (selection.kind === "file" || selection.kind === "folder") {
+    return (
+      typeof selection.path === "string" &&
+      (selection.nodeId === undefined || typeof selection.nodeId === "string")
+    );
+  }
+  return (
+    selection.kind === "coin" &&
+    typeof selection.nodeId === "string" &&
+    typeof selection.phrase === "string" &&
+    typeof selection.originPath === "string"
+  );
+}
+
+function isFocusDelta(value: unknown): value is Extract<FolderDelta, { type: "focus" }> {
+  if (!value || typeof value !== "object") return false;
+  const delta = value as Record<string, unknown>;
+  return (
+    delta.type === "focus" &&
+    (delta.op === "mount" || delta.op === "unmount") &&
+    isFocusSelection(delta.selection) &&
+    Number.isInteger(delta.panelIndex) &&
+    (delta.panelIndex as number) >= 0 &&
+    Number.isFinite(delta.timestamp)
+  );
+}
 
 /** Fetches every folder-reified trace node for `folderId` across all read
- *  relays, merged by event id. Queries both the new kind-4290-with-`z:folder`
- *  form and the legacy folder-reified form (spec §R11.3), post-filtering 4290
- *  results to folder-discriminated nodes so file nodes for the same folder
- *  aren't mistaken for folder nodes. Does not resolve the chain — returns the
- *  raw node set for `fetchLatestFolderNode` to head-resolve, and for the
- *  context-block directory log to read every membership event (add/remove). */
+ *  relays, merged by event id. The genesis is queried by id because it cannot
+ *  carry its own `f` identity tag. Does not resolve the chain — returns the raw
+ *  node set for `fetchLatestFolderNode` to head-resolve, and for the context-
+ *  block directory log to read every membership event (add/remove). */
 export async function fetchFolderNodes(folderId: string): Promise<Event[]> {
   const relays = await getReadRelays();
-  // Query by both `#f` and `#D` (spec §3.1 folder-id mirrors — both emitted on
-  // every write) so nodes resolve whichever a relay indexes by. Also fetch the
-  // genesis node by id directly: it carries no f/D since an event can't know
-  // its own id before signing.
-  const [byF, byD, genesis] = await Promise.all([
+  const [byF, genesis] = await Promise.all([
     queryMany(relays, { kinds: [TRACE_NODE_KIND], "#f": [folderId] }),
-    queryMany(relays, { kinds: [TRACE_NODE_KIND], "#D": [folderId] }),
     queryMany(relays, { ids: [folderId] }),
   ]);
   const isFolderNode = (e: Event) => e.tags.some((t) => t[0] === "z" && t[1] === "folder");
   const byIdMap = new Map<string, Event>();
   for (const e of byF) if (isFolderNode(e)) byIdMap.set(e.id, e);
-  for (const e of byD) if (isFolderNode(e)) byIdMap.set(e.id, e);
   for (const e of genesis) if (isFolderNode(e)) byIdMap.set(e.id, e);
   return [...byIdMap.values()];
 }
@@ -2420,8 +2447,18 @@ export async function fetchLatestFolderNode(folderId: string): Promise<Event | n
  *  malformed/empty content. */
 export function membersFromNode(event: Event): ManifestFileEntry[] {
   try {
-    const parsed = JSON.parse(event.content) as { snapshot?: FolderSnapshot };
-    return parsed.snapshot?.members ?? [];
+    const parsed = JSON.parse(event.content) as { snapshot?: { members?: unknown[] } };
+    if (!Array.isArray(parsed.snapshot?.members)) return [];
+    return parsed.snapshot.members.filter((member): member is ManifestFileEntry => {
+      if (!member || typeof member !== "object") return false;
+      const entry = member as Partial<ManifestFileEntry>;
+      return (
+        (entry.kind === "file" || entry.kind === "folder") &&
+        typeof entry.relativePath === "string" &&
+        typeof entry.latestNodeId === "string" &&
+        typeof entry.contentHash === "string"
+      );
+    });
   } catch {
     return [];
   }
@@ -2477,8 +2514,8 @@ export async function fetchFolderDisplayName(
 }
 
 /** Builds and signs (does not publish) a folder-reified 4290 node. Mirrors
- *  the FileTraceNode shape: positional `tags[0]` = `["folder", folderId]`,
- *  `D` mirror, one `q` tag per active member in order, `e…prev` to the prior
+ *  the FileTraceNode shape: `z` discriminator, `f` folder identity, one `q`
+ *  tag per active member in order, `e…prev` to the prior
  *  head (absent on genesis). No `d` tag — folder-reified 4290 is NOT replaceable; ordering
  *  comes from the chain, so there is no forced-forward `created_at` rule.
  *
@@ -2507,13 +2544,13 @@ function buildFolderNodeTemplate(
     // Reification discriminator (protocol §3.1: REQUIRED on every node).
     ["z", "folder"],
   ];
-  // Spec §3.1: `f`/`D`/`folder` carry the folder's own genesis id on every node
+  // Spec §3.1: `f` carries the folder's own genesis id on every node
   // EXCEPT genesis itself — an event can't know its own id before signing.
   // Genesis (folderId null) emits none; its event id becomes the identity every
   // later node references. This closes the genesis-identity question: new
   // folders adopt the genesis event id as identity.
   if (folderId) {
-    tags.push(["folder", folderId], ["f", folderId], ["D", folderId]);
+    tags.push(["f", folderId]);
   }
   tags.push(
     ...members.map((m, i) => {
@@ -2567,14 +2604,12 @@ async function hashFolderSnapshot(members: ManifestFileEntry[]): Promise<string>
  *  independently built, content-identical folders hash identically (§R3) —
  *  node ids are signed artifacts no two owners share.
  *
- *  Shallow-local Merkle-with-pointer: `kind` defaults to "file" for legacy
- *  members (pre-nesting); a folder member's `contentHash` is its own stored
+ *  Shallow-local Merkle-with-pointer: a folder member's `contentHash` is its own stored
  *  canonical-body hash, never recomputed here (no chain walk, no recursion,
  *  cycle-safe by construction). Widening the projection from two-tuple to
- *  three-tuple is a breaking change to contentHash/#x clustering — legacy
- *  folders rehash on their next step; no integrity property is affected. */
+ *  three-tuple is part of the current wire contract. */
 function canonicalFolderBody(members: ManifestFileEntry[]): string {
-  return JSON.stringify(members.map((m) => [m.relativePath, m.kind ?? "file", m.contentHash]));
+  return JSON.stringify(members.map((m) => [m.relativePath, m.kind, m.contentHash]));
 }
 
 // --- focus buffer (§R7) -------------------------------------------------
@@ -2603,7 +2638,7 @@ function storedFocus(folderId: string): FolderDelta[] {
     if (typeof localStorage !== "undefined") {
       const raw = localStorage.getItem(FOCUS_BUFFER_PREFIX + folderId);
       const parsed: unknown = raw ? JSON.parse(raw) : [];
-      if (Array.isArray(parsed)) loaded = parsed as FolderDelta[];
+      if (Array.isArray(parsed)) loaded = parsed.filter(isFocusDelta);
     }
   } catch {
     // Focus is observational; an unavailable/corrupt local buffer must not
@@ -2751,8 +2786,7 @@ async function publishFolderNode(
 /** Publishes a kind-34290 TraceHead pointing at a trace's current nucleus.
  *  Spec §4: `d` = trace identity, content `{ head }`, written on every step.
  *  Reuses the already-connected write relays and the same signer key as the
- *  triggering step. The legacy manifest read path tolerates these (it checks
- *  for `content.files` and falls through when absent). */
+ *  triggering step. */
 export function nextReplaceableCreatedAt(
   nowSec: number,
   priorCreatedAt?: number,
@@ -2811,30 +2845,6 @@ async function publishTraceHead(
   }
 }
 
-/** Publishes a folder-trace node with the given full membership. Genesis if no
- *  prior head exists, else chained off it with `action: "edit"`. The membership
- *  is taken verbatim — the delta is the caller's responsibility to compute; this
- *  path is used by callers that already have the full next member list (the
- *  three backends' step/import/delete paths). Kept under the old `publishManifest`
- *  name so those backends compile unchanged. */
-export async function publishManifest(
-  folderId: string,
-  entries: ManifestFileEntry[],
-  signer?: Uint8Array,
-): Promise<Event> {
-  const previous = await fetchLatestFolderNode(folderId);
-  return publishFolderNode(folderId, entries, {
-    prevEventId: previous?.id ?? null,
-    action: previous ? "edit" : "import",
-    signer,
-    // Carry the folder's existing geohash pins forward so a routine membership
-    // step (edit/delete/LLM) doesn't silently wipe a prior Spaces pin. Pin
-    // updates go through `setFolderGeohashes`, which passes the new set
-    // explicitly and overrides this carry-forward.
-    geohashes: previous ? geohashesFromNode(previous) : undefined,
-  });
-}
-
 /** The `["g", geohash]` tags on a folder node, in tag order. Empty array for
  *  nodes with no pins (the common case). */
 function geohashesFromNode(event: Event): string[] {
@@ -2889,7 +2899,7 @@ export async function fetchPinsByGeohash(cells: string[]): Promise<ZinePin[]> {
   const byFolder = new Map<string, Event[]>();
   for (const e of events) {
     if (!e.tags.some((t) => t[0] === "z" && t[1] === "folder")) continue;
-    const fid = e.tags.find((t) => t[0] === "f")?.[1] ?? e.tags.find((t) => t[0] === "D")?.[1];
+    const fid = e.tags.find((t) => t[0] === "f")?.[1];
     if (!fid) continue;
     let arr = byFolder.get(fid);
     if (!arr) {
@@ -2910,16 +2920,11 @@ export async function fetchPinsByGeohash(cells: string[]): Promise<ZinePin[]> {
   return pins;
 }
 
-/** Publish a folder genesis node (empty membership, no prev, no `f`/`D`/`folder`
+/** Publish a folder genesis node (empty membership, no prev, no `f`
  *  tags — an event can't know its own id before signing) and return its event
  *  id — the folder's permanent identity (spec §3.1: trace identity IS the
  *  genesis node id).
- *
- *  This is the Phase 5 mint, replacing the pre-Phase-5 pattern of minting a
- *  UUID then calling `createEmptyFolder(uuid)`. Callers (attachFolder,
- *  webCreateFolder, forkCurrentFolder) adopt the returned id as `FolderRef.id`.
- *  Legacy UUID-keyed folders keep working unchanged via the `#D` arm of
- *  `fetchFolderNodes`. */
+ *  Callers adopt the returned id as `FolderRef.id`. */
 export async function createFolderGenesis(opts?: {
   signer?: Uint8Array;
   forkedFrom?: string | null;
@@ -2950,17 +2955,15 @@ export async function upsertManifestEntry(
   entry: ManifestFileEntry,
   signer?: Uint8Array,
   opts?: { localOnly?: boolean },
-): Promise<void> {
+): Promise<Event> {
   const previous = await fetchLatestFolderNode(folderId);
-  // Current membership: from the folder head if one exists, else from the legacy
-  // 34290 manifest (lazy migration seeds the first folder node from it).
   const current = previous ? membersFromNode(previous) : [];
   const next = current.filter((f) => f.relativePath !== entry.relativePath);
   next.push(entry);
-  await publishFolderNode(folderId, next, {
+  return publishFolderNode(folderId, next, {
     prevEventId: previous?.id ?? null,
     action: previous ? "edit" : "import",
-    deltas: [{ type: "add", relativePath: entry.relativePath, nodeId: entry.latestNodeId, timestamp: Date.now() }],
+    deltas: [{ type: "add", kind: entry.kind, relativePath: entry.relativePath, nodeId: entry.latestNodeId, timestamp: Date.now() }],
     signer,
     localOnly: opts?.localOnly,
   });
@@ -2975,14 +2978,16 @@ export async function removeManifestEntry(
   folderId: string,
   relativePath: string,
   signer?: Uint8Array,
-): Promise<void> {
+): Promise<Event | null> {
   const previous = await fetchLatestFolderNode(folderId);
   const current = previous ? membersFromNode(previous) : [];
+  const existing = current.find((entry) => entry.relativePath === relativePath);
+  if (!existing) return null;
   const next = current.filter((f) => f.relativePath !== relativePath);
-  await publishFolderNode(folderId, next, {
+  return publishFolderNode(folderId, next, {
     prevEventId: previous?.id ?? null,
     action: previous ? "edit" : "import",
-    deltas: [{ type: "remove", relativePath, timestamp: Date.now() }],
+    deltas: [{ type: "remove", kind: existing.kind, relativePath, timestamp: Date.now() }],
     signer,
   });
 }
@@ -3003,7 +3008,7 @@ export async function renameManifestEntry(
   toPath: string,
   nodeId: string,
   signer?: Uint8Array,
-): Promise<void> {
+): Promise<Event> {
   const previous = await fetchLatestFolderNode(folderId);
   const current = previous ? membersFromNode(previous) : [];
   // Repoint the renamed member's path; carry over latestNodeId/contentHash.
@@ -3025,12 +3030,12 @@ export async function renameManifestEntry(
       .filter((f) => f.relativePath !== toPath)
       .concat({ kind: "file", relativePath: toPath, latestNodeId: nodeId, contentHash: "" });
   }
-  await publishFolderNode(folderId, next, {
+  return publishFolderNode(folderId, next, {
     prevEventId: previous?.id ?? null,
     action: previous ? "edit" : "import",
     // Carry the member's kind onto the rename delta (spec §3.3 — kind mirrors
-    // the member entry). Absent on legacy members, defaulting to "file".
-    deltas: [{ type: "rename", kind: existing?.kind, fromPath, toPath, nodeId, timestamp: Date.now() }],
+    // the member entry). A missing source races a remove and becomes a file.
+    deltas: [{ type: "rename", kind: existing?.kind ?? "file", fromPath, toPath, nodeId, timestamp: Date.now() }],
     signer,
   });
 }
@@ -3051,12 +3056,12 @@ export async function renameManifestEntry(
 
 /** One replayable focus event on the folder's folder chain. `steppedAt` is the
  *  node's content-level ms timestamp (chain order, never `created_at`); the
- *  op/selection/panelIndex fields come straight off the focus delta. `op` is
- *  `"mount"` when present, `"unmount"` for the panel-empties case, and undefined
- *  for older focus deltas written before `op` existed (treat as mount). */
+ *  op/selection/panelIndex fields come straight off the focus delta. */
 export interface FocusEntry {
   steppedAt: number;
-  op?: "mount" | "unmount";
+  /** Original observation time retained inside the later carrying Step. */
+  observedAt: number;
+  op: "mount" | "unmount";
   selection: FocusSelection;
   panelIndex: number;
 }
@@ -3067,7 +3072,7 @@ export interface FocusEntry {
  *  lifetime. Non-focus nodes (membership changes, genesis) are skipped, but a
  *  node that carries BOTH a membership delta and flushed focus deltas yields one
  *  FocusEntry per focus delta — readers iterate the `deltas` array, not `[0]`.
- *  A folder written before focus deltas existed returns []. */
+ *  A folder with no focus observations returns []. */
 export async function focusTimeline(folderId: string): Promise<FocusEntry[]> {
   const all = await fetchFolderNodes(folderId);
   // Walk the `e...prev` chain oldest-first — same rule as fetchChain (never
@@ -3093,15 +3098,16 @@ export async function focusTimeline(folderId: string): Promise<FocusEntry[]> {
     try {
       const content = JSON.parse(event.content) as {
         steppedAt: number;
-        deltas?: FolderDelta[];
+        deltas?: unknown[];
       };
       // §8: a node MAY carry several deltas (one structural + N flushed focus).
       // Iterate, push one FocusEntry per focus delta — order preserved.
       if (!content.deltas) continue;
       for (const delta of content.deltas) {
-        if (delta.type !== "focus") continue;
+        if (!isFocusDelta(delta)) continue;
         out.push({
           steppedAt: content.steppedAt,
+          observedAt: delta.timestamp,
           op: delta.op,
           selection: delta.selection,
           panelIndex: delta.panelIndex,
@@ -3157,15 +3163,14 @@ export async function fetchNodeOwner(nodeId: string): Promise<string | null> {
 
 /** Resolve the fixed owner of a folder trace. Genesis is authoritative because
  * a trace has one owner for its whole lifetime; a malformed later node signed
- * by another key must never redefine ownership. Legacy UUID-keyed folders have
- * no event whose id equals `folderId`, so they retain the head-signer fallback. */
+ * by another key must never redefine ownership. */
 export function folderOwnerFromNodes(folderId: string, nodes: readonly Event[]): string | null {
   const genesis = nodes.find(
     (event) =>
       event.id === folderId &&
       event.tags.some((tag) => tag[0] === "z" && tag[1] === "folder"),
   );
-  return genesis?.pubkey ?? resolveHead([...nodes])?.pubkey ?? null;
+  return genesis?.pubkey ?? null;
 }
 
 /** Returns the fixed owner (signer pubkey) of a folder, or null when no folder
@@ -3180,12 +3185,9 @@ export async function fetchFolderOwner(folderId: string): Promise<string | null>
  *  `forked-from` the source node, `snapshot.members` copied verbatim from the
  *  source (each member still points at the source owner's node — a citation,
  *  not a copy), member `q` tags carrying the source owner's pubkey so ownership
- *  is recoverable from the fork node alone. Returns the genesis event. Pass
- *  `destFolderId: null` for the current genesis-id-is-identity protocol; a
- *  non-null id remains accepted for legacy UUID-keyed folders. */
+ *  is recoverable from the fork node alone. Returns the genesis event. */
 export async function forkFolder(
   sourceFolderId: string,
-  destFolderId: string | null,
   opts?: { signer?: Uint8Array; localOnly?: boolean },
 ): Promise<Event> {
   const sourceNode =
@@ -3203,7 +3205,7 @@ export async function forkFolder(
   // but at genesis every member is the source owner's.
   const memberOwners = sourceOwner ? members.map(() => sourceOwner!) : undefined;
 
-  return publishFolderNode(destFolderId, members, {
+  return publishFolderNode(null, members, {
     prevEventId: null, // genesis under a new owner — a fresh chain
     action: "fork",
     forkedFrom,
@@ -3526,9 +3528,7 @@ function fileTag(e: Event, name: string): string | undefined {
 }
 
 function isFileNode(e: Event): boolean {
-  const z = fileTag(e, "z");
-  // Legacy pre-`z` file nodes: kind 4290 without z:folder counts as file.
-  return z !== "folder";
+  return e.kind === TRACE_NODE_KIND && fileTag(e, "z") === "file";
 }
 
 function snapshotOf(e: Event): string {
@@ -3555,7 +3555,7 @@ async function queryReferencing(nodeIds: string[]): Promise<Event[]> {
   for (let i = 0; i < nodeIds.length; i += chunkSize) {
     const chunk = nodeIds.slice(i, i + chunkSize);
     const hits = await queryMany(relays, {
-      kinds: [FILE_TRACE_NODE_KIND],
+      kinds: [TRACE_NODE_KIND],
       "#e": chunk,
     });
     for (const e of hits) byId.set(e.id, e);
@@ -3577,9 +3577,9 @@ export async function findMergeCandidates(
 ): Promise<MergeCandidate[]> {
   const relays = await getReadRelays();
   const oursRaw = await queryMany(relays, {
-    kinds: [FILE_TRACE_NODE_KIND],
+    kinds: [TRACE_NODE_KIND],
     "#F": [relativePath],
-    "#D": [folderId],
+    "#f": [folderId],
   });
   const ours = oursRaw.filter(isFileNode);
   const ourIds = new Set(ours.map((e) => e.id));
@@ -3625,9 +3625,8 @@ export async function findMergeCandidates(
   }
 
   for (const { genesis, forkedFromId } of geneses) {
-    const theirFolder =
-      fileTag(genesis, "D") ?? fileTag(genesis, "f") ?? fileTag(genesis, "folder");
-    const theirPath = fileTag(genesis, "F") ?? fileTag(genesis, "file") ?? relativePath;
+    const theirFolder = fileTag(genesis, "f");
+    const theirPath = fileTag(genesis, "F") ?? relativePath;
     if (!theirFolder) continue;
 
     let theirHead = genesis;
@@ -3671,7 +3670,7 @@ async function queryReferencingByQ(nodeIds: string[]): Promise<Event[]> {
   for (let i = 0; i < nodeIds.length; i += chunkSize) {
     const chunk = nodeIds.slice(i, i + chunkSize);
     const hits = await queryMany(relays, {
-      kinds: [FILE_TRACE_NODE_KIND],
+      kinds: [TRACE_NODE_KIND],
       "#q": chunk,
     });
     for (const e of hits) byId.set(e.id, e);
@@ -3687,7 +3686,7 @@ export interface TraceInbound {
   kind: "fork" | "tag" | "cite";
   /** Stable genesis identity of the inbound trace. Unlike sourceEventId, this
    * survives edits, moves into Oblivion, and restore. */
-  sourceTraceId?: string;
+  sourceTraceId: string;
   /** The inbound trace's node (its genesis for a fork, or the citing node). */
   sourceEventId: string;
   /** Current path advertised by the verified source head, when present. */
@@ -3711,7 +3710,7 @@ export function excludeInboundSources(
 ): TraceInbound[] {
   if (hiddenSourceIds.size === 0) return inbound;
   const visible = inbound.filter(
-    (entry) => !hiddenSourceIds.has(entry.sourceTraceId ?? entry.sourceEventId),
+    (entry) => !hiddenSourceIds.has(entry.sourceTraceId),
   );
   return visible.length === inbound.length ? inbound : visible;
 }
@@ -3719,7 +3718,7 @@ export function excludeInboundSources(
 /** A raw delta parsed out of an event's content for inbound scanning. The cite
  *  role (inline/live/tag/reply, spec §3.3) distinguishes a tag from a quote
  *  from a reply; `sourceEventId` is the pinned nucleus the cite points at. All
- *  fields optional — `findInbound` guards each before use. */
+ *  fields optional — `findInboundSnapshot` guards each before use. */
 export interface RawDeltaInbound {
   type: string;
   role?: string;
@@ -3751,54 +3750,6 @@ export function classifyCite(role: string | undefined): TraceInbound["kind"] | n
   return null;
 }
 
-type SourceChainLoader = (folderId: string, relativePath: string) => Promise<Event[]>;
-
-/** Resolve historical `#q` hits to one current head per citing trace. A relay
- *  reverse lookup necessarily finds old nodes whose q-set used to include the
- *  target; only the source trace's current head says whether that citation is
- *  still live. Coordinate-less legacy nodes fall back to the hit itself. */
-export async function resolveInboundSourceHeads(
-  refs: readonly Event[],
-  loadChain: SourceChainLoader = fetchChain,
-): Promise<Event[]> {
-  const coordinateRefs = new Map<
-    string,
-    { folderId: string; relativePath: string; fallback: Event }
-  >();
-  const coordinateLess = new Map<string, Event>();
-
-  for (const ref of refs) {
-    const folderId =
-      fileTag(ref, "D") ?? fileTag(ref, "f") ?? fileTag(ref, "folder");
-    const relativePath = fileTag(ref, "F") ?? fileTag(ref, "file");
-    if (!folderId || !relativePath) {
-      coordinateLess.set(ref.id, ref);
-      continue;
-    }
-    const key = `${folderId}\u0000${relativePath}`;
-    if (!coordinateRefs.has(key)) {
-      coordinateRefs.set(key, { folderId, relativePath, fallback: ref });
-    }
-  }
-
-  const resolved = await Promise.all(
-    [...coordinateRefs.values()].map(async ({ folderId, relativePath }) => {
-      try {
-        const chain = await loadChain(folderId, relativePath);
-        return chain[chain.length - 1] ?? null;
-      } catch {
-        // A historical q-hit is not evidence that the citation is still live.
-        // Callers that need stale UI retain their last verified snapshot.
-        return null;
-      }
-    }),
-  );
-  for (const head of resolved) {
-    if (head) coordinateLess.set(head.id, head);
-  }
-  return [...coordinateLess.values()];
-}
-
 export interface ResolvedInboundHead {
   traceId: string;
   head: Event;
@@ -3814,7 +3765,7 @@ export interface InboundHeadSnapshot {
 type TraceIdentityResolver = (nodeId: string) => Promise<string | null>;
 type StableTraceResolver = (
   traceId: string,
-  fallback?: { folderId: string; relativePath: string },
+  exactHeadId?: string,
 ) => Promise<TraceChainResolution>;
 
 /** Resolve historical inbound hits through stable trace identity. No failed
@@ -3825,10 +3776,7 @@ export async function resolveInboundHeadSnapshot(
   identityResolver: TraceIdentityResolver = resolveTraceIdentity,
   traceResolver: StableTraceResolver = resolveTraceChain,
 ): Promise<InboundHeadSnapshot> {
-  const grouped = new Map<
-    string,
-    { folderId?: string; relativePath?: string }
-  >();
+  const grouped = new Set<string>();
   let complete = true;
 
   for (const ref of refs) {
@@ -3843,22 +3791,15 @@ export async function resolveInboundHeadSnapshot(
       complete = false;
       continue;
     }
-    if (!grouped.has(traceId)) {
-      grouped.set(traceId, {
-        folderId: fileTag(ref, "D") ?? fileTag(ref, "f") ?? fileTag(ref, "folder"),
-        relativePath: fileTag(ref, "F") ?? fileTag(ref, "file"),
-      });
-    }
+    grouped.add(traceId);
   }
 
   const heads: ResolvedInboundHead[] = [];
-  for (const [traceId, coordinate] of grouped) {
-    const fallback =
-      coordinate.folderId && coordinate.relativePath
-        ? { folderId: coordinate.folderId, relativePath: coordinate.relativePath }
-        : undefined;
+  for (const traceId of grouped) {
     try {
-      const resolution = await traceResolver(traceId, fallback);
+      // A historical ref's coordinate or node id is not proof of the current
+      // head. Follow the stable TraceHead and fail closed if it is unavailable.
+      const resolution = await traceResolver(traceId);
       if (resolution.status !== "resolved" || resolution.chain.length === 0) {
         complete = false;
         continue;
@@ -3882,7 +3823,7 @@ export function inboundCitationsFromResolvedHeads(
   const seen = new Set<string>();
   for (const { traceId, head } of sources) {
     if (fileTag(head, "action") === "delete") continue;
-    const sourcePath = fileTag(head, "F") ?? fileTag(head, "file");
+    const sourcePath = fileTag(head, "F");
     for (const targetId of targetIds) {
       const kind = classifyQEdge(head, targetId);
       if (!kind) continue;
@@ -3900,19 +3841,6 @@ export function inboundCitationsFromResolvedHeads(
     }
   }
   return out;
-}
-
-/** Compatibility pure helper for callers/tests that already hold heads but do
- * not have their stable identities. Production inbound lookup uses
- * `inboundCitationsFromResolvedHeads`. */
-export function inboundCitationsFromHeads(
-  heads: readonly Event[],
-  targetIds: ReadonlySet<string>,
-): TraceInbound[] {
-  return inboundCitationsFromResolvedHeads(
-    heads.map((head) => ({ traceId: head.id, head })),
-    targetIds,
-  );
 }
 
 export interface InboundSnapshot {
@@ -3961,22 +3889,16 @@ export function filterInboundCitationRefs(
  * emits cite deltas for `tag` and `reply`, not `inline`.
  */
 export async function findInboundSnapshot(
-  folderId: string,
-  relativePath: string,
-  targetTraceId?: string,
+  targetTraceId: string,
 ): Promise<InboundSnapshot> {
   let complete = true;
   let ours: Event[] = [];
   try {
-    if (targetTraceId) {
-      const resolution = await resolveTraceChain(targetTraceId, { folderId, relativePath });
-      if (resolution.status !== "resolved") {
-        return { entries: [], complete: false };
-      }
-      ours = resolution.chain;
-    } else {
-      ours = await fetchChain(folderId, relativePath);
+    const resolution = await resolveTraceChain(targetTraceId);
+    if (resolution.status !== "resolved") {
+      return { entries: [], complete: false };
     }
+    ours = resolution.chain;
   } catch {
     return { entries: [], complete: false };
   }
@@ -4017,7 +3939,7 @@ export async function findInboundSnapshot(
     const key = `fork:${traceId}:${origin.fromNodeId}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const sourcePath = fileTag(head, "F") ?? fileTag(head, "file");
+    const sourcePath = fileTag(head, "F");
     out.push({
       kind: "fork",
       sourceTraceId: traceId,
@@ -4052,22 +3974,13 @@ export async function findInboundSnapshot(
   );
   complete = complete && sourceSnapshot.complete;
   for (const entry of inboundCitationsFromResolvedHeads(sourceSnapshot.heads, ourIds)) {
-    const key = `${entry.kind}:${entry.sourceTraceId ?? entry.sourceEventId}:${entry.fromNodeId}`;
+    const key = `${entry.kind}:${entry.sourceTraceId}:${entry.fromNodeId}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(entry);
   }
 
   return { entries: out, complete };
-}
-
-/** Compatibility array-only surface. New UI should use findInboundSnapshot so
- * it can retain verified rows when a relay observation is incomplete. */
-export async function findInbound(
-  folderId: string,
-  relativePath: string,
-): Promise<TraceInbound[]> {
-  return (await findInboundSnapshot(folderId, relativePath)).entries;
 }
 
 /** Classify one `q` edge from event `e` into our node `targetId` as an inbound
@@ -4080,7 +3993,7 @@ export async function findInbound(
  *  This mirrors the outbound reader (`eventMeta.citationTargets` reads every
  *  `q` as a citation); it does NOT rely on the cite delta to *detect* the edge,
  *  because the write path emits cite deltas only for `tag` and `reply`, not for
- *  `inline` bracket quotes. See `findInbound` for the rationale. */
+ *  `inline` bracket quotes. See `findInboundSnapshot` for the rationale. */
 export function classifyQEdge(e: Event, targetId: string): TraceInbound["kind"] | null {
   // Folder nodes: their `q` edges are membership entries (spec §3.1), not
   // citations. A folder that includes this file as a member is composition at
@@ -4451,57 +4364,63 @@ export function reconstructUpTo(chain: Event[], throughIndex: number): string {
   return reconstructFromChain(chain.slice(0, end));
 }
 
-/** Reconstructs file content by replaying deltas along the chain. */
+/** Reconstruct file content from each unconditional snapshot. */
 export function reconstructFromChain(chain: Event[]): string {
   let content = "";
   for (const event of chain) {
-    const parsed = JSON.parse(event.content) as { snapshot?: string; deltas?: Array<{ type: string; position: { start: number; end: number }; newValue: string | null }> };
-    if (typeof parsed.snapshot === "string") {
-      content = parsed.snapshot; // snapshot is authoritative when present
-      continue;
+    const parsed = JSON.parse(event.content) as { snapshot?: string };
+    if (typeof parsed.snapshot !== "string") {
+      throw new Error(`TraceNode ${event.id} is missing its required snapshot`);
     }
-    if (parsed.deltas) {
-      for (const d of parsed.deltas) {
-        if (d.type !== "insert" && d.type !== "delete" && d.type !== "replace") continue;
-        content =
-          content.slice(0, d.position.start) + (d.newValue ?? "") + content.slice(d.position.end);
-      }
-    }
+    content = parsed.snapshot;
   }
   return content;
 }
 
 /** Reads the keystroke log from a single node's content JSON. Returns `[]`
- *  when the node carries no kedits (pre-kedits nodes, forced no-op Steps,
- *  or nodes stepped with an empty buffer). Unlike `reconstructRunsFromChain`
+ *  when the node carries no kedits (forced no-op Steps or nodes stepped with
+ *  an empty buffer). Unlike `reconstructRunsFromChain`
  *  there is no chain walk or fallback synthesis: kedits is either present
  *  on the node or it isn't. */
 export function keditsFromEvent(event: Event): KEdit[] {
   try {
-    const parsed = JSON.parse(event.content) as { kedits?: KEdit[] };
-    return Array.isArray(parsed.kedits) ? parsed.kedits : [];
+    const parsed = JSON.parse(event.content) as { kedits?: unknown[] };
+    return Array.isArray(parsed.kedits) ? parsed.kedits.filter(isKEdit) : [];
   } catch {
     return [];
   }
 }
 
+function isKEdit(value: unknown): value is KEdit {
+  if (!value || typeof value !== "object") return false;
+  const edit = value as Partial<KEdit>;
+  return (
+    (edit.op === "ins" || edit.op === "del" || edit.op === "repl") &&
+    Number.isInteger(edit.from) &&
+    Number.isInteger(edit.to) &&
+    (edit.from as number) >= 0 &&
+    (edit.to as number) >= (edit.from as number) &&
+    typeof edit.text === "string" &&
+    typeof edit.voice === "string" &&
+    Number.isFinite(edit.t) &&
+    Number.isInteger(edit.tx) &&
+    (edit.tx as number) >= 0 &&
+    (edit.intent === undefined || edit.intent === "undo" || edit.intent === "redo")
+  );
+}
+
 /** Reconstruct per-author runs by replaying the chain. Attribution is sourced
- *  in four tiers, per node in order — the first tier that fires wins:
+ *  from three current carriers, per node in order — the first path that fires wins:
  *
- *  1. **Legacy `authors` map** → when a valid map accompanies body deltas but
- *     none carries an `author` field, adopt the complete map. Those nodes
- *     predate per-delta attribution; defaulting their unannotated deltas to the
- *     signer would overwrite the only carrier that distinguishes MODEL text.
- *  2. **Position-bearing content deltas** → splice each delta's insert into the
+ *  1. **Position-bearing content deltas** → splice each delta's insert into the
  *     running run-list, resolving its optional `author` index through the
- *     node-local `voices` table and defaulting to the signer. Once any body
- *     delta carries `author`, this is the primary carrier for the whole step.
- *  3. **`authors` field present and valid** (concatenates to this node's
+ *     node-local `voices` table and defaulting to the signer.
+ *  2. **`authors` field present and valid** (concatenates to this node's
  *     `snapshot`) → adopt the run list when no body delta describes the change.
  *     This is the secondary carrier for bare snapshots.
- *  4. **Snapshot with no deltas and no `authors`** → the signer authored the
- *     whole snapshot (a wholesale reset — genesis/import on older data, or a
- *     node that shed its deltas). This is the only honest attribution when no
+ *  3. **Snapshot with no deltas and no `authors`** → the signer authored the
+ *     whole snapshot (for example, genesis/import or delete). This is the only
+ *     honest attribution when no
  *     delta or map describes the change. A tag/reply-only node (snapshot
  *     unchanged) falls through here too and correctly preserves attribution.
  *
@@ -4531,6 +4450,9 @@ export function reconstructRunsFromChain(chain: Event[]): Run[] {
         author?: unknown;
       }>;
     };
+    if (typeof parsed.snapshot !== "string") {
+      throw new Error(`TraceNode ${event.id} is missing its required snapshot`);
+    }
     // Position-bearing content deltas only (spec §3.3: a delta changes the
     // body iff it carries a `position`). Citation deltas with role tag/reply
     // have no position and never touch text — skip them so they don't trip
@@ -4539,25 +4461,7 @@ export function reconstructRunsFromChain(chain: Event[]): Run[] {
     const contentDeltas = (parsed.deltas ?? []).filter(
       (d) => d.position && (d.type === "insert" || d.type === "delete" || d.type === "replace"),
     );
-    const fromAuthors =
-      typeof parsed.snapshot === "string"
-        ? parseAuthors(parsed.authors, parsed.snapshot)
-        : null;
-    // Backward compatibility for nodes written before delta-level `author`:
-    // they often carry both an accurate full-snapshot authors map and ordinary
-    // unannotated body deltas. The missing field did not mean "the signer wrote
-    // this span" at that time; it meant per-delta attribution did not exist.
-    // Presence (even malformed presence) on any body delta marks the new wire
-    // shape, where per-delta attribution is primary and invalid/missing indexes
-    // deliberately degrade to the signer.
-    const hasDeltaAttribution = contentDeltas.some((d) =>
-      Object.prototype.hasOwnProperty.call(d, "author"),
-    );
-    if (contentDeltas.length > 0 && fromAuthors && !hasDeltaAttribution) {
-      chars = runsToChars(fromAuthors);
-      if (dbg) dbg.tiers[0]++;
-      continue;
-    }
+    const fromAuthors = parseAuthors(parsed.authors, parsed.snapshot);
     if (contentDeltas.length === 0) {
       // Secondary carrier: a valid authors map describes the complete
       // snapshot when no more precise body delta is present.
@@ -4568,8 +4472,8 @@ export function reconstructRunsFromChain(chain: Event[]): Run[] {
       }
       // No content deltas on this step. Two sub-cases:
       //  (a) a bare snapshot that differs from the running content — a
-      //      wholesale reset with no delta info (genesis, or legacy output
-      //      that shed deltas). The only honest attribution is the whole
+      //      wholesale reset with no delta info (for example, genesis/import
+      //      or delete). The only honest attribution is the whole
       //      snapshot to this signer.
       //  (b) a tag/reply-only edit — the snapshot matches the current text,
       //      so attribution is preserved (the signer touched metadata, not
@@ -4864,8 +4768,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
  * raw Nostr event it came from.
  *
  * Body extraction by kind:
- *  - 4290 FileTraceNode — `snapshot` is authoritative; deltas replayed as a
- *    fallback for legacy output that shed the snapshot.
+ *  - 4290 FileTraceNode — `snapshot` is authoritative.
  *  - 4291 TraceName — the name chain carries a `name` field; rendered as a
  *    heading so the body reads as the trace's current name.
  *  - folder-reified 4290 node — `snapshot.members` rendered as an unordered list.
@@ -4904,11 +4807,8 @@ export function hitToDocument(hit: SampleHit): {
 /** Pull the readable body out of a sampled event's content. Never returns
  *  event metadata — only the text the user should see in the editor. */
 function extractBody(event: Event): string {
-  // Spec §R11.3: file and folder share kind 4290, discriminated by `z`. A
-  // 4290 with z:folder renders its membership list; a 4290 with z:file (or no
-  // z) renders its snapshot text.
-  const isFolder = event.tags.some((t) => t[0] === "z" && t[1] === "folder");
-  if (isFolder) {
+  const reification = event.tags.find((tag) => tag[0] === "z")?.[1];
+  if (event.kind === TRACE_NODE_KIND && reification === "folder") {
     const parsed = safeParse(event.content);
     const snapshot = isObject(parsed) ? parsed.snapshot : undefined;
     const members = isObject(snapshot) ? snapshot.members : undefined;
@@ -4924,16 +4824,10 @@ function extractBody(event: Event): string {
     return "";
   }
   switch (event.kind) {
-    case FILE_TRACE_NODE_KIND: {
+    case TRACE_NODE_KIND: {
+      if (reification !== "file") return "";
       const parsed = safeParse(event.content);
       if (isObject(parsed) && typeof parsed.snapshot === "string") return parsed.snapshot;
-      if (isObject(parsed) && Array.isArray(parsed.deltas)) {
-        const replayed = replayDeltas(parsed.deltas);
-        if (replayed) return replayed;
-      }
-      // A 4290 with neither snapshot nor usable deltas — the protocol says
-      // snapshot is unconditional, so this shouldn't happen, but don't dump
-      // raw JSON if it does.
       return "";
     }
     default: {
@@ -4962,20 +4856,6 @@ function safeParse(s: string): unknown {
 type ParsedRecord = { [key: string]: unknown };
 function isObject(v: unknown): v is ParsedRecord {
   return typeof v === "object" && v !== null;
-}
-
-// Replay a single event's deltas onto an empty string. Used only when a 4290
-// node lacks a snapshot (non-normative but seen in legacy output).
-function replayDeltas(
-  deltas: Array<{ type: string; position: { start: number; end: number }; newValue: string | null }>,
-): string {
-  let content = "";
-  for (const d of deltas) {
-    if (d.type !== "insert" && d.type !== "delete" && d.type !== "replace") continue;
-    content =
-      content.slice(0, d.position.start) + (d.newValue ?? "") + content.slice(d.position.end);
-  }
-  return content;
 }
 
 // --- tag browsing (protocol §Tagging vs. bracketing) --------------------
@@ -5008,10 +4888,10 @@ export interface TagCandidate {
 export async function resolveTagCandidates(name: string, urls: string[]): Promise<TagCandidate[]> {
   const trimmed = name.trim();
   if (!trimmed) return [];
-  const modern = await sampleRelays(urls, { kinds: [TRACE_NODE_KIND], "#D": [trimmed] });
+  const current = await sampleRelays(urls, { kinds: [TRACE_NODE_KIND], "#f": [trimmed] });
   // Merge by event id; post-filter to folder-discriminated nodes.
   const byId = new Map<string, Event>();
-  for (const hit of modern.hits) {
+  for (const hit of current.hits) {
     if (hit.event.tags.some((t) => t[0] === "z" && t[1] === "folder")) byId.set(hit.event.id, hit.event);
   }
   const hits = [...byId.values()];
@@ -5077,7 +4957,3 @@ export async function browseTag(
   });
   return { hits: [...merged.values()], errors };
 }
-
-export {
-  FILE_TRACE_NODE_KIND,
-};

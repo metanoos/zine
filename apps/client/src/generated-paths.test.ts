@@ -3,13 +3,16 @@ import assert from "node:assert/strict";
 
 import {
   MINT,
+  SCAN,
   OBLIVION,
   formatLocalSecondStamp,
   forkPathForMint,
   isMintPath,
+  isScanPath,
   isOblivionPath,
   mintedPath,
   slugifyFilename,
+  systemPathDisplayName,
   uniquePath,
 } from "./generated-paths.js";
 
@@ -43,6 +46,13 @@ test("forkPathForMint removes Mint's timestamp and avoids collisions", () => {
   );
 });
 
+test("system display names hide Mint timestamps without changing paths", () => {
+  const path = `${MINT}/2026-07-15_143210-same-phrase.md`;
+  assert.equal(systemPathDisplayName(path), "same-phrase.md");
+  assert.equal(systemPathDisplayName(`${OBLIVION}/2026-07-15_143210/draft.md`), "draft.md");
+  assert.equal(path, `${MINT}/2026-07-15_143210-same-phrase.md`);
+});
+
 test("system path classifiers match only their own region", () => {
   assert.equal(isMintPath(MINT), true);
   assert.equal(isMintPath(`${MINT}/item.md`), true);
@@ -50,6 +60,9 @@ test("system path classifiers match only their own region", () => {
   assert.equal(isOblivionPath(OBLIVION), true);
   assert.equal(isOblivionPath(`${OBLIVION}/stamp/item.md`), true);
   assert.equal(isOblivionPath(`${MINT}/item.md`), false);
+  assert.equal(isScanPath(SCAN), true);
+  assert.equal(isScanPath(`${SCAN}/project/item.md`), true);
+  assert.equal(isScanPath("scanner/item.md"), false);
 });
 
 test("shared slug and collision helpers preserve generated-name conventions", () => {

@@ -1,11 +1,16 @@
-/** Reserved top-level mount names in the Press tree. Mint is backed by its own
- *  protocol folder identity; Oblivion is a local lifecycle region. Neither is
- *  an ordinary user-created folder inside Root. */
+/** Reserved top-level mount names in the Press tree. Mint and Scan are backed
+ *  by dedicated local-only protocol folders; Oblivion is a local lifecycle
+ *  region. None is an ordinary user-created folder inside Root. */
 export const MINT = "mint";
+export const SCAN = "scan";
 export const OBLIVION = "oblivion";
 
 export function isMintPath(path: string): boolean {
   return path === MINT || path.startsWith(MINT + "/");
+}
+
+export function isScanPath(path: string): boolean {
+  return path === SCAN || path.startsWith(SCAN + "/");
 }
 
 export function isOblivionPath(path: string): boolean {
@@ -13,7 +18,7 @@ export function isOblivionPath(path: string): boolean {
 }
 
 export function isSystemRootPath(path: string): boolean {
-  return path === MINT || path === OBLIVION;
+  return path === MINT || path === SCAN || path === OBLIVION;
 }
 
 /** Filesystem-safe, fixed-width local timestamp used by every generated path.
@@ -63,6 +68,14 @@ export function mintedPath(
 }
 
 const MINT_STAMP_PREFIX = /^\d{4}-\d{2}-\d{2}_\d{6}-/;
+
+/** Human-facing basename for generated system paths. Structural paths keep
+ * their timestamp so identity, collision handling, and chronology are intact. */
+export function systemPathDisplayName(path: string): string {
+  const slash = path.lastIndexOf("/");
+  const name = slash === -1 ? path : path.slice(slash + 1);
+  return isMintPath(path) ? name.replace(MINT_STAMP_PREFIX, "") : name;
+}
 
 /** A Mint -> ordinary-folder drop creates an editable fork with an ordinary
  *  title. The timestamp belongs to the immutable Mint item, not its fork. */
