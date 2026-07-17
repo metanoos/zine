@@ -12,12 +12,14 @@ not another editor.
 
 ## Who it is for
 
-zine-mcp is the first product wedge for teams whose agents create durable
-files such as reports, research, policies, or editorial work. It gives the
-person responsible for those agents an artifact-level record that ordinary
-model-call logs and file history do not provide on their own: which agent key
-changed the file, which version was sent, and which exact version was later
-endorsed.
+zine-mcp is the interoperability path for MCP-capable harnesses into Zine's
+agent-provenance use case: teams whose agents create durable files such as
+reports, research, policies, or editorial work. It gives the person responsible
+for those agents an artifact-level record that ordinary model-call logs and
+file history do not provide on their own: which agent key changed the file,
+which version was sent, and which exact version was later endorsed. It remains
+an outside-in integration with claims bounded to the metadata and actions the
+harness supplies; it does not claim complete provider-session capture.
 
 The open protocol remains broader than this wedge. See the
 [documentation hub](../../docs/README.md), [product framing](../../docs/PRODUCT.md),
@@ -176,8 +178,6 @@ zine-mcp [--profile <name>] [--source-folder <folderId>]
 | `--home-relay` | no | `ws://127.0.0.1:4869` | private loopback home for Step/read/history |
 | `--publish-relay` | no, repeatable | — | non-loopback Send destination |
 | `--config` | no | profile-dependent | explicit state file; default profile uses `~/.zine/mcp.json`, named profiles use `~/.zine/profiles/<name>.json` |
-| `--folder` | no | — | deprecated alias for `--source-folder` |
-| `--relay` | no | — | deprecated loopback-only alias for `--home-relay` |
 
 Profile writes are atomic and owner-only. Corrupt state fails loudly rather
 than minting a replacement identity, and a profile lock prevents two writers

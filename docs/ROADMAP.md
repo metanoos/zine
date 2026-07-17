@@ -1,27 +1,33 @@
 # Roadmap
 
-Dates do not unlock phases; evidence does. Each phase below names the proof
-that opens the next one. The thesis stays constant throughout: signed process
-provenance for human-AI authorship, sovereign by default, evidence instead of
-verdicts.
+Evidence, not dates, unlocks phases, with the one named exception below. Each
+phase names the proof that opens the next one. The thesis stays constant
+throughout: signed process provenance for human-AI authorship, sovereign by
+default, evidence instead of verdicts.
+
+One explicit founder-conviction decision changes what is built before demand
+evidence arrives. As of 2026-07-17, Zine is building the local-first multi-AI
+task and correspondence platform while customer discovery runs in parallel.
+That is a sequencing choice, not evidence that demand already exists.
 
 ## Sequencing rule
 
-Single-player value comes before network value:
+Task and correspondence implementation now runs alongside customer discovery.
+Managed services and global network work remain evidence-gated:
 
 ```text
-agent provenance
-      |
-      v
-shareable verification
-      |
-      v
+multi-AI task + correspondence <----> customer discovery
+               |
+               v
+shareable verification + retained team use
+               |
+               v
 managed team layer
-      |
-      v
+               |
+               v
 consented calibration corpus
-      |
-      v
+               |
+               v
 network rendezvous, only if density exists
 ```
 
@@ -35,34 +41,57 @@ Already built:
 - distinct human, model, and agent voice keys;
 - per-delta attribution and, for native desktop model operations, exact LLM
   metadata and context references;
-- local and hosted relay implementations with NIP-42 access policy;
-- mutual-peer co-citation, process vetting, and fuzzy quote matching; and
+- a local relay implementation with NIP-42 owner/peer/writer policy, plus a
+  hosted relay implementation whose equivalent operator ACL is still a gap;
+- mutual-peer co-citation, process vetting, and fuzzy quote matching;
+- raw-file Reify with an opt-in signed-event bundle and readable report;
+- desktop signing and provider secrets stored behind a Stronghold vault;
+- prepared direct MODEL operations with explicit approval and stale-result
+  protection, though that path is not yet universal or durably bound to Steps;
 - a pre-registered narration study.
 
-Known gaps include nested folder fork-on-write, release packaging, no-install
-proof reports, organization administration, calibration, kind and tag
-registration, and a second independent implementation.
+Known gaps include authoritative relation and task metadata, durable attempt
+journaling, universal exact-context preflight, declarative model rows, native
+harness adapters, nested folder fork-on-write, public release packaging,
+no-install verification, organization administration, calibration, kind and
+tag registration, and a second independent implementation.
 
-## Phase 1: agent provenance anyone can adopt
+## Phase 1: multi-AI correspondence anyone can adopt
 
 Priority work:
 
-1. Package `zine-mcp` so a team can connect it without building the
-   repository.
-2. Accept optional harness-supplied goal, prompt, model, and context metadata
-   on MCP-authored Steps — without inventing those claims when the harness
-   omits them.
-3. Generate a human-readable proof-of-process report for one file or folder.
-4. Serve the report through a no-install verifier that checks signatures,
-   lineage, anchors, and attribution status in the browser.
-5. Finish release automation and test installers on clean machines.
-6. Put Zine in the hands of a first handful of teams tracing real
-   agent-written artifacts.
-7. Register the provisional protocol surface and support a second independent
+1. Make one clean pre-production schema cut for durable relation roles, task
+   turns, operation metadata, and ordered prompt-rule references; update the
+   specifications, readers, writers, fixtures, indexes, and tests together.
+2. Bind every live model action to exact context preflight and disclosure,
+   durable attempt journaling, per-target locking, compare-and-set application,
+   and idempotent recovery.
+3. Replace the hard-coded model row with a declarative registry and prove the
+   shared runtime first with GLM, including cumulative Continue, generic Reply,
+   `Analyze · Process`, and explicit trace-preserving compaction.
+4. Add pinned Codex, Claude, and local-model adapters that preserve native
+   approvals, use minimal authority, and cross providers only through reviewed
+   handoff manifests. Keep MCP as outside-in interoperability with bounded
+   metadata claims.
+5. Make correspondence and replay role-aware, including provenance-preserving
+   quotation without Coin, an honest EXTERNAL origin, and context relationships
+   that do not become citation or social signals.
+6. Build consent-gated full-chain transfer and a separately owned reviewer
+   analysis trace, without silently publishing linked private context.
+7. Package `zine-mcp`, finish an installable macOS dogfood bundle on the current
+   development machine, serve exported bundles through a no-install verifier,
+   and run first-team discovery and dogfood in parallel with the implementation.
+   Signed and notarized public releases and the clean-machine Windows/Linux
+   matrix remain deferred in [`TODOS.md`](../TODOS.md).
+8. Register the provisional protocol surface and support a second independent
    implementation, even a deliberately small one.
 
 Phase 1 has succeeded when:
 
+- the new schema, attempt journal, action runtime, and adapters pass their
+  regression suites and a real-relay verification;
+- one press can Continue, Reply, Analyze, compact, and hand off a readable task
+  across multiple model rows without losing exact provenance or local control;
 - named teams trace real agent-written artifacts;
 - they repeat the workflow weekly, for weeks in a row;
 - at least one proof is read by someone outside the team that created it;
@@ -70,6 +99,13 @@ Phase 1 has succeeded when:
   ordinary file history could not; and
 - a team asks to pay for availability, organization controls, or
   verification.
+
+Founder conviction does not make this phase irreversible. Narrow or stop the
+broader build if teams do not return to multi-AI task or correspondence work,
+if the trace does not answer consequential handoff or review questions better
+than ordinary files plus provider logs, or if integrated adapters cannot keep
+their authority and evidence claims bounded enough to preserve Zine's
+local-first trust model.
 
 ## Phase 2: operate the paid team layer
 
@@ -115,7 +151,8 @@ simulation does not open this gate; only usage does.
 
 ## Not on the roadmap
 
-- New social gestures without observed user demand.
+- New social or model gestures beyond the accepted task/correspondence set
+  without observed user demand.
 - More DHT wire design before real co-citation density.
 - Claims that timing or revision shape proves a human author.
 - A proprietary relay requirement.

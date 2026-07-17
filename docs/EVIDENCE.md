@@ -2,7 +2,7 @@
 
 Zine asks readers to check claims, not to trust them. This page separates
 exercised implementation, measured research, protocol assertions, and open
-hypotheses. Last updated 2026-07-15.
+hypotheses. Last updated 2026-07-17.
 
 ## What works today
 
@@ -11,14 +11,30 @@ hypotheses. Last updated 2026-07-15.
 | Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke |
 | Step, Send, Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
-| Headless MCP press with its own voice key | Implemented | MCP unit/build smoke plus isolated relay integration |
+| Desktop Stronghold storage for signing and provider secrets | Implemented on desktop; browser remains read-only | `secret-store.test.ts`, `secret-migration.test.ts`, key/model store tests, and the Tauri Stronghold shell |
+| Headless MCP press with its own voice key and permanent profile Root | Implemented | Offline stdio smoke proves zero-folder cold start, exact signed-event outbox, raw node reads, and Root/key reuse; isolated real-relay integration flushes a queued event unchanged, preserves optional source forks, and exercises external Send |
+| Prepared desktop MODEL operations and approval gating | Implemented for direct single-shot gestures; not yet enforced on every live model call | `prepared-operation.test.ts`, `context-snapshot.test.ts`, `model-operation-executor.test.ts`, and `llm-prepared.test.ts`; the separate agent loop still uses its own transport, and `preparedRequestHash` is not yet stored in Step metadata |
 | Per-delta human/model attribution | Implemented | Attribution regression suite; trust status remains asserted unless corroborated through a signed seam |
 | Fork and merge | Implemented for current top-level flows | Merge and ownership tests; recursive nested-folder fork-on-write remains deferred |
 | Mutual-peer co-citation and process vet | Implemented and tested | `co-citation.ts`, `vet.ts`, `vet-walker.ts`, and their tests |
 | Exact and fuzzy quote matching | Implemented with uncalibrated defaults | SHA-256 coordinate plus MinHash/LSH client layer |
+| Raw-file Reify with optional trace bundle and report | Implemented on desktop | `reify.ts` materializes signed snapshots and keeps raw events under `.zine/` |
 | Global Kademlia rendezvous | Not implemented | Design sketch in the [rendezvous specification](../protocol/rendezvous.md) |
-| Public proof report and no-install verifier | Not implemented | On the [roadmap](ROADMAP.md) |
+| No-install public verifier | Not implemented | On the [roadmap](ROADMAP.md) |
 | Managed organization service | Not implemented | Hosted relay code exists; no paid service or SLA is claimed |
+
+Desktop vault caveat: Stronghold's password and snapshot KDFs are
+intentionally expensive. A fully unoptimized development build can appear to
+stall for minutes; the current development profile optimizes only the
+cryptographic hot paths. Release KDF parameters and the application security
+contract are unchanged.
+
+Reify writes each chosen Step's authoritative `snapshot` to its ordinary file
+path. It never substitutes the live unstepped editor buffer and never embeds
+provenance in the file. “Include trace” is explicit and off by default; when
+enabled it adds raw signed events at `.zine/trace.json` and a derived readable
+projection at `.zine/report.md`. The JSON, not the report, preserves the fields
+needed to verify event ids and signatures.
 
 Nothing above needs to be taken on faith. From a repository checkout:
 
@@ -74,9 +90,12 @@ The normative trust posture is in
 
 ## What we have not proven yet
 
-- Named teams using Zine on real work, week after week.
+- Named teams returning week after week to multi-AI task and correspondence
+  work on real artifacts.
+- A cross-model handoff whose trace answers a consequential question that
+  ordinary files plus provider logs could not.
 - Willingness to pay for a hosted or organization layer.
-- A public verification artifact used outside the authoring environment.
+- A no-install verifier used outside the authoring environment.
 - Kind and tag registration in the Nostr ecosystem.
 - A second independent implementation of the wire format.
 - A consented corpus large enough to calibrate timing, revision-shape, and

@@ -273,8 +273,7 @@ readable from its inlined snapshot; only verification is lost.
 
 The press uses one keychain with **separate roles**. A fresh install assigns
 different secrets so a stable network address is not coupled to a pen the
-author may switch. A migrated single-key install may assign one key to several
-roles for continuity.
+author may switch. The user may intentionally assign one key to several roles.
 
 | role | what it is |
 |---|---|

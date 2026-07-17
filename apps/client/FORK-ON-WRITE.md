@@ -28,7 +28,7 @@ owner's traces.
 | Foreign folder write | Fails closed with “fork the folder first”; it never cross-signs the foreign folder chain. |
 | Recursive nested-folder fork | Not implemented. |
 | Folder-cycle guard | Not implemented because recursive folder forking is not yet enabled. |
-| Legacy disk workspace service | Removed. `workspace.ts` now contains only the native picker/scan/reify bridge. |
+| Disk workspace service | Removed. `workspace.ts` contains only the native picker/scan/reify bridge. |
 
 Regression coverage in `workspace-local-movement.test.ts` locks the ownership
 decision (`owned`, `foreign`, `unverifiable`). The behavioral implementation

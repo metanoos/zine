@@ -32,6 +32,11 @@ reviewer should be able to answer:
 - Which version was opened for discussion, and which version was endorsed?
 - Can another party inspect the evidence without access to the original app?
 
+That adoption wedge remains the starting use case. As of 2026-07-17, the
+build focus is the local-first multi-AI task and correspondence platform that
+serves it. Customer discovery runs in parallel; managed services and network
+layers remain evidence-gated.
+
 Native model operations in the desktop press can also record the prompt,
 model configuration, and cited context. Threading equivalent harness-supplied
 metadata through MCP Steps is roadmap work.
@@ -73,8 +78,12 @@ work into the receiving owner's chain.
 | Step, Send, Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
 | Top-level foreign-file fork-on-write | Implemented; recursive nested-folder fork-on-write is deferred |
 | Mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
+| Raw-file Reify export with an optional signed-event bundle | Implemented on desktop |
+| Stronghold storage for signing and provider secrets | Implemented on desktop; the browser remains read-only |
+| Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures; not yet universal or durably bound to Steps |
+| Hosted relay | Implemented; an operator ACL equivalent to the local relay policy remains a gap |
 | Global content-hash rendezvous over Kademlia | Specified as a sketch, not implemented |
-| Managed remote, organization control plane, and public verification reports | Commercial product hypotheses, not shipping services |
+| Managed remote, organization control plane, and no-install public verifier | Commercial product hypotheses, not shipping services |
 
 The complete evidence and limitation record lives in
 [docs/EVIDENCE.md](docs/EVIDENCE.md). Protocol status words have exact meanings
@@ -138,10 +147,11 @@ owning specification, the specification wins.
 ├── docs/                          reader-facing product, protocol, evidence, roadmap, and company
 ├── protocol/                      trace, transport, and rendezvous specifications
 ├── relay/                         Go relay, local sidecar, and hosted peer
+├── scripts/                       development, diagnostics, and verification orchestration
 ├── Dockerfile, docker-compose.yml hosted relay plus browser client
 ├── research/                      narration study and raw outputs
 └── apps/
-    ├── client/                    React/Tauri desktop and browser press
+    ├── client/                    React/Tauri desktop press and read-only browser build
     └── mcp/                       headless MCP press
 ```
 
@@ -154,8 +164,9 @@ owning specification, the specification wins.
   attribution, transport, and vetting.
 - [Evidence](docs/EVIDENCE.md): what is implemented, measured, asserted, and
   still unknown.
-- [Roadmap](docs/ROADMAP.md): validation-gated sequence from the agent wedge to
-  hosted services and, later, network discovery.
+- [Roadmap](docs/ROADMAP.md): the multi-AI task and correspondence build now
+  underway alongside customer discovery, with evidence gates for hosted and
+  network phases.
 - [Company](docs/COMPANY.md): how an open sovereign protocol can support a
   commercial service without making the press dependent on it.
 - [Protocol specifications](protocol/README.md): normative authority and status

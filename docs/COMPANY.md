@@ -46,7 +46,7 @@ workflow, and calibrated interpretation around commodity storage.
 | Self-hosted OTS calendar is the target, not current behavior | Managed anchoring with declared cadence and proof availability | Current prototype can use a public calendar |
 | Peer-list portability across devices is unsettled | Organization key and ACL control plane | Not implemented |
 | DHT bootstrap needs operator-provided super-peers | Operated bootstrap | Deferred with the global DHT |
-| Verification is bounded and reader-side | Public verifier and exportable evidence report | Not implemented |
+| Verification is bounded and reader-side | Public verifier and exportable evidence report | Local bundle/report implemented; public verifier is not |
 | Timing and graph models need real calibration | Opt-in research corpus and calibrated policy models | Defaults exist; calibration does not |
 
 ## How pricing would work

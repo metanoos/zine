@@ -66,20 +66,28 @@ signed history          review/discussion      commitment
 
 The flow:
 
-1. Connect the MCP press to a folder trace and relay.
-2. The press mints a distinct key for the agent; it never imports yours.
-3. The agent Steps file states under its own key, preserving full snapshots
-   and trace lineage.
-4. It Sends an exact stepped version when the work is ready for someone else
-   to fetch.
-5. The author may later Attest a sent version to stand behind it.
-6. Anyone with access fetches nodes or history to inspect the record.
+1. Configure the MCP client with a command and optional named profile. The
+   press mints or reopens that profile's permanent Root; no folder or running
+   relay is required. An existing source folder is an explicit, optional fork.
+2. The press mints a distinct key for the agent and never imports yours. The
+   key, Root, and current working state persist across runs.
+3. The agent Steps file states under its own key. Each exact signed event lands
+   in a durable local outbox before relay delivery, so an unavailable home
+   relay does not lose or reject the Step.
+4. It Sends one exact stepped file node when the work is ready for someone
+   else to fetch; earlier private Steps need not leave the machine.
+5. The handoff includes a portable locator. An LLM can consume the canonical
+   raw signed node directly, while the desktop verifies and renders the
+   nucleus plus any reachable history for a human.
+6. The author may later Attest a sent version to stand behind it.
 
-The desktop press is the reference interface for authoring and review. Its
+The desktop press is the human interpretation surface; the raw signed trace is
+the headless machine interface. Its
 native model operations also record each call's prompt, model configuration,
-and cited context. Two pieces come next on the [roadmap](ROADMAP.md): carrying
-that same call metadata on MCP-authored steps, and a no-install verification
-report a reviewer can open in a browser.
+and cited context. The current [roadmap](ROADMAP.md) builds next toward a
+multi-AI task and correspondence foundation. Carrying the same call metadata
+on MCP-authored Steps and a no-install verifier remain Phase 1 work, but they
+are no longer the only immediate priorities.
 
 ## Beyond one agent run
 
@@ -113,13 +121,16 @@ required for the first user to benefit.
 ## Where Zine is today
 
 The desktop press, the MCP press, the local relay, and the full gesture set —
-Step, Send, Attest, Mint, Cite, fork, and merge — work today, and the
-[evidence ledger](EVIDENCE.md) records exactly what is implemented, what has
-been measured, and what remains unproven. Hosted services, proof reports, and
-the network layer are sequenced behind evidence, not dates; the
+Step, Send, Attest, Mint, Cite, fork, and merge — plus raw-file Reify export
+work today.
+The [evidence ledger](EVIDENCE.md) records exactly what is implemented, what has
+been measured, and what remains unproven. Hosted services, a no-install public
+verifier, and the network layer are sequenced behind evidence, not dates; the
 [roadmap](ROADMAP.md) names the proof that unlocks each phase.
 
-What matters most right now is deliberately narrow: teams tracing real
+What matters most right now remains deliberately narrow: teams tracing real
 agent-written artifacts every week, and a proof record that answers a review
-or dispute question ordinary file history could not. If Zine cannot earn
-that, nothing later on the roadmap deserves to be built.
+or dispute question ordinary file history could not. The broader task and
+correspondence build now proceeds in parallel, but repeated real use and
+consequential review value remain the evidence that determines whether it
+should continue, narrow, or stop.
