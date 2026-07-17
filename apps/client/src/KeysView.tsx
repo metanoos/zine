@@ -24,6 +24,7 @@ import {
   KEYCHAIN_FONTS,
   keyNpub,
   keyNsec,
+  keySecretHex,
   loadKeys,
   patchKey,
   removeKey,
@@ -36,6 +37,8 @@ import {
 import { publishVoiceIdentity } from "./provenance.js";
 import { loadDoors } from "./doors-store.js";
 import { getVoicePrompt, setVoicePrompt } from "./voice-prompt-store.js";
+import { PubkeyDisplay } from "./PubkeyDisplay.js";
+import { canSignWithSecrets } from "./secret-store.js";
 
 /** Alpha for the card swatch bg — denser than the editor-run bg (0.13). */
 const CARD_BG_ALPHA = 0.22;
@@ -54,7 +57,7 @@ export function KeysView({
   const [keys, setKeys] = useState<KeyEntry[]>(() => loadKeys());
   const [doors, setDoors] = useState(() => loadDoors());
   // The most-recently-copied value per card, for transient "copied" feedback.
-  // Holds "npub" | "nsec"; clears on the next copy of either (or on timeout).
+  // Raw hex is primary; NIP-19 npub/nsec encodings remain secondary options.
   const [copied, setCopied] = useState<Record<string, string>>({});
   // Which cards have their Style section unfolded. One toggle per card so a
   // user can compare two voices' settings side by side.
@@ -65,6 +68,17 @@ export function KeysView({
   // The id of the key being dragged, or null. Held over the duration of a
   // drag-and-drop reorder so a card knows to dim itself while it's the source.
   const [dragId, setDragId] = useState<string | null>(null);
+  const [keyError, setKeyError] = useState<string | null>(null);
+
+  if (!canSignWithSecrets()) {
+    return (
+      <section className="view-placeholder keys-view">
+        <p className="view-placeholder-blurb">
+          This hosted press is read-only. Signing keys are available only in an unlocked desktop vault.
+        </p>
+      </section>
+    );
+  }
 
   /** The set of keyIds that are doors — passed to rolesForKey so it can badge
    *  keys without keys-store importing doors-store (which would be a cycle). */
@@ -97,6 +111,14 @@ export function KeysView({
     }
   }
 
+  async function handleSecretCopy(id: string, value: string, which: string) {
+    const confirmed = window.confirm(
+      "Copy this private key? Anyone with it can act as this voice.",
+    );
+    if (!confirmed) return;
+    await handleCopy(id, value, which);
+  }
+
   // Switching the AUTHOR/MODEL voice is done in the ActionPalette, not here — this view
   // only manages the keychain (create/restyle/copy/remove).
 
@@ -110,8 +132,7 @@ export function KeysView({
   // Merge a partial identity patch onto the key's current identity and persist.
   // Same commit-on-each-change flow as updateLabel — the live preview swatch
   // reflects the change immediately because it reads from k.identity. The
-  // schemaVersion gate in keys-store ensures manual identity edits survive
-  // reloads (loadKeys only re-derives from the pubkey for pre-schema keys).
+  // Current-schema profiles preserve manual identity edits across reloads.
   // Restyling a key also broadcasts its identity as a kind-34292 replaceable
   // event so foreign readers render the chosen colors instead of the hash.
   // Fire-and-forget: the local swatch is already live; the relay publish is
@@ -141,10 +162,15 @@ export function KeysView({
     });
   }
 
-  function handleAdd() {
-    const next = addKey();
-    setKeys(next);
-    onKeysChange(next);
+  async function handleAdd() {
+    setKeyError(null);
+    try {
+      const next = await addKey();
+      setKeys(next);
+      onKeysChange(next);
+    } catch (error) {
+      setKeyError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   function handleRemove(id: string) {
@@ -174,6 +200,7 @@ export function KeysView({
           const { fg, bg } = identityColors(k.identity, CARD_BG_ALPHA);
           const npub = keyNpub(k);
           const nsec = keyNsec(k);
+          const privateHex = keySecretHex(k);
           const roles = rolesForKey(k.id, doorKeyIds);
           const activeRoles = ALL_ROLES.filter((role) =>
             role === "NODE" ? roles.node
@@ -259,31 +286,40 @@ export function KeysView({
                   )}
                 </div>
                 <div className="key-value-row">
-                  <span className="key-value-label">npub</span>
-                  <code className="key-value-text" title={npub}>
-                    {npub.slice(0, 16)}…{npub.slice(-8)}
-                  </code>
+                  <span className="key-value-label">pubkey</span>
+                  <PubkeyDisplay pubkey={k.pubkey} className="key-pubkey-display" />
                   <button
                     type="button"
-                    className="icon-btn key-copy-btn"
+                    className="key-format-copy-btn"
                     title="Copy npub"
+                    aria-label="Copy npub"
                     onClick={() => void handleCopy(k.id, npub, "npub")}
                   >
-                    {copied[k.id] === "npub" ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
+                    {copied[k.id] === "npub" ? <Check size={12} aria-hidden="true" /> : "npub"}
                   </button>
                 </div>
                 <div className="key-value-row">
-                  <span className="key-value-label">nsec</span>
-                  <code className="key-value-text" title={nsec}>
+                  <span className="key-value-label">private</span>
+                  <code className="key-value-text">
                     {"•".repeat(24)}
                   </code>
                   <button
                     type="button"
                     className="icon-btn key-copy-btn"
-                    title="Copy nsec"
-                    onClick={() => void handleCopy(k.id, nsec, "nsec")}
+                    title="Copy private key (hex)"
+                    aria-label="Copy private key (hex)"
+                    onClick={() => void handleSecretCopy(k.id, privateHex, "private")}
                   >
-                    {copied[k.id] === "nsec" ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
+                    {copied[k.id] === "private" ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
+                  </button>
+                  <button
+                    type="button"
+                    className="key-format-copy-btn"
+                    title="Copy nsec"
+                    aria-label="Copy nsec"
+                    onClick={() => void handleSecretCopy(k.id, nsec, "nsec")}
+                  >
+                    {copied[k.id] === "nsec" ? <Check size={12} aria-hidden="true" /> : "nsec"}
                   </button>
                 </div>
                 {isOpen && (
@@ -358,6 +394,7 @@ export function KeysView({
         <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
         <span>Add voice</span>
       </button>
+      {keyError && <p className="sampler-status error" role="alert">{keyError}</p>}
     </section>
   );
 }

@@ -19,18 +19,18 @@
  * Storage shape mirrors relay-config.ts: a JSON array in localStorage, each
  * entry stable by id so add/remove survive edits. The onion address is cached
  * on the entry so the UI renders without re-deriving on every paint; it's a
- * pure function of the key's secretHex, so it never drifts.
+ * pure function of the referenced key secret, so it never drifts.
  */
 
-import { loadKeys } from "./keys-store.js";
-import { onionAddressForKey } from "./onion-key.js";
+import { loadKeys, secretKeyForVoice } from "./keys-store.js";
+import { onionAddressForSecret } from "./onion-key.js";
 
 export interface DoorEntry {
   /** Stable id (so removals survive edits). */
   id: string;
   /** The keychain key whose secret derives this door's onion. */
   keyId: string;
-  /** Cached derived `.onion` address (pure function of keyId's secretHex). */
+  /** Cached derived `.onion` address (pure function of keyId's secret). */
   address: string;
   /** When the door was added — for ordering and debugging. */
   createdAt: number;
@@ -38,17 +38,16 @@ export interface DoorEntry {
 
 const STORAGE_KEY = "zine.doors";
 
-/** Resolve the keychain secretHex for a keyId, or null if the key was deleted. */
-function secretHexFor(keyId: string): string | null {
-  return loadKeys().find((k) => k.id === keyId)?.secretHex ?? null;
+/** Resolve key bytes for a keyId, or null if it was deleted or locked. */
+function secretFor(keyId: string): Uint8Array | null {
+  const key = loadKeys().find((entry) => entry.id === keyId);
+  return key ? secretKeyForVoice(key.pubkey) : null;
 }
 
 /**
  * Read the persisted doors list. Entries whose keychain key was deleted are
  * pruned (a dangling door has no secret to derive from — and Tor can't register
  * it), and the address is re-derived so it never drifts from the stored secret.
- * This is the relay-config.ts normalize() pattern: a stored list never needs a
- * manual migration step.
  */
 export function loadDoors(): DoorEntry[] {
   let raw: DoorEntry[] = [];
@@ -62,12 +61,13 @@ export function loadDoors(): DoorEntry[] {
   const keys = loadKeys();
   let changed = false;
   const live = raw.flatMap((d) => {
-    const secret = keys.find((k) => k.id === d.keyId)?.secretHex;
+    const key = keys.find((entry) => entry.id === d.keyId);
+    const secret = key ? secretKeyForVoice(key.pubkey) : null;
     if (!secret) {
       changed = true;
       return []; // key deleted — prune the door
     }
-    const address = onionAddressForKey(secret).address;
+    const address = onionAddressForSecret(secret).address;
     if (address !== d.address) {
       changed = true;
       return [{ ...d, address }];
@@ -90,13 +90,13 @@ export function saveDoors(doors: DoorEntry[]): void {
  */
 export function addDoor(keyId: string): DoorEntry[] {
   const doors = loadDoors();
-  const secret = secretHexFor(keyId);
+  const secret = secretFor(keyId);
   if (!secret) return doors; // key vanished — nothing to add
   if (doors.some((d) => d.keyId === keyId)) return doors; // dedupe
   const entry: DoorEntry = {
     id: `d-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     keyId,
-    address: onionAddressForKey(secret).address,
+    address: onionAddressForSecret(secret).address,
     createdAt: Date.now(),
   };
   const next = [...doors, entry];

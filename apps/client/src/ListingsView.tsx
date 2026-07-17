@@ -35,7 +35,8 @@ import {
   type FolderIndexEntry,
   type StackDef,
 } from "./provenance.js";
-import { loadOrCreateVoice } from "./identity.js";
+import { authorVoice } from "./keys-store.js";
+import { canSignWithSecrets } from "./secret-store.js";
 import { isStaff, relayOperatorPubkeys } from "./operator-store.js";
 import {
   DEFAULT_SOCIAL_QUERY,
@@ -92,8 +93,11 @@ function shortId(id: string): string {
  *  already includes the hosted relay's operator + curation team via operator-
  *  store). Used to scope stack-def and stack-assignment fetches to the team. */
 function teamPubkeySet(): Set<string> {
+  const localVoice = canSignWithSecrets()
+    ? authorVoice()
+    : null;
   return new Set(
-    [loadOrCreateVoice().publicKey, ...relayOperatorPubkeys()].filter(
+    [localVoice, ...relayOperatorPubkeys()].filter(
       (k): k is string => typeof k === "string",
     ),
   );

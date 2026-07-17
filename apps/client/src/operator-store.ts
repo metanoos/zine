@@ -18,6 +18,7 @@
 import { getToken } from "nostr-tools/nip98";
 import { finalizeEvent } from "nostr-tools/pure";
 import { isTauri, loadOrCreateVoice } from "./identity.js";
+import { canSignWithSecrets } from "./secret-store.js";
 
 /** The operator/team/ban snapshot served by GET /operator/state. `operator` is
  *  "" when no operator is bound. */
@@ -60,6 +61,7 @@ export function relayOperatorPubkeys(): string[] {
 
 /** True if the current browser voice is the relay's operator. */
 export function isOperator(): boolean {
+  if (isTauri() || !canSignWithSecrets()) return false;
   const st = getOperatorState();
   if (!st.operator) return false;
   return st.operator === loadOrCreateVoice().publicKey;
@@ -68,6 +70,7 @@ export function isOperator(): boolean {
 /** True if the current browser voice is the operator OR on the curation team.
  *  Gates the operator nav entry and the moderation affordances. */
 export function isStaff(): boolean {
+  if (isTauri() || !canSignWithSecrets()) return false;
   const me = loadOrCreateVoice().publicKey;
   const st = getOperatorState();
   if (st.operator === me) return true;

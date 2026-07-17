@@ -5,8 +5,8 @@ import {
   collectVoiceAttributions,
   loadVoiceNicknames,
   saveVoiceNickname,
-  shortVoiceKey,
   shouldShowVoiceLegend,
+  voiceKeyForCopy,
   voiceNpub,
 } from "./voice-attribution-ui.js";
 
@@ -24,9 +24,10 @@ const SECOND_FOREIGN = "c".repeat(64);
 const localKey: KeyEntry = {
   id: "local",
   label: "Alice",
-  secretHex: "1".repeat(64),
+  secretRef: "nostr:key:local",
   pubkey: LOCAL,
   identity: { font: "serif", hue: 120, sat: 45 },
+  schemaVersion: 1,
   createdAt: 1,
 };
 
@@ -76,13 +77,12 @@ test("legend shows every non-empty attributed document, including one personal v
   assert.equal(shouldShowVoiceLegend(mixed), true);
 });
 
-test("voice keys render as shortened npubs with both ends retained", () => {
+test("voice key copies default to raw pubkeys with npub remaining secondary", () => {
   const npub = voiceNpub(FOREIGN);
-  const short = shortVoiceKey(FOREIGN);
   assert.match(npub, /^npub1/);
-  assert.equal(short.startsWith(npub.slice(0, 13)), true);
-  assert.equal(short.endsWith(npub.slice(-6)), true);
-  assert.equal(voiceNpub("legacy-voice"), "legacy-voice");
+  assert.equal(voiceKeyForCopy(FOREIGN), FOREIGN);
+  assert.equal(voiceKeyForCopy(FOREIGN, "npub"), npub);
+  assert.equal(voiceNpub("invalid-voice"), "invalid-voice");
 });
 
 test("foreign nicknames persist locally and an empty label clears them", () => {

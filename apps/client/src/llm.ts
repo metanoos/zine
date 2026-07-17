@@ -22,7 +22,9 @@
  * a custom provider — that's the point of the generic shape.
  */
 
-import type { ProviderConfig } from "./models-store.js";
+import { providerCredential, type ProviderConfig } from "./models-store.js";
+import { providerProfileFingerprint } from "./provider-fingerprint.js";
+import type { PreparedOperation } from "./prepared-operation.js";
 import { isTauri } from "./identity.js";
 import {
   anthropicModelOptions,
@@ -76,6 +78,40 @@ export async function complete(
     : callOpenAI(cfg, configuredMessages, opts);
 }
 
+/** Execute already-approved bytes. This boundary resolves the credential and
+ * selects a protocol, but it never gathers context or rebuilds messages. */
+export async function completePrepared(
+  prepared: PreparedOperation,
+  cfg: ProviderConfig,
+  opts: CompleteOptions = {},
+): Promise<string> {
+  if (
+    cfg.id !== prepared.providerId ||
+    providerProfileFingerprint(cfg) !== prepared.providerFingerprint
+  ) {
+    throw new Error("Provider configuration changed after prompt approval");
+  }
+  const messages = prepared.messages.map((message) => ({ ...message }));
+  return cfg.protocol === "anthropic"
+    ? callAnthropic(cfg, messages, opts)
+    : callOpenAI(cfg, messages, opts);
+}
+
+/** Fixed workspace-free connectivity probe used by Models onboarding. */
+export async function probeProvider(
+  cfg: ProviderConfig,
+  signal?: AbortSignal,
+): Promise<string> {
+  const messages: ChatMessage[] = [{
+    role: "user",
+    content: "Connection probe. Reply with exactly: ok",
+  }];
+  const opts: CompleteOptions = { maxTokens: 8, signal };
+  return cfg.protocol === "anthropic"
+    ? callAnthropic(cfg, messages, opts)
+    : callOpenAI(cfg, messages, opts);
+}
+
 // --- OpenAI Chat Completions -------------------------------------------
 
 async function callOpenAI(
@@ -86,7 +122,8 @@ async function callOpenAI(
   const url = joinPath(cfg.baseUrl, "chat/completions");
   const stream = !!opts.onDelta;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (cfg.apiKey) headers["Authorization"] = `Bearer ${cfg.apiKey}`;
+  const apiKey = providerCredential(cfg);
+  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
 
   const body = JSON.stringify({
     model: cfg.modelId,
@@ -124,7 +161,8 @@ async function callAnthropic(
     "Content-Type": "application/json",
     "anthropic-version": "2023-06-01",
   };
-  if (cfg.apiKey) headers["x-api-key"] = cfg.apiKey;
+  const apiKey = providerCredential(cfg);
+  if (apiKey) headers["x-api-key"] = apiKey;
 
   const body = JSON.stringify({
     model: cfg.modelId,
@@ -149,8 +187,7 @@ async function callAnthropic(
  *  Rust `llm_fetch` command (native HTTP — the webview's `fetch` can't reliably
  *  reach cross-origin LLM providers: responses arrive with a doubled
  *  `Access-Control-Allow-Origin` that browsers reject). In a plain browser,
- *  fall back to direct `fetch` + `consumeSSE` — same codepath the desktop shell
- *  used before the proxy existed.
+ *  use direct `fetch` + `consumeSSE`.
  *
  *  Browser dev caveat: z.ai's gateway double-stamps `Access-Control-Allow-
  *  Origin`, which no direct fetch survives. `devProxyUrl()` rewrites z.ai URLs
@@ -336,7 +373,9 @@ function joinPath(base: string, path: string): string {
  *  unreliable), so this only intercepts z.ai URLs. */
 function devProxyUrl(url: string): string {
   if (isTauri()) return url;
-  if (!import.meta.env.DEV) return url;
+  // Vite injects `import.meta.env` in the browser build; direct Node test
+  // execution leaves it undefined.
+  if (!import.meta.env?.DEV) return url;
   if (!url.startsWith("https://api.z.ai/")) return url;
   const path = url.slice("https://api.z.ai".length); // keep leading slash
   return `/llm/zai${path}`;

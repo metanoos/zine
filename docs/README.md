@@ -9,7 +9,7 @@ repository and the app's About view.
 | [Product](PRODUCT.md) | Who needs Zine, what problem it solves, and where adoption starts |
 | [Protocol](PROTOCOL.md) | How traces, gestures, attribution, transport, and vetting work |
 | [Evidence](EVIDENCE.md) | What is implemented, measured, asserted, and still unknown |
-| [Roadmap](ROADMAP.md) | What comes next and which evidence unlocks each phase |
+| [Roadmap](ROADMAP.md) | What is being built now, and which evidence gates each later phase |
 | [Company](COMPANY.md) | How an open sovereign protocol can support an optional paid layer |
 
 ## Authority

@@ -1,5 +1,6 @@
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import type { Event } from "nostr-tools";
+import { canSignWithSecrets } from "./secret-store.js";
 
 /**
  * Browser-side signing identity for the desktop client.
@@ -15,7 +16,7 @@ import type { Event } from "nostr-tools";
  * That separation is the accepted two-worlds cost of the first wire-up.
  */
 
-const STORAGE_KEY = "zine.voice.secretHex";
+const STORAGE_KEY = "zine.headless.voice.secretHex";
 
 export interface Voice {
   secretKey: Uint8Array;
@@ -26,6 +27,9 @@ let cached: Voice | null = null;
 
 /** Returns the browser voice, generating+persisting one on first use. */
 export function loadOrCreateVoice(): Voice {
+  if (!canSignWithSecrets() || isTauri()) {
+    throw new Error("Signing identity is unavailable until the desktop vault is unlocked");
+  }
   if (cached) return cached;
   const existing = localStorage.getItem(STORAGE_KEY);
   if (existing) {
@@ -66,7 +70,7 @@ export const LOCAL_RELAY_URL = "ws://127.0.0.1:4869";
  * the "where do I connect first" answer.
  */
 export function resolveRelayUrl(): string {
-  // Node (zine-mcp headless press): the `--relay` arg is exported here as
+  // Node (zine-mcp headless press): the `--home-relay` arg is exported here as
   // ZINE_RELAY_URL by apps/mcp before any shared module loads. Checked first
   // so the headless press pins its home relay without `import.meta.env`
   // (Vite-only) or `window`/`location` (browser-only). Unset in the browser

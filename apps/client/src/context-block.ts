@@ -222,21 +222,20 @@ export function renderContextBlock(input: ContextBlockInput): string {
  *  selection, panelIndex) but defined locally so this renderer stays
  *  self-contained, like `DeltaLogEntry` above. The caller adapts from
  *  `FocusEntry[]`; the shapes are structurally identical so TS accepts the
- *  assignment directly. `selection` is a union of file / folder / span, same
+ *  assignment directly. `selection` is a union of file / folder / coin, same
  *  three reifications as `FocusSelection` — kept loose as a structural type
  *  here rather than importing the discriminated union. */
 export interface LimelightEntry {
   /** ms-epoch, the node's content-level timestamp (chain order). */
   steppedAt: number;
-  /** "mount" when present, "unmount" when the panel emptied, undefined for
-   *  older focus deltas written before `op` existed (treat as mount). */
-  op?: "mount" | "unmount";
-  /** The trace that was in the panel: file/folder carry a path; a span carries
+  /** "mount" when present, "unmount" when the panel emptied. */
+  op: "mount" | "unmount";
+  /** The trace that was in the panel: file/folder carry a path; a coin carries
    *  a phrase + originPath + nodeId. */
   selection:
     | { kind: "file"; path: string; nodeId?: string }
     | { kind: "folder"; path: string; nodeId?: string }
-    | { kind: "span"; nodeId: string; phrase: string; originPath: string };
+    | { kind: "coin"; nodeId: string; phrase: string; originPath: string };
   /** 0-based panel column the trace occupied. */
   panelIndex: number;
 }
@@ -266,12 +265,11 @@ export function renderLimelightLog(
     const ts = formatTimestamp(e.steppedAt);
     const interval =
       prevSteppedAt === null ? "     " : formatInterval(e.steppedAt - prevSteppedAt).padStart(5);
-    // op defaults to "mount" for older entries with no op field.
-    const action = (e.op ?? "mount").padEnd(7);
+    const action = e.op.padEnd(7);
     const panel = `panel ${e.panelIndex}`.padEnd(8);
     const target =
-      e.selection.kind === "span"
-        ? `${e.selection.originPath} (span)`
+      e.selection.kind === "coin"
+        ? `${e.selection.originPath} (coin)`
         : e.selection.path;
     lines.push(`[#${seq}] ${action} ${ts}${interval}   ${panel}   ${target}`);
     prevSteppedAt = e.steppedAt;

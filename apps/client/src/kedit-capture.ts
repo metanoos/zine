@@ -40,16 +40,13 @@ export function captureKEditTransaction(
   return edits;
 }
 
-/** Group consecutive KEdits that share a valid transaction id. Legacy entries
- *  without `tx` stay as single-edit transactions so old nodes replay exactly
- *  as they did before transaction grouping existed. */
+/** Group consecutive KEdits that share a transaction id. */
 export function groupKEditsByTransaction(kedits: readonly KEdit[]): KEdit[][] {
   const groups: KEdit[][] = [];
   for (const edit of kedits) {
-    const tx = Number.isSafeInteger(edit.tx) && (edit.tx ?? -1) >= 0 ? edit.tx : undefined;
     const previous = groups[groups.length - 1];
     const previousTx = previous?.[0]?.tx;
-    if (tx !== undefined && previous && previousTx === tx) {
+    if (previous && previousTx === edit.tx) {
       previous.push(edit);
     } else {
       groups.push([edit]);

@@ -539,7 +539,7 @@ and tested. The global Kademlia wire is not implemented. Current modules:
 - `vet-walker.ts` — extracts `CheckpointMeta` from trace events (wire → vet data)
 Current writers emit only lowercase `q` trace citations. The former
 `role:"content"`/uppercase-`Q` writer and command-palette action are retired;
-`eventMeta` retains a legacy read arm only so old events remain inspectable.
+readers ignore uppercase `Q` tags.
 
 - **Doors-on-`H` (the ambitious endpoint).** `H` → HKDF → an onion address,
   reusing the `doors` primitive (`doors-store.ts`, `transport.md` §3 — doors

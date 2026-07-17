@@ -1,24 +1,23 @@
 /**
- * About renders the five reader-facing documents from `docs/`. Repository
- * readers and app users therefore see the same product, protocol, evidence,
- * roadmap, and company narrative. The normative wire specs remain separate.
+ * About is an app-owned React reading surface. Its copy intentionally mirrors
+ * the five reader-facing repository documents, but its elements and navigation
+ * are rendered directly by React rather than injected as an HTML string.
  */
 
 import {
+  Fragment,
+  createElement,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
-import { marked, Renderer } from "marked";
-import companyMarkdown from "../../../docs/COMPANY.md?raw";
-import evidenceMarkdown from "../../../docs/EVIDENCE.md?raw";
-import productMarkdown from "../../../docs/PRODUCT.md?raw";
-import protocolMarkdown from "../../../docs/PROTOCOL.md?raw";
-import roadmapMarkdown from "../../../docs/ROADMAP.md?raw";
+import { marked, type Token, type Tokens } from "marked";
+import aboutCopy from "./about-copy.md?raw";
 import {
   aboutDocumentTarget,
+  aboutFolio,
   aboutHashTarget,
   aboutRepositoryHref,
   aboutTargetHash,
@@ -26,7 +25,20 @@ import {
   type AboutDocument,
   type AboutDocumentDefinition,
   type AboutDocumentId,
+  type AboutDocumentTarget,
 } from "./about-documents.js";
+import { isTauri } from "./identity.js";
+
+function appOwnedMarkdown(documentId: AboutDocumentId): string {
+  const startMarker = `<!-- zine-about-copy:${documentId}:start -->\n`;
+  const endMarker = `<!-- zine-about-copy:${documentId}:end -->`;
+  const start = aboutCopy.indexOf(startMarker);
+  const end = aboutCopy.indexOf(endMarker, start + startMarker.length);
+  if (start < 0 || end < 0) {
+    throw new Error(`App-owned About copy is missing ${documentId}.`);
+  }
+  return aboutCopy.slice(start + startMarker.length, end);
+}
 
 const DEFINITIONS: AboutDocumentDefinition[] = [
   {
@@ -34,47 +46,39 @@ const DEFINITIONS: AboutDocumentDefinition[] = [
     label: "Product",
     description: "Who needs Zine and where adoption starts.",
     repositoryPath: "docs/PRODUCT.md",
-    markdown: productMarkdown,
+    markdown: appOwnedMarkdown("product"),
   },
   {
     id: "protocol",
     label: "Protocol",
     description: "How traces, gestures, transport, and vetting work.",
     repositoryPath: "docs/PROTOCOL.md",
-    markdown: protocolMarkdown,
+    markdown: appOwnedMarkdown("protocol"),
   },
   {
     id: "evidence",
     label: "Evidence",
     description: "What is implemented, measured, and still unknown.",
     repositoryPath: "docs/EVIDENCE.md",
-    markdown: evidenceMarkdown,
+    markdown: appOwnedMarkdown("evidence"),
   },
   {
     id: "roadmap",
     label: "Roadmap",
     description: "Which evidence unlocks each product phase.",
     repositoryPath: "docs/ROADMAP.md",
-    markdown: roadmapMarkdown,
+    markdown: appOwnedMarkdown("roadmap"),
   },
   {
     id: "company",
     label: "Company",
     description: "How the open protocol supports an optional paid layer.",
     repositoryPath: "docs/COMPANY.md",
-    markdown: companyMarkdown,
+    markdown: appOwnedMarkdown("company"),
   },
 ];
 
 const DOCUMENTS = parseAboutDocuments(DEFINITIONS);
-
-function escapeAttribute(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
 
 function aboutSectionElementId(documentId: AboutDocumentId, sectionId: string): string {
   return aboutTargetHash({ documentId, sectionId }).slice(1);
@@ -84,24 +88,205 @@ function currentAboutTarget() {
   return typeof window === "undefined" ? null : aboutHashTarget(window.location.hash);
 }
 
-function renderAboutMarkdown(document: AboutDocument, markdown: string): string {
-  const renderer = new Renderer();
-  renderer.link = function renderLink({ href, tokens }) {
-    const label = this.parser.parseInline(tokens);
-    const target = aboutDocumentTarget(href, document.id);
-    if (target) {
-      const section = target.sectionId
-        ? ` data-about-section="${escapeAttribute(target.sectionId)}"`
-        : "";
-      const targetHash = aboutTargetHash(target);
-      return `<a href="${escapeAttribute(targetHash)}" data-about-document="${target.documentId}"${section}>${label}</a>`;
-    }
+async function openExternalAboutLink(href: string): Promise<void> {
+  if (isTauri()) {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(href);
+    return;
+  }
+  window.open(href, "_blank", "noopener,noreferrer");
+}
 
-    const resolved = aboutRepositoryHref(document.repositoryPath, href);
-    if (resolved === "#") return label;
-    return `<a href="${escapeAttribute(resolved)}" target="_blank" rel="noreferrer">${label}</a>`;
-  };
-  return marked.parse(markdown, { async: false, renderer }) as string;
+interface MarkdownRenderContext {
+  document: AboutDocument;
+  navigate: (target: AboutDocumentTarget) => void;
+  openExternal: (href: string) => void;
+}
+
+function renderInlineTokens(
+  tokens: Token[],
+  context: MarkdownRenderContext,
+  keyPrefix: string,
+): ReactNode[] {
+  return tokens.map((token, index) => {
+    const key = `${keyPrefix}-${index}`;
+    switch (token.type) {
+      case "text": {
+        const text = token as Tokens.Text;
+        return text.tokens?.length
+          ? <Fragment key={key}>{renderInlineTokens(text.tokens, context, key)}</Fragment>
+          : <Fragment key={key}>{text.text}</Fragment>;
+      }
+      case "escape":
+        return <Fragment key={key}>{(token as Tokens.Escape).text}</Fragment>;
+      case "strong": {
+        const strong = token as Tokens.Strong;
+        return <strong key={key}>{renderInlineTokens(strong.tokens, context, key)}</strong>;
+      }
+      case "em": {
+        const emphasis = token as Tokens.Em;
+        return <em key={key}>{renderInlineTokens(emphasis.tokens, context, key)}</em>;
+      }
+      case "del": {
+        const deleted = token as Tokens.Del;
+        return <del key={key}>{renderInlineTokens(deleted.tokens, context, key)}</del>;
+      }
+      case "codespan":
+        return <code key={key}>{(token as Tokens.Codespan).text}</code>;
+      case "br":
+        return <br key={key} />;
+      case "link": {
+        const link = token as Tokens.Link;
+        const label = renderInlineTokens(link.tokens, context, `${key}-label`);
+        const target = aboutDocumentTarget(link.href, context.document.id);
+        if (target) {
+          return (
+            <button
+              key={key}
+              type="button"
+              className="about-prose-link"
+              title={link.title ?? undefined}
+              onClick={() => context.navigate(target)}
+            >
+              {label}
+            </button>
+          );
+        }
+        const href = aboutRepositoryHref(context.document.repositoryPath, link.href);
+        if (href === "#") return <Fragment key={key}>{label}</Fragment>;
+        return (
+          <button
+            key={key}
+            type="button"
+            className="about-prose-link"
+            title={link.title ?? href}
+            onClick={() => context.openExternal(href)}
+          >
+            {label}
+          </button>
+        );
+      }
+      case "image": {
+        const image = token as Tokens.Image;
+        const href = aboutRepositoryHref(context.document.repositoryPath, image.href);
+        return <img key={key} src={href} alt={image.text} title={image.title ?? undefined} />;
+      }
+      default:
+        return <Fragment key={key}>{token.raw}</Fragment>;
+    }
+  });
+}
+
+function renderBlockTokens(
+  tokens: Token[],
+  context: MarkdownRenderContext,
+  keyPrefix: string,
+): ReactNode[] {
+  return tokens.map((token, index) => {
+    const key = `${keyPrefix}-${index}`;
+    switch (token.type) {
+      case "space":
+      case "def":
+        return null;
+      case "paragraph": {
+        const paragraph = token as Tokens.Paragraph;
+        return <p key={key}>{renderInlineTokens(paragraph.tokens, context, key)}</p>;
+      }
+      case "text": {
+        const text = token as Tokens.Text;
+        return (
+          <Fragment key={key}>
+            {text.tokens?.length ? renderInlineTokens(text.tokens, context, key) : text.text}
+          </Fragment>
+        );
+      }
+      case "code": {
+        const code = token as Tokens.Code;
+        return (
+          <pre key={key}>
+            <code className={code.lang ? `language-${code.lang}` : undefined}>{code.text}</code>
+          </pre>
+        );
+      }
+      case "blockquote": {
+        const quote = token as Tokens.Blockquote;
+        return <blockquote key={key}>{renderBlockTokens(quote.tokens, context, key)}</blockquote>;
+      }
+      case "list": {
+        const list = token as Tokens.List;
+        const items = list.items.map((item, itemIndex) => (
+          <li key={`${key}-item-${itemIndex}`}>
+            {renderBlockTokens(item.tokens, context, `${key}-item-${itemIndex}`)}
+          </li>
+        ));
+        return list.ordered
+          ? <ol key={key} start={typeof list.start === "number" ? list.start : undefined}>{items}</ol>
+          : <ul key={key}>{items}</ul>;
+      }
+      case "table": {
+        const table = token as Tokens.Table;
+        return (
+          <table key={key}>
+            <thead>
+              <tr>
+                {table.header.map((cell, cellIndex) => (
+                  <th key={`${key}-head-${cellIndex}`} style={{ textAlign: cell.align ?? undefined }}>
+                    {renderInlineTokens(cell.tokens, context, `${key}-head-${cellIndex}`)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {table.rows.map((row, rowIndex) => (
+                <tr key={`${key}-row-${rowIndex}`}>
+                  {row.map((cell, cellIndex) => (
+                    <td key={`${key}-row-${rowIndex}-${cellIndex}`} style={{ textAlign: cell.align ?? undefined }}>
+                      {renderInlineTokens(cell.tokens, context, `${key}-row-${rowIndex}-${cellIndex}`)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        );
+      }
+      case "heading": {
+        const heading = token as Tokens.Heading;
+        const level = Math.min(6, Math.max(3, heading.depth));
+        return createElement(
+          `h${level}`,
+          { key },
+          renderInlineTokens(heading.tokens, context, key),
+        );
+      }
+      case "hr":
+        return <hr key={key} />;
+      default:
+        return <Fragment key={key}>{token.raw}</Fragment>;
+    }
+  });
+}
+
+function AboutMarkdown({
+  document,
+  markdown,
+  onNavigate,
+}: {
+  document: AboutDocument;
+  markdown: string;
+  onNavigate: (target: AboutDocumentTarget) => void;
+}) {
+  const tokens = useMemo(() => marked.lexer(markdown), [markdown]);
+  const context = useMemo<MarkdownRenderContext>(() => ({
+    document,
+    navigate: onNavigate,
+    openExternal: (href) => {
+      void openExternalAboutLink(href).catch((error) => {
+        console.error(`Could not open About link ${href}`, error);
+      });
+    },
+  }), [document, onNavigate]);
+  return <>{renderBlockTokens(tokens, context, document.id)}</>;
 }
 
 export function AboutView() {
@@ -110,15 +295,10 @@ export function AboutView() {
     initialTargetRef.current?.documentId ?? "product",
   );
   const document = DOCUMENTS.find(({ id }) => id === activeDocumentId) ?? DOCUMENTS[0];
+  const documentIndex = Math.max(0, DOCUMENTS.findIndex(({ id }) => id === document.id));
+  const documentFolio = aboutFolio(documentIndex);
   const detailRef = useRef<HTMLDivElement>(null);
   const pendingSectionIdRef = useRef<string | undefined>(initialTargetRef.current?.sectionId);
-  const renderedSections = useMemo(
-    () => document.sections.map((section) => ({
-      ...section,
-      html: renderAboutMarkdown(document, section.markdown),
-    })),
-    [document],
-  );
 
   useEffect(() => {
     const requestedSectionId = pendingSectionIdRef.current;
@@ -197,29 +377,22 @@ export function AboutView() {
     selectDocument(documentId, sectionId);
   }
 
-  function followDocumentLink(event: ReactMouseEvent<HTMLDivElement>) {
-    const origin = event.target;
-    if (!(origin instanceof Element)) return;
-    const link = origin.closest<HTMLAnchorElement>("a[data-about-document]");
-    if (!link) return;
-    const documentId = link.dataset.aboutDocument as AboutDocumentId | undefined;
-    if (!documentId) return;
-    event.preventDefault();
-    navigateToDocument(documentId, link.dataset.aboutSection);
+  function navigateToTarget(target: AboutDocumentTarget) {
+    navigateToDocument(target.documentId, target.sectionId);
   }
 
   return (
     <section className="view-placeholder about-view">
       <aside className="about-categories">
         <p className="about-intro">
-          Five source documents. The same words here and in the repository.
+          Five source documents, rebuilt as an app-owned reading surface.
         </p>
         <nav
           className="about-category-list"
           aria-label="About documents"
           role="tablist"
         >
-          {DOCUMENTS.map((candidate) => (
+          {DOCUMENTS.map((candidate, candidateIndex) => (
             <button
               key={candidate.id}
               id={`about-document-${candidate.id}`}
@@ -230,14 +403,17 @@ export function AboutView() {
               className={`about-category${document.id === candidate.id ? " active" : ""}`}
               onClick={() => navigateToDocument(candidate.id)}
             >
-              <span className="about-category-label">{candidate.label}</span>
+              <span className="about-category-label">
+                <span className="about-category-number">{aboutFolio(candidateIndex)}</span>
+                <span>{candidate.label}</span>
+              </span>
               <span className="about-category-description">{candidate.description}</span>
             </button>
           ))}
         </nav>
       </aside>
 
-      <div className="about-detail" ref={detailRef} onClick={followDocumentLink}>
+      <div className="about-detail" ref={detailRef}>
         <article
           id={aboutTargetHash({ documentId: document.id }).slice(1)}
           className="about-detail-inner about-telling"
@@ -245,36 +421,46 @@ export function AboutView() {
           aria-labelledby={`about-document-${document.id}`}
         >
           <header className="about-document-header">
-            <h1 className="about-title">{document.title}</h1>
+            <h1 className="about-title">
+              <span className="about-title-number">{documentFolio}</span>
+              <span>{document.title}</span>
+            </h1>
             <nav className="about-section-list" aria-label={`${document.title} section shortcuts`}>
-              {document.sections.map((candidate) => (
-                <a
+              {document.sections.map((candidate, sectionIndex) => (
+                <button
                   key={candidate.id}
+                  type="button"
                   className="about-section"
-                  href={aboutTargetHash({ documentId: document.id, sectionId: candidate.id })}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    navigateToDocument(document.id, candidate.id);
-                  }}
+                  onClick={() => navigateToDocument(document.id, candidate.id)}
                 >
-                  {candidate.title}
-                </a>
+                  <span className="about-section-number">
+                    {aboutFolio(documentIndex, sectionIndex)}
+                  </span>
+                  <span>{candidate.title}</span>
+                </button>
               ))}
             </nav>
           </header>
           <div className="about-document-sections">
-            {renderedSections.map((section) => (
+            {document.sections.map((section, sectionIndex) => (
               <section
                 key={section.id}
                 id={aboutSectionElementId(document.id, section.id)}
                 className="about-document-section"
               >
-                <h2 className="about-section-title">{section.title}</h2>
-                {/* Trusted, repository-owned Markdown bundled at build time. */}
-                <div
-                  className="about-prose"
-                  dangerouslySetInnerHTML={{ __html: section.html }}
-                />
+                <h2 className="about-section-title">
+                  <span className="about-section-title-number">
+                    {aboutFolio(documentIndex, sectionIndex)}
+                  </span>
+                  <span>{section.title}</span>
+                </h2>
+                <div className="about-prose">
+                  <AboutMarkdown
+                    document={document}
+                    markdown={section.markdown}
+                    onNavigate={navigateToTarget}
+                  />
+                </div>
               </section>
             ))}
           </div>

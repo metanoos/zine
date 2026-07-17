@@ -55,3 +55,12 @@ test("About document descriptors wrap instead of truncating", () => {
   assert.match(description, /overflow-wrap:\s*anywhere\s*;/);
   assert.doesNotMatch(description, /text-overflow:\s*ellipsis\s*;/);
 });
+
+test("About folio numbers stay visually separate from source titles", () => {
+  const pageNumber = rule(css, ".about-title-number");
+  const sectionNumber = rule(css, ".about-section-title-number");
+
+  assert.match(pageNumber, /font-family:\s*var\(--font-mono\)\s*;/);
+  assert.match(sectionNumber, /font-family:\s*var\(--font-mono\)\s*;/);
+  assert.match(sectionNumber, /font-size:\s*0\.62rem\s*;/);
+});

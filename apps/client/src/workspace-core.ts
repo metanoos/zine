@@ -77,8 +77,7 @@ export function keditLogToArray(log: KEditLog | undefined): KEdit[] {
 
 /** The next node-local editor transaction id. A Step resets an empty log to
  *  zero; a crash-pad restore or an in-flight Step suffix continues after the
- *  newest captured transaction. Legacy logs without ids safely begin at zero
- *  because their entries cannot collide with a numeric group. */
+ *  newest captured transaction. */
 export function nextKEditTx(log: KEditLog): number {
   const edits = log.tail?.edits;
   const last = edits && edits.length > 0 ? edits[edits.length - 1] : undefined;
@@ -302,7 +301,7 @@ export function changedRegion(
 }
 
 export interface FileState {
-  /** "file" or "folder". Absent on legacy entries — readers default "file".
+  /** "file" or "folder". Omitted by callers for the default file case.
    *  A folder-member (kind: "folder") is a subfolder trace cited by the parent
    *  folder's manifest: its nodeId is the subfolder's genesis, runs is empty
    *  (no body), tags is empty. The tree renders it as a folder; context-gather
@@ -314,8 +313,8 @@ export interface FileState {
   nodeId: string;
   /** Stable trace identity: the genesis kind-4290 event id. Unlike `nodeId`,
    * this never changes when the trace takes a Step or moves to another path.
-   * Optional for legacy/local records; readers derive and persist it when the
-   * chain is next resolved. */
+   * Optional before genesis is stepped; readers derive and persist it when the
+   * chain is resolved. */
   traceId?: string;
   /** User-authored `t` tags for this file (everything after the folder tag,
    *  which is derived from the path and never stored here). */
@@ -327,7 +326,10 @@ export interface FileState {
    *  `findResolvedBrackets` and folded into the same `q` set. So this is the
    *  *tagged-but-not-quoted* subset — read back from the head node on attach as
    *  (head's q-tags) minus (body's bracket node ids). Empty/absent for a leaf. */
-  taggedTraces?: string[];
+  citationIds?: string[];
+  /** Local activity time used only for directory presentation. It is copied
+   *  from local-store's reconciliation timestamp and never enters a trace. */
+  updatedAt?: number;
   /** Present only on files freshly sampled from a relay this session. Not
    *  persisted — a sampled file reloads as a plain clean document (the body
    *  on disk is clean text with no frontmatter). Drives the event-metadata
@@ -343,7 +345,7 @@ export interface FileState {
 export interface FileStepBaseline {
   content: string;
   tags: readonly string[];
-  taggedTraces: readonly string[];
+  citationIds: readonly string[];
 }
 
 /**
@@ -361,12 +363,12 @@ export function fileHasUnsteppedChanges(
   if (file.kind === "folder") return false;
   const content = flattenRuns(file.runs);
   const tags = file.tags;
-  const taggedTraces = file.taggedTraces ?? [];
+  const citationIds = file.citationIds ?? [];
   if (!baseline) {
     return (
       content.length > 0 ||
       tags.length > 0 ||
-      taggedTraces.length > 0 ||
+      citationIds.length > 0 ||
       (file.kedits?.length ?? 0) > 0
     );
   }
@@ -374,13 +376,13 @@ export function fileHasUnsteppedChanges(
     baseline.content !== content ||
     baseline.tags.length !== tags.length ||
     baseline.tags.some((tag, index) => tag !== tags[index]) ||
-    baseline.taggedTraces.length !== taggedTraces.length ||
-    baseline.taggedTraces.some((nodeId, index) => nodeId !== taggedTraces[index])
+    baseline.citationIds.length !== citationIds.length ||
+    baseline.citationIds.some((nodeId, index) => nodeId !== citationIds[index])
   );
 }
 
 /** A folder's effective trace-tags: the transitive union of every descendant
- *  file's `taggedTraces` (de-duplicated). Folders don't carry their own tag
+ *  file's `citationIds` (de-duplicated). Folders don't carry their own tag
  *  store — they inherit from their contents, so a folder's tags are exactly the
  *  traces anything inside it names. `ROOT` ("") collects over the whole tree.
  *  Returns node ids; callers resolve names via the same path used for file
@@ -394,7 +396,7 @@ export function folderTags(
   for (const [rel, state] of Object.entries(files)) {
     if (state.kind === "folder") continue;
     if (folderPath !== "" && !rel.startsWith(prefix)) continue;
-    for (const id of state.taggedTraces ?? []) out.add(id);
+    for (const id of state.citationIds ?? []) out.add(id);
   }
   return [...out];
 }
@@ -474,7 +476,7 @@ export interface Workspace {
    *  the LLM "reply" path) or that want a single-run reset. `replyingTo`
    *  is the stepped node id this write is a reply to (the Reply action's
    *  source) — emits a `reply-to` delta + paired `q` tag (spec §reply-to
-   *  delta type); omit for every ordinary write. `taggedTraces` are cited-trace
+   *  delta type); omit for every ordinary write. `citationIds` are cited-trace
    *  node ids tagged onto this file without a body bracket (the protocol's
    *  `tag-add`); each emits a `q` tag + `tag-add` delta, folded into the same
    *  dedup as body quotes and the reply source so a trace cited more than one
@@ -486,7 +488,7 @@ export interface Workspace {
     signer?: Uint8Array,
     runs?: Run[],
     replyingTo?: string,
-    taggedTraces?: string[],
+    citationIds?: string[],
     /** The keystroke log drained from the editor's `keditField` at step time.
      *  One `KEdit` per discrete editor change since the previous step. Landed
      *  on the node's `kedits` content field for full typo-level replayability. */
@@ -513,9 +515,9 @@ export interface Workspace {
   /** Create a new empty file. If it already exists, just open it. */
   createFile(relativePath: string): Promise<string>;
 
-  /** Create a directory (including parents). Folders have no provenance node
-   *  of their own — they're implicit in file paths. */
-  createFolder(relativePath: string): Promise<void>;
+  /** Create a directory and its empty folder-trace genesis. Returns that
+   *  stable genesis id so replay can begin at the folder's inception. */
+  createFolder(relativePath: string): Promise<string>;
 
   /** Delete a file or folder. For folders, every tracked descendant is
    *  tombstoned in the manifest. */

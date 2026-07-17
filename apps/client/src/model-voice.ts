@@ -31,7 +31,14 @@ import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { getPublicKey } from "nostr-tools/pure";
 
-import { loadKeys, saveKeys, identityFromPubkey, type KeyEntry } from "./keys-store.js";
+import {
+  keySecretRef,
+  loadKeys,
+  saveKeys,
+  identityFromPubkey,
+  type KeyEntry,
+} from "./keys-store.js";
+import { putSecret } from "./secret-store.js";
 
 /** Domain-separation salt, UTF-8 encoded (@noble v2 needs Uint8Array, not
  *  string, for salt/info). Versioned so a future scheme change produces a
@@ -61,12 +68,6 @@ function modelKeyId(modelId: string): string {
   return `model:${modelId}`;
 }
 
-function bytesToHex(bytes: Uint8Array): string {
-  let hex = "";
-  for (const b of bytes) hex += b.toString(16).padStart(2, "0");
-  return hex;
-}
-
 /**
  * Derive the model voice AND ensure it is present in the keychain, so it picks
  * up a stable visual identity (font + color) and so `secretKeyForVoice` can
@@ -89,10 +90,18 @@ export function ensureModelVoice(
   const id = modelKeyId(modelId);
   const keys = loadKeys();
   if (!keys.some((k) => k.id === id)) {
+    const secretRef = keySecretRef(id);
+    // `putSecret` fills the unlocked session cache synchronously before its
+    // durable Stronghold write, so the derived voice is immediately usable by
+    // the existing synchronous signing boundary. Bootstrap has already made
+    // this a desktop-only authoring path.
+    void putSecret(secretRef, secret).catch((error) => {
+      console.error(`[model-voice] could not persist ${secretRef}:`, error);
+    });
     const entry: KeyEntry = {
       id,
       label: label || modelId,
-      secretHex: bytesToHex(secret),
+      secretRef,
       pubkey,
       identity: identityFromPubkey(pubkey),
       // Match the current identity-derivation schema so loadKeys() doesn't

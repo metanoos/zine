@@ -20,7 +20,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { deriveOnionSeed, onionAddressFromSeed, deriveOnionAddress, onionAddressForKey } from "./onion-key.js";
+import { deriveOnionSeed, onionAddressFromSeed, onionAddressForSecret } from "./onion-key.js";
 
 const KAT_SECRET = new Uint8Array(32);
 for (let i = 0; i < 32; i++) KAT_SECRET[i] = i + 1;
@@ -67,14 +67,11 @@ test("address shape: 56 base32 chars + .onion suffix", () => {
 });
 
 /**
- * onionAddressForKey(hexSecret) is the parameterized derivation doors-store uses
- * to compute an address for any keychain key. It must agree with the pure
- * functions over the same secret — catches any drift in the hex→seed→address
- * wiring that the doors feature relies on.
+ * onionAddressForSecret computes an address for any keychain key. It must agree
+ * with the pure functions over the same secret and produce Tor's expanded key.
  */
-test("onionAddressForKey: hex secret → same address as pure derivation", () => {
-  const katHex = toHex(KAT_SECRET);
-  const got = onionAddressForKey(katHex);
+test("onionAddressForSecret: secret bytes → address and expanded key", () => {
+  const got = onionAddressForSecret(KAT_SECRET);
   const expectedSeed = deriveOnionSeed(KAT_SECRET);
   assert.equal(got.address, onionAddressFromSeed(expectedSeed));
   // The seedBase64 is what crosses IPC to Tor's control port — must be non-empty
@@ -82,18 +79,4 @@ test("onionAddressForKey: hex secret → same address as pure derivation", () =>
   assert.ok(got.seedBase64.length > 0);
   const decoded = Buffer.from(got.seedBase64, "base64");
   assert.equal(decoded.length, 64, "expanded key must be 64 bytes for Tor");
-});
-
-/**
- * deriveOnionAddress(secretHex) derives the owner key's onion from a passed-in
- * hex secret (the caller resolves the owner key from the keychain). It must
- * agree with the pure functions over the same secret — catches any drift in the
- * hex→seed→address wiring. The no-arg fallback path (legacy single voice) is
- * exercised separately.
- */
-test("deriveOnionAddress: passed secret matches pure derivation", () => {
-  const katHex = toHex(KAT_SECRET);
-  const got = deriveOnionAddress(katHex);
-  const expected = onionAddressFromSeed(deriveOnionSeed(KAT_SECRET));
-  assert.equal(got.address, expected, "passed-secret address must match pure derivation");
 });

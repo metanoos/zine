@@ -27,18 +27,23 @@ import type { FolderRef, Run } from "./workspace-core.js";
 const PREFIX = "zine.folder.";
 
 export interface LocalFile {
-  /** "file" or "folder". Absent on legacy/local entries — default "file". A
-   *  folder-member (kind: "folder") is a placeholder: content is "", nodeId is
+  /** "file" or "folder". A folder-member (kind: "folder") is a placeholder:
+   *  content is "", nodeId is
    *  the subfolder genesis, runs/tags empty. Stored so the tree renders the
    *  folder-member across reloads without re-fetching the manifest. */
-  kind?: "file" | "folder";
+  kind: "file" | "folder";
   content: string;
   tags: string[];
   /** The latest kind-4290 node id stepped for this file (relay chain head), or
    *  "" if not yet pushed. Used as prevEventId on the next relay push. */
   nodeId: string;
-  /** Stable file-trace identity (genesis event id). Optional on legacy local
-   * records and backfilled the next time their relay chain is resolved. */
+  /** One-shot bootstrap intent for a preloaded starter document. Its first
+   *  relay flush publishes and persists an empty genesis before appending the
+   *  preloaded body as Step 1. Kept until the body step lands so a crash between
+   *  those two publishes resumes from the empty genesis instead of forking. */
+  pendingEmptyGenesis?: boolean;
+  /** Stable file-trace identity (genesis event id). Optional until the file's
+   * genesis has been stepped or its relay chain has been resolved. */
   traceId?: string;
   /** Durable local movement journal. It is written before the relay-side half
    * of a move/to-Oblivion/restore gesture and cleared only after the new file
@@ -50,15 +55,15 @@ export interface LocalFile {
   };
   /** ms-precision local write time. The tiebreaker vs the relay. */
   updatedAt: number;
-  /** Live per-voice attribution (the editor's run list). Optional: absent on
-   *  legacy records and on relay-pulled content (the protocol carries no runs),
+  /** Live per-voice attribution (the editor's run list). Optional on
+   *  relay-pulled content (the protocol carries no local run objects),
    *  in which case the file loads as a single run under the active voice.
    *  Validated against `content` on load — stale attribution from an external
    *  edit falls back to a single run rather than mis-coloring. */
   runs?: Run[];
   /** The pubkey of the voice that authored the local edit, so the debounced
    *  relay push signs with the correct key (not just the active one). Absent
-   *  on legacy records and relay-pulled content → push uses the active voice.
+   *  on relay-pulled content → push uses the active voice.
    *  Stores a pubkey, never a secret; resolved to bytes via keys-store at push. */
   voicePubkey?: string;
   /** The stepped node id this write is a reply to (Reply action's source),
@@ -72,7 +77,7 @@ export interface LocalFile {
    *  `tags`, NOT one-shot like `pendingReplyingTo`: a tag stays across steps
    *  until untagged, so every push re-emits them. Read back from the relay head
    *  as (head q-tags) minus (body brackets) on attach. */
-  taggedTraces?: string[];
+  citationIds?: string[];
   /** When true, the next debounced relay push steps to the home relay only
    *  (the Step gesture, protocol §8) — doesn't fan out to external write
    *  relays. Like `pendingReplyingTo`, this is one-shot: consumed (and
@@ -103,7 +108,7 @@ export interface LocalFolder {
   files: Record<string, LocalFile>;
   /** Folder-level tags keyed by folder relative path. Folders are otherwise
    *  implicit in file paths; this is the one piece of folder metadata. Optional
-   *  — absent on legacy records → no folder tags until the user adds one. */
+   *  until the user adds folder tags. */
   folderTags?: Record<string, string[]>;
   /** Paths the user has shielded (excluded from context injection). Stored as an
    *  array because JSON has no Set; folder paths exclude their whole subtree. */
@@ -123,21 +128,9 @@ export function loadLocalFolder(folderId: string): LocalFolder | null {
     if (typeof parsed.id !== "string" || typeof parsed.files !== "object" || !parsed.files) {
       return null;
     }
-    const files = parsed.files as Record<string, LocalFile>;
-    // Migrate the short-lived pre-Oblivion movement-journal spelling. Keeping
-    // this at the storage boundary prevents the old synonym from leaking back
-    // into the application model while an interrupted gesture is resumed.
-    for (const file of Object.values(files)) {
-      const persisted = file as unknown as {
-        pendingMove?: { kind: string; fromPath: string };
-      };
-      if (persisted.pendingMove?.kind === "archive") {
-        file.pendingMove = {
-          kind: "to-oblivion",
-          fromPath: persisted.pendingMove.fromPath,
-        };
-      }
-    }
+    const unknownFiles = parsed.files as Record<string, unknown>;
+    if (!Object.values(unknownFiles).every(isLocalFile)) return null;
+    const files = unknownFiles as Record<string, LocalFile>;
     return {
       id: parsed.id,
       label: parsed.label,
@@ -148,6 +141,19 @@ export function loadLocalFolder(folderId: string): LocalFolder | null {
   } catch {
     return null;
   }
+}
+
+function isLocalFile(value: unknown): value is LocalFile {
+  if (!value || typeof value !== "object") return false;
+  const file = value as Partial<LocalFile>;
+  return (
+    (file.kind === "file" || file.kind === "folder") &&
+    typeof file.content === "string" &&
+    Array.isArray(file.tags) &&
+    file.tags.every((tag) => typeof tag === "string") &&
+    typeof file.nodeId === "string" &&
+    typeof file.updatedAt === "number"
+  );
 }
 
 /** Persist a whole folder (overwrites). */
@@ -177,15 +183,17 @@ export function saveLocalFile(
     runs?: Run[];
     voicePubkey?: string;
     pendingReplyingTo?: string;
-    taggedTraces?: string[];
+    citationIds?: string[];
     pendingLocalOnly?: boolean;
     pendingForce?: boolean;
     pendingKedits?: KEdit[];
+    pendingEmptyGenesis?: boolean;
   },
   label?: string,
 ): void {
   const existing = loadLocalFolder(folderId) ?? { id: folderId, label, files: {} };
   existing.files[relativePath] = {
+    kind: data.kind ?? existing.files[relativePath]?.kind ?? "file",
     content: data.content,
     tags: data.tags,
     nodeId: data.nodeId,
@@ -194,18 +202,19 @@ export function saveLocalFile(
       : {}),
     ...(data.pendingMove ? { pendingMove: data.pendingMove } : {}),
     updatedAt: Date.now(),
-    // Persist runs only when the caller has live attribution. Absent (rather
-    // than []) on relay pulls / legacy writes → loads as a single run.
+    // Persist runs only when the caller has live attribution. Relay pulls omit
+    // them and load as a single run.
     ...(data.runs && data.runs.length > 0 ? { runs: data.runs } : {}),
     ...(data.voicePubkey ? { voicePubkey: data.voicePubkey } : {}),
     ...(data.pendingReplyingTo ? { pendingReplyingTo: data.pendingReplyingTo } : {}),
-    ...(data.taggedTraces && data.taggedTraces.length > 0 ? { taggedTraces: data.taggedTraces } : {}),
+    ...(data.citationIds && data.citationIds.length > 0 ? { citationIds: data.citationIds } : {}),
     // One-shot flags consumed by the next pushToRelay. Persisted so they survive
     // the debounce gap (writeFile returns; pushToRelay fires later from the same
     // record). Cleared by pushToRelay after the step lands.
     ...(data.pendingLocalOnly ? { pendingLocalOnly: data.pendingLocalOnly } : {}),
     ...(data.pendingForce ? { pendingForce: data.pendingForce } : {}),
     ...(data.pendingKedits ? { pendingKedits: data.pendingKedits } : {}),
+    ...(data.pendingEmptyGenesis ? { pendingEmptyGenesis: true } : {}),
   };
   if (label !== undefined) existing.label = label;
   saveLocalFolder(existing);
@@ -308,21 +317,23 @@ export function mirrorPad(
     nodeId: string;
     runs?: Run[];
     voicePubkey?: string;
-    taggedTraces?: string[];
+    citationIds?: string[];
     kedits?: KEdit[];
   },
 ): void {
   try {
     const raw = localStorage.getItem(padKey(folderId));
-    const pad = raw ? (JSON.parse(raw) as Record<string, LocalFile>) : {};
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    const pad = currentLocalFiles(parsed) ?? {};
     pad[relativePath] = {
+      kind: "file",
       content: data.content,
       tags: data.tags,
       nodeId: data.nodeId,
       updatedAt: Date.now(),
       ...(data.runs && data.runs.length > 0 ? { runs: data.runs } : {}),
       ...(data.voicePubkey ? { voicePubkey: data.voicePubkey } : {}),
-      ...(data.taggedTraces && data.taggedTraces.length > 0 ? { taggedTraces: data.taggedTraces } : {}),
+      ...(data.citationIds && data.citationIds.length > 0 ? { citationIds: data.citationIds } : {}),
       ...(data.kedits && data.kedits.length > 0 ? { kedits: data.kedits } : {}),
     };
     localStorage.setItem(padKey(folderId), JSON.stringify(pad));
@@ -337,11 +348,18 @@ export function loadPad(folderId: string): Record<string, LocalFile> | null {
   try {
     const raw = localStorage.getItem(padKey(folderId));
     if (!raw) return null;
-    const pad = JSON.parse(raw) as Record<string, LocalFile>;
-    return pad;
+    return currentLocalFiles(JSON.parse(raw));
   } catch {
     return null;
   }
+}
+
+function currentLocalFiles(value: unknown): Record<string, LocalFile> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const files = value as Record<string, unknown>;
+  return Object.values(files).every(isLocalFile)
+    ? files as Record<string, LocalFile>
+    : null;
 }
 
 /** Remove one path from a folder's pad (called after a successful step).
@@ -350,7 +368,11 @@ export function clearPadPath(folderId: string, relativePath: string): void {
   try {
     const raw = localStorage.getItem(padKey(folderId));
     if (!raw) return;
-    const pad = JSON.parse(raw) as Record<string, LocalFile>;
+    const pad = currentLocalFiles(JSON.parse(raw));
+    if (!pad) {
+      localStorage.removeItem(padKey(folderId));
+      return;
+    }
     delete pad[relativePath];
     if (Object.keys(pad).length === 0) {
       localStorage.removeItem(padKey(folderId));

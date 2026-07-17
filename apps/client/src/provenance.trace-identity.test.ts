@@ -4,6 +4,7 @@ import type { Event } from "nostr-tools";
 
 import {
   nextReplaceableCreatedAt,
+  resolveTraceChainAtHead,
   resolveTraceChainCandidates,
   resolveTraceIdentity,
 } from "./provenance.js";
@@ -38,6 +39,20 @@ function loader(events: Event[]) {
 test("trace identity is the genesis reached through prev links", async () => {
   const events = [node("g"), node("a1", "g"), node("a2", "a1")];
   assert.equal(await resolveTraceIdentity("a2", loader(events)), "g");
+});
+
+test("an exact folder-member head resolves a renamed chain without coordinates", async () => {
+  const genesis = node("g");
+  genesis.tags.push(["F", "old-name.md"]);
+  const moved = node("a1", "g");
+  moved.tags.push(["F", "new-name.md"]);
+
+  const resolved = await resolveTraceChainAtHead("g", "a1", loader([genesis, moved]));
+  assert.equal(resolved.status, "resolved");
+  if (resolved.status === "resolved") {
+    assert.equal(resolved.source, "exact-head");
+    assert.deepEqual(resolved.chain.map((event) => event.id), ["g", "a1"]);
+  }
 });
 
 test("newer valid TraceHead candidate supersedes an ancestor candidate", async () => {

@@ -82,7 +82,9 @@ function composeSettleSystem(): string {
     "YOUR ROLE — Settle: the condenser. You take one passage of loose prose " +
     "and return a terse, dense version: cut filler, tighten phrasing, keep " +
     "every load-bearing idea. You do NOT add new content, arguments, or " +
-    "facts. You do NOT emit brackets of any kind (Settle never creates " +
+    "facts. Protected tokens shaped like `__ZINE_ANCHOR_N__` stand for " +
+    "immutable bracket spans: copy each token exactly once and in order. " +
+    "You do NOT emit any other brackets (Settle never creates " +
     "sediment — only the human does, by hand). The passage after the " +
     "context block, under no header, is the text to condense. Return ONLY " +
     "the condensed prose — no preamble, no commentary, no fences."
@@ -315,6 +317,10 @@ export function editMessages(path: string, content: string, instruction: string)
  *  every field is used by every op; pass what you have. Fields the chosen op
  *  doesn't need are ignored. */
 export interface OpInputs {
+  /** Captured replacement/insertion range. It does not enter the prompt, but
+   *  it participates in PreparedOperation dependencies and atomic apply. */
+  rangeFrom?: number;
+  rangeTo?: number;
   /** Extend: selected passage or doc tail. */
   seed?: string;
   /** Extend: was there a live selection? */

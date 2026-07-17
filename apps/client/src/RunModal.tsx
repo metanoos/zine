@@ -18,7 +18,7 @@ import {
   nextAutomationRunAt,
   type AutomationRecipe,
   type AutomationRecipeDraft,
-  type AutomationScope,
+  type AutomationScopes,
 } from "./automation-store.js";
 import type { ProviderConfig } from "./models-store.js";
 
@@ -29,7 +29,7 @@ export interface RunModalProps {
   defaultProviderId: string | null;
   recipes: AutomationRecipe[];
   currentWorkspace: { id: string; label?: string } | null;
-  currentScopes: AutomationScope[];
+  currentScopes: AutomationScopes;
   /** Called with the goal + chosen provider when the user clicks Run now. */
   onStart: (goal: string, providerId: string, recipeId?: string) => void;
   onSaveRecipe: (input: AutomationRecipeDraft) => AutomationRecipe;
@@ -37,12 +37,8 @@ export interface RunModalProps {
   onClose: () => void;
 }
 
-function scopeSummary(scopes: readonly AutomationScope[]): string {
-  if (scopes.length === 0) return "no scope selected";
-  if (scopes.length <= 2) {
-    return scopes.map((scope) => scope.path || "root").join(" + ");
-  }
-  return `${scopes.length} mounted scopes`;
+function scopeSummary(scopes: AutomationScopes): string {
+  return scopes[0]?.path || (scopes.length > 0 ? "root" : "no scope mounted");
 }
 
 /** Modal overlay + dialog for composing an agent-run goal. Mirrors the
@@ -170,9 +166,7 @@ export function RunModal({
               {recipes.map((recipe) => (
                 <option key={recipe.id} value={recipe.id}>
                   {recipe.label}
-                  {!recipe.workspaceId
-                    ? " · needs binding"
-                    : currentWorkspace && recipe.workspaceId !== currentWorkspace.id
+                  {currentWorkspace && recipe.workspaceId !== currentWorkspace.id
                       ? ` · ${recipe.workspaceLabel || recipe.workspaceId.slice(0, 8)}`
                       : ""}
                 </option>
@@ -240,9 +234,7 @@ export function RunModal({
             ? "Open a workspace before saving a recipe."
             : !selectedRecipe
               ? `Will bind to ${currentWorkspace.label || currentWorkspace.id.slice(0, 8)} · ${scopeSummary(currentScopes)}`
-              : !selectedRecipe.workspaceId
-                ? "Legacy recipe · Update recipe to bind it to this workspace and scope."
-                : recipeBoundHere
+              : recipeBoundHere
                   ? `Bound to ${selectedRecipe.workspaceLabel || selectedRecipe.workspaceId.slice(0, 8)} · ${scopeSummary(selectedRecipe.scopes)}`
                   : `Bound to ${selectedRecipe.workspaceLabel || selectedRecipe.workspaceId.slice(0, 8)} · open that workspace to run, or Update recipe to rebind here.`}
         </p>

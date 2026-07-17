@@ -33,10 +33,12 @@ import type { Run } from "./workspace-core.js";
 import type { ToolTurn } from "./agent-llm.js";
 
 const ROOT_MODEL: ProviderConfig = {
-  id: "m1", label: "Root", protocol: "openai", baseUrl: "x", modelId: "root-model", apiKey: "k",
+  id: "m1", label: "Root", protocol: "openai", baseUrl: "x", modelId: "root-model",
+  credentialRef: "model:test:root", credentialConfigured: false,
 };
 const CHILD_MODEL: ProviderConfig = {
-  id: "m2", label: "Child", protocol: "openai", baseUrl: "x", modelId: "child-model", apiKey: "k",
+  id: "m2", label: "Child", protocol: "openai", baseUrl: "x", modelId: "child-model",
+  credentialRef: "model:test:child", credentialConfigured: false,
 };
 
 /** Build a fake ctx backed by an in-memory file map. */

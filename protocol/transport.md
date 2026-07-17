@@ -7,8 +7,8 @@ and reachability. `trace-provenance.md` owns the trace data model.
 
 The press has one local keychain and assigns keys to explicit roles. A fresh
 install SHOULD use distinct keys so rotating an author or model voice cannot
-silently change the relay's owner or network address. A migrated installation
-MAY assign one key to several roles to preserve continuity.
+silently change the relay's owner or network address. An installation MAY
+intentionally assign one key to several roles.
 
 | Role | Responsibility | Rotation posture |
 |---|---|---|

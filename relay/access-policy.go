@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -29,11 +28,6 @@ import (
 // Mode is chosen at startup and re-evaluated on file change (polled every 5s,
 // zero-dep — matching the relay's simplicity). The policy is a private local
 // security boundary, never published as a Nostr event (transport.md §2).
-//
-// Migration: the file was previously named friends.json with a "friends" JSON
-// key. On first read, if peers.json is absent but friends.json exists, the
-// file is atomically renamed (and its "friends" key rewritten to "peers").
-// See migrateLegacyFile.
 type AccessPolicy struct {
 	mu       sync.RWMutex
 	path     string
@@ -47,8 +41,8 @@ type AccessPolicy struct {
 // PeersFile is the on-disk shape, stored as a sibling to the relay DB
 // (~/.tracer/peers.json), mirroring the hosted binary's operator.json.
 type PeersFile struct {
-	Owner  string   `json:"owner"`
-	Peers  []string `json:"peers"`
+	Owner string   `json:"owner"`
+	Peers []string `json:"peers"`
 	// Writers may publish events they sign as themselves (read+write, but only
 	// their own pubkey's events). The canonical writer is a headless press
 	// (zine-mcp) — a key you authorize to publish traces on your relay while
@@ -70,56 +64,11 @@ func NewAccessPolicy(path string) *AccessPolicy {
 	return policy
 }
 
-// migrateLegacyFile performs a one-time rename of the pre-rename friends.json
-// to peers.json, rewriting its "friends" JSON key to "peers". Called from
-// reload() only when peers.json is missing but friends.json exists. Atomic
-// (temp + rename), matching writePeersFile's persistence pattern. Logs once;
-// idempotent — a second call finds peers.json and is a no-op at the caller.
-func migrateLegacyFile(peersPath string) {
-	legacy := filepath.Join(filepath.Dir(peersPath), "friends.json")
-	if _, err := os.Stat(legacy); err != nil {
-		return // no legacy file
-	}
-	raw, err := os.ReadFile(legacy)
-	if err != nil {
-		return // leave it; reload will treat peers.json as absent (local mode)
-	}
-	// Remap the JSON key. Parse generically so an unknown/extra field survives.
-	var generic map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &generic); err == nil {
-		if f, ok := generic["friends"]; ok {
-			generic["peers"] = f
-			delete(generic, "friends")
-		}
-		if remapped, err := json.MarshalIndent(generic, "", "    "); err == nil {
-			raw = remapped
-		}
-	}
-	tmp := peersPath + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return
-	}
-	if err := os.Rename(tmp, peersPath); err != nil {
-		_ = os.Remove(tmp)
-		return
-	}
-	// Remove the old file only after the new one has landed. (os.Rename wrote
-	// peersPath from tmp; legacy is still on disk here.)
-	_ = os.Remove(legacy)
-	log.Printf("migrated access-policy file: friends.json -> peers.json (renamed \"friends\" key to \"peers\")")
-}
-
 // reload reads the JSON file if it has changed (by mtime). Called once at
 // construction and then every poll interval. Missing/corrupt file = local
 // mode (hasOwner stays false). A file with an empty owner is also local mode
 // — the owner field is what activates networked mode.
 func (a *AccessPolicy) reload() {
-	// One-shot migration: if peers.json is absent but the legacy friends.json
-	// exists, rename it into place before stat-ing.
-	if _, err := os.Stat(a.path); os.IsNotExist(err) {
-		migrateLegacyFile(a.path)
-	}
-
 	info, err := os.Stat(a.path)
 	if err != nil {
 		// File doesn't exist — local mode. Don't clobber a previously-loaded

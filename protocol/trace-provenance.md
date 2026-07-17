@@ -13,9 +13,12 @@ A **trace** is the protocol's single primitive: a body on an append-only chain
 of signed checkpoints. Its body is either a **file** (text) or a **folder** (an
 ordered membership list).
 
-A **coin** is an immutable, single-node file trace struck from a span of another
-trace. File describes its wire shape, not an editable workspace file, so the
-discriminator remains `z: "file" | "folder"` with no third value.
+A **coin** is an immutable, single-node file trace. It is either **extracted**
+from an exact span of another trace or minted **directly** as signer-authored
+text with no source-trace claim. File describes its wire shape, not an editable
+workspace file, so the reification discriminator remains
+`z: "file" | "folder"` with no third value; the REQUIRED `content.coin`
+envelope (§3.2) distinguishes Coins from mutable file traces.
 
 A **press** is the authoring interface, not a server. A **relay** is the local
 or remote Nostr server to which a press writes traces. A **zine** is an attested
@@ -78,10 +81,10 @@ One stepped checkpoint of one trace. Every node is self-sufficient: it MUST carr
 |---|---|
 | `["z", "file" \| "folder"]` | Reification discriminator. REQUIRED on every node. |
 | `["f", folderGenesisId]` | The folder this trace resides in. REQUIRED on file nodes (coins included — they reside in the Press's dedicated Mint folder). On folder nodes it carries the folder's **own** genesis id and is REQUIRED on every node except genesis itself (an event cannot know its own id before signing). `#f=[id]` returns every node **directly** in a folder — the folder's own chain and its immediate members' nodes; `#z` splits them. A folder member's own members are NOT found transitively: reading a whole tree is bounded fan-out (one `#f` query per folder member, recursing by depth). |
-| `["F", relativePath]` | Structural name for named file **and folder member** traces: the member's name within its immediate parent folder. Single-segment (no `/`) — hierarchy is expressed via folder-members, not slash-joined paths. Coins receive an automatic structural name (§3.8). Absent only on a folder's own genesis and legacy nameless coins. |
+| `["F", relativePath]` | Structural name for named file **and folder member** traces: the member's name within its immediate parent folder. Single-segment (no `/`) — hierarchy is expressed via folder-members, not slash-joined paths. Coins receive an automatic structural name (§3.8). Absent only on a folder's own genesis. |
 | `["e", prevNodeId, relayHint, "prev"]` | Node this one supersedes. Absent only on genesis. |
 | `["e", parentNodeId, relayHint, "merge-parent"]` | Zero or more, merge nodes only — one per branch reconciled. |
-| `["e", originNodeId, relayHint, "extracted-from"]` | REQUIRED on coins — the exact node-version the text was pulled out of. Absent on whole-file genesis imports. |
+| `["e", originNodeId, relayHint, "extracted-from"]` | REQUIRED on **extracted** coins — mirrors `content.coin.origin.sourceNodeId` for relay-side fan-out queries. MUST be absent on direct coins, which make no source claim, and on whole-file genesis imports. |
 | `["e", sourceNodeId, relayHint, "forked-from"]` | REQUIRED on fork-genesis nodes (§3.8) — the exact node-version the trace was seeded from. |
 | `["x", bodyHashHex]` | Body hash (per §2). REQUIRED on coins and on folder nodes; OPTIONAL on named file nodes (open question). `#x` finds every trace with an identical body, whoever minted it. |
 | `["q", nucleusId, relayHint, ownerPubkey]` | Out-edges: the traces this node composes. NIP-18 quote-tag shape. The list is the full **current** set of active out-edges — cumulative, not incremental. On folder nodes, one per member; **`q`-tag order MUST equal `snapshot.members` order** — member ordering is stated once, in two places that MUST agree. |
@@ -96,6 +99,7 @@ One stepped checkpoint of one trace. Every node is self-sufficient: it MUST carr
   "snapshot": "…file text…",
   "deltas": [ … ],
   "contentHash": "…hex…",
+  "coin": { "version": 1, "origin": { "kind": "direct" } },
   "voices": [ "<signer pubkey>", "<other voice pubkey>", … ],
   "authors": [ { "v": "<pubkey>", "len": 42, "src": "<nodeId>" } ],
   "kedits": [ { "op": "ins | del | repl", "from": 42, "to": 42, "text": "…", "voice": "<pubkey>", "t": 1730000000000, "tx": 7, "intent": "undo | redo" } ],
@@ -106,6 +110,23 @@ One stepped checkpoint of one trace. Every node is self-sufficient: it MUST carr
   "contributors": [ { "type": "human | llm | agent", "pubkey": "…" } ]
 }
 ```
+
+`coin` is REQUIRED on Coins and MUST be absent on mutable file traces. Version
+1 has exactly two origin forms:
+
+```json
+{ "version": 1, "origin": { "kind": "direct" } }
+{ "version": 1, "origin": { "kind": "extracted", "sourceNodeId": "…", "sourceContentHash": "…hex…", "range": { "start": 10, "end": 24 } } }
+```
+
+For an extracted Coin, `sourceNodeId` pins the exact source nucleus,
+`sourceContentHash` is the SHA-256 hash of that nucleus's complete text
+snapshot, and `range` is the UTF-16 half-open interval whose bytes MUST equal
+the Coin's `snapshot`. The paired `extracted-from` tag MUST name the same node.
+A direct Coin has no source fields and MUST NOT carry an `extracted-from` edge:
+its claim is only that the event signer minted these exact bytes. Readers MUST
+use the envelope as the sole Coin discriminator; an `extracted-from` tag without
+the envelope does not make an event a Coin.
 
 For folder nodes, `snapshot` is instead:
 
@@ -118,7 +139,7 @@ For folder nodes, `snapshot` is instead:
 - `snapshot` — REQUIRED on every node this protocol's triggers produce. Full file text, or full ordered membership. Retention may shed `deltas` and `kedits`, never `snapshot` (§9).
 - `contentHash` — REQUIRED. Files: SHA-256 of the UTF-8 snapshot text. Folders: SHA-256 of the canonical folder body (§2) — the projection, not the raw snapshot, so resolution metadata (`latestNodeId`) never perturbs the hash. `contentHash` MUST NOT incorporate any name or path.
 - `authors` — OPTIONAL per-character attribution; see §3.6.
-- `voices` — OPTIONAL symbol table for per-delta attribution (§3.3, §3.6). An array of pubkeys; the node signer SHOULD be `voices[0]` so a delta that omits `author` (defaults to signer) and one that carries `"author": 0` resolve to the same key. A delta's `"author": <index>` resolves as `voices[index]`. Absent on mono-author nodes and on legacy nodes written before per-delta attribution; readers treat a delta with no `author` as signer-attributed regardless. The table is local to this node — every node that needs it carries its own — so a reader never resolves across events.
+- `voices` — OPTIONAL symbol table for per-delta attribution (§3.3, §3.6). An array of pubkeys; the node signer SHOULD be `voices[0]` so a delta that omits `author` (defaults to signer) and one that carries `"author": 0` resolve to the same key. A delta's `"author": <index>` resolves as `voices[index]`. It is absent on mono-author nodes. The table is local to this node — every node that needs it carries its own — so a reader never resolves across events.
 - `kedits` — OPTIONAL high-resolution editor-action log accumulated since the
   previous Step. It is advisory process evidence, not an integrity input:
   `snapshot` remains authoritative and readers MAY ignore this field. Each
@@ -129,8 +150,8 @@ For folder nodes, `snapshot` is instead:
   transaction time in Unix milliseconds. `tx` is a non-negative integer
   scoped to this node: consecutive entries with the same `tx` are ranges from
   one transaction and MUST be applied atomically against the same pre-state.
-  New writers MUST emit `tx`; readers MUST treat legacy entries without it as
-  independent single-range transactions. `intent` is OPTIONAL and may be only
+  Writers MUST emit `tx`; readers MUST discard KEdit entries without a valid
+  `tx`. `intent` is OPTIONAL and may be only
   `undo` or `redo`; when present, every entry in that transaction MUST carry
   the same value. Its absence means only "no recorded history intent," not
   "ordinary typing." Applying valid KEdit transactions to `prev.snapshot`
@@ -213,15 +234,15 @@ Observation type (folder nodes):
 { "type": "focus", "op": "mount | unmount", "selection": { … }, "panelIndex": 1, "timestamp": 1730000000000 }
 ```
 
-A `focus` delta records panel occupancy — session-replay data, not membership. `op: "mount"` means a trace entered an edit panel; `op: "unmount"` means the trace that was there left. It MUST NOT alter `snapshot` or `contentHash`. **Focus deltas never mint their own Steps**: they accumulate in a persisted local per-folder buffer and ride along on the next structural folder Step. Closing and reopening the press does not create a checkpoint or discard the observations. The `selection` payload names what was focused, mirroring the reifications:
+A `focus` delta records **foreground panel occupancy** — session-replay data, not membership. `op: "mount"` means a trace became the visible, active tab in an edit panel; `op: "unmount"` means it stopped being that panel's visible tab. These operations do not describe tab-strip membership: selecting another tab emits an unmount/mount transition even though both tabs may remain open. It MUST NOT alter `snapshot` or `contentHash`. **Focus deltas never mint their own Steps**: they accumulate in a persisted local per-folder buffer and ride along on the next structural folder Step. Closing and reopening the press does not create a checkpoint or discard the observations. The `selection` payload names what was focused, mirroring the reifications:
 
 ```json
 { "kind": "file",   "path": "essay.md", "nodeId": "…" }
 { "kind": "folder", "path": ".",        "nodeId": "…" }
-{ "kind": "span",   "nodeId": "…", "phrase": "the cited words", "originPath": "essay.md" }
+{ "kind": "coin",   "nodeId": "…", "phrase": "the cited words", "originPath": "essay.md" }
 ```
 
-`kind: "span"` is the legacy focus-observation discriminator for a selected coin. Writers retain it for wire compatibility; it does not introduce a fourth product category or weaken the coin's full-trace identity.
+Press-local selection and mounting remain separate from this observation. An Explorer selection chooses one or more traces for an action such as replay. Exactly one context mount may be active at a time; mounting another file or folder replaces it, and a mounted folder contributes its descendants. Neither gesture changes tab focus by itself and neither is serialized as a `focus` delta. Tab focus is singular per panel: bringing one tab to the front is the event recorded here. The field name `selection` inside the delta names that focused trace; it is not the press's multi-selection state.
 
 ### 3.4 Action (advisory)
 
@@ -231,7 +252,7 @@ A `focus` delta records panel occupancy — session-replay data, not membership.
 
 | Action | Meaning | Distinguishing tags |
 |---|---|---|
-| `import` | Genesis — first-observed content, or a coin just struck | no `prev`; `extracted-from` + `x` if a coin |
+| `import` | Genesis — first-observed content, or a coin just struck | no `prev`; `content.coin` + `x` if a coin; `extracted-from` only for extracted coins |
 | `fork` | Genesis seeded from another trace's node under a different owner | `forked-from`, no `prev` |
 | `edit` | Ordinary change | `prev` |
 | `external` | File changed outside the traced editor — disk drift detected at next app open or poll, or an external process / MCP tool wrote it. Signed by the external actor's voice (a per-machine reconciler key for bare drift, a per-actor key for MCP callers), never the authoring key. The authoring key only signs changes the editor's own transactions produced. `authors` is omitted, so reconstruction attributes the bytes to the external voice's pubkey (Tier-2 signer attribution, §3.6) — honestly low-trust: the signer claims only "the machine's state moved," not "the human typed this." Per-actor distinction is carried by the signer pubkey, not this tag. | `prev`; signed by the external voice |
@@ -276,7 +297,7 @@ replay check.
 
 ### 3.6 Attribution
 
-Attribution is carried at two layers, in priority order: per-delta (primary) and node-snapshot (legacy). A reader reconstructs authorship by reading each delta's `author` index, resolving it through the node's `voices` table (§3.2), and defaulting to the node signer (`event.pubkey`) when the index is absent or out of range. The result is a per-character attribution of `snapshot` recoverable in one forward pass over a single node's deltas — O(content), independent of chain depth — without an `authors` map, a sum-check, or a separate reconstruction tier.
+Attribution is carried at two layers, in priority order: per-delta (primary) and node-snapshot (secondary). A reader reconstructs authorship by reading each delta's `author` index, resolving it through the node's `voices` table (§3.2), and defaulting to the node signer (`event.pubkey`) when the index is absent or out of range. The result is a per-character attribution of `snapshot` recoverable in one forward pass over a single node's deltas — O(content), independent of chain depth — without an `authors` map, a sum-check, or a separate reconstruction tier.
 
 `authors` — OPTIONAL, now the secondary carrier. An ordered run list covering `snapshot`: run *k* attributes the slice beginning at the sum of all prior `len` values, for `len` UTF-16 code units, to pubkey `v`. The `len` values MUST sum to exactly the snapshot's length; on any mismatch a reader MUST treat `authors` as absent and fall back to per-delta + signer attribution. Runs carry no text — the body is stored once, in `snapshot`.
 
@@ -284,7 +305,7 @@ Attribution is carried at two layers, in priority order: per-delta (primary) and
 - `len` — run length in UTF-16 code units.
 - `src` — OPTIONAL: the event id of a node **signed by `v`** in which this run's text appears, making verification a single fetch.
 
-`authors` predates per-delta attribution and remains the only carrier on legacy nodes (written before per-delta `author` existed), on bare-snapshot resets (genesis/import from plain text, deletes), and as a redundant cross-check when both are present. A node MAY carry both; when they disagree, per-delta is authoritative for the deltas it covers and `authors` is treated as stale. The field is retained, not deprecated — `src` verification (below) operates on `authors` runs, which carry corroborating-node pointers that per-delta `author` does not.
+`authors` is the carrier on bare-snapshot resets (genesis/import from plain text, deletes) and a redundant cross-check when both layers are present. A node MAY carry both; when they disagree, per-delta is authoritative for the deltas it covers and `authors` is treated as stale. `src` verification (below) operates on `authors` runs, which carry corroborating-node pointers that per-delta `author` does not.
 
 **Per-delta is the right layer for in-session co-authorship; `authors` is the right layer for verified cross-authorship.** The two solve different problems. Per-delta `author` records who produced each span during a step — the human–AI loop, multiple in-process voices, any case where text enters the buffer without crossing a chain seam. It is O(1) per delta, independent per delta (one corrupted delta doesn't poison the rest), and needs no reconstruction. `authors` runs carry `src`, the corroborating-node pointer, so a run attributed to pubkey P can be **verified** when its text is derivable from a node signed by P reachable via the seam edges: `merge-parent`, `extracted-from`, `forked-from`, or `q`. That verification is meaningless for in-session co-authorship (the AI's text enters via a function call, not a seam edge — §R5), which is exactly why per-delta attribution is the primary path and `authors`' verification machinery is reserved for the case it actually serves.
 
@@ -311,15 +332,23 @@ Given `prompt` + the rule manifest + the cited nuclei, a reader whose binary imp
 
 Everything outside brackets is fluid by default. A bare bracket is rewrite protection only: it shields a span from silent drift across LLM rounds without minting anything. A selection deletion that fully contains brackets removes the loose text but spares each complete bracket; Cut and paste/type-over operate on the complete selection. Clicking bracketed text selects the whole occurrence, and Backspace twice unwraps it to ordinary text (dropping any resolved citation suffix without deleting the visible phrase). A bare bracket is NEVER auto-resolved by coincidental text match — resolution is always an explicit act.
 
-**Coining pass** (client- or CLI-triggered), for each unresolved bracket:
+**Extracted coining pass** (client- or CLI-triggered), for each unresolved bracket:
 
 1. Read the current span text.
-2. Step a new file-reified `TraceNode`, `action: import`, `snapshot` = that text, no `prev`, as a direct member of the Press's dedicated **Mint folder**. This one genesis Step strikes the coin; a coin never gains a later `prev` node. The Mint folder is an independent folder trace mounted beside Root by the press; it is not a member of Root and therefore cannot leak its inventory when Root is Sent. Mint folder genesis and membership Steps remain local until explicitly Sent. The coin has a single-segment `F` name. The reference naming policy is `<YYYY-MM-DD_HHmmss>-<smart-title>.md` in the Press's local time, at second precision, with a numeric collision suffix when necessary. Tags `extracted-from` (the exact origin node-version) and `x` (body hash) are both REQUIRED.
+2. Step a new file-reified `TraceNode`, `action: import`, `snapshot` = that text, no `prev`, as a direct member of the Press's dedicated **Mint folder**. This one genesis Step strikes the coin; a coin never gains a later `prev` node. The Mint folder is an independent folder trace mounted beside Root by the press; it is not a member of Root and therefore cannot leak its inventory when Root is Sent. Mint folder genesis and membership Steps remain local until explicitly Sent. The coin has a single-segment `F` name. The reference naming policy is `<YYYY-MM-DD_HHmmss>-<smart-title>.md` in the Press's local time, at second precision, with a numeric collision suffix when necessary. `content.coin.origin` MUST be `kind: "extracted"` and carry the exact source node, full source-snapshot hash, and UTF-16 span range. Tags `extracted-from` (mirroring the source node) and `x` (Coin body hash) are both REQUIRED.
 3. Rewrite the bracket in place to `[[ text | newNodeId ]]`. That edit is an ordinary `cite` delta (`role: "inline"`, `sourceEventId: newNodeId`) on the origin document's next step, mirrored as a top-level `q` tag.
 
-Coining captures what's there *now* as a fresh trace; it does not reconstruct a pre-mint history for the text. Once struck, the coin's identity and sole nucleus are stable — later rounds cite the same trace. Coining is a local Step, not a Send: the coin becomes a social signal only if its own node is Sent or a Sent container carries a `q` citation to it. Sending a container does not recursively publish the cited coin or the private Mint folder. A coin MAY be reified as a plain text file, but that is an exported materialization, not another Step or a conversion of the coin into a mutable file trace. A cosmetic alias MAY still be attached via `TraceOpinion` (§5); it does not replace the structural `F` name.
+**Direct coining.** A press MAY expose a Mint composer that strikes signer-
+authored text without first creating a mutable source trace. It follows the
+same one-node, `action: import`, named Mint-member, local-Step, and `x` rules,
+but its `content.coin.origin` is `{ "kind": "direct" }` and it MUST NOT emit
+`extracted-from`. The composer MAY retain its pre-mint `kedits` as advisory
+process evidence applied from the empty string; those KEdits do not create a
+`prev` history and the final snapshot remains authoritative.
 
-**Provenance-aware copy.** Copying unbracketed text between two files in one press is a shorthand coining gesture. If the source buffer differs from its latest Step, the press first Steps that exact source snapshot locally; it then strikes a coin whose `extracted-from` names that source nucleus. The clipboard MUST retain an ordinary plain-text representation for interoperability and MAY carry a press-private coin reference. Pasting that reference into another traced file installs `[[ text | coinId ]]`; the target's next Step carries both the cumulative `q` edge and a gesture-local `cite role: "inline"` delta. The source document is not rewritten to cite the coin merely because its text was copied. If the private reference is missing, stale, unverifiable, or stripped by another application, paste degrades to ordinary text and MUST NOT assert source provenance. Materialization happens at Copy, not Paste: waiting until Paste could pin a different source state if the source changed between gestures.
+Coining captures what's there *now* as a fresh trace; it does not reconstruct a pre-mint chain for the text. Once struck, the coin's identity and sole nucleus are stable — later rounds cite the same trace. Coining is a local Step, not a Send: the coin becomes a social signal only if its own node is Sent or a Sent container carries a `q` citation to it. Sending a container does not recursively publish the cited coin or the private Mint folder. A coin MAY be reified as a plain text file, but that is an exported materialization, not another Step or a conversion of the coin into a mutable file trace. A cosmetic alias MAY still be attached via `TraceOpinion` (§5); it does not replace the structural `F` name.
+
+**Provenance-aware copy.** Copying unbracketed text between two files in one press is a shorthand extracted-coining gesture. If the source buffer differs from its latest Step, the press first Steps that exact source snapshot locally; it then strikes an extracted coin whose envelope records the nucleus, full snapshot hash, and exact range, with `extracted-from` mirroring that nucleus. The clipboard MUST retain an ordinary plain-text representation for interoperability and MAY carry a press-private coin reference. Pasting that reference into another traced file installs `[[ text | coinId ]]`; the target's next Step carries both the cumulative `q` edge and a gesture-local `cite role: "inline"` delta. The source document is not rewritten to cite the coin merely because its text was copied. If the private reference is missing, stale, unverifiable, or stripped by another application, paste degrades to ordinary text and MUST NOT assert source provenance. Materialization happens at Copy, not Paste: waiting until Paste could pin a different source state if the source changed between gestures.
 
 **Resilience across edits.** A resolved bracket survives an edit iff its old-content position range overlaps no span in the diff the step already computes — an interval-overlap test, no fetch. Splits survive (both halves keep citing the same id), textual merges survive (two adjacent citations), and any overlapping edit destroys the bracket: the `| eventId` suffix drops, the text reverts to fluid, the cited trace itself is untouched. This is local continuity only — whether a citation was honest is §3.9's separate, reader-triggered check.
 
@@ -487,16 +516,10 @@ A Step appends one signed trace node to its chain. Steps are triggered by:
 
 ## 9. Reconstruction and retention
 
-Every node has `snapshot` — reading any version's body is O(1), no replay. `deltas` remain useful for per-span provenance, edit-rhythm analytics, and as a fallback if an old node shed its snapshot under a non-conforming producer:
-
-```
-node = target
-while node.snapshot is undefined: node = node.prev
-content = node.snapshot
-for n in chain(node.next … target): content = applyDeltas(content, n.deltas)
-```
-
-In the common case the loop never runs.
+Every node has `snapshot` — reading any version's body is O(1), no replay. A
+TraceNode without a valid snapshot is non-conforming and MUST NOT be
+reconstructed from deltas. `deltas` remain useful for per-span provenance and
+edit-rhythm analytics.
 
 **Retention is one-directional:** an old node MAY shed `deltas` and `kedits`, never `snapshot`. Downstream integrity is unaffected — later nodes check their own deltas against *this* node's snapshot, never the reverse. Policy (keep full logs for recent nodes, compress older ones) is operator/client territory, not protocol.
 
@@ -717,9 +740,9 @@ the newer scheme.
 
 27. **High-resolution KEdit logs adopted as optional Step metadata; undo/redo intent made explicit.** The earlier telemetry boundary correctly rejected a signed event per keystroke, but stated the privacy consequence too broadly: it also ruled out batching editor actions inside a checkpoint the author deliberately chose. `kedits` now carry that optional, retention-sheddable process evidence on one Step without changing event cadence (§3.2, §8). This is a real disclosure trade: Send publishes intermediate states and timing along with the node, including work later undone; `snapshot` remains authoritative and operators may shed the log. The timing half of the trade is biometric, not just informational — see §3.2's keystroke-dynamics warning.
 
-  History actions need semantic identity as well as their concrete inverse mutations. Without `intent`, Cmd/Ctrl+Z is indistinguishable from manually deleting the same range, and redo is indistinguishable from retyping it. Writers therefore preserve the editor's direct `undo`/`redo` transaction annotation. A node-local `tx` groups every range in one editor transaction because multi-cursor and grouped history changes share one pre-state coordinate space; replay applies the group atomically. Legacy KEdits without `tx` or `intent` remain valid and degrade to independent, unlabeled edits. This supersedes only the blanket rejection of batched keystroke metadata in §R5/§R11.21; per-keystroke events remain rejected.
+  History actions need semantic identity as well as their concrete inverse mutations. Without `intent`, Cmd/Ctrl+Z is indistinguishable from manually deleting the same range, and redo is indistinguishable from retyping it. Writers therefore preserve the editor's direct `undo`/`redo` transaction annotation. A node-local `tx` groups every range in one editor transaction because multi-cursor and grouped history changes share one pre-state coordinate space; replay applies the group atomically. KEdits without `tx` are invalid and discarded. This supersedes only the blanket rejection of batched keystroke metadata in §R5/§R11.21; per-keystroke events remain rejected.
 
-26. **Citations unified on trace-targeting `q`; orphan-text `Q` retired.** A citation now always targets a first-class trace node with lowercase `q`. `[[text]]` by itself is draft syntax and emits no social signal. Mint creates a trace for the selected text and records its `x` content hash plus `extracted-from` origin; explicit inline quotation and tacit/bodyless tagging are two manifestations of the same `q` edge, not two citation types. Send controls reachability of the carrying trace and therefore of its citations. The prior uppercase-`Q`/`role: "content"` design in §R11.22(b) is superseded and MUST NOT be emitted. Legacy readers MAY parse old `Q` tags, but they do not participate in current co-citation. The planned DHT may derive a content-addressed rendezvous key from the cited target's verified `x` hash; that key is an index coordinate, not a second citation primitive. See `rendezvous.md` §1–§2.
+26. **Citations unified on trace-targeting `q`; orphan-text `Q` retired.** A citation now always targets a first-class trace node with lowercase `q`. `[[text]]` by itself is draft syntax and emits no social signal. Mint creates a trace for the selected text and records its `x` content hash plus `extracted-from` origin; explicit inline quotation and tacit/bodyless tagging are two manifestations of the same `q` edge, not two citation types. Send controls reachability of the carrying trace and therefore of its citations. The prior uppercase-`Q`/`role: "content"` design in §R11.22(b) is superseded; writers MUST NOT emit it and readers MUST ignore it. The planned DHT may derive a content-addressed rendezvous key from the cited target's verified `x` hash; that key is an index coordinate, not a second citation primitive. See `rendezvous.md` §1–§2.
 
 25. **Attest separated from the revision chain as `TraceAttestation` (kind 4294).** The prior encoding made Attest an `action: "attest"` kind-4290 node. That reused an append-only class, but violated what that class means: a TraceNode MUST carry a real body, content hash, trace identity, and (for non-genesis nodes) an ownership-consistent `prev` edge. Attesting a folder or another author's node had no truthful snapshot or `prev`, while self-attestation created a no-content revision and accidentally moved the very head it was describing. The fix keeps the correct half of the old decision — attestations are regular and append-only because their history is the payload — while separating the wrong half: kind 4294 targets the exact sent node with an `e` edge and carries only endorsement metadata (§5A). It neither joins nor advances the target chain. This also lands the asynchronous cross-author endorsement deferred in §R5 without making merge bilateral.
 
@@ -749,13 +772,13 @@ the newer scheme.
 
   (c) **Rendezvous layer (companion doc; planned).** A Kademlia DHT is designed, not implemented, to answer "which Sent events cite a trace whose verified content coordinate is `H`?" It carries fetchable event pointers (`H → {eventId, relayUrl}`), never content or a private-ACL onion. A querier verifies the carrying event's `q` edge and the cited target's `x`/body hash before its signer enters the process-evidence admission filter. Mutual-peer exact-target co-citation is the trust-bounded v1; the future global path publishes pointers as a side effect of Send, with no separate "attest interest" gesture. See `rendezvous.md` Parts I/II.
 
-21. **Per-delta attribution adopted; per-delta signing stays rejected.** Body-edit deltas now carry an OPTIONAL `author` index naming the voice that produced that span's text (§3.3), resolved through a node-local `voices` table (§3.2); when absent or out of range, the delta defaults to the node signer (`event.pubkey`). This makes per-character attribution recoverable in one forward pass over a single node's deltas — O(content), independent of chain depth — without an `authors` map, a sum-check, or a reconstruction tier. Per-delta is the new primary attribution path; `authors` (§3.6) becomes the secondary carrier, retained for `src`-pointer verification of cross-author runs (merge/fork/quote seam edges) and for legacy nodes written before this field existed.
+21. **Per-delta attribution adopted; per-delta signing stays rejected.** Body-edit deltas now carry an OPTIONAL `author` index naming the voice that produced that span's text (§3.3), resolved through a node-local `voices` table (§3.2); when absent or out of range, the delta defaults to the node signer (`event.pubkey`). This makes per-character attribution recoverable in one forward pass over a single node's deltas — O(content), independent of chain depth — without an `authors` map, a sum-check, or a reconstruction tier. Per-delta is the primary attribution path; `authors` (§3.6) is the secondary carrier retained for `src`-pointer verification of cross-author runs (merge/fork/quote seam edges).
 
   **Why the reversal.** §R5's earlier draft rejected "attribution at delta granularity" but its objections were aimed at per-delta *events* (new signed events per delta): event volume and cadence destruction. Those objections hold and per-delta signing stays rejected. The broader rejection of a batched keystroke stream was later superseded by §R11.27's optional KEdit log. Per-delta `author` reintroduces none of the event-level costs — it is one field on an already-batched, already-stepped event. The earlier draft conflated the two and rejected the package; they are unbound.
 
   The clincher is the human–AI loop. `authors`' verification model (corroborate a run via a seam edge to a node the attributed author signed) has no purchase on in-session co-authorship: the AI's text enters the buffer through an in-process function call, not via incorporation from a foreign chain, so there is no seam to walk. For the case that is zine's center of gravity — human + AI co-authorship on one chain under keys the human controls — `authors`' machinery offers no advantage over plain per-delta `author`, and per-delta is cheaper, per-delta-independent (one bad delta doesn't poison the whole map, unlike the all-or-nothing `authors` sum-check), and needs no reconstruction. The verification model is retained for the case it actually serves (verifiable cross-authorship via merge); the common case gets the O(1) path.
 
-  **Compactness.** On mono-author steps (the common case — an LLM Extend steps all-inject deltas; human auto-save steps all-pen deltas), every delta is the signer's, so the `author` field is omitted and there is no `voices` table — the default-to-signer rule keeps the wire unchanged from the legacy form. Attribution overhead appears only on steps that mix voices within one checkpoint: one `voices` array per node (each full pubkey stored once) plus one digit per non-signer delta, instead of repeating a 64-char pubkey on every delta. The table is node-local — every node that needs one carries its own — so a reader never resolves across events. Considered and rejected: storing an 8-char (4-byte) pubkey prefix instead of an index, which would save more bytes but be ambiguous to a cold reader (which full key?) and lossy in principle; and storing the full inline pubkey per delta, which is self-sufficient but verbose. The index form is lossless, self-sufficient (the table rides in the same node), and pays for itself at the third non-signer delta. Backward compatible: old nodes without `author` or `voices` fall back to the signer, same as the legacy path.
+  **Compactness.** On mono-author steps (the common case — an LLM Extend steps all-inject deltas; human auto-save steps all-pen deltas), every delta is the signer's, so the `author` field is omitted and there is no `voices` table. Attribution overhead appears only on steps that mix voices within one checkpoint: one `voices` array per node (each full pubkey stored once) plus one digit per non-signer delta, instead of repeating a 64-char pubkey on every delta. The table is node-local — every node that needs one carries its own — so a reader never resolves across events. Considered and rejected: storing an 8-char (4-byte) pubkey prefix instead of an index, which would save more bytes but be ambiguous to a cold reader (which full key?) and lossy in principle; and storing the full inline pubkey per delta, which is self-sufficient but verbose. The index form is lossless, self-sufficient (the table rides in the same node), and pays for itself at the third non-signer delta.
 
 20. **NIP-03 anteriority anchor layered on Attest.** *Decision as made at entry 20; the load-bearing stamp has since moved to Step (§R11.22). Attest keeps an OPTIONAL own stamp; the text below records the original argument.* Attest is the one gesture that may reach for a trustless third-party anchor, via a NIP-03 kind-1040 event stamping the attest node's event id against Bitcoin (OpenTimestamps). Three questions, answered once:
 

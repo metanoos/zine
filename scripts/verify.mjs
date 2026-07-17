@@ -1,7 +1,8 @@
 // Canonical repository verification entry point.
 //
-// `npm run check` runs the four area test suites in parallel. `npm run verify`
-// adds the client production build and the isolated real-relay smoke test.
+// `npm run check` runs dev automation tests, the client typecheck, and the four
+// area test suites in parallel. `npm run verify` adds the client production
+// build and the isolated real-relay smoke test.
 // Keeping orchestration here makes the documented command cross-platform and
 // gives humans, Codex, and CI one definition of "green".
 
@@ -19,6 +20,8 @@ if (mode !== "check" && mode !== "verify") {
 }
 
 const checks = [
+  { label: "dev automation tests", command: process.execPath, args: ["--test", join(repoRoot, "scripts", "dependency-state.test.mjs")], cwd: repoRoot },
+  { label: "client typecheck", command: npm, args: ["run", "typecheck"], cwd: join(repoRoot, "apps", "client") },
   { label: "client tests", command: npm, args: ["test"], cwd: join(repoRoot, "apps", "client") },
   { label: "MCP tests/build/smoke", command: npm, args: ["test"], cwd: join(repoRoot, "apps", "mcp") },
   { label: "relay tests", command: "go", args: ["test", "./..."], cwd: join(repoRoot, "relay") },

@@ -3,7 +3,7 @@
  *
  * Recipes are a browser-local convenience: they are not protocol events and
  * never grant an agent any capability it does not already have. Each recipe is
- * bound to a permanent workspace id and explicit scope mounts. The scheduler
+ * bound to a permanent workspace id and one explicit scope mount. The scheduler
  * only re-enters App's existing draft-only `startAgentRun` path while Zine is
  * open. Run manifests live inside each run's sandbox folder as `run.json`, so
  * the goal, model, trigger, binding, and outcome survive the in-memory loop.
@@ -22,16 +22,18 @@ export interface AutomationScope {
   path: string;
 }
 
+export type AutomationScopes = [] | [AutomationScope];
+
 export interface AutomationRecipe {
   id: string;
   label: string;
   goal: string;
   providerId: string;
-  /** Permanent folder genesis id. Empty only on a legacy, not-yet-rebound recipe. */
+  /** Permanent folder genesis id. */
   workspaceId: string;
   workspaceLabel?: string;
-  /** Exact explicit mounts captured when the recipe was saved. */
-  scopes: AutomationScope[];
+  /** The exact explicit mount captured when the recipe was saved. */
+  scopes: AutomationScopes;
   /** null means manual-only; otherwise the interval between starts. */
   intervalMinutes: number | null;
   enabled: boolean;
@@ -52,7 +54,7 @@ export interface AutomationRecipeDraft {
 export interface AutomationRecipeInput extends AutomationRecipeDraft {
   workspaceId: string;
   workspaceLabel?: string;
-  scopes: AutomationScope[];
+  scopes: AutomationScopes;
 }
 
 export type AgentRunTrigger = "manual" | "schedule";
@@ -72,7 +74,7 @@ export interface AgentRunManifest {
     id: string;
     label?: string;
   };
-  scopes: AutomationScope[];
+  scopes: AutomationScopes;
   model: {
     providerId: string;
     label: string;
@@ -107,22 +109,16 @@ function interval(value: unknown): number | null | undefined {
     : undefined;
 }
 
-function normalizeScopes(value: unknown): AutomationScope[] {
-  if (!Array.isArray(value)) return [];
-  const scopes: AutomationScope[] = [];
-  const seen = new Set<string>();
-  for (const raw of value) {
-    if (!raw || typeof raw !== "object") continue;
-    const scope = raw as Record<string, unknown>;
-    const kind = scope.kind;
-    const path = scope.path;
-    if ((kind !== "file" && kind !== "folder") || typeof path !== "string") continue;
-    const key = `${kind}:${path}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    scopes.push({ kind, path });
-  }
-  return scopes;
+function normalizeScopes(value: unknown): AutomationScopes {
+  if (!Array.isArray(value) || value.length !== 1) return [];
+  const raw = value[0];
+  if (!raw || typeof raw !== "object") return [];
+  const scope = raw as Record<string, unknown>;
+  const kind = scope.kind;
+  const path = scope.path;
+  return (kind === "file" || kind === "folder") && typeof path === "string"
+    ? [{ kind, path }]
+    : [];
 }
 
 function normalizeRecipes(value: unknown, now: number): AutomationRecipe[] {
@@ -135,15 +131,21 @@ function normalizeRecipes(value: unknown, now: number): AutomationRecipe[] {
     const id = typeof item.id === "string" ? item.id.trim() : "";
     const goal = typeof item.goal === "string" ? item.goal.trim() : "";
     const providerId = typeof item.providerId === "string" ? item.providerId.trim() : "";
-    // Legacy v1 recipes had no workspace binding. Preserve them as unbound so
-    // the UI can rebind on Update, but never let the scheduler guess a folder.
     const workspaceId = typeof item.workspaceId === "string" ? item.workspaceId.trim() : "";
     const workspaceLabel = typeof item.workspaceLabel === "string" && item.workspaceLabel.trim()
       ? item.workspaceLabel.trim()
       : undefined;
     const scopes = normalizeScopes(item.scopes);
     const every = interval(item.intervalMinutes);
-    if (!id || seen.has(id) || !goal || !providerId || every === undefined) continue;
+    if (
+      !id ||
+      seen.has(id) ||
+      !goal ||
+      !providerId ||
+      !workspaceId ||
+      scopes.length !== 1 ||
+      every === undefined
+    ) continue;
     seen.add(id);
     const label = typeof item.label === "string" && item.label.trim()
       ? item.label.trim()
@@ -283,15 +285,14 @@ export function dueAutomationRecipes(
     .map((entry) => entry.recipe);
 }
 
-/** Only a recipe explicitly bound to this workspace may be considered. Legacy
- * unbound recipes remain visible for manual rebinding but never auto-run. */
+/** Only a recipe explicitly bound to this workspace may be considered. */
 export function dueAutomationRecipesForWorkspace(
   recipes: readonly AutomationRecipe[],
   workspaceId: string,
   now = Date.now(),
 ): AutomationRecipe[] {
   return dueAutomationRecipes(
-    recipes.filter((recipe) => recipe.workspaceId === workspaceId && recipe.scopes.length > 0),
+    recipes.filter((recipe) => recipe.workspaceId === workspaceId),
     now,
   );
 }

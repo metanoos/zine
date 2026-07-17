@@ -120,8 +120,11 @@ try {
   const ownerSecret = generateSecretKey();
   const ownerSecretHex = Buffer.from(ownerSecret).toString("hex");
   const ownerPubkey = getPublicKey(ownerSecret);
+  const agentSecret = generateSecretKey();
+  const agentSecretHex = Buffer.from(agentSecret).toString("hex");
+  const agentPubkey = getPublicKey(agentSecret);
   const configPath = join(tempRoot, "mcp.json");
-  writeFileSync(configPath, JSON.stringify({ "zine.voice.secretHex": ownerSecretHex }, null, 2), { mode: 0o600 });
+  writeFileSync(configPath, JSON.stringify({ "zine.headless.voice.secretHex": agentSecretHex }, null, 2), { mode: 0o600 });
 
   const binary = buildRelay();
   const homeHost = "127.0.0.1";
@@ -134,7 +137,11 @@ try {
 
   const homeDir = join(tempRoot, "home");
   mkdirSync(homeDir, { recursive: true });
-  writeFileSync(join(homeDir, "peers.json"), JSON.stringify({ owner: ownerPubkey, peers: [], writers: [] }), { mode: 0o600 });
+  writeFileSync(
+    join(homeDir, "peers.json"),
+    JSON.stringify({ owner: ownerPubkey, peers: [], writers: [agentPubkey] }),
+    { mode: 0o600 },
+  );
   spawnRelay(binary, "home", homeHost, homePort, join(homeDir, "relay.sqlite3"));
   await waitForPort(homeHost, homePort);
 
@@ -142,7 +149,11 @@ try {
   if (publicHost && publicPort) {
     const publicDir = join(tempRoot, "external");
     mkdirSync(publicDir, { recursive: true });
-    writeFileSync(join(publicDir, "peers.json"), JSON.stringify({ owner: ownerPubkey, peers: [], writers: [] }), { mode: 0o600 });
+    writeFileSync(
+      join(publicDir, "peers.json"),
+      JSON.stringify({ owner: ownerPubkey, peers: [], writers: [agentPubkey] }),
+      { mode: 0o600 },
+    );
     spawnRelay(binary, "external", publicHost, publicPort, join(publicDir, "relay.sqlite3"));
     await waitForPort(publicHost, publicPort);
     externalUrl = `ws://${publicHost}:${publicPort}`;
@@ -154,7 +165,9 @@ try {
     ZINE_TEST_HOME_RELAY_URL: `ws://${homeHost}:${homePort}`,
     ZINE_TEST_EXTERNAL_RELAY_URL: externalUrl,
     ZINE_TEST_CONFIG_PATH: configPath,
-    ZINE_TEST_OWNER_PUBKEY: ownerPubkey,
+    ZINE_TEST_AGENT_PUBKEY: agentPubkey,
+    ZINE_TEST_RELAY_OWNER_PUBKEY: ownerPubkey,
+    ZINE_TEST_RELAY_OWNER_SECRET_HEX: ownerSecretHex,
   });
 } catch (error) {
   for (const relay of relays) {

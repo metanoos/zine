@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  createReplayPanels,
+  replayLivePanelIndices,
   removeReplayPanels,
   type ReplayPanelState,
 } from "./replay-panel-layout.js";
@@ -12,12 +12,22 @@ const live = (tabs: string[], active = tabs[0] ?? ""): ReplayPanelState => ({
   active,
 });
 
-test("replay panels contain every animated path without empty placeholders", () => {
-  assert.deepEqual(createReplayPanels(["a.md", "b.md", "c.md", "d.md"], 3), [
-    { tabs: ["a.md"], active: "a.md", replayOwned: true },
-    { tabs: ["b.md"], active: "b.md", replayOwned: true },
-    { tabs: ["c.md", "d.md"], active: "c.md", replayOwned: true },
-  ]);
+test("replay can occupy panel 1 when the main panel is an empty placeholder", () => {
+  assert.deepEqual(replayLivePanelIndices([live([])], true), []);
+});
+
+test("retained live panels compact left instead of preserving empty gaps", () => {
+  const panels: ReplayPanelState[] = [
+    live([]),
+    live(["notes.md"]),
+    { tabs: ["animated.md"], active: "animated.md", replayOwned: true },
+  ];
+
+  assert.deepEqual(replayLivePanelIndices(panels, true), [1]);
+});
+
+test("empty live placeholders remain when replay has nothing to mount", () => {
+  assert.deepEqual(replayLivePanelIndices([live([])], false), [0]);
 });
 
 test("replay teardown preserves live tab changes made during playback", () => {

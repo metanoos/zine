@@ -10,7 +10,7 @@
  * `loadRelays()` time, and the provenance layer holds the URL for the whole
  * process.
  *
- * This is the single place the `--relay` CLI arg crosses into the shared
+ * This is the single place the `--home-relay` CLI arg crosses into the shared
  * modules' resolution path. `relay-config.ts` then rebuilds its home entry
  * from this URL on every `loadRelays()`, so the headless press reads from and
  * writes to exactly the relay the operator named — no stored-list override

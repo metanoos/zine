@@ -1,6 +1,6 @@
 /**
  * Inbound tracker helpers (protocol §3.8 forks, §6 tags, §3.3 cites).
- * Pure unit tests — no relay. The relay-dependent resolver `findInbound`
+ * Pure unit tests — no relay. The relay-dependent resolver `findInboundSnapshot`
  * (which issues the chunked `#e` / `#q` reverse lookups) is the same shape as
  * `findMergeCandidates` and, like it, is not unit-tested here; what IS testable
  * without a relay is the delta-parse + role classification — the logic that
@@ -16,10 +16,8 @@ import {
   classifyQEdge,
   excludeInboundSources,
   filterInboundCitationRefs,
-  inboundCitationsFromHeads,
   inboundCitationsFromResolvedHeads,
   resolveInboundHeadSnapshot,
-  resolveInboundSourceHeads,
 } from "./provenance.js";
 import type { Event } from "nostr-tools";
 
@@ -76,10 +74,8 @@ function sourceEvent(
     kind: 4290,
     tags: [
       ["z", "file"],
-      ["file", path],
-      ["folder", "source-folder"],
       ["F", path],
-      ["D", "source-folder"],
+      ["f", "source-folder"],
       ["action", action],
       ...(prev ? [["e", prev, "", "prev"]] : []),
       ...qTargets.map((target) => ["q", target, ""]),
@@ -280,27 +276,24 @@ test("classifyQEdge: tag for a DIFFERENT node, q to ours → cite (not tag)", ()
 
 // --- current-source filtering -------------------------------------------
 
-test("historical q hits resolve to the source tombstone instead of staying visible", async () => {
+test("resolved source tombstones do not remain visible", () => {
   const cited = sourceEvent("a1", "A.md", ["b1"]);
   const removed = sourceEvent("a2", "A.md", [], "a1", "delete");
-
-  const heads = await resolveInboundSourceHeads([cited], async (folderId, path) => {
-    assert.equal(folderId, "source-folder");
-    assert.equal(path, "A.md");
-    return [cited, removed];
-  });
-
-  assert.deepEqual(heads.map((event) => event.id), ["a2"]);
-  assert.deepEqual(inboundCitationsFromHeads(heads, new Set(["b1"])), []);
+  assert.deepEqual(
+    inboundCitationsFromResolvedHeads([{ traceId: cited.id, head: removed }], new Set(["b1"])),
+    [],
+  );
 });
 
-test("historical q hits collapse to one current citing head", async () => {
+test("one resolved current citing head produces one inbound edge", () => {
   const first = sourceEvent("a1", "A.md", ["b1"]);
   const current = sourceEvent("a2", "A.md", ["b1"], "a1");
-  const heads = await resolveInboundSourceHeads([first, current], async () => [first, current]);
 
   assert.deepEqual(
-    inboundCitationsFromHeads(heads, new Set(["b1"])).map((entry) => entry.sourceEventId),
+    inboundCitationsFromResolvedHeads(
+      [{ traceId: first.id, head: current }],
+      new Set(["b1"]),
+    ).map((entry) => entry.sourceEventId),
     ["a2"],
   );
 });
@@ -308,7 +301,10 @@ test("historical q hits collapse to one current citing head", async () => {
 test("a remote path named Oblivion is not treated as a lifecycle signal", () => {
   const oblivionNamedSource = sourceEvent("a-oblivion", "oblivion/2026-07-15_120000/A.md", ["b1"]);
   assert.deepEqual(
-    inboundCitationsFromHeads([oblivionNamedSource], new Set(["b1"])).map((entry) => entry.sourceEventId),
+    inboundCitationsFromResolvedHeads(
+      [{ traceId: oblivionNamedSource.id, head: oblivionNamedSource }],
+      new Set(["b1"]),
+    ).map((entry) => entry.sourceEventId),
     ["a-oblivion"],
   );
 });
@@ -319,9 +315,9 @@ test("stable source resolution follows a moved trace to its current head", async
   const snapshot = await resolveInboundHeadSnapshot(
     [cited],
     async () => "a1",
-    async (traceId, fallback) => {
+    async (traceId, exactHeadId) => {
       assert.equal(traceId, "a1");
-      assert.deepEqual(fallback, { folderId: "source-folder", relativePath: "A.md" });
+      assert.equal(exactHeadId, undefined);
       return { status: "resolved", traceId, chain: [cited, moved], source: "trace-head" };
     },
   );
@@ -357,7 +353,13 @@ test("cached inbound rows hide a source as soon as its local head enters Oblivio
       fromNodeId: "b1",
       ownerPubkey: "pk-a",
     },
-    { kind: "cite" as const, sourceEventId: "c1", fromNodeId: "b1", ownerPubkey: "pk-c" },
+    {
+      kind: "cite" as const,
+      sourceTraceId: "c-genesis",
+      sourceEventId: "c1",
+      fromNodeId: "b1",
+      ownerPubkey: "pk-c",
+    },
   ];
   assert.deepEqual(excludeInboundSources(inbound, new Set(["a-genesis"])), [inbound[1]]);
 });

@@ -25,7 +25,7 @@
  *     `system` string, so all configured/system layers are joined in order.
  */
 
-import type { ProviderConfig } from "./models-store.js";
+import { providerCredential, type ProviderConfig } from "./models-store.js";
 import { isTauri } from "./identity.js";
 import {
   anthropicModelOptions,
@@ -101,7 +101,8 @@ async function callOpenAI(
 ): Promise<ToolTurn> {
   const url = joinPath(cfg.baseUrl, "chat/completions");
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (cfg.apiKey) headers["Authorization"] = `Bearer ${cfg.apiKey}`;
+  const apiKey = providerCredential(cfg);
+  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
 
   const body = JSON.stringify({
     model: cfg.modelId,
@@ -194,7 +195,8 @@ async function callAnthropic(
     "Content-Type": "application/json",
     "anthropic-version": "2023-06-01",
   };
-  if (cfg.apiKey) headers["x-api-key"] = cfg.apiKey;
+  const apiKey = providerCredential(cfg);
+  if (apiKey) headers["x-api-key"] = apiKey;
 
   const body = JSON.stringify({
     model: cfg.modelId,

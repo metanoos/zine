@@ -8,11 +8,6 @@
  *
  * These commands only exist in the desktop (Tauri) build — the webapp has no
  * relay to gate access on. Callers must guard with isTauri().
- *
- * Migration note: the file was previously named friends.json with a "friends"
- * key. The Rust reader migrates it into peers.json on first read (see
- * migrate_legacy_friends_file in lib.rs), so callers don't need to know about
- * the old name.
  */
 
 import { decode } from "nostr-tools/nip19";

@@ -2,8 +2,7 @@
  * Nostr keypair keychain — the set of voices the user can sign and attribute
  * text with. Promotes the `keys` nav entry from placeholder to a real view,
  * following the `models-store.ts` / `relay-config.ts` precedent: a
- * localStorage-backed list with a stable active id and one builtin entry that
- * can never be deleted (there must always be a signer).
+ * localStorage-backed list with role ids and at least one entry.
  *
  * GENERATIVE VISUAL IDENTITY. Each key carries an `identity` — a font + hue +
  * saturation, derived deterministically from the pubkey (see identityFromPubkey)
@@ -14,16 +13,21 @@
  * on both light and dark themes (lightness comes from a `--voice-ink-l` token
  * set per theme, see App.css).
  *
- * SECURITY POSTURE: secret key material lives in localStorage as hex, exactly
- * as `identity.ts` already stored it pre-keychain. Routing only these secrets
- * through OS keychain would create the same asymmetry `models-store.ts` calls
- * out — better to move every secret (Nostr + LLM) to a keychain layer together,
- * as a later hardening pass. Until then, consistent and honest about the limit.
+ * SECURITY POSTURE: this module persists only public profiles. `secretRef` is
+ * an opaque handle into the unlocked SecretStore session; raw signing bytes
+ * never enter the JSON profile written to localStorage.
  */
 
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { npubEncode, nsecEncode } from "nostr-tools/nip19";
 import { fetchVoiceIdentity } from "./provenance.js";
+import {
+  canSignWithSecrets,
+  deleteSecret,
+  getSecretCached,
+  putSecret,
+  putSecrets,
+} from "./secret-store.js";
 
 export interface KeyIdentity {
   /** CSS font-family value (e.g. `"Newsreader", serif`). */
@@ -35,31 +39,51 @@ export interface KeyIdentity {
 }
 
 export interface KeyEntry {
-  /** Stable id so edits survive reordering; builtins carry stable ids. */
+  /** Stable id so edits survive reordering. */
   id: string;
   label: string;
-  /** Hex secret (32 bytes → 64 hex chars). */
-  secretHex: string;
+  /** Opaque reference to the 32-byte signing secret in SecretStore. */
+  secretRef: string;
   /** Derived npub-less hex pubkey (32 bytes → 64 hex chars). */
   pubkey: string;
   identity: KeyIdentity;
   createdAt: number;
-  /** True for the seeded/migrated first key — can't be deleted, only edited. */
-  builtin?: boolean;
-  /** Identity-derivation schema. When missing or != IDENTITY_SCHEMA, loadKeys()
-   *  re-derives `identity` from the pubkey (deterministic) and bumps this. The
-   *  gate means the one-time migration runs once per key, then never again —
-   *  so a later manual `identity` patch via patchKey survives. */
-  schemaVersion?: number;
+  /** Identity-derivation schema for rejecting unsupported stored profiles. */
+  schemaVersion: number;
 }
 
 const STORAGE_KEY = "zine.keys";
-/** Current identity-derivation schema. Bump when the identityFromPubkey
- *  mapping changes; loadKeys() re-derives any key below it on load. */
+/** Current identity-derivation schema. */
 const IDENTITY_SCHEMA = 1;
-const ACTIVE_KEY = "zine.keys.active";
-/** The pre-keychain single-voice secret slot, migrated into the first key. */
-const LEGACY_SECRET_KEY = "zine.voice.secretHex";
+const HEX_PUBKEY = /^[0-9a-f]{64}$/;
+
+function isCurrentKeyEntry(value: unknown): value is KeyEntry {
+  if (!value || typeof value !== "object") return false;
+  const key = value as Partial<KeyEntry>;
+  return (
+    key.schemaVersion === IDENTITY_SCHEMA &&
+    typeof key.id === "string" &&
+    key.id.length > 0 &&
+    typeof key.label === "string" &&
+    typeof key.secretRef === "string" &&
+    key.secretRef.length > 0 &&
+    typeof key.pubkey === "string" &&
+    HEX_PUBKEY.test(key.pubkey) &&
+    sanitizeVoiceIdentity(key.identity ?? null) !== null &&
+    typeof key.createdAt === "number" &&
+    Number.isFinite(key.createdAt)
+  );
+}
+
+export function keySecretRef(id: string): string {
+  return `nostr:key:${id}`;
+}
+
+function stageKeySecret(ref: string, secret: Uint8Array): void {
+  void putSecret(ref, secret).catch((error) => {
+    console.error(`[keys] could not persist ${ref}:`, error);
+  });
+}
 
 /**
  * Curated font pool for identity generation — readable body faces across the
@@ -215,7 +239,16 @@ export function keyNpub(k: KeyEntry): string {
 
 /** The key's secret key as an nsec (`nsec1…`). */
 export function keyNsec(k: KeyEntry): string {
-  return nsecEncode(hexToBytes(k.secretHex));
+  const secret = getSecretCached(k.secretRef);
+  if (!secret) throw new Error(`Private key unavailable for ${k.label}`);
+  return nsecEncode(secret);
+}
+
+/** Resolve raw hex only for an explicit, confirmed export gesture. */
+export function keySecretHex(k: KeyEntry): string {
+  const secret = getSecretCached(k.secretRef);
+  if (!secret) throw new Error(`Private key unavailable for ${k.label}`);
+  return bytesToHex(secret);
 }
 
 function newId(): string {
@@ -236,46 +269,38 @@ function nextVoiceLabel(keys: KeyEntry[]): string {
 function entryFromSecret(
   secretHex: string,
   label: string,
-  builtin: boolean,
   identity?: KeyIdentity,
 ): KeyEntry {
   const secretKey = hexToBytes(secretHex);
   const pubkey = getPublicKey(secretKey);
+  const id = newId();
+  const secretRef = keySecretRef(id);
+  stageKeySecret(secretRef, secretKey);
   return {
-    id: builtin ? "builtin-voice-1" : newId(),
+    id,
     label,
-    secretHex,
+    secretRef,
     pubkey,
     identity: identity ?? identityFromPubkey(pubkey),
     schemaVersion: IDENTITY_SCHEMA,
     createdAt: Date.now(),
-    builtin,
   };
 }
 
-/** Generate a fresh keypair entry with a given label. Never builtin. */
+/** Generate a fresh keypair entry with a given label. */
 function freshKey(label: string, identity?: KeyIdentity): KeyEntry {
-  return entryFromSecret(bytesToHex(generateSecretKey()), label, false, identity);
+  return entryFromSecret(bytesToHex(generateSecretKey()), label, identity);
 }
 
 /**
- * Ensure the keychain is seeded. Three cases:
+ * Ensure the keychain is seeded. On a fresh install, mint AUTHOR, MODEL, NODE,
+ * EXTERNAL, and three spare voices. The spares complete the starter color
+ * spectrum and give system starter text a voice distinct from both AUTHOR and
+ * MODEL. Doors are created only when requested. The user can rename, restyle,
+ * add, or regenerate any identity freely via the Keys view.
  *
- *   - Legacy migration: a pre-keychain install has `zine.voice.secretHex`. We
- *     absorb it into the first builtin key ("voice-1") so the user keeps their
- *     signing identity and provenance chain continuity, and set it as the
- *     AUTHOR + MODEL + NODE roles so existing behavior is unchanged. The legacy
- *     slot is left in place so a downgrade remains harmless.
- *
- *   - Fresh install: nothing present — mint AUTHOR, MODEL, NODE, EXTERNAL, and
- *     three spare voices. The spares complete the starter color spectrum and
- *     give system starter text a voice distinct from both AUTHOR and MODEL.
- *     Doors are created only when requested. The user can rename, restyle, add,
- *     or regenerate any identity freely via the Keys view.
- *
- *   - Existing keychain: no-op. We never clobber a user's keys.
- *
- * Idempotent: if a keychain already exists, this returns immediately.
+ * An existing keychain is never clobbered. Idempotent: if a keychain already
+ * exists, this returns immediately.
  */
 function seedIfEmpty(): void {
   const existing = localStorage.getItem(STORAGE_KEY);
@@ -286,25 +311,18 @@ function seedIfEmpty(): void {
     // through normal use; this repairs direct-storage tampering).
     try {
       const parsed = JSON.parse(existing);
-      if (Array.isArray(parsed) && parsed.length > 0) return;
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed.every(isCurrentKeyEntry)) return;
     } catch {
       // Corrupt blob — fall through and reseed.
     }
   }
 
-  // --- Legacy migration: absorb the old single-key slot as the builtin key,
-  //     and assign it to every role so existing behavior is unchanged. ---
-  const legacy = localStorage.getItem(LEGACY_SECRET_KEY);
-  if (legacy && /^[0-9a-fA-F]{64}$/.test(legacy)) {
-    const author = entryFromSecret(legacy, "voice-1", true);
-    saveKeys([author]);
-    localStorage.setItem(AUTHOR_ROLE_KEY, author.id);
-    localStorage.setItem("zine.roles.inject", author.id);
-    localStorage.setItem(NODE_ROLE_KEY, author.id);
-    return;
-  }
+  // Hosted/browser builds are readers until they have an encrypted vault.
+  // Never manufacture a plaintext identity merely because a reader view asks
+  // for the public key list.
+  if (!canSignWithSecrets()) return;
 
-  // --- Fresh install: mint the operational identities + three spare voices. ---
+  // Mint the operational identities + three spare voices.
   // The ordinary identities retain neutral labels because roles are freely
   // reassignable. NODE owns the relay; EXTERNAL signs filesystem scans. Doors
   // are absent until the user deliberately opens one. Styles are shuffled once
@@ -321,17 +339,14 @@ function seedIfEmpty(): void {
   const keys = [voice1, voice2, voice3, voice4, voice5, node, external];
   saveKeys(keys);
 
-  // Pre-assign the three roles so every feature works out of the box. The slot
-  // strings keep their legacy pen/inject names so an upgrade preserves picks.
+  // Pre-assign the three roles so every feature works out of the box.
   localStorage.setItem(NODE_ROLE_KEY, node.id);
   localStorage.setItem(AUTHOR_ROLE_KEY, voice1.id);
-  localStorage.setItem("zine.roles.inject", voice3.id);
+  localStorage.setItem(MODEL_ROLE_KEY, voice3.id);
 }
 
-/** Read the persisted key list, seeding on first run. Also migrates any key
- *  whose identity was derived under an older (or absent) schema to the current
- *  deterministic identityFromPubkey form — the relay-config.ts normalize()
- *  pattern: a stored list never needs a manual migration step. */
+/** Read the persisted key list, seeding on first run. Unsupported profile
+ * schemas are rejected instead of rewritten in place. */
 export function loadKeys(): KeyEntry[] {
   seedIfEmpty();
   let raw: KeyEntry[] = [];
@@ -342,72 +357,87 @@ export function loadKeys(): KeyEntry[] {
     raw = [];
   }
   if (!Array.isArray(raw)) raw = [];
-  // Re-derive identity for any key below the current schema. Pre-schema keys
-  // carried a Math.random() identity that changed on every reseed — the source
-  // of "my editor's background colors changed on reload" when zine.keys was
-  // evicted/corrupt/private-mode. After migration the identity is a pure
-  // function of the pubkey, so it's stable forever. The schemaVersion gate
-  // means this runs once per existing key, then never again — a later manual
-  // identity patch (patchKey) sets the field directly and isn't overridden
-  // because it persists schemaVersion: IDENTITY_SCHEMA alongside it.
-  let changed = false;
-  const migrated = raw.map((k) => {
-    if (k.schemaVersion === IDENTITY_SCHEMA) return k;
-    changed = true;
-    return { ...k, identity: identityFromPubkey(k.pubkey), schemaVersion: IDENTITY_SCHEMA };
-  });
-  if (changed) saveKeys(migrated);
-  return migrated;
+  return raw.filter(isCurrentKeyEntry);
 }
 
-/** Persist the key list. (No builtin-reinsertion guard here — removeKey
- *  already refuses to empty the list, and seedIfEmpty repairs a wiped slot
- *  on the next load.) */
+/** Persist only the current public profile shape. */
 export function saveKeys(keys: KeyEntry[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(keys));
-}
-
-/** The id of the active key, or null. Falls back to the first key if unset. */
-export function getActiveKeyId(): string | null {
-  const id = localStorage.getItem(ACTIVE_KEY);
-  if (id) return id;
-  const keys = loadKeys();
-  return keys[0]?.id ?? null;
-}
-
-/** Set the active key by id. */
-export function setActiveKeyId(id: string | null): void {
-  if (id === null) localStorage.removeItem(ACTIVE_KEY);
-  else localStorage.setItem(ACTIVE_KEY, id);
-}
-
-/** The full active key entry, or null. */
-export function getActiveKey(): KeyEntry | null {
-  const id = getActiveKeyId();
-  if (!id) return null;
-  return loadKeys().find((k) => k.id === id) ?? null;
+  const publicProfiles = keys.map((key) => ({
+    id: key.id,
+    label: key.label,
+    secretRef: key.secretRef,
+    pubkey: key.pubkey,
+    identity: key.identity,
+    createdAt: key.createdAt,
+    schemaVersion: key.schemaVersion,
+  }));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(publicProfiles));
 }
 
 /**
- * The active key's pubkey — the voice name new text is attributed to. Matches
- * the pre-keychain role of `ACTIVE_VOICE = "voice-1"` (a stable string), but
- * now resolves to the active key's pubkey so editor runs and signing agree.
- *
- * @deprecated The "active key" is a hidden internal default with no UI surface.
- * The two user-facing key concepts are the **AUTHOR** key (the AUTHOR control,
- * `zine.roles.pen`, the default signer for Save/auto-save) and the **MODEL**
- * key (the MODEL control, `zine.roles.inject`, used by LLM ops). New code
- * should resolve to one of those via `getAuthorKey()`/`authorVoice()` or the
- * MODEL role, not this fallback.
+ * Desktop bootstrap invariant: every persisted profile resolves from the
+ * already-unlocked vault, or a fresh profile set is durably created before App
+ * renders.
  */
-export function activeVoice(): string {
-  return getActiveKey()?.pubkey ?? "voice-1";
+export async function initializeKeyStoreForAuthoring(): Promise<KeyEntry[]> {
+  const stored = localStorage.getItem(STORAGE_KEY);
+  if (stored) {
+    const parsed = JSON.parse(stored) as unknown;
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      if (!parsed.every(isCurrentKeyEntry)) {
+        throw new Error("Unsupported key profile schema; factory reset is required");
+      }
+      for (const key of parsed) {
+        if (!key.secretRef || !getSecretCached(key.secretRef)) {
+          throw new Error(`Secure key material is unavailable for ${key.label || key.id}`);
+        }
+      }
+      return loadKeys();
+    }
+  }
+
+  const palette = shuffledDefaultVoicePalette();
+  const specs: Array<[string, KeyIdentity]> = [
+    ["voice-1", palette[0]],
+    ["voice-2", palette[1]],
+    ["voice-3", palette[2]],
+    ["voice-4", palette[3]],
+    ["voice-5", palette[4]],
+    ["node-1", palette[5]],
+    ["external-1", palette[6]],
+  ];
+  const profiles: KeyEntry[] = [];
+  const secrets: Array<readonly [string, Uint8Array]> = [];
+  for (const [label, identity] of specs) {
+    const secret = generateSecretKey();
+    const pubkey = getPublicKey(secret);
+    const id = newId();
+    const secretRef = keySecretRef(id);
+    secrets.push([secretRef, secret]);
+    profiles.push({
+      id,
+      label,
+      secretRef,
+      pubkey,
+      identity,
+      schemaVersion: IDENTITY_SCHEMA,
+      createdAt: Date.now(),
+    });
+  }
+  try {
+    await putSecrets(secrets);
+  } finally {
+    for (const [, secret] of secrets) secret.fill(0);
+  }
+  saveKeys(profiles);
+  const node = profiles.find((key) => key.label === "node-1")!;
+  localStorage.setItem(NODE_ROLE_KEY, node.id);
+  localStorage.setItem(AUTHOR_ROLE_KEY, profiles[0].id);
+  localStorage.setItem(MODEL_ROLE_KEY, profiles[2].id);
+  return profiles;
 }
 
-/** localStorage key for the AUTHOR role. The string value `"zine.roles.pen"` is
- *  a stable storage name (not renamed to `zine.roles.author`) so an upgrade
- *  keeps the user's picked key without a migration step. */
-const AUTHOR_ROLE_KEY = "zine.roles.pen";
+const AUTHOR_ROLE_KEY = "zine.roles.author";
 
 /** The id of the AUTHOR key, or null. Defaults to the first keychain key when
  *  the role is unset or points at a deleted key — never to a separate "active"
@@ -430,8 +460,7 @@ export function getAuthorKey(): KeyEntry | null {
 }
 
 /** The AUTHOR key's pubkey — the default voice for new text and the signer for
- *  Save/auto-save/send. Replaces `activeVoice()` as the canonical "default
- *  signer" resolution now that the active key concept is retired. */
+ *  Save/auto-save/send. */
 export function authorVoice(): string {
   return getAuthorKey()?.pubkey ?? "voice-1";
 }
@@ -445,8 +474,7 @@ export function setAuthorKeyId(id: string): void {
 
 // --- MODEL role: the LLM-ops key ----------------------------------------
 
-/** localStorage key for the MODEL role (legacy stable storage name). */
-const MODEL_ROLE_KEY = "zine.roles.inject";
+const MODEL_ROLE_KEY = "zine.roles.model";
 
 /** The id of the MODEL key, or null. Defaults to the first keychain key when
  *  unset or dangling — same fallback as AUTHOR/NODE. The MODEL key drives LLM
@@ -469,8 +497,8 @@ export function setModelKeyId(id: string): void {
 // --- NODE role: the per-machine identity --------------------------------
 //
 // Three roles share one keychain, each a different *purpose*:
-//   - AUTHOR (`zine.roles.pen`)      signs the zines it writes
-//   - MODEL  (`zine.roles.inject`)   drives LLM ops
+//   - AUTHOR (`zine.roles.author`)   signs the zines it writes
+//   - MODEL  (`zine.roles.model`)    drives LLM ops
 //   - NODE   (`zine.roles.node`)     owns this machine's relay: derives the Tor
 //                                    onion, is the `owner` in peers.json, and
 //                                    signs the NIP-42 AUTH challenge that proves
@@ -479,19 +507,13 @@ export function setModelKeyId(id: string): void {
 //
 // The NODE role decouples the onion/AUTH identity (which must be stable so your
 // address doesn't change and peers keep reaching you) from the AUTHOR role
-// (which the user may switch freely while writing). Before this role existed,
-// onauth and onion-key.ts both read loadOrCreateVoice() — the legacy single key
-// — which silently diverged from the user's chosen keys the moment a non-builtin
-// key was involved.
+// (which the user may switch freely while writing).
 
 /** localStorage key for the NODE role. */
 const NODE_ROLE_KEY = "zine.roles.node";
 
 /** The id of the NODE key, or null. Defaults to the first keychain key when the
- *  role is unset or points at a deleted key — same fallback posture as AUTHOR.
- *  On a migrated install the builtin "voice-1" key (seeded from the legacy slot)
- *  is the node key, so existing onions/AUTH identities stay stable without a
- *  migration step. */
+ *  role is unset or points at a deleted key — same fallback posture as AUTHOR. */
 export function getNodeKeyId(): string | null {
   const stored = localStorage.getItem(NODE_ROLE_KEY);
   if (stored) {
@@ -519,7 +541,18 @@ export function nodeVoice(): string {
  *  when the keychain is empty, which seedIfEmpty() prevents. */
 export function nodeSecretKey(): Uint8Array | null {
   const entry = getNodeKey();
-  return entry ? hexToBytes(entry.secretHex) : null;
+  return entry ? getSecretCached(entry.secretRef) : null;
+}
+
+export function authorSecretKey(): Uint8Array | null {
+  const entry = getAuthorKey();
+  return entry ? getSecretCached(entry.secretRef) : null;
+}
+
+export function modelSecretKey(): Uint8Array | null {
+  const id = getModelKeyId();
+  const entry = id ? loadKeys().find((key) => key.id === id) : null;
+  return entry ? getSecretCached(entry.secretRef) : null;
 }
 
 /** Set the NODE key by id. Changing it means the machine's .onion address and
@@ -641,28 +674,39 @@ export function voiceSpanStyle(voice: string): { className: string; style?: stri
  *  rather than the active keychain key. */
 export function secretKeyForVoice(pubkey: string): Uint8Array | null {
   const entry = loadKeys().find((k) => k.pubkey === pubkey);
-  return entry ? hexToBytes(entry.secretHex) : null;
+  return entry ? getSecretCached(entry.secretRef) : null;
 }
 
 /** Generate a new keypair with a fresh identity and append it. An omitted label
- *  continues the neutral `voice-N` sequence. Returns the new full list. New
- *  keys are never builtin. */
-export function addKey(label?: string): KeyEntry[] {
+ *  continues the neutral `voice-N` sequence. Returns the new full list. */
+export async function addKey(label?: string): Promise<KeyEntry[]> {
   const keys = loadKeys();
   const secretKey = generateSecretKey();
   const pubkey = getPublicKey(secretKey);
+  const id = newId();
+  const secretRef = keySecretRef(id);
   const entry: KeyEntry = {
-    id: newId(),
+    id,
     label: label || nextVoiceLabel(keys),
-    secretHex: bytesToHex(secretKey),
+    secretRef,
     pubkey,
     identity: identityFromPubkey(pubkey),
     schemaVersion: IDENTITY_SCHEMA,
     createdAt: Date.now(),
   };
   const next = [...keys, entry];
-  saveKeys(next);
-  return next;
+  try {
+    await putSecret(secretRef, secretKey);
+    try {
+      saveKeys(next);
+    } catch (error) {
+      await deleteSecret(secretRef);
+      throw error;
+    }
+    return next;
+  } finally {
+    secretKey.fill(0);
+  }
 }
 
 /** Remove a key. The last remaining key can't be deleted (there must always be
@@ -673,17 +717,17 @@ export function addKey(label?: string): KeyEntry[] {
 export function removeKey(id: string): KeyEntry[] {
   const keys = loadKeys();
   if (keys.length <= 1) return keys; // never empty the keychain
+  const removed = keys.find((key) => key.id === id);
   const next = keys.filter((k) => k.id !== id);
   saveKeys(next);
+  if (removed) {
+    void deleteSecret(removed.secretRef).catch((error) => {
+      console.error(`[keys] could not delete ${removed.secretRef}:`, error);
+    });
+  }
   const fallback = next[0]?.id ?? null;
-  // Reassign any role that pointed at the deleted key. The legacy
-  // `zine.keys.active` slot is also repointed for backward-compat with any
-  // reader that hasn't migrated yet (harmless — it's no longer seeded).
-  if (getActiveKeyId() === id) setActiveKeyId(fallback);
-  // The slot strings keep their legacy pen/inject names (stable storage keys);
-  // they're the AUTHOR and MODEL roles respectively. NODE is the relay-owning
-  // identity.
-  for (const slot of ["zine.roles.pen", "zine.roles.inject", "zine.roles.node"]) {
+  // Reassign any role that pointed at the deleted key.
+  for (const slot of [AUTHOR_ROLE_KEY, MODEL_ROLE_KEY, NODE_ROLE_KEY]) {
     if (localStorage.getItem(slot) === id && fallback) {
       localStorage.setItem(slot, fallback);
     }

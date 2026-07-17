@@ -57,26 +57,21 @@ function builtinEntry(): RelayEntry {
   };
 }
 
-/**
- * Normalize a raw stored entry into the current shape. Reads the legacy
- * `enabled` + `role` ("read"|"write"|"both") fields from older versions and
- * folds them into the `read`/`write` booleans, so a stored list never needs a
- * manual migration step.
- */
-function normalize(raw: Partial<RelayEntry> & { enabled?: boolean; role?: string }): RelayEntry | null {
-  if (typeof raw.id !== "string" || typeof raw.url !== "string") return null;
-  // Prefer the new fields when present; otherwise derive from legacy shape.
-  const read = typeof raw.read === "boolean"
-    ? raw.read
-    : typeof raw.enabled === "boolean"
-      ? raw.enabled && (raw.role === "read" || raw.role === "both" || !raw.role)
-      : true;
-  const write = typeof raw.write === "boolean"
-    ? raw.write
-    : typeof raw.enabled === "boolean"
-      ? raw.enabled && (raw.role === "write" || raw.role === "both" || !raw.role)
-      : true;
-  return { id: raw.id, url: raw.url, read, write, builtin: raw.builtin === true ? true : undefined };
+/** Validate a stored entry against the current shape. */
+function normalize(raw: Partial<RelayEntry>): RelayEntry | null {
+  if (
+    typeof raw.id !== "string" ||
+    typeof raw.url !== "string" ||
+    typeof raw.read !== "boolean" ||
+    typeof raw.write !== "boolean"
+  ) return null;
+  return {
+    id: raw.id,
+    url: raw.url,
+    read: raw.read,
+    write: raw.write,
+    builtin: raw.builtin === true ? true : undefined,
+  };
 }
 
 /** Read the persisted list, always ensuring the home entry leads it. */
@@ -97,11 +92,8 @@ export function loadRelays(): RelayEntry[] {
   }
 
   // The home entry must always be present, lead the list, and be read+write.
-  // A prior version persisted a user-toggleable read/write on it; any stored
-  // copy is replaced with the always-on entry so stale `write: false` values
-  // (which silently broke every publish) are corrected on the next load. The
-  // URL is refreshed against the current runtime so a moved webapp never shows
-  // a stale address.
+  // Its URL is refreshed against the current runtime so a moved webapp never
+  // shows a stale address.
   const rest = entries.filter((e) => !e.builtin);
   const homeUrl = resolveRelayUrl();
   const trimmed = rest.filter((e) => e.url !== homeUrl);
@@ -130,6 +122,40 @@ export function addRelay(url: string): RelayEntry[] {
     write: true,
   };
   const next = [...entries, entry];
+  saveRelays(next);
+  return next;
+}
+
+/**
+ * Replace every user-configured relay with an exact runtime-supplied set.
+ *
+ * The desktop UI edits entries one at a time through add/remove/toggle. A
+ * headless press is configured declaratively by its process arguments, so it
+ * must not inherit a stale publication target from an earlier invocation of
+ * the same config file. Existing ids are retained for unchanged URLs to keep
+ * the persisted representation stable across restarts.
+ */
+export function replaceExternalRelays(urls: readonly string[]): RelayEntry[] {
+  const current = loadRelays();
+  const home = current.find((entry) => entry.builtin) ?? builtinEntry();
+  const existingByUrl = new Map(
+    current.filter((entry) => !entry.builtin).map((entry) => [entry.url, entry]),
+  );
+  const seen = new Set([home.url]);
+  const external: RelayEntry[] = [];
+  for (const rawUrl of urls) {
+    const url = rawUrl.trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    const existing = existingByUrl.get(url);
+    external.push({
+      id: existing?.id ?? `r-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      url,
+      read: true,
+      write: true,
+    });
+  }
+  const next = [home, ...external];
   saveRelays(next);
   return next;
 }
@@ -168,6 +194,35 @@ export function setRelayWrite(id: string, write: boolean): RelayEntry[] {
 /** Entries the provenance layer should publish to (write === true). */
 export function writeRelays(entries: RelayEntry[] = loadRelays()): RelayEntry[] {
   return entries.filter((e) => e.write);
+}
+
+/** Whether a relay URL resolves only to this machine. Invalid URLs are local
+ * by default: they cannot establish the public reachability required by Send. */
+export function isLoopbackRelayUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return (
+      host === "localhost" ||
+      host === "0.0.0.0" ||
+      /^127(?:\.\d{1,3}){3}$/.test(host) ||
+      host === "::1" ||
+      host === "[::1]"
+    );
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Write-enabled destinations that satisfy Send's machine-boundary rule.
+ *
+ * On desktop/headless the builtin home is loopback and therefore excluded.
+ * The hosted webapp's same-origin relay remains eligible when non-loopback,
+ * preserving its current remote-first behavior until browser authoring is
+ * split from the hosted verifier surface.
+ */
+export function publicationRelays(entries: RelayEntry[] = loadRelays()): RelayEntry[] {
+  return entries.filter((entry) => entry.write && !isLoopbackRelayUrl(entry.url));
 }
 
 /** Entries the provenance layer should read from (read === true). */

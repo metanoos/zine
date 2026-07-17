@@ -18,7 +18,6 @@ import {
   lshBands,
   quoteFuzzyKeys,
   lshThreshold,
-  SHINGLE_K,
 } from "./quote-fuzzy.js";
 
 // --- Shingling ---------------------------------------------------------

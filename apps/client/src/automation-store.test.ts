@@ -34,8 +34,7 @@ const WORKSPACE_BINDING = {
   workspaceLabel: "Research",
   scopes: [
     { kind: "folder" as const, path: "notes" },
-    { kind: "file" as const, path: "brief.md" },
-  ],
+  ] as [{ kind: "folder"; path: string }],
 };
 
 test("recipes persist, update in place, and remove", () => {
@@ -154,22 +153,40 @@ test("corrupt recipe storage fails closed", () => {
   assert.deepEqual(loadAutomationRecipes(storage, 1_000), []);
 });
 
-test("legacy recipes remain visible but cannot become due until rebound", () => {
+test("recipes without a workspace binding are rejected", () => {
   const storage = new MemoryStorage();
   storage.setItem("zine.automations.v1", JSON.stringify([{
-    id: "legacy",
-    label: "Legacy",
-    goal: "Old scheduled goal",
+    id: "unbound",
+    label: "Unbound",
+    goal: "Unbound scheduled goal",
     providerId: "model-a",
     intervalMinutes: 60,
     enabled: true,
     createdAt: 0,
     updatedAt: 0,
   }]));
-  const [legacy] = loadAutomationRecipes(storage, 1_000);
-  assert.equal(legacy.workspaceId, "");
-  assert.deepEqual(legacy.scopes, []);
-  assert.deepEqual(dueAutomationRecipesForWorkspace([legacy], "workspace-a", 10_000_000), []);
+  assert.deepEqual(loadAutomationRecipes(storage, 1_000), []);
+});
+
+test("recipes with parallel mounts are rejected", () => {
+  const storage = new MemoryStorage();
+  storage.setItem("zine.automations.v1", JSON.stringify([{
+    id: "parallel",
+    label: "Old parallel recipe",
+    goal: "Summarize",
+    providerId: "model-a",
+    workspaceId: "workspace-a",
+    scopes: [
+      { kind: "folder", path: "notes" },
+      { kind: "file", path: "brief.md" },
+    ],
+    intervalMinutes: 60,
+    enabled: true,
+    createdAt: 0,
+    updatedAt: 0,
+  }]));
+
+  assert.deepEqual(loadAutomationRecipes(storage, 1_000), []);
 });
 
 test("new recipes cannot silently save without a workspace scope binding", () => {

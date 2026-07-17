@@ -26,9 +26,9 @@ test("citationTargetSet collects and dedupes ordinary q targets", () => {
   );
 });
 
-test("citationTargetSet ignores legacy uppercase Q content coordinates", () => {
+test("citationTargetSet ignores invalid uppercase Q content coordinates", () => {
   assert.deepEqual(
-    [...citationTargetSet([peerEvent("pk-a", [], [["Q", "legacy-hash", ""]])])],
+    [...citationTargetSet([peerEvent("pk-a", [], [["Q", "invalid-hash", ""]])])],
     [],
   );
 });

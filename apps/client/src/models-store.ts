@@ -6,15 +6,17 @@
  * Models view only renders cards the user chose to add, so the surface starts
  * empty instead of stacked with unused preset stubs.
  *
- * SECURITY POSTURE: the API key is stored in localStorage as plaintext, the
- * same way `identity.ts` stores the app's Nostr secret key (the only other
- * secret in the client). This is a deliberate, documented choice: routing
- * *only* the LLM key through OS keychain would protect a throwaway credential
- * better than the app's own signing key — an odd asymmetry. The right move is
- * to move *both* secrets to a keychain layer together, as a separate
- * hardening pass. Until then, both live in localStorage, consistent and
- * honest about the limitation: any same-origin JS can read them.
+ * SECURITY POSTURE: provider cards are public configuration only. Credentials
+ * resolve through an opaque `credentialRef` in the unlocked SecretStore and
+ * are materialized only at the transport boundary.
  */
+
+import {
+  canUseModelSecrets,
+  deleteSecret,
+  getSecretCached,
+  putSecret,
+} from "./secret-store.js";
 
 export type ProviderProtocol = "openai" | "anthropic";
 
@@ -44,9 +46,9 @@ export interface ProviderConfig {
   protocol: ProviderProtocol;
   baseUrl: string;
   modelId: string;
-  apiKey: string;
-  /** Optional generation controls. Missing means provider/model default, which
-   *  keeps old saved cards backward-compatible and unsupported models usable. */
+  credentialRef: string;
+  credentialConfigured: boolean;
+  /** Optional generation controls. Missing means provider/model default. */
   reasoningEffort?: ReasoningEffort;
   verbosity?: ModelVerbosity;
   personality?: ModelPersonality;
@@ -63,6 +65,12 @@ export interface ProviderConfig {
 }
 
 const STORAGE_KEY = "zine.models";
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+export function providerCredentialRef(id: string): string {
+  return `model:provider:${id}:api-key`;
+}
 
 /** A preset offered as a starting point when adding a provider. The `slug`
  *  is recorded on the created entry (as `preset`) so each preset can be
@@ -132,15 +140,63 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
  *  added. Presets are surfaced separately via `availablePresets()`; nothing
  *  is auto-seeded. */
 export function loadProviders(): ProviderConfig[] {
-  let raw: ProviderConfig[] = [];
+  let raw: unknown[] = [];
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) raw = JSON.parse(stored) as ProviderConfig[];
+    if (stored) raw = JSON.parse(stored) as unknown[];
   } catch {
     raw = [];
   }
   if (!Array.isArray(raw)) raw = [];
-  return raw;
+  return raw.flatMap((provider) => {
+    const current = currentProvider(provider);
+    return current ? [current] : [];
+  });
+}
+
+function currentProvider(value: unknown): ProviderConfig | null {
+  if (!value || typeof value !== "object") return null;
+  const provider = value as Record<string, unknown>;
+  if (
+    typeof provider.id !== "string" ||
+    !provider.id ||
+    typeof provider.label !== "string" ||
+    (provider.protocol !== "openai" && provider.protocol !== "anthropic") ||
+    typeof provider.baseUrl !== "string" ||
+    typeof provider.modelId !== "string" ||
+    typeof provider.credentialRef !== "string" ||
+    !provider.credentialRef ||
+    typeof provider.credentialConfigured !== "boolean"
+  ) return null;
+  const reasoningEffort = provider.reasoningEffort;
+  const verbosity = provider.verbosity;
+  const personality = provider.personality;
+  if (
+    reasoningEffort !== undefined &&
+    !["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(reasoningEffort))
+  ) return null;
+  if (verbosity !== undefined && !["low", "medium", "high"].includes(String(verbosity))) return null;
+  if (personality !== undefined && !["none", "friendly", "pragmatic"].includes(String(personality))) return null;
+  if (provider.temperature !== undefined && (typeof provider.temperature !== "number" || !Number.isFinite(provider.temperature))) return null;
+  if (provider.maxTokens !== undefined && (typeof provider.maxTokens !== "number" || !Number.isInteger(provider.maxTokens) || provider.maxTokens <= 0)) return null;
+  if (provider.instructions !== undefined && typeof provider.instructions !== "string") return null;
+  if (provider.preset !== undefined && typeof provider.preset !== "string") return null;
+  return {
+    id: provider.id,
+    label: provider.label,
+    protocol: provider.protocol,
+    baseUrl: provider.baseUrl,
+    modelId: provider.modelId,
+    credentialRef: provider.credentialRef,
+    credentialConfigured: provider.credentialConfigured,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort: reasoningEffort as ReasoningEffort }),
+    ...(verbosity === undefined ? {} : { verbosity: verbosity as ModelVerbosity }),
+    ...(personality === undefined ? {} : { personality: personality as ModelPersonality }),
+    ...(provider.temperature === undefined ? {} : { temperature: provider.temperature as number }),
+    ...(provider.maxTokens === undefined ? {} : { maxTokens: provider.maxTokens as number }),
+    ...(provider.instructions === undefined ? {} : { instructions: provider.instructions }),
+    ...(provider.preset === undefined ? {} : { preset: provider.preset }),
+  };
 }
 
 /** Presets not yet represented in the saved list — what the "add provider"
@@ -152,19 +208,37 @@ export function availablePresets(existing: ProviderConfig[] = loadProviders()): 
 
 /** Persist the provider list. */
 export function saveProviders(providers: ProviderConfig[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(providers));
+  const profiles = providers.map((provider) => ({
+    id: provider.id,
+    label: provider.label,
+    protocol: provider.protocol,
+    baseUrl: provider.baseUrl,
+    modelId: provider.modelId,
+    credentialRef: provider.credentialRef,
+    credentialConfigured: provider.credentialConfigured,
+    ...(provider.reasoningEffort === undefined ? {} : { reasoningEffort: provider.reasoningEffort }),
+    ...(provider.verbosity === undefined ? {} : { verbosity: provider.verbosity }),
+    ...(provider.personality === undefined ? {} : { personality: provider.personality }),
+    ...(provider.temperature === undefined ? {} : { temperature: provider.temperature }),
+    ...(provider.maxTokens === undefined ? {} : { maxTokens: provider.maxTokens }),
+    ...(provider.instructions === undefined ? {} : { instructions: provider.instructions }),
+    ...(provider.preset === undefined ? {} : { preset: provider.preset }),
+  }));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
 }
 
 /** Add a blank custom provider. Returns the new full list. */
 export function addProvider(label?: string): ProviderConfig[] {
   const providers = loadProviders();
+  const id = `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const entry: ProviderConfig = {
-    id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id,
     label: label || "Custom",
     protocol: "openai",
     baseUrl: "",
     modelId: "",
-    apiKey: "",
+    credentialRef: providerCredentialRef(id),
+    credentialConfigured: false,
   };
   const next = [...providers, entry];
   saveProviders(next);
@@ -176,13 +250,15 @@ export function addProvider(label?: string): ProviderConfig[] {
  *  by the user after this — editable and deletable like any custom one. */
 export function addProviderFromPreset(preset: ProviderPreset): ProviderConfig[] {
   const providers = loadProviders();
+  const id = `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const entry: ProviderConfig = {
-    id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id,
     label: preset.label,
     protocol: preset.protocol,
     baseUrl: preset.baseUrl,
     modelId: preset.modelId,
-    apiKey: "",
+    credentialRef: providerCredentialRef(id),
+    credentialConfigured: false,
     preset: preset.slug,
   };
   const next = [...providers, entry];
@@ -195,8 +271,14 @@ export function addProviderFromPreset(preset: ProviderPreset): ProviderConfig[] 
  *  is chosen under Press → MODEL (voice-provider-store), not here. */
 export function removeProvider(id: string): ProviderConfig[] {
   const providers = loadProviders();
+  const removed = providers.find((provider) => provider.id === id);
   const next = providers.filter((p) => p.id !== id);
   saveProviders(next);
+  if (removed) {
+    void deleteSecret(removed.credentialRef).catch((error) => {
+      console.error(`[models] could not delete ${removed.credentialRef}:`, error);
+    });
+  }
   return next;
 }
 
@@ -207,4 +289,31 @@ export function patchProvider(id: string, patch: Partial<Omit<ProviderConfig, "i
   const next = providers.map((p) => (p.id === id ? { ...p, ...patch } : p));
   saveProviders(next);
   return next;
+}
+
+/** Resolve a short-lived credential string immediately before transport. */
+export function providerCredential(provider: ProviderConfig): string {
+  if (!canUseModelSecrets()) {
+    throw new Error("MODEL operations are unavailable in this read-only press");
+  }
+  const secret = getSecretCached(provider.credentialRef);
+  if (!secret) {
+    if (!provider.credentialConfigured) return "";
+    throw new Error(`Credential unavailable for ${provider.label}`);
+  }
+  return decoder.decode(secret);
+}
+
+/** Store/clear a credential without ever adding it to React card state. */
+export async function setProviderCredential(
+  id: string,
+  value: string,
+): Promise<ProviderConfig[]> {
+  const providers = loadProviders();
+  const provider = providers.find((entry) => entry.id === id);
+  if (!provider) return providers;
+  const credential = value.trim();
+  if (credential) await putSecret(provider.credentialRef, encoder.encode(credential));
+  else await deleteSecret(provider.credentialRef);
+  return patchProvider(id, { credentialConfigured: Boolean(credential) });
 }

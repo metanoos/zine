@@ -26,57 +26,20 @@
  */
 
 import { createFolderGenesis } from "./provenance.js";
-import { loadLocalFolder, saveLocalFile } from "./local-store.js";
-import { addKey, getAuthorKey, getModelKeyId, loadKeys, type KeyEntry } from "./keys-store.js";
+import {
+  getAuthorKey,
+  secretKeyForVoice,
+} from "./keys-store.js";
 
 const ROOT_KEY = "zine.root";
 const MINT_KEY_PREFIX = "zine.mint.";
+const SCAN_KEY_PREFIX = "zine.scan.";
 const pendingMintFolders = new Map<string, Promise<string>>();
+const pendingScanFolders = new Map<string, Promise<string>>();
 
 /** The default display name for the root. The user can rename it (the label
  *  is mutable); only the id is permanent. */
 export const DEFAULT_ROOT_LABEL = "root";
-
-/** The small starter document installed into each newly minted Root. A slash-
- *  joined path is the local-primary workspace's folder representation, so this
- *  appears as `wokspace` containing `ayoo-world.md` in the tree. */
-export const FACTORY_ROOT_FILE_PATH = "wokspace/ayoo-world.md";
-export const FACTORY_ROOT_FILE_CONTENT = "ayoooo, world!\n\n";
-
-/** Use a spare voice for system-provided starter prose, keeping the seed text
- *  distinct from both AUTHOR and MODEL. Older profiles without a spare fall
- *  back to MODEL; legacy single-key profiles mint an alternate neutral voice. */
-function factoryRootVoice(): KeyEntry {
-  const keys = loadKeys();
-  const authorId = getAuthorKey()?.id;
-  const modelId = getModelKeyId();
-  const alternate = keys.find(
-    (key) =>
-      key.id !== authorId &&
-      key.id !== modelId &&
-      /^voice-\d+$/i.test(key.label.trim()),
-  );
-  if (alternate) return alternate;
-  const model = keys.find((key) => key.id === modelId && key.id !== authorId);
-  if (model) return model;
-  const withAlternate = addKey();
-  return withAlternate[withAlternate.length - 1]!;
-}
-
-/** Seed the starter document locally without ever replacing user content.
- *  Its empty node id marks it as not yet stepped; workspace attach resumes
- *  that initial relay publication while still allowing an offline first boot. */
-export function preloadFactoryRoot(rootId: string): void {
-  if (loadLocalFolder(rootId)?.files[FACTORY_ROOT_FILE_PATH]) return;
-  const voice = factoryRootVoice();
-  saveLocalFile(rootId, FACTORY_ROOT_FILE_PATH, {
-    content: FACTORY_ROOT_FILE_CONTENT,
-    tags: [],
-    nodeId: "",
-    runs: [{ voice: voice.pubkey, text: FACTORY_ROOT_FILE_CONTENT }],
-    voicePubkey: voice.pubkey,
-  });
-}
 
 /** The current install root's id, or null on first boot (including the first
  *  boot after factory reset). Never clears the key on malformed storage — a
@@ -108,6 +71,15 @@ export function getRootLabel(): string | null {
   return null;
 }
 
+/** Root is an AUTHOR-owned container. Resolve that role explicitly instead of
+ * using the separate browser/headless session identity. */
+export function rootAuthorSigner(): Uint8Array {
+  const author = getAuthorKey();
+  const signer = author ? secretKeyForVoice(author.pubkey) : null;
+  if (!signer) throw new Error("Cannot mint Root: the AUTHOR signing key is unavailable.");
+  return signer;
+}
+
 /** Mint the install root: publish its genesis node, persist the returned event
  *  id to `zine.root`, and return it. Idempotent within an install lifecycle —
  *  if a root already exists, returns the existing id without minting again
@@ -115,9 +87,8 @@ export function getRootLabel(): string | null {
 export async function mintRoot(): Promise<string> {
   const existing = getRootId();
   if (existing) return existing;
-  const id = await createFolderGenesis();
+  const id = await createFolderGenesis({ signer: rootAuthorSigner() });
   localStorage.setItem(ROOT_KEY, JSON.stringify({ id }));
-  preloadFactoryRoot(id);
   return id;
 }
 
@@ -152,6 +123,41 @@ export async function getOrCreateMintFolder(
       pendingMintFolders.delete(rootId);
     });
   pendingMintFolders.set(rootId, creating);
+  return creating;
+}
+
+/** The dedicated Scan folder mounted beside Root. It is deliberately local
+ * only and author-owned: imported file nodes retain the substrate's signature,
+ * while the private intake inventory remains under the Root owner's control
+ * and cannot leak through a later Root Send. */
+export function getScanFolderId(rootId: string): string | null {
+  const id = localStorage.getItem(`${SCAN_KEY_PREFIX}${rootId}`);
+  return id && id.length > 0 ? id : null;
+}
+
+/** Return this Root's dedicated local-only Scan folder, creating its genesis
+ * exactly once under the supplied Root-owner key. */
+export async function getOrCreateScanFolder(
+  rootId: string,
+  signer?: Uint8Array,
+): Promise<string> {
+  const existing = getScanFolderId(rootId);
+  if (existing) return existing;
+  const pending = pendingScanFolders.get(rootId);
+  if (pending) return pending;
+
+  const creating = createFolderGenesis({
+    signer: signer ?? rootAuthorSigner(),
+    localOnly: true,
+  })
+    .then((id) => {
+      localStorage.setItem(`${SCAN_KEY_PREFIX}${rootId}`, id);
+      return id;
+    })
+    .finally(() => {
+      pendingScanFolders.delete(rootId);
+    });
+  pendingScanFolders.set(rootId, creating);
   return creating;
 }
 

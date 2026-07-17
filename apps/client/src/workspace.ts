@@ -39,8 +39,10 @@ export async function scanExternal(absPath: string): Promise<ScannedFile[]> {
   return invoke<ScannedFile[]>("scan_external", { absPath });
 }
 
-/** Emit reconstructed traces to a chosen destination folder. Existing files
- * at matching relative paths are overwritten with the trace content. */
+/** Emit already-materialized text entries to a chosen destination folder.
+ * Callers resolve authoritative stepped snapshots before crossing this native
+ * boundary; this writer never reconstructs or decorates trace content.
+ * Existing files at matching relative paths are overwritten. */
 export async function reifyToDisk(
   destRoot: string,
   entries: { relativePath: string; content: string }[],

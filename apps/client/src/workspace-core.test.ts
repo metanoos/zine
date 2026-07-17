@@ -1,9 +1,8 @@
 /**
- * Tests for the step-signer resolution helpers: `dominantVoiceInRegion` and
- * `changedRegion`. These underpin the guard in stepFile (App.tsx) that picks a
- * signer matching the *new* text a step commits, so a node's `event.pubkey`
- * attributes its net-new content truthfully even if the `authors` map is later
- * lost on reload (the "MODEL text collapsed to AUTHOR color" bug).
+ * Tests for run-preserving edit and attribution helpers. `dominantVoiceInRegion`
+ * selects the per-delta contributor voice; it must never select a trace signer.
+ * A Step remains signed by the trace owner while `authors`/`voices` preserve
+ * human and MODEL contributions across reload.
  */
 
 import { test } from "node:test";
@@ -186,7 +185,7 @@ test("dominantVoiceInRegion: empty run list → null", () => {
 // --- append-efficient KEdit log -----------------------------------------
 
 function edit(text: string, t: number): KEdit {
-  return { op: "ins", from: 0, to: 0, text, voice: A, t };
+  return { op: "ins", from: 0, to: 0, text, voice: A, t, tx: t };
 }
 
 test("KEdit log appends chunks without changing the prior log", () => {
@@ -210,7 +209,6 @@ test("KEdit log continues transaction ids after capture and restore", () => {
     { ...edit("b", 2), tx: 4 },
   ]);
   assert.equal(nextKEditTx(captured), 5);
-  assert.equal(nextKEditTx(keditLogFromArray([edit("legacy", 1)])), 0);
   assert.equal(nextKEditTx(EMPTY_KEDIT_LOG), 0);
 });
 

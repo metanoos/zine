@@ -12,12 +12,14 @@ not another editor.
 
 ## Who it is for
 
-zine-mcp is the first product wedge for teams whose agents create durable
-files such as reports, research, policies, or editorial work. It gives the
-person responsible for those agents an artifact-level record that ordinary
-model-call logs and file history do not provide on their own: which agent key
-changed the file, which version was sent, and which exact version was later
-endorsed.
+zine-mcp is the interoperability path for MCP-capable harnesses into Zine's
+agent-provenance use case: teams whose agents create durable files such as
+reports, research, policies, or editorial work. It gives the person responsible
+for those agents an artifact-level record that ordinary model-call logs and
+file history do not provide on their own: which agent key changed the file,
+which version was sent, and which exact version was later endorsed. It remains
+an outside-in integration with claims bounded to the metadata and actions the
+harness supplies; it does not claim complete provider-session capture.
 
 The open protocol remains broader than this wedge. See the
 [documentation hub](../../docs/README.md), [product framing](../../docs/PRODUCT.md),
@@ -38,32 +40,55 @@ trace-provenance layer:
 
 | Tool | Gesture (spec §) | What it does |
 |---|---|---|
+| `zine_workspace_info` | — | Show the profile's stable Root, agent pubkey, relays, and queued-event count |
 | `zine_list_files` | — | List the folder manifest with each file's trace head |
 | `zine_read_file` | — | Read a file's current text + its head node (action, when stepped) |
-| `zine_get_history` | — | Walk a file's trace chain (genesis → head) |
-| `zine_get_node` | §R1 | Fetch one node's full self-sufficient payload by id |
+| `zine_get_history` | — | Walk a file's trace chain and return each raw signed event |
+| `zine_get_node` | §R1 | Fetch one canonical raw signed event plus its parsed payload by id |
+| `zine_get_handoff` | — | Return a portable locator for the desktop review surface |
 | `zine_step` | **Step** §8 | Step a node locally (hasn't left the machine) |
 | `zine_send` | **Send** §8 | Step pending changes, otherwise reuse the latest Step, then publish it |
 | `zine_attest` | **Attest** §5A/§8 | Append an endorsement of one sent node |
-| `zine_mint_span` | **Mint** §3.8 | Strike an immutable, addressable node from a span |
+| `zine_mint_span` | **Mint** §3.8 | Strike an extracted immutable node from an exact source span (`sourceStart` disambiguates repeated text) |
 | `zine_delete` | §3.3 | Remove a file from the manifest (history retained) |
 
 Step records the supplied state locally. Send steps the supplied present state
 only when it differs from the latest Step, then publishes the current node.
 The sovereignty filter: not every Step is Sent, and callers do not need to Step
-immediately before Send.
+immediately before Send. A Step first persists as an exact signed event in the
+profile's local state. When the loopback home relay is reachable the press
+synchronizes that outbox in order; an unavailable relay does not make Step
+fail. Publication destinations remain separate: Send deliberately publishes
+one selected file node outside the machine.
 
-## Prerequisites
+## Storage and relays
 
-1. **A running relay.** zine-mcp connects, never spawns. Options:
-   - **Desktop users:** start the zine desktop app once — it spawns the local sidecar at `ws://127.0.0.1:4869`.
-   - **Self-hosters:** run a standalone `zine-relay`, or point at your hosted super-peer.
-2. **A folder id.** The folder trace's genesis event id (spec §3.1 — trace identity IS the genesis node id). Find it in the desktop app, or query your relay for kind-34290 manifests.
-3. **Networked-mode relays only: authorize the agent key as a writer.** If your
-   relay has an owner set (NIP-42 AUTH required), the headless press's voice key
+No folder or running relay is required for the normal headless start. On first
+run, each profile mints its own voice key and one permanent, pathless Root. It
+reopens both on later runs. Signed events and current file state live in the
+profile's local storage; only one zine-mcp process may write a profile at a
+time.
+
+Relays add synchronization and reachability:
+
+1. **Optional local home relay.** zine-mcp connects, never spawns. The default
+   is the desktop sidecar at `ws://127.0.0.1:4869`; without the desktop, run
+   `zine-relay` on loopback. A LAN or hosted URL is rejected as `--home-relay`
+   because private Steps cannot use a remote home. If it is down, Steps remain
+   durable locally and retry in the background every five seconds.
+2. **Optional publication relays.** Add one `--publish-relay <wsUrl>` per
+   non-loopback Send destination. Without one, Step/read/history work; Send and
+   Attest fail explicitly.
+3. **Optional source folder.** `--source-folder <folderId>` opts into an
+   existing folder trace. A human-owned source is shallow-forked under the
+   agent key and the source→fork mapping is reused across runs. Normal headless
+   work should omit this flag and use the profile Root.
+4. **Networked-mode relays only: authorize the agent key as a writer.** If the
+   local relay has an owner set (NIP-42 AUTH required), the headless press's key
    needs read/write access. For the local desktop relay, zine-mcp adds its key
-   to `~/.tracer/peers.json` under `writers` on first run. For a remote relay,
-   authorize the pubkey printed to stderr through that relay's operator flow.
+   to `~/.tracer/peers.json` under `writers` on first run. For a protected
+   publication relay, authorize the pubkey printed to stderr through that
+   relay's operator flow.
    Do not add it as a read-only peer. In local mode (no owner set), no writer
    entry is needed.
 
@@ -77,10 +102,10 @@ This produces `dist/server.js`, exposed as the `zine-mcp` bin.
 
 ## Configure your harness
 
-MCP clients all spawn a `command` plus `args` over stdio. Add the matching block
-to your client's config and replace `<folderId>`. Without `--relay`, zine-mcp
-uses the desktop sidecar at `ws://127.0.0.1:4869`. Pass `--relay <url>` only for
-a self-hosted relay or hosted super-peer.
+MCP clients configure a headless press by spawning a `command` plus `args` over
+stdio. There is no interactive setup or required working directory. Give
+independent agents different `--profile` names; omit it for the default
+profile. Add publication relays only when Send/Attest should be available.
 
 ### Claude Desktop
 
@@ -93,7 +118,8 @@ a self-hosted relay or hosted super-peer.
       "command": "node",
       "args": [
         "/absolute/path/to/zine/apps/mcp/dist/server.js",
-        "--folder", "<folderId>"
+        "--profile", "claude",
+        "--publish-relay", "wss://relay.example.com"
       ]
     }
   }
@@ -111,7 +137,7 @@ a self-hosted relay or hosted super-peer.
       "command": "node",
       "args": [
         "/absolute/path/to/zine/apps/mcp/dist/server.js",
-        "--folder", "<folderId>"
+        "--profile", "zcode"
       ]
     }
   }
@@ -128,8 +154,7 @@ a self-hosted relay or hosted super-peer.
     "zine": {
       "command": "node",
       "args": [
-        "/absolute/path/to/zine/apps/mcp/dist/server.js",
-        "--folder", "<folderId>"
+        "/absolute/path/to/zine/apps/mcp/dist/server.js"
       ]
     }
   }
@@ -141,16 +166,35 @@ Restart your client after editing the config. The agent voice pubkey prints to s
 ## CLI
 
 ```
-zine-mcp --folder <folderId> [--relay <wsUrl>] [--config <path>]
+zine-mcp [--profile <name>] [--source-folder <folderId>]
+         [--home-relay <wsUrl>] [--publish-relay <wsUrl> ...]
+         [--config <path>]
 ```
 
 | Flag | Required | Default | Meaning |
 |---|---|---|---|
-| `--folder` | yes | — | folderId to bind (the folder trace's genesis event id) |
-| `--relay` | no | `ws://127.0.0.1:4869` | home relay URL (the desktop sidecar; override for self-hosted) |
-| `--config` | no | `~/.zine/mcp.json` | key store path (holds the agent voice key) |
+| `--profile` | no | `default` | isolated voice key, permanent Root, outbox, and working state |
+| `--source-folder` | no | — | explicitly bind/fork an existing folder instead of using the profile Root |
+| `--home-relay` | no | `ws://127.0.0.1:4869` | private loopback home for Step/read/history |
+| `--publish-relay` | no, repeatable | — | non-loopback Send destination |
+| `--config` | no | profile-dependent | explicit state file; default profile uses `~/.zine/mcp.json`, named profiles use `~/.zine/profiles/<name>.json` |
 
-There are no interactive prompts; the MCP client owns the stdio process.
+Profile writes are atomic and owner-only. Corrupt state fails loudly rather
+than minting a replacement identity, and a profile lock prevents two writers
+from racing.
+
+## Headless and desktop handoff
+
+LLMs can reason directly over `zine_get_node` and `zine_get_history`: the raw
+signed trace is the canonical machine interface. The headless press does not
+Reify files or convert provenance into Markdown.
+
+For a human review, `zine_send` returns a `zine-trace:…` locator alongside the
+node id. `zine_get_handoff` returns the same shape for the current file head.
+Paste that locator into **Desktop action palette → Open Trace**. The desktop
+verifies the exact signed file nucleus and renders any reachable history. Send
+publishes only the chosen file node, so earlier private Steps may correctly be
+absent; the nucleus remains self-sufficient and verifiable.
 
 ## Development
 
@@ -163,13 +207,17 @@ npm run build  # typecheck, then bundle the executable to dist/server.js
 The protocol gestures and workspace behavior come from the shared client
 modules (`provenance.ts`, `workspace-local.ts`, `identity.ts`,
 `keys-store.ts`). A Node `localStorage` shim (`storage-node.ts`) persists the
-agent key; the home relay is pinned via `ZINE_RELAY_URL`
-(`relay-config-override.ts`).
+agent key, permanent Root, current files, and signed-event outbox; the home relay is pinned via `ZINE_RELAY_URL`
+(`relay-config-override.ts`). External destinations are replaced from the
+current process's `--publish-relay` arguments on every boot, so an old config
+cannot silently retain a stale publication target.
 
 ## What zine-mcp is not
 
-- It does **not** spawn the relay. Relay-running is the desktop app's job (or a standalone relay, or a hosted one).
+- It does **not** require or spawn the local home relay. Relay-running is the desktop app's job (or a standalone local relay).
+- It does **not** accept a hosted relay as home. Hosted relays are explicit Send destinations.
 - It is **not** a filesystem MCP server. The tools are trace gestures.
+- It does **not** Reify traces into folders or Markdown; raw signed events are the machine contract.
 - It does **not** import your key. It mints its own agent voice.
 - It is **not** a no-install audit portal. Public proof reports and browser-only
   verification are roadmap items, not current capabilities.

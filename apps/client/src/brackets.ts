@@ -376,7 +376,12 @@ export function bracketRangeAt(text: string, position: number): BracketRange | n
 export interface MintSelectionTarget {
   phrase: string;
   /** Present when the selection belongs to an unresolved bracket already. */
-  bracket: { matchStart: number; matchEnd: number } | null;
+  bracket: {
+    matchStart: number;
+    matchEnd: number;
+    phraseStart: number;
+    phraseEnd: number;
+  } | null;
 }
 
 /** Resolve a non-empty editor selection into the passage Step should mint.
@@ -400,7 +405,12 @@ export function findMintSelectionTarget(
       if (b.resolved || b.phraseEnd <= b.phraseStart) return null;
       return {
         phrase: text.slice(b.phraseStart, b.phraseEnd),
-        bracket: { matchStart: b.matchStart, matchEnd: b.matchEnd },
+        bracket: {
+          matchStart: b.matchStart,
+          matchEnd: b.matchEnd,
+          phraseStart: b.phraseStart,
+          phraseEnd: b.phraseEnd,
+        },
       };
     }
     const overlapsSelection = b.matchStart < end && b.matchEnd > start;
@@ -807,12 +817,19 @@ const bracketProtectFilter = EditorState.transactionFilter.of(bracketProtect);
  *  brackets in `text`, each with its phrase text and the absolute position of
  *  the *whole* `[[ … ]]` occurrence (so the caller can locate and rewrite it).
  *  String-based — works on flatten(file.runs), no EditorView needed. */
-export function findPendingBrackets(text: string): { phrase: string; matchStart: number; matchEnd: number }[] {
-  const out: { phrase: string; matchStart: number; matchEnd: number }[] = [];
+export function findPendingBrackets(text: string): BracketRange[] {
+  const out: BracketRange[] = [];
   for (const b of iterBrackets(text)) {
     if (b.resolved) continue;
     if (b.phraseEnd <= b.phraseStart) continue;
-    out.push({ phrase: text.slice(b.phraseStart, b.phraseEnd), matchStart: b.matchStart, matchEnd: b.matchEnd });
+    out.push({
+      phrase: text.slice(b.phraseStart, b.phraseEnd),
+      matchStart: b.matchStart,
+      matchEnd: b.matchEnd,
+      phraseStart: b.phraseStart,
+      phraseEnd: b.phraseEnd,
+      resolved: false,
+    });
   }
   return out;
 }

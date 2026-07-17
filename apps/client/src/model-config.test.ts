@@ -15,7 +15,8 @@ const BASE: ProviderConfig = {
   protocol: "openai",
   baseUrl: "https://compatible.example/v1",
   modelId: "model-1",
-  apiKey: "",
+  credentialRef: "model:test:config",
+  credentialConfigured: false,
 };
 
 test("OpenAI-compatible options use card overrides and compatibility max_tokens", () => {

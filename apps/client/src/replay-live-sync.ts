@@ -1,6 +1,6 @@
 import {
-  pathInEffectiveScopes,
-  type ScopeRef,
+  pathInTraceScopes,
+  type TraceRef,
 } from "./scope-model.js";
 
 /** Minimal file state needed to discover a newly-published replay head. */
@@ -9,15 +9,15 @@ interface ReplayHeadState {
 }
 
 /**
- * Find file heads that are both novel and inside the replay's mounted scope.
- * The scope check belongs here, at discovery time: a tab can Step while the
- * scrubber is mounted on a different file or folder, and that unrelated Step
+ * Find file heads that are both novel and inside the replay selection.
+ * The selection check belongs here, at discovery time: a trace can Step while
+ * the scrubber is selected elsewhere, and that unrelated Step
  * must not move the scrubber's current/total position.
  */
-export function freshMountedReplayHeads(
+export function freshSelectedReplayHeads(
   files: Readonly<Record<string, ReplayHeadState>>,
   knownIds: ReadonlySet<string>,
-  scopes: readonly ScopeRef[],
+  scopes: readonly TraceRef[],
   shielded: ReadonlySet<string>,
 ): Array<{ path: string; nodeId: string }> {
   const fresh: Array<{ path: string; nodeId: string }> = [];
@@ -26,7 +26,7 @@ export function freshMountedReplayHeads(
     if (
       nodeId &&
       !knownIds.has(nodeId) &&
-      pathInEffectiveScopes(scopes, shielded, path)
+      pathInTraceScopes(scopes, shielded, path)
     ) {
       fresh.push({ path, nodeId });
     }

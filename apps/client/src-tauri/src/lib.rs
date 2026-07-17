@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,30 @@ use tauri::{ipc::Channel, Manager, path::BaseDirectory};
 use base64::Engine;
 
 static RELAY_SPAWNED: AtomicBool = AtomicBool::new(false);
+const SECRET_VAULT_FILENAME: &str = "zine-secrets.hold";
+const SECRET_SALT_FILENAME: &str = "zine-secrets.salt";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretVaultStatus {
+    vault_exists: bool,
+}
+
+fn secret_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_local_data_dir()
+        .map_err(|error| format!("could not resolve secure-vault directory: {error}"))
+}
+
+/// Report whether this install already has a Stronghold snapshot. The path is
+/// deliberately kept native; JavaScript only needs create-vs-unlock wording.
+#[tauri::command]
+fn secret_vault_status(app: tauri::AppHandle) -> Result<SecretVaultStatus, String> {
+    let data_dir = secret_data_dir(&app)?;
+    Ok(SecretVaultStatus {
+        vault_exists: data_dir.join(SECRET_VAULT_FILENAME).is_file(),
+    })
+}
 
 // Segments skipped when walking an attached folder — non-content noise that
 // should never become a trace node (VCS, deps, build artifacts, OS cruft).
@@ -193,10 +218,33 @@ fn run_relay_factory_reset(bin: &str) -> Result<(), String> {
 /// mint a new root against an empty, local-mode sidecar.
 #[tauri::command]
 async fn factory_reset(app: tauri::AppHandle) -> Result<(), String> {
+    // Revoke app-owned Tor reachability before deleting the ACL. Otherwise the
+    // relay's deliberate local-mode reset window would be reachable through a
+    // still-running onion while the new vault screen waits for user input.
+    stop_owned_tor()?;
     let bin = resolve_relay_binary(&app)?;
     run_relay_factory_reset(&bin)?;
     std::thread::sleep(Duration::from_millis(5_250));
     run_relay_factory_reset(&bin)
+}
+
+/// Delete the encrypted Stronghold snapshot after JavaScript has unloaded its
+/// active handle. The per-install Argon2 salt is deliberately retained: it is
+/// not key material, and the native process survives a webview reload, so
+/// retaining it avoids a salt/snapshot race while the next empty vault is
+/// created. With no snapshot, bootstrap presents the create-vault flow.
+fn remove_secret_vault_snapshot(data_dir: &Path) -> Result<(), String> {
+    let path = data_dir.join(SECRET_VAULT_FILENAME);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("remove secure vault {}: {error}", path.display())),
+    }
+}
+
+#[tauri::command]
+fn factory_reset_vault(app: tauri::AppHandle) -> Result<(), String> {
+    remove_secret_vault_snapshot(&secret_data_dir(&app)?)
 }
 
 // --- native scan/reify substrate -----------------------------------------
@@ -314,16 +362,56 @@ async fn pick_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
 /// under it, relativePath = the path relative to the picked folder. Non-UTF8
 /// files are skipped (binaries aren't editable).
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ScannedFile {
     relative_path: String,
     content: String,
 }
 
+const MAX_SCAN_FILES: usize = 1_000;
+const MAX_SCAN_BYTES: u64 = 32 * 1024 * 1024;
+
+#[derive(Default)]
+struct ScanBudget {
+    files: usize,
+    bytes: u64,
+}
+
+impl ScanBudget {
+    fn reserve(&mut self, bytes: u64) -> Result<(), String> {
+        let next_files = self.files.saturating_add(1);
+        let next_bytes = self.bytes.saturating_add(bytes);
+        if next_files > MAX_SCAN_FILES {
+            return Err(format!(
+                "Scan exceeds the {}-file safety limit; choose a smaller folder",
+                MAX_SCAN_FILES
+            ));
+        }
+        if next_bytes > MAX_SCAN_BYTES {
+            return Err(format!(
+                "Scan exceeds the {} MiB safety limit; choose a smaller folder",
+                MAX_SCAN_BYTES / (1024 * 1024)
+            ));
+        }
+        self.files = next_files;
+        self.bytes = next_bytes;
+        Ok(())
+    }
+}
+
 #[tauri::command]
-fn scan_external(abs_path: String) -> Result<Vec<ScannedFile>, String> {
+async fn scan_external(abs_path: String) -> Result<Vec<ScannedFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || scan_external_blocking(abs_path))
+        .await
+        .map_err(|error| format!("Scan worker failed: {error}"))?
+}
+
+fn scan_external_blocking(abs_path: String) -> Result<Vec<ScannedFile>, String> {
     let path = PathBuf::from(&abs_path);
     let meta = fs::metadata(&path).map_err(|e| format!("stat {}: {}", path.display(), e))?;
     if meta.is_file() {
+        let mut budget = ScanBudget::default();
+        budget.reserve(meta.len())?;
         let bytes = fs::read(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
         let content = match String::from_utf8(bytes) {
             Ok(s) => s,
@@ -345,12 +433,18 @@ fn scan_external(abs_path: String) -> Result<Vec<ScannedFile>, String> {
         .canonicalize()
         .map_err(|e| format!("root folder does not exist: {}", e))?;
     let mut out = Vec::new();
-    scan_walk(&canon, &canon, &mut out)?;
+    let mut budget = ScanBudget::default();
+    scan_walk(&canon, &canon, &mut out, &mut budget)?;
     out.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     Ok(out)
 }
 
-fn scan_walk(dir: &Path, root: &Path, out: &mut Vec<ScannedFile>) -> Result<(), String> {
+fn scan_walk(
+    dir: &Path,
+    root: &Path,
+    out: &mut Vec<ScannedFile>,
+    budget: &mut ScanBudget,
+) -> Result<(), String> {
     let entries = fs::read_dir(dir)
         .map_err(|e| format!("failed to read {}: {}", dir.display(), e))?;
     for entry in entries {
@@ -365,8 +459,13 @@ fn scan_walk(dir: &Path, root: &Path, out: &mut Vec<ScannedFile>) -> Result<(), 
             Err(_) => continue,
         };
         if ft.is_dir() {
-            scan_walk(&entry.path(), root, out)?;
+            scan_walk(&entry.path(), root, out, budget)?;
         } else if ft.is_file() {
+            let bytes_len = match entry.metadata() {
+                Ok(metadata) => metadata.len(),
+                Err(_) => continue,
+            };
+            budget.reserve(bytes_len)?;
             let bytes = match fs::read(entry.path()) {
                 Ok(b) => b,
                 Err(_) => continue, // unreadable file: skip, don't abort the whole scan
@@ -635,13 +734,6 @@ fn peers_json_path() -> Result<PathBuf, String> {
     Ok(home.join(".tracer").join("peers.json"))
 }
 
-/// The pre-rename filename. Kept for one-shot migration (friends.json →
-/// peers.json); see migrate_legacy_friends_file.
-fn legacy_friends_json_path() -> Result<PathBuf, String> {
-    let home = dirs_home().ok_or("could not determine home directory")?;
-    Ok(home.join(".tracer").join("friends.json"))
-}
-
 const PEERS_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const PEERS_STALE_LOCK_AGE: Duration = Duration::from_secs(30);
 
@@ -722,56 +814,9 @@ fn acquire_peers_file_lock() -> Result<PeersFileLock, String> {
     PeersFileLock::acquire(&peers_lock_path()?, PEERS_LOCK_TIMEOUT)
 }
 
-/// One-shot migration: if peers.json is absent but the legacy friends.json
-/// exists, rename it into place. The relay and the MCP server each run the
-/// same check, so whichever process reads first performs the rename and the
-/// others find peers.json and skip. Idempotent — a second call is a no-op.
-/// We do NOT rewrite the JSON key here: serde reads `friends` into `peers`
-/// via the tolerant path below, and the next *write* persists the new shape.
-/// (If no write ever happens, the relay's own migration rewrites the key.)
-fn migrate_legacy_friends_file() {
-    let Ok(peers_path) = peers_json_path() else { return };
-    if peers_path.exists() {
-        return; // already migrated (or never legacy)
-    }
-    let Ok(legacy) = legacy_friends_json_path() else { return };
-    if !legacy.exists() {
-        return;
-    }
-    // Read + remap the JSON key `friends` → `peers` so the on-disk shape is
-    // correct post-rename, not just the filename.
-    if let Ok(raw) = fs::read_to_string(&legacy) {
-        if let Ok(mut generic) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if let Some(obj) = generic.as_object_mut() {
-                if let Some(f) = obj.remove("friends") {
-                    obj.insert("peers".to_string(), f);
-                }
-            }
-            if let Ok(remapped) = serde_json::to_string_pretty(&generic) {
-                let tmp = legacy.with_extension("json.tmp");
-                if fs::write(&tmp, remapped).is_ok() {
-                    if fs::rename(&tmp, &peers_path).is_ok() {
-                        let _ = fs::remove_file(&legacy);
-                        eprintln!("[zine] migrated access-policy file: friends.json -> peers.json");
-                        return;
-                    }
-                    let _ = fs::remove_file(&tmp);
-                }
-            }
-        }
-    }
-    // Fall back to a plain rename (key stays `friends` until next write; the
-    // relay's tolerant reader handles it the same way we do below).
-    let _ = fs::rename(&legacy, &peers_path);
-    eprintln!("[zine] migrated access-policy file: friends.json -> peers.json (filename only)");
-}
-
-/// Read peers.json tolerantly: accepts both the new `peers` key and the
-/// legacy `friends` key (written before the rename), so a partial/failed
-/// migration never locks the owner out. Returns a default (empty owner, no
-/// peers) if the file doesn't exist yet — that's the local-mode state.
+/// Read peers.json. Returns a default (empty owner, no peers) if the file
+/// doesn't exist yet — that's the local-mode state.
 fn read_peers_file_unlocked() -> Result<PeersFile, String> {
-    migrate_legacy_friends_file();
     let path = peers_json_path()?;
     if !path.exists() {
         return Ok(PeersFile {
@@ -782,20 +827,7 @@ fn read_peers_file_unlocked() -> Result<PeersFile, String> {
     }
     let raw = fs::read_to_string(&path)
         .map_err(|e| format!("read {}: {}", path.display(), e))?;
-    // Tolerant parse: accept `friends` as a legacy alias for `peers`.
-    if let Ok(mut generic) = serde_json::from_str::<serde_json::Value>(&raw) {
-        if let Some(obj) = generic.as_object_mut() {
-            if obj.get("peers").is_none() {
-                if let Some(f) = obj.remove("friends") {
-                    obj.insert("peers".to_string(), f);
-                }
-            }
-        }
-        serde_json::from_value::<PeersFile>(generic)
-            .map_err(|e| format!("parse {}: {}", path.display(), e))
-    } else {
-        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {}", path.display(), e))
-    }
+    serde_json::from_str(&raw).map_err(|e| format!("parse {}: {}", path.display(), e))
 }
 
 fn read_peers_file() -> Result<PeersFile, String> {
@@ -956,6 +988,29 @@ fn remove_writer(pubkey: String) -> Result<PeersState, String> {
 // re-derived and re-registered — no ~/.tracer/onion-key file (transport.md §3.4).
 
 static TOR_SPAWNED: AtomicBool = AtomicBool::new(false);
+static TOR_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
+
+fn stop_owned_tor() -> Result<(), String> {
+    let mut owned = TOR_CHILD
+        .lock()
+        .map_err(|_| "Tor process lock is poisoned".to_string())?;
+    if let Some(mut child) = owned.take() {
+        if child
+            .try_wait()
+            .map_err(|error| format!("inspect Tor process before reset: {error}"))?
+            .is_none()
+        {
+            child
+                .kill()
+                .map_err(|error| format!("stop Tor before factory reset: {error}"))?;
+            child
+                .wait()
+                .map_err(|error| format!("wait for Tor shutdown before factory reset: {error}"))?;
+        }
+    }
+    TOR_SPAWNED.store(false, Ordering::SeqCst);
+    Ok(())
+}
 
 /// Spawn the Tor daemon if it isn't already up. Mirrors spawn_relay: locate the
 /// binary, spawn detached, poll the SOCKS port for readiness. Returns "running"
@@ -992,7 +1047,7 @@ async fn spawn_tor(app: tauri::AppHandle) -> Result<String, String> {
     // Cookie auth for the control port — safer than a hashed password (no
     // shared secret to leak) and the standard ADD_ONION path. Detached so Tor
     // survives the app process if needed (matches the relay's spawn posture).
-    Command::new(&bin)
+    let child = Command::new(&bin)
         .arg("--SocksPort")
         .arg("9050")
         .arg("--ControlPort")
@@ -1007,11 +1062,15 @@ async fn spawn_tor(app: tauri::AppHandle) -> Result<String, String> {
         .arg("notice stdout")
         .spawn()
         .map_err(|e| format!("failed to spawn tor binary at {}: {}", bin, e))?;
+    *TOR_CHILD
+        .lock()
+        .map_err(|_| "Tor process lock is poisoned".to_string())? = Some(child);
 
     // Wait for the SOCKS port to accept connections (Tor's readiness signal).
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if Instant::now() > deadline {
+            let _ = stop_owned_tor();
             return Err("tor spawned but did not start listening within 15s".into());
         }
         if TcpStream::connect_timeout(&socks_addr, Duration::from_millis(200)).is_ok() {
@@ -1169,9 +1228,23 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let data_dir = secret_data_dir(app.handle())
+                .map_err(std::io::Error::other)?;
+            fs::create_dir_all(&data_dir)?;
+            app.handle().plugin(
+                tauri_plugin_stronghold::Builder::with_argon2(
+                    &data_dir.join(SECRET_SALT_FILENAME),
+                )
+                .build(),
+            )?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            secret_vault_status,
             spawn_relay,
             factory_reset,
+            factory_reset_vault,
             pick_folder,
             pick_file,
             scan_external,
@@ -1196,6 +1269,59 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn scanned_files_serialize_for_the_typescript_boundary() {
+        let value = serde_json::to_value(ScannedFile {
+            relative_path: "notes/draft.md".to_string(),
+            content: "draft".to_string(),
+        })
+        .expect("scanned file should serialize");
+
+        assert_eq!(value["relativePath"], "notes/draft.md");
+        assert_eq!(value["content"], "draft");
+        assert!(value.get("relative_path").is_none());
+    }
+
+    #[test]
+    fn scan_budget_rejects_oversized_batches_before_reading_more_files() {
+        let mut bytes = ScanBudget::default();
+        assert!(bytes.reserve(MAX_SCAN_BYTES).is_ok());
+        assert!(bytes.reserve(1).unwrap_err().contains("MiB safety limit"));
+
+        let mut files = ScanBudget::default();
+        for _ in 0..MAX_SCAN_FILES {
+            files.reserve(0).expect("file inside count budget");
+        }
+        assert!(files.reserve(0).unwrap_err().contains("file safety limit"));
+    }
+
+    #[test]
+    fn factory_reset_removes_only_the_secret_vault_snapshot() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "zine-secret-reset-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create secret reset test directory");
+        let vault = dir.join(SECRET_VAULT_FILENAME);
+        let salt = dir.join(SECRET_SALT_FILENAME);
+        let unrelated = dir.join("keep-me");
+        fs::write(&vault, b"encrypted").expect("write vault fixture");
+        fs::write(&salt, b"salt").expect("write salt fixture");
+        fs::write(&unrelated, b"other").expect("write unrelated fixture");
+
+        remove_secret_vault_snapshot(&dir).expect("reset vault snapshot");
+        remove_secret_vault_snapshot(&dir).expect("reset should be idempotent");
+
+        assert!(!vault.exists());
+        assert!(salt.exists(), "the live plugin's KDF salt must survive reload");
+        assert!(unrelated.exists());
+        fs::remove_dir_all(dir).expect("remove secret reset test directory");
+    }
 
     #[test]
     fn peers_file_lock_excludes_second_writer_and_cleans_up() {

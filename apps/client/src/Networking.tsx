@@ -21,13 +21,15 @@ import {
   setOwner,
   type PeersState,
 } from "./peers-store.js";
-import { deriveOnionAddress, onionAddressForKey } from "./onion-key.js";
+import { onionAddressForSecret } from "./onion-key.js";
 import {
   loadKeys,
   getNodeKeyId,
   setNodeKeyId,
   nodeVoice,
   getNodeKey,
+  nodeSecretKey,
+  secretKeyForVoice,
   type KeyEntry,
 } from "./keys-store.js";
 import {
@@ -38,6 +40,7 @@ import {
 } from "./doors-store.js";
 import { detectCoCitations, type CoCitation } from "./co-citation.js";
 import { addFollow, loadFollows, removeFollow, type FollowEntry } from "./follows-store.js";
+import { PubkeyDisplay } from "./PubkeyDisplay.js";
 
 type NetworkCategory = "node" | "seeds" | "following" | "peers" | "co-citations";
 
@@ -316,9 +319,7 @@ function FollowingSection() {
           <li key={entry.pubkey} className="settings-row peer-row">
             <span>
               {entry.label && <strong className="follow-label">{entry.label}</strong>}
-              <code className="peer-pubkey" title={entry.pubkey}>
-                {entry.pubkey.slice(0, 24)}…{entry.pubkey.slice(-8)}
-              </code>
+              <PubkeyDisplay pubkey={entry.pubkey} className="peer-pubkey" />
             </span>
             <button
               type="button"
@@ -342,7 +343,7 @@ function FollowingSection() {
         <input
           className="peer-add-input"
           type="text"
-          placeholder="npub1… or hex pubkey"
+          placeholder="pubkey (64-hex) or npub1…"
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
         />
@@ -402,10 +403,9 @@ function NodeSection() {
     // The owner's onion address is pure crypto — computable without Tor. It
     // follows the owner key, so recompute when the selection changes.
     try {
-      const ownerKey = getNodeKey();
-      const { address } = ownerKey
-        ? deriveOnionAddress(ownerKey.secretHex)
-        : deriveOnionAddress();
+      const ownerSecret = nodeSecretKey();
+      if (!ownerSecret) throw new Error("NODE secret unavailable");
+      const { address } = onionAddressForSecret(ownerSecret);
       setOnionAddress(address);
     } catch {
       // voice not yet generated — will compute on next render
@@ -416,10 +416,10 @@ function NodeSection() {
    *  crypto-derived one. Returns the address on success, throws on mismatch. */
   async function registerOnion(
     invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>,
-    secretHex: string,
+    secret: Uint8Array,
     expected: string,
   ): Promise<string> {
-    const { seedBase64 } = onionAddressForKey(secretHex);
+    const { seedBase64 } = onionAddressForSecret(secret);
     const reported = (await invoke("setup_onion", { seedBase64 })) as string;
     if (reported !== expected) {
       throw new Error(
@@ -441,10 +441,9 @@ function NodeSection() {
     setKeys(loadKeys());
     setError(null);
     try {
-      const ownerKey = getNodeKey();
-      const { address } = ownerKey
-        ? deriveOnionAddress(ownerKey.secretHex)
-        : deriveOnionAddress();
+      const ownerSecret = nodeSecretKey();
+      if (!ownerSecret) throw new Error("NODE secret unavailable");
+      const { address } = onionAddressForSecret(ownerSecret);
       setOnionAddress(address);
     } catch {
       setOnionAddress(null);
@@ -475,13 +474,17 @@ function NodeSection() {
       const ownerKey = getNodeKey();
       if (!ownerKey) throw new Error("no owner key set");
       const live: string[] = [];
-      live.push(await registerOnion(invoke, ownerKey.secretHex, onionAddress ?? ""));
+      const ownerSecret = secretKeyForVoice(ownerKey.pubkey);
+      if (!ownerSecret) throw new Error("owner key is locked");
+      live.push(await registerOnion(invoke, ownerSecret, onionAddress ?? ""));
       const doorErrors: string[] = [];
       for (const door of doors) {
         const key = keys.find((k) => k.id === door.keyId);
         if (!key) continue;
         try {
-          live.push(await registerOnion(invoke, key.secretHex, door.address));
+          const secret = secretKeyForVoice(key.pubkey);
+          if (!secret) throw new Error(`${key.label} is locked`);
+          live.push(await registerOnion(invoke, secret, door.address));
         } catch (e) {
           doorErrors.push(`${key.label}: ${String(e)}`);
         }
@@ -513,7 +516,9 @@ function NodeSection() {
       if (key && door) {
         try {
           const { invoke } = await import("@tauri-apps/api/core");
-          const addr = await registerOnion(invoke, key.secretHex, door.address);
+          const secret = secretKeyForVoice(key.pubkey);
+          if (!secret) throw new Error(`${key.label} is locked`);
+          const addr = await registerOnion(invoke, secret, door.address);
           setTorStatus({
             kind: "live",
             addresses: [...torStatus.addresses, addr],
@@ -797,9 +802,7 @@ function PeersSection() {
       <div className="owner-section settings-row">
         <div className="owner-info">
           <span className="owner-label">Owner:</span>
-          <code className="owner-pubkey" title={state.owner}>
-            {state.owner ? `${state.owner.slice(0, 16)}…` : "(not set)"}
-          </code>
+          <PubkeyDisplay pubkey={state.owner || "(not set)"} className="owner-pubkey" />
         </div>
         <div className="owner-status">
           {state.networkedMode ? (
@@ -824,9 +827,7 @@ function PeersSection() {
       <ul className="peer-list">
         {state.peers.map((pk) => (
           <li key={pk} className="settings-row peer-row">
-            <code className="peer-pubkey" title={pk}>
-              {pk.slice(0, 24)}…{pk.slice(-8)}
-            </code>
+            <PubkeyDisplay pubkey={pk} className="peer-pubkey" />
             <button
               type="button"
               className="peer-delete"
@@ -838,7 +839,7 @@ function PeersSection() {
           </li>
         ))}
         {state.peers.length === 0 && state.networkedMode && (
-          <li className="peer-empty">No peers yet — paste an npub or pubkey below.</li>
+          <li className="peer-empty">No peers yet — paste a pubkey or npub below.</li>
         )}
       </ul>
 
@@ -852,7 +853,7 @@ function PeersSection() {
         <input
           className="peer-add-input"
           type="text"
-          placeholder="Paste their npub1… or hex pubkey"
+          placeholder="Paste their hex pubkey or npub1…"
           value={draft}
           onChange={(ev) => setDraft(ev.target.value)}
         />
@@ -869,9 +870,7 @@ function PeersSection() {
       <ul className="peer-list">
         {state.writers.map((pk) => (
           <li key={pk} className="settings-row peer-row">
-            <code className="peer-pubkey" title={pk}>
-              {pk.slice(0, 24)}…{pk.slice(-8)}
-            </code>
+            <PubkeyDisplay pubkey={pk} className="peer-pubkey" />
             <button
               type="button"
               className="peer-delete"
@@ -896,7 +895,7 @@ function PeersSection() {
         <input
           className="peer-add-input"
           type="text"
-          placeholder="Paste the agent’s npub1… or hex pubkey"
+          placeholder="Paste the agent’s hex pubkey or npub1…"
           value={writerDraft}
           onChange={(ev) => setWriterDraft(ev.target.value)}
         />

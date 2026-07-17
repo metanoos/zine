@@ -6,16 +6,24 @@
   --surface-raised: #f2efe7;
   --surface-sunken: #d3cfc5;
   --ink: #17171a;
-  --ink-dim: #6b6a66;
+  --ink-dim: #5b5a56;
   --accent: #b87d05;
   --accent-soft: #b87d051f;
   --accent-surface: #e8d5ae;
   --on-accent: #5c3d00;
-  --reject-fg: #b23a48;
-  --reject-bg: #b23a481f;
-  --shielded-fg: #2563eb;
+  --reject-fg: #c9182b;
+  --reject-bg: #c9182b1f;
+  --tree-icon-idle-fg: #74716b;
+  --context-mounted-fg: #a65600;
+  --context-included-fg: #a66300;
+  --scan-fg: #2563eb;
+  --shielded-fg: var(--reject-fg);
+  --mint-fg: #2d6a2f;
+  --coin-fg: #2d6a2f;
   --rule: #17171a24;
   --rule-strong: #17171a3d;
+  /* Non-editable traces are reading surfaces, not black writing canvases. */
+  --readonly-surface: color-mix(in srgb, var(--surface-raised) 88%, var(--surface));
 
   --font-display: "Big Shoulders Display", sans-serif;
   --font-body: "Newsreader", Georgia, serif;
@@ -52,14 +60,19 @@
     --surface-raised: #171719;
     --surface-sunken: #050506;
     --ink: #ecebe6;
-    --ink-dim: #8f8d87;
+    --ink-dim: #a6a39c;
     --accent: #f5a919;
     --accent-soft: #f5a9191f;
     --accent-surface: #271c06;
     --on-accent: #2b1c00;
     --reject-fg: #e06577;
     --reject-bg: #e0657722;
-    --shielded-fg: #6ea8ff;
+    --tree-icon-idle-fg: #8f8d87;
+    --context-mounted-fg: #f5a919;
+    --context-included-fg: #c58d2d;
+    --scan-fg: #6ea8ff;
+    --mint-fg: #82cf85;
+    --coin-fg: #82cf85;
     --rule: #ecebe61f;
     --rule-strong: #ecebe63a;
 
@@ -88,14 +101,19 @@ html[data-theme="dark"] {
   --surface-raised: #171719 !important;
   --surface-sunken: #050506 !important;
   --ink: #ecebe6 !important;
-  --ink-dim: #8f8d87 !important;
+  --ink-dim: #a6a39c !important;
   --accent: #f5a919 !important;
   --accent-soft: #f5a9191f !important;
   --accent-surface: #271c06 !important;
   --on-accent: #2b1c00 !important;
   --reject-fg: #e06577 !important;
   --reject-bg: #e0657722 !important;
-  --shielded-fg: #6ea8ff !important;
+  --tree-icon-idle-fg: #8f8d87 !important;
+  --context-mounted-fg: #f5a919 !important;
+  --context-included-fg: #c58d2d !important;
+  --scan-fg: #6ea8ff !important;
+  --mint-fg: #82cf85 !important;
+  --coin-fg: #82cf85 !important;
   --rule: #ecebe61f !important;
   --rule-strong: #ecebe63a !important;
 
@@ -120,14 +138,19 @@ html[data-theme="light"] {
   --surface-raised: #f2efe7 !important;
   --surface-sunken: #d3cfc5 !important;
   --ink: #17171a !important;
-  --ink-dim: #6b6a66 !important;
+  --ink-dim: #5b5a56 !important;
   --accent: #b87d05 !important;
   --accent-soft: #b87d051f !important;
   --accent-surface: #e8d5ae !important;
   --on-accent: #3d2800 !important;
-  --reject-fg: #b23a48 !important;
-  --reject-bg: #b23a481f !important;
-  --shielded-fg: #2563eb !important;
+  --reject-fg: #c9182b !important;
+  --reject-bg: #c9182b1f !important;
+  --tree-icon-idle-fg: #74716b !important;
+  --context-mounted-fg: #a65600 !important;
+  --context-included-fg: #a66300 !important;
+  --scan-fg: #2563eb !important;
+  --mint-fg: #2d6a2f !important;
+  --coin-fg: #2d6a2f !important;
   --rule: #17171a24 !important;
   --rule-strong: #17171a3d !important;
 
@@ -149,6 +172,13 @@ html[data-theme="light"] {
 
 * {
   box-sizing: border-box;
+}
+
+/* Lucide's default 2-unit strokes get faint when reduced to the press's
+   12–14px chrome. One global weight keeps tree, tab, palette, and action
+   glyphs optically consistent without per-component overrides. */
+.lucide {
+  stroke-width: 2.25;
 }
 
 /* Scrollbars — slim, themed to the surface/rule tokens so they read as chrome
@@ -635,7 +665,9 @@ html[data-theme="light"] .rail-brand-wordmark {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .press-loading-spinner {
+  .press-loading-spinner,
+  .action-palette-replay-spinner,
+  .action-palette-replay-thumb.is-advancing {
     animation: none;
   }
 }
@@ -832,6 +864,9 @@ html[data-theme="light"] .rail-brand-wordmark {
  * reading content. */
 
 .about-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
   margin: 0;
   font-family: var(--font-display);
   font-weight: 300;
@@ -839,6 +874,16 @@ html[data-theme="light"] .rail-brand-wordmark {
   font-size: 1.85rem;
   line-height: 1.2;
   color: var(--accent);
+}
+
+.about-title-number {
+  flex: none;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+  letter-spacing: 0.08em;
 }
 
 /* Each telling is its own reading column. */
@@ -865,7 +910,8 @@ html[data-theme="light"] .rail-brand-wordmark {
 }
 
 .about-section {
-  display: inline-block;
+  display: inline-flex;
+  align-items: baseline;
   padding: 0.35rem 0.55rem;
   border: 1px solid var(--rule);
   border-radius: 999px;
@@ -876,6 +922,15 @@ html[data-theme="light"] .rail-brand-wordmark {
   line-height: 1.2;
   text-decoration: none;
   cursor: pointer;
+}
+
+.about-section-number {
+  flex: none;
+  margin-right: 0.4rem;
+  color: var(--accent);
+  font-size: 0.88em;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
 }
 
 .about-section:hover,
@@ -903,12 +958,25 @@ html[data-theme="light"] .rail-brand-wordmark {
 }
 
 .about-section-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
   margin: 0.25rem 0 0;
   font-family: var(--font-display);
   font-size: 1.3rem;
   font-weight: 300;
   line-height: 1.25;
   color: var(--ink);
+}
+
+.about-section-title-number {
+  flex: none;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+  letter-spacing: 0.06em;
 }
 
 /* Manifesto / plain-terms prose: flowing paragraphs, no per-beat counter. */
@@ -927,14 +995,36 @@ html[data-theme="light"] .rail-brand-wordmark {
   color: var(--ink);
 }
 
-.about-prose a {
+.about-prose a,
+.about-prose-link {
   color: var(--accent);
   text-decoration-color: color-mix(in srgb, var(--accent) 55%, transparent);
   text-underline-offset: 0.16em;
 }
 
-.about-prose a:hover {
+.about-prose-link {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  line-height: inherit;
+  text-align: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.about-prose a:hover,
+.about-prose-link:hover,
+.about-prose-link:focus-visible {
   text-decoration-color: var(--accent);
+}
+
+.about-prose-link:focus-visible {
+  border-radius: 2px;
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* Inline and block code emitted by the About Markdown renderer. */
@@ -1252,6 +1342,133 @@ html[data-theme="light"] .rail-brand-wordmark {
   background: var(--rule);
 }
 
+/* Canonical raw-pubkey presentation: first 4...last 4 plus one copy action.
+   Surfaces may add typography or a container treatment, but not reformat the
+   key themselves. */
+.pubkey-display {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.pubkey-display-code {
+  min-width: 0;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  white-space: nowrap;
+}
+
+.pubkey-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+
+.pubkey-copy-btn:hover {
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+
+/* Canonical voice identity chip. The command-palette selector and every file
+   tab's voice bar render this exact label + pubkey + copy composition. */
+.voice-chip {
+  display: inline-flex;
+  align-items: stretch;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+.voice-chip:hover,
+.voice-chip:focus-within {
+  border-color: currentColor;
+}
+
+.voice-chip.is-selected {
+  border-color: currentColor;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.voice-chip-action {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0.28rem;
+  min-width: 0;
+  min-height: 1.45rem;
+  padding: 0.08rem 0.28rem;
+  border: none;
+  border-radius: 3px 0 0 3px;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1.3;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.voice-chip-action:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.voice-chip-action:focus-visible {
+  outline: 1px solid currentColor;
+  outline-offset: -1px;
+}
+
+.voice-chip-label {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 9rem;
+  overflow: hidden;
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-chip-pubkey {
+  flex: 0 0 auto;
+  min-width: max-content;
+  color: currentColor;
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  letter-spacing: 0.02em;
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.voice-chip-copy {
+  align-self: center;
+  margin-right: 0.08rem;
+  color: currentColor;
+  opacity: 0.72;
+}
+
+.voice-chip:hover .voice-chip-copy,
+.voice-chip-copy:focus-visible {
+  opacity: 1;
+}
+
 /* Keys view — Nostr keychain. Card layout differs from models cards: a left
    preview swatch (the label rendered in the key's own font + colors) anchors
    a right meta column (label input, delete/copy actions, pubkey). The swatch
@@ -1405,9 +1622,10 @@ html[data-theme="light"] .rail-brand-wordmark {
   color: var(--accent);
 }
 
-/* npub / nsec rows. Label + truncated monospace value + copy (and reveal for
-   nsec). The value truncates with an ellipsis; the full string is in the
-   title for hover/tooltip. Mirrors the models-field visual weight. */
+/* Raw public/private key rows. Hex is the primary format because it matches
+   protocol and relay surfaces; compact npub/nsec controls retain the NIP-19
+   sharing formats without giving them equal visual weight. Secret values stay
+   masked and never appear in hover tooltips. */
 .key-value-row {
   display: flex;
   align-items: center;
@@ -1423,7 +1641,7 @@ html[data-theme="light"] .rail-brand-wordmark {
   letter-spacing: 0.05em;
   font-size: 0.6rem;
   opacity: 0.7;
-  width: 2.2rem;
+  width: 3rem;
 }
 
 .key-value-text {
@@ -1437,6 +1655,38 @@ html[data-theme="light"] .rail-brand-wordmark {
 }
 
 .key-value-row:hover .key-value-text {
+  color: var(--ink);
+}
+
+.key-pubkey-display {
+  flex: 1 1 auto;
+  color: var(--ink-dim);
+}
+
+.key-value-row:hover .key-pubkey-display {
+  color: var(--ink);
+}
+
+.key-format-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 2.5rem;
+  height: 1.35rem;
+  padding: 0;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+
+.key-format-copy-btn:hover {
+  border-color: var(--ink-dim);
   color: var(--ink);
 }
 
@@ -1991,6 +2241,24 @@ html[data-theme="light"] .rail-brand-wordmark {
   text-transform: uppercase;
 }
 
+.about-category-label {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.about-category-number {
+  flex: none;
+  color: var(--ink-dim);
+  font-size: 0.82em;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
+.about-category.active .about-category-number {
+  color: var(--accent);
+}
+
 .networking-category.active .networking-category-label,
 .about-category.active .about-category-label {
   color: var(--accent);
@@ -2363,8 +2631,15 @@ html[data-theme="light"] .rail-brand-wordmark {
   }
 
   .about-category-label {
+    flex-direction: column;
+    align-items: center;
+    gap: 0.08rem;
     font-size: 0.61rem;
     letter-spacing: 0.02em;
+  }
+
+  .about-category-number {
+    font-size: 0.72em;
   }
 
   .about-section-list {
@@ -2761,56 +3036,104 @@ html[data-theme="light"] .rail-brand-wordmark {
   overflow: hidden;
 }
 
-/* Settings button pinned to the top of the sidebar. */
-.sidebar-settings-bar {
-  flex: 0 0 auto;
+/* Onboarding and reset controls sit at the directory's lower-right edge. */
+.sidebar-directory-tree {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+}
+.sidebar-directory-footer {
+  position: absolute;
+  left: 0.6rem;
+  right: 0.55rem;
+  bottom: 0.55rem;
+  z-index: 1;
   display: flex;
   align-items: center;
-  justify-content: flex-start;
-  padding: 0.3rem 0.6rem;
-  border-bottom: 1px solid var(--rule);
+  gap: 0.5rem;
+  pointer-events: none;
 }
-.sidebar-settings-btn {
-  opacity: 0.6;
+.sidebar-sort-btn,
+.sidebar-help-btn,
+.sidebar-reset-btn {
+  flex: 0 0 auto;
+  background: var(--surface);
+  opacity: 0.5;
+  pointer-events: auto;
 }
-.sidebar-settings-btn:hover {
+.sidebar-sort-control {
+  position: relative;
+  pointer-events: auto;
+}
+.sidebar-help-btn {
+  margin-left: auto;
+}
+.sidebar-sort-btn.active,
+.sidebar-sort-btn:hover,
+.sidebar-sort-btn:focus-visible,
+.sidebar-help-btn:hover,
+.sidebar-help-btn:focus-visible,
+.sidebar-reset-btn:hover,
+.sidebar-reset-btn:focus-visible {
   opacity: 1;
 }
+.sidebar-sort-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 0.35rem);
+  display: grid;
+  min-width: 9.5rem;
+  padding: 0.3rem;
+  background: var(--surface-raised);
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  font-family: var(--font-mono);
+}
+.sidebar-sort-label {
+  padding: 0.25rem 0.45rem 0.35rem;
+  color: var(--ink-dim);
+  font-size: 0.62rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.sidebar-sort-option {
+  display: grid;
+  grid-template-columns: 0.8rem 1fr;
+  gap: 0.35rem;
+  align-items: center;
+  width: 100%;
+  padding: 0.32rem 0.45rem;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.72rem;
+  text-align: left;
+  cursor: pointer;
+}
+.sidebar-sort-option:hover,
+.sidebar-sort-option:focus-visible {
+  background: var(--surface-sunken);
+}
+.sidebar-sort-option[aria-checked="true"] {
+  color: var(--accent);
+}
 
-/* Settings modal (factory reset). Reuses .confirm-dialog. */
-.settings-dialog {
+/* Factory reset uses the same title, copy, and action hierarchy as the app's
+   other compact confirmation modals. */
+.factory-reset-dialog {
+  box-sizing: border-box;
+  width: min(30rem, calc(100vw - 2rem));
   max-width: 30rem;
 }
-.settings-heading {
-  margin: 0 0 0.75rem;
-  font-family: var(--font-mono);
-  font-size: 0.85rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--ink);
+.factory-reset-title {
+  margin-bottom: 0.65rem;
 }
-.settings-section {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-.settings-section-heading {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+.factory-reset-message {
   color: var(--ink-dim);
-}
-.settings-section-blurb {
-  margin: 0 0 0.5rem;
-  font-size: 0.78rem;
-  line-height: 1.45;
-  color: var(--ink-dim);
-}
-.settings-section-blurb code {
-  font-family: var(--font-mono);
-  font-size: 0.74rem;
 }
 
 /* Switch-folder button pinned to the top of the sidebar: detach the current
@@ -3215,7 +3538,7 @@ body.sidebar-resizing {
 .tree {
   flex: 1 1 0;
   min-height: 0;
-  padding-bottom: 1rem;
+  padding-bottom: 2.5rem;
   overflow-y: auto;
   overscroll-behavior: contain;
   /* cqh makes each generated system region's cap relative to the directory
@@ -3223,7 +3546,15 @@ body.sidebar-resizing {
   container-type: size;
 }
 
-/* Mint and Oblivion include their header row in the half-list cap. Their
+/* The working tree, Scan, Mint, and Oblivion are stable top-level landmarks. Keep
+   their product-defined order and separate the regions without introducing
+   rules between ordinary nested folders. Their headers intentionally inherit
+   the same height as every other directory row. */
+.tree > .tree-node-root + .tree-node-root {
+  border-top: 1px solid var(--rule-strong);
+}
+
+/* Scan, Mint, and Oblivion include their header row in the half-list cap. Their
    contents scroll independently once they reach that limit, leaving at least
    half of the directory listing available to the other regions. */
 .tree-node-system {
@@ -3260,12 +3591,12 @@ body.sidebar-resizing {
   background: var(--surface-sunken);
 }
 
-/* The active tab of the focused panel. A raised row plus a heavier gold inset
+/* The active tab of the focused panel. A raised row plus a thick gold inset
    at the leading edge mirrors the tab's gold top edge without conflating focus
-   with the full gold ring used for an explicitly mounted scope. */
+   with injected-context state. */
 .tree-row-tab-focused {
   background: var(--surface-raised);
-  box-shadow: inset 3px 0 0 var(--accent);
+  box-shadow: inset 4px 0 0 var(--accent);
 }
 
 .tree-row-tab-focused .tree-name {
@@ -3275,25 +3606,93 @@ body.sidebar-resizing {
 
 .tree-icon {
   flex: none;
-  color: var(--ink-dim);
+  color: var(--tree-icon-idle-fg);
 }
 
-/* Gold marks effective scope; a shielded boundary goes blue. Directly
-   mounting that trace lifts its own boundary. */
+/* Context state is intentionally categorical: gold is the one exact mount,
+   muted gold is inherited inclusion beneath a folder mount, red marks the
+   explicit shield boundary, and ordinary grey is unmounted. */
 .tree-icon-in-scope {
-  color: var(--accent);
+  color: var(--context-mounted-fg);
+}
+
+.tree-icon-included {
+  color: var(--context-included-fg);
 }
 
 .tree-icon-shielded {
   color: var(--shielded-fg);
 }
 
-/* Passive icon slot. Clicks bubble to the row's ordinary activate behavior. */
+.tree-icon-scan {
+  color: var(--scan-fg);
+}
+
+.tree-icon-oblivion {
+  color: var(--ink-dim);
+}
+
+.tree-icon-mint {
+  color: var(--mint-fg);
+}
+
+.tree-icon-coin {
+  color: var(--coin-fg);
+}
+
 .tree-icon-slot {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   color: inherit;
   line-height: 0;
+}
+
+.tree-expand-btn,
+.tree-expand-spacer {
+  flex: none;
+  width: 0.75rem;
+  height: 1rem;
+}
+
+.tree-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+
+.tree-expand-btn:hover,
+.tree-expand-btn:focus-visible {
+  background: var(--surface-raised);
+  color: var(--ink);
+  outline: none;
+}
+
+/* Context mounting belongs to the glyph, not the row. Keep the button's
+   footprint identical to the passive system icon slot. */
+.tree-icon-btn {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  margin: -0.1rem;
+  padding: 0.1rem;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tree-icon-btn:hover,
+.tree-icon-btn:focus-visible {
+  background: var(--accent-soft);
+  outline: none;
 }
 
 .tree-system-icon {
@@ -3305,22 +3704,7 @@ body.sidebar-resizing {
   text-overflow: ellipsis;
 }
 
-.tree-attestation-badge {
-  flex: none;
-  min-width: 1.15rem;
-  margin-left: auto;
-  padding: 0.05rem 0.3rem;
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
-  border-radius: 999px;
-  color: var(--ink-dim);
-  background: var(--surface);
-  font-size: 0.68rem;
-  line-height: 1.1;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-
-/* New folder / New file on the mounted-folder row — pushed right so the
+/* New folder / New file on the root row — pushed right so the
    label still reads as the primary expand/collapse target. */
 .tree-row-actions {
   display: flex;
@@ -3330,23 +3714,19 @@ body.sidebar-resizing {
   flex: none;
 }
 
-/* Only explicit mounts own the whole row container. Descendants brought into
-   scope by a mounted folder receive a gold icon without this row treatment. */
-.tree-row-mounted {
-  background: var(--accent-soft);
-  box-shadow: inset 0 0 0 1px var(--accent);
+/* Explorer selection uses a thin ring and soft highlight so one or many
+   selected traces remain obvious without competing with the thicker focus
+   marker at the leading edge. */
+.tree-row-selected {
+  background: var(--surface-sunken);
+  box-shadow: inset 0 0 0 1px var(--rule-strong);
 }
 
-/* Preserve both signals when the focused tab is also an explicit mount. */
-.tree-row-mounted.tree-row-tab-focused {
+/* Preserve both signals when the focused tab is also selected in the tree. */
+.tree-row-selected.tree-row-tab-focused {
   box-shadow:
-    inset 0 0 0 1px var(--accent),
-    inset 3px 0 0 var(--accent);
-}
-
-.tree-row-shielded .tree-name {
-  color: var(--ink-dim);
-  opacity: 0.72;
+    inset 0 0 0 1px var(--rule-strong),
+    inset 4px 0 0 var(--accent);
 }
 
 /* Drag & drop */
@@ -4014,20 +4394,22 @@ body.panel-resizing {
   color: var(--accent);
 }
 
-/* Replay state is explicit text, not an edge marker. That matters because the
+/* Read-only state is explicit text, not an edge marker. Replay projections and
+   immutable Coins share this badge instead of presenting two unrelated modes.
+   That matters because the
    tab list is vertically flipped to put its native scrollbar above the tabs:
    a top/bottom border changes apparent meaning after the counter-transform. */
-.tab-replay-badge {
+.tab-readonly-badge {
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   height: 0.95rem;
   padding: 0 0.28rem;
-  border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--rule-strong));
+  border: 1px solid var(--rule-strong);
   border-radius: 2px;
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 9%, var(--surface-raised));
+  color: var(--ink-dim);
+  background: var(--readonly-surface);
   font-family: var(--font-mono);
   font-size: 0.54rem;
   font-weight: 650;
@@ -4035,8 +4417,8 @@ body.panel-resizing {
   line-height: 1;
 }
 
-.tab.trace-active .tab-replay-badge {
-  border-color: var(--accent);
+.tab.trace-active .tab-readonly-badge {
+  border-color: color-mix(in srgb, var(--ink-dim) 62%, var(--rule-strong));
 }
 
 .tab-label {
@@ -4056,7 +4438,17 @@ body.panel-resizing {
   opacity: 0.55;
 }
 .tab.tab-in-scope .tab-status {
-  color: var(--accent);
+  color: var(--context-mounted-fg);
+  opacity: 1;
+}
+
+.tab .tab-status.tab-status-coin {
+  color: var(--coin-fg);
+  opacity: 1;
+}
+
+.tab .tab-status.tab-status-scan {
+  color: var(--scan-fg);
   opacity: 1;
 }
 
@@ -4084,9 +4476,50 @@ body.panel-resizing {
   opacity: 1;
 }
 
-.tab-close:hover {
+.tab-close:hover:not(:disabled) {
   background: var(--rule-strong);
   color: var(--ink);
+}
+
+.tab-close:disabled {
+  cursor: wait;
+  opacity: 0.35;
+}
+
+.tab.tab-replay {
+  max-width: 22rem;
+}
+
+.replay-tab-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  flex: none;
+  padding-left: 0.15rem;
+  border-left: 1px solid var(--rule-strong);
+}
+
+.replay-tab-action {
+  height: 1.2rem;
+  padding: 0 0.3rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--ink-dim);
+  font: 500 0.58rem/1 var(--font-mono);
+  cursor: pointer;
+}
+
+.replay-tab-action:hover:not(:disabled),
+.replay-tab-action:focus-visible {
+  border-color: var(--accent);
+  color: var(--ink);
+  outline: none;
+}
+
+.replay-tab-action:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 /* Tab drag & drop — the dragged tab fades; the insertion point is marked by a
@@ -4255,7 +4688,7 @@ body.panel-resizing {
   align-items: center;
   gap: 0.5rem;
   flex: 0 0 auto;
-  padding: 0.28rem 0.9rem;
+  padding: 0.5rem 0.9rem;
   border-top: 1px solid var(--rule);
   background: var(--surface-sunken);
   min-width: 0;
@@ -4291,6 +4724,23 @@ body.panel-resizing {
 }
 .panel-inbound-summary:disabled {
   cursor: default;
+}
+
+/* Attestations complete the document footer, directly below citations-in.
+   Counts are relay-reachable observations, not a claim of a global total. */
+.panel-attestation-row {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 0.5rem 0.9rem;
+  border-top: 1px solid var(--rule);
+  background: var(--surface-sunken);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--ink-faint, var(--ink-dim));
 }
 /* Each signal cluster (forked-by / cited-by). Icon + label, then
    the chips. flex-wrap so a long list drops to a second line within the row. */
@@ -4454,7 +4904,7 @@ body.panel-resizing {
   align-items: center;
   gap: 0.3rem;
   min-width: 0;
-  padding: 0.32rem 0.9rem;
+  padding: 0.5rem 0.9rem;
 }
 .panel-outbound-summary {
   display: inline-flex;
@@ -4505,11 +4955,10 @@ body.panel-resizing {
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-/* Document voice legend. A sibling strip directly beneath outgoing citations:
-   citations answer "what does this text point to?"; voices answer "who wrote
-   these passages?". It shares the scroll-native top widget, so readers decode
-   the colors before entering the body and the provenance header scrolls away
-   as one unit. */
+/* Document voice legend. The outer strip sits above outgoing citations, leaving
+   the paired citation bars flush against the beginning and end of the file
+   body. It shares the scroll-native top widget, so the provenance header still
+   scrolls away as one unit. */
 .panel-voices-bar {
   position: relative;
   z-index: 3;
@@ -4519,7 +4968,7 @@ body.panel-resizing {
   gap: 0.45rem;
   width: 100%;
   min-width: 0;
-  padding: 0.3rem 0.9rem;
+  padding: 0.5rem 0.9rem;
   border-bottom: 1px solid var(--rule);
   background: var(--surface-sunken);
   container-type: inline-size;
@@ -4542,44 +4991,7 @@ body.panel-resizing {
   min-width: 0;
 }
 .panel-voice-chip {
-  display: inline-flex;
-  align-items: center;
   max-width: 100%;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-.panel-voice-chip:hover,
-.panel-voice-chip.is-selected {
-  border-color: var(--rule-strong, var(--ink-dim));
-}
-.panel-voice-chip.is-selected {
-  box-shadow: 0 0 0 1px var(--accent);
-}
-.panel-voice-chip-identity {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.28rem;
-  min-width: 0;
-  max-width: 100%;
-  padding: 0.08rem 0.32rem;
-  font-size: 0.7rem;
-  line-height: 1.3;
-  white-space: nowrap;
-}
-.panel-voice-chip-name {
-  min-width: 0;
-  max-width: 9rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.panel-voice-chip-key {
-  opacity: 0.72;
-  font-family: var(--font-mono);
-  font-size: 0.58rem;
 }
 .panel-voice-more {
   padding: 0.08rem 0.2rem;
@@ -4594,8 +5006,8 @@ body.panel-resizing {
 
 /* The selected chip expands details inside the provenance header. Keeping the
    card in flow moves the body down instead of obscuring the very passages the
-   reader just isolated. The full npub remains copyable while the optional
-   nickname is explicitly local. */
+   reader just isolated. The raw pubkey is primary while npub remains a compact
+   secondary copy format; the optional nickname is explicitly local. */
 .panel-voice-popover {
   position: relative;
   flex: 1 0 100%;
@@ -4621,8 +5033,7 @@ body.panel-resizing {
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.panel-voice-popover-close,
-.panel-voice-copy {
+.panel-voice-popover-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4636,9 +5047,29 @@ body.panel-resizing {
   color: var(--ink-dim);
   cursor: pointer;
 }
-.panel-voice-popover-close:hover,
-.panel-voice-copy:hover {
+.panel-voice-popover-close:hover {
   background: var(--surface-sunken);
+  color: var(--ink);
+}
+.panel-voice-format-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 2.5rem;
+  height: 1.35rem;
+  padding: 0;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+.panel-voice-format-copy:hover {
+  border-color: var(--ink-dim);
   color: var(--ink);
 }
 .panel-voice-full-key {
@@ -4647,16 +5078,19 @@ body.panel-resizing {
   gap: 0.35rem;
   min-width: 0;
 }
-.panel-voice-full-key code {
+.panel-voice-pubkey-display {
   flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--ink);
   font-family: var(--font-mono);
   font-size: 0.65rem;
   line-height: 1.35;
+}
+.panel-voice-full-key code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .panel-voice-coverage,
 .panel-voice-local-label {
@@ -4684,13 +5118,6 @@ body.panel-resizing {
 @container voicelegend (max-width: 18rem) {
   .panel-voice-list { flex-basis: 100%; }
   .panel-voice-chip { min-width: 0; }
-  .panel-voice-chip-name { flex: 0 0 auto; }
-  .panel-voice-chip-key {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
   .panel-voice-popover { padding: 0.45rem; }
   .panel-voice-nickname {
     grid-template-columns: minmax(0, 1fr);
@@ -4850,6 +5277,13 @@ html[data-theme="light"] .editor-host {
   --editor-surface: #fbf8f0;
 }
 
+/* Replay projections share the raised reading surface used by immutable
+   Coins. This deliberately overrides the pure-black dark editor canvas. */
+.panel-replay-frozen .editor-host,
+.panel-replay-mounted .editor-host {
+  --editor-surface: var(--readonly-surface);
+}
+
 /* CodeMirror block-widget portal targets for page chrome. They must have no
    vertical margins (CM measures block widgets directly); the rows inside own
    their borders and padding. */
@@ -4879,7 +5313,8 @@ html[data-theme="light"] .editor-host {
 
 /* Paint the unused area below the footer from the row itself, so the inset
    above it keeps the editor surface rather than inheriting the footer fill. */
-.editor-chrome-bottom .panel-inbound-row {
+.editor-chrome-bottom .panel-attestation-row,
+.editor-chrome-bottom .panel-inbound-row:last-child {
   box-shadow: 0 100vh 0 100vh var(--surface-sunken);
 }
 
@@ -5657,6 +6092,374 @@ html[data-theme="light"] .editor-host {
   gap: 0.8rem;
 }
 
+/* Headless-to-desktop handoff inspector. The locator is only an address; the
+ * panel renders its nucleus after verification and any ancestry it can reach. */
+.trace-locator-dialog {
+  width: min(860px, 94vw);
+}
+.trace-locator-help {
+  margin: 0;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+.trace-locator-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 0.55rem;
+  color: var(--ink);
+  background: var(--surface-sunken);
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+.trace-locator-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.trace-locator-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.trace-locator-actions button,
+.trace-locator-steps button {
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+.trace-locator-approval {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.75rem;
+  color: var(--ink);
+  background: var(--surface-sunken);
+  border: 1px solid var(--danger, #c33);
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+.trace-locator-approval h3,
+.trace-locator-approval p,
+.trace-locator-approval ul {
+  margin: 0;
+}
+.trace-locator-approval h3 { color: var(--danger, #c33); }
+.trace-locator-approval ul {
+  display: grid;
+  gap: 0.25rem;
+  padding-left: 1.3rem;
+}
+.trace-locator-approval code { overflow-wrap: anywhere; }
+.trace-locator-approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+.trace-locator-approval-actions button {
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+.trace-locator-approval-actions button.is-primary {
+  color: var(--surface-raised);
+  background: var(--danger, #c33);
+  border-color: var(--danger, #c33);
+}
+.trace-locator-result {
+  display: grid;
+  gap: 0.7rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--rule);
+}
+.trace-locator-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem 0.8rem;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+.trace-locator-meta div {
+  display: grid;
+  grid-template-columns: 5rem minmax(0, 1fr);
+  gap: 0.35rem;
+}
+.trace-locator-meta dt { color: var(--ink-dim); }
+.trace-locator-meta dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trace-locator-steps {
+  display: flex;
+  gap: 0.3rem;
+  overflow-x: auto;
+  padding-bottom: 0.2rem;
+}
+.trace-locator-steps button {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0.15rem 0.4rem;
+  flex: 0 0 auto;
+  padding: 0.35rem 0.5rem;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  font-size: 0.68rem;
+  text-align: left;
+}
+.trace-locator-steps button span:last-child {
+  grid-column: 1 / -1;
+  font-size: 0.6rem;
+}
+.trace-locator-steps button.is-selected {
+  color: var(--ink);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.trace-locator-verification {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+.trace-locator-diff {
+  max-height: 40vh;
+  margin: 0;
+  padding: 0.75rem;
+  overflow: auto;
+  color: var(--ink);
+  background: var(--surface-sunken);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.trace-locator-diff span.is-added { background: rgba(60, 170, 100, 0.18); }
+.trace-locator-diff span.is-removed {
+  background: rgba(190, 70, 70, 0.18);
+  text-decoration: line-through;
+}
+
+/* Mint entries and the direct-mint draft both use normal panel tabs. Finished
+ * Coins are immutable; the draft keeps the same spatial reading surface. */
+
+.coin-view {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: clamp(1.25rem, 4vw, 3rem);
+  background: var(--readonly-surface);
+}
+
+/* The session-owned direct-Coin draft shares the reading layout but remains an
+   editable work surface, so it must not inherit the immutable Coin treatment. */
+.coin-composer-view {
+  background: var(--surface);
+}
+
+.coin-view-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  width: min(720px, 100%);
+  margin: 0 auto;
+}
+
+.coin-view-header {
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.coin-view-title {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: clamp(1.15rem, 2vw, 1.5rem);
+  font-weight: 600;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.coin-modal-kicker {
+  margin: 0 0 0.16rem;
+  color: var(--coin-fg);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.coin-modal-phrase {
+  margin: 0;
+  padding: 1.15rem 1.25rem;
+  color: var(--ink);
+  background: var(--surface-sunken);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--coin-fg);
+  border-radius: 4px;
+  font-family: var(--font-body);
+  font-size: 1.08rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.coin-modal-meta {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+
+.coin-modal-meta div {
+  display: grid;
+  grid-template-columns: 6rem minmax(0, 1fr);
+  gap: 0.65rem;
+}
+
+.coin-modal-meta dt {
+  color: var(--ink-dim);
+}
+
+.coin-modal-meta dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.coin-modal-hint {
+  margin: 0;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+
+.coin-composer-form {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.coin-composer-view .coin-view-content {
+  min-height: 100%;
+}
+
+.coin-composer-input {
+  flex: 1;
+  width: 100%;
+  min-height: 14rem;
+  box-sizing: border-box;
+  resize: vertical;
+}
+
+.coin-composer-input:focus {
+  border-color: var(--coin-fg);
+  outline: none;
+}
+
+.coin-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.coin-mint-submit {
+  padding: 0.35rem 0.8rem;
+  border: 1px solid var(--coin-fg);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--coin-fg);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.coin-mint-submit:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--coin-fg) 10%, transparent);
+}
+
+.coin-mint-submit:disabled,
+.coin-composer-form .confirm-cancel:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+/* Oblivion holds restorable files, but it is not a working tree. Keep retained
+ * content out of editor tabs and provide one focused read-only inspection
+ * surface instead. */
+.oblivion-modal-dialog {
+  width: min(760px, 92vw);
+}
+
+.oblivion-modal-kicker {
+  margin: 0 0 0.16rem;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.oblivion-modal-content {
+  margin: 0;
+  padding: 1.15rem 1.25rem;
+  max-height: 56vh;
+  overflow: auto;
+  color: var(--ink);
+  background: var(--surface-sunken);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--ink-dim);
+  border-radius: 4px;
+  font-family: var(--font-body);
+  font-size: 1rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.oblivion-modal-meta {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+
+.oblivion-modal-meta div {
+  display: grid;
+  grid-template-columns: 6rem minmax(0, 1fr);
+  gap: 0.65rem;
+}
+
+.oblivion-modal-meta dt {
+  color: var(--ink-dim);
+}
+
+.oblivion-modal-meta dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.oblivion-modal-hint {
+  margin: 0;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+
 /* Attest modal — wider than compose-dialog (the map needs room) and capped so
  * the map region stays a fixed height. Reuses compose-overlay/dialog shape. */
 .attest-dialog {
@@ -5943,6 +6746,73 @@ html[data-theme="light"] .editor-host {
   background: var(--accent-soft);
 }
 
+.confirm-fork:disabled,
+.confirm-skip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Reify keeps the portable artifact and its optional provenance visibly
+   separate. Evidence starts unchecked because raw Steps may contain private
+   prompts, timing, context, and intermediate snapshots. */
+.reify-export-dialog {
+  max-width: 440px;
+}
+
+.reify-export-message {
+  margin-top: 0.7rem;
+  margin-bottom: 0.7rem;
+}
+
+.reify-export-warning {
+  margin: 0 0 0.8rem;
+  padding: 0.55rem 0.65rem;
+  border-left: 2px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.reify-trace-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.reify-trace-option input {
+  margin-top: 0.15rem;
+  accent-color: var(--accent);
+}
+
+.reify-trace-option span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.reify-trace-option small,
+.reify-trace-privacy {
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  line-height: 1.4;
+}
+
+.reify-trace-privacy {
+  margin: 0.45rem 0 1rem 1.4rem;
+}
+
+.reify-export-actions {
+  flex-wrap: wrap;
+}
+
 /* --- create / sample modals ----------------------------------------------
  * New folder / New file / Sample relays open centered modals (portalled to
  * document.body) instead of shifting the collection listing. The shells reuse
@@ -6080,120 +6950,138 @@ html[data-theme="light"] .editor-host {
   color: var(--ink-dim);
 }
 
-/* Folder-wide replay transport — always-visible block pinned at the bottom of
-   the sidebar. Three stacked rows: the exact mounted scope, a stepper + counter,
-   and a transport row (play · pace · slider). The slider fills the transport
-   row's remaining width and scrubs the mounted timeline.
+/* Replay transport — the first row of the action palette. The selected traces
+   occupy the palette's voice column; previous Step, pace, play, position, and
+   next Step lead the action column, followed by the slider and current action.
    `last` is sticky: a new step while parked at the right end grows the slider's
    max and ticks the counter up. */
-.sidebar-replay {
-  flex: 0 0 auto;
-  margin-top: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  width: 100%;
-  padding: 0.45rem 0.6rem 0.5rem;
-  background: var(--surface-sunken);
-  border-top: 1px solid var(--rule);
+.action-palette-group.action-palette-replay {
+  align-items: center;
 }
 
-.sidebar-replay-row {
+/* The Explorer/tab selection is the playback identity. The prompt-context mount
+   is intentionally independent and lives with MODEL instead. */
+.action-palette-replay-targets {
   display: flex;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.25rem;
   width: 100%;
-}
-
-/* The timeline's identity. Scope and tab focus are intentionally independent,
-   so naming the mount here prevents a Step in another tab from looking like a
-   broken counter. Long multi-mount unions stay one line; the full value remains
-   available through the row's title. */
-.sidebar-replay-scope {
   min-width: 0;
-  gap: 0.45rem;
-  padding-bottom: 0.1rem;
-  border-bottom: 1px solid color-mix(in srgb, var(--rule) 70%, transparent);
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 
-.sidebar-replay-scope-key {
-  flex: 0 0 auto;
-  color: var(--ink-dim);
-  font-family: var(--font-mono);
-  font-size: 0.58rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.sidebar-replay-scope-value {
+/* Selected replay traces use the same icon + monospace title grammar as tabs. */
+.action-palette-replay-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 0 0 var(--action-palette-voice-width);
+  width: var(--action-palette-voice-width);
   min-width: 0;
+  min-height: var(--action-palette-control-height);
+  max-width: var(--action-palette-voice-width);
+  box-sizing: border-box;
+  padding: 0.22rem 0.4rem;
   overflow: hidden;
   color: var(--ink);
-  font-family: var(--font-body);
-  font-size: 0.72rem;
+  background: color-mix(in srgb, var(--surface-sunken) 55%, var(--surface-raised));
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
   line-height: 1.2;
+  white-space: nowrap;
+}
+
+.action-palette-replay-target .tab-status {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.action-palette-replay-target-label {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Top row: the stepper + counter, left-aligned to match the transport row
-   below it (play + pace sit at the left edge there too). */
-.sidebar-replay-stepper {
-  justify-content: flex-start;
+.action-palette-replay-target-empty {
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
 }
 
-/* Bottom row: play + pace stay fixed-width on the left, slider fills the rest. */
-.sidebar-replay-transport {
-  justify-content: flex-start;
+.action-palette-replay-controls {
+  display: flex;
+  min-width: 0;
+}
+
+.action-palette-replay-transport {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 /* Subtle accent edge while auto-playing, so the transport reads as "running". */
-.sidebar-replay.is-playing {
-  box-shadow: inset 0 2px 0 0 var(--accent, #4f8cff);
+.action-palette-replay.is-playing {
+  box-shadow: inset 2px 0 0 0 var(--accent, #4f8cff);
 }
 
-.sidebar-replay .steps-step-btn {
+.action-palette-replay .steps-step-btn {
   /* Slightly larger hit area than the modal's — this is a persistent control. */
   padding: 0.28rem 0.55rem;
   line-height: 1;
 }
 
-.sidebar-replay .steps-position {
-  /* Stable width so the stepper doesn't reflow as the index digit count grows. */
-  min-width: 3.4rem;
+.action-palette-replay .steps-position {
+  /* Match one action button in the other palette rows. */
+  box-sizing: border-box;
+  flex: 0 0 5.5rem;
+  width: 5.5rem;
+  min-width: 5.5rem;
+  max-width: 5.5rem;
   text-align: center;
+  margin-right: 0;
 }
 
 /* The play/pause button rests in the default step-button look (no accent
    border) and only lights up while actively playing, so it doesn't draw the
    eye when idle. Transforms to ⏸ while playing. */
-.sidebar-replay-play {
+.action-palette-replay-play {
   flex: 0 0 auto;
 }
-.sidebar-replay.is-playing .sidebar-replay-play {
+.action-palette-replay.is-playing .action-palette-replay-play {
   color: var(--accent, #4f8cff) !important;
   border-color: var(--accent, #4f8cff) !important;
-}
-.sidebar-replay-play:disabled {
-  opacity: 0.4;
 }
 
-/* The skip-to-live (⏭) escape gets the same accent treatment as play, but only
-   while replay holds the editor read-only — it's the visible way out of a
-   frozen/paused-on-history view. Clicking it seeks to `last`, which lifts the
-   read-only gate. Brightens further on hover to reinforce "click to escape". */
-.sidebar-replay-skip {
-  color: var(--accent, #4f8cff) !important;
-  border-color: var(--accent, #4f8cff) !important;
+/* Loading replaces Play instead of presenting a disabled transport. Keep the
+   footprint identical so the rest of the row never shifts while selection resolves. */
+.action-palette-replay-loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 2rem;
+  height: 1.5rem;
 }
-.sidebar-replay-skip:hover {
-  background: var(--accent-soft, #4f8cff1f);
+
+.action-palette-replay-spinner {
+  width: 0.8rem;
+  height: 0.8rem;
+  border: 1.5px solid var(--rule-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: press-loading-spin 0.8s linear infinite;
 }
 
 /* The speed chip: a compact, self-contained toggle. Bold-ish so it reads as a
    value you can change, not a label. Hover hints it's clickable. Fixed width so
    the row doesn't reflow as the digit count changes (1× vs 16×). */
-.sidebar-replay-speed {
+.action-palette-replay-speed {
   flex: 0 0 auto;
   font-family: var(--font-mono);
   font-size: 0.66rem;
@@ -6208,38 +7096,90 @@ html[data-theme="light"] .editor-host {
   min-width: 2rem;
   text-align: center;
 }
-.sidebar-replay-speed:hover {
+.action-palette-replay-speed:hover {
   border-color: var(--accent, #4f8cff);
   color: var(--accent, #4f8cff);
 }
 
-/* Custom time-proportional slider. Replaces a native <input type="range">,
+/* Four transport buttons plus their three 0.3rem gaps occupy exactly the same
+   11.3rem span as two 5.5rem palette commands plus their one 0.3rem gap:
+   (11.3rem - 0.9rem) / 4 = 2.6rem. Border-box keeps padding inside that span. */
+.action-palette-replay-play,
+.action-palette-replay-speed,
+.action-palette-replay-previous,
+.action-palette-replay-next,
+.action-palette-replay-loading {
+  box-sizing: border-box;
+  flex: 0 0 2.6rem;
+  width: 2.6rem;
+  min-width: 2.6rem;
+  max-width: 2.6rem;
+  height: var(--action-palette-control-height);
+}
+
+/* Custom playback-time slider. Replaces a native <input type="range">,
    whose thumb position is hardwired to linear-in-value and so can't be mapped
    to absolute time. This div owns pointer (drag-to-seek), keyboard, and a11y
    (role=slider); ticks/thumb/bands are absolutely positioned children on a
    shared time axis (see stepAxis in App.tsx). */
-.sidebar-replay-track {
+.action-palette-replay-track {
   position: relative;
-  flex: 1 1 auto;
+  /* Four 5.5rem action tracks plus their three standard 0.3rem gaps. */
+  flex: 0 1 22.9rem;
+  width: 22.9rem;
+  max-width: 22.9rem;
   min-width: 0;
   height: 1.4rem;
   margin: 0;
-  cursor: pointer;
+  cursor: grab;
   display: flex;
   align-items: center;
   touch-action: none; /* let pointermove drag, no touch-scroll hijack */
 }
-.sidebar-replay-track[aria-disabled="true"] {
+
+.action-palette-replay-status {
+  flex: 1 1 8rem;
+  min-width: 0;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+  overflow: hidden;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.action-palette-replay-status-pulse {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
+  border-radius: 2px;
+}
+.action-palette-replay-status-pulse.is-step {
+  font-weight: 600;
+}
+.action-palette-replay-status:empty {
+  visibility: hidden;
+}
+.action-palette-replay-track:active {
+  cursor: grabbing;
+}
+.action-palette-replay-track[aria-disabled="true"] {
   cursor: default;
 }
-.sidebar-replay-track:focus-visible {
+.action-palette-replay-track:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 2px;
   border-radius: 4px;
 }
 /* The 3px baseline rule. Drawn as a child (not ::before) so it stays a plain
    element consistent with the ticks/thumb/bands layered above it. */
-.sidebar-replay-rule {
+.action-palette-replay-rule {
   position: absolute;
   left: 0;
   right: 0;
@@ -6251,57 +7191,90 @@ html[data-theme="light"] .editor-host {
   z-index: 0;
 }
 
-/* Idle band: a large time gap between adjacent save points, rendered in-track
-   as a translucent colored span. Clickable to jump past the idle stretch (the
-   old separate ribbon, in-track now). Sits above the rule/ticks, below the
-   thumb; pointer-events on so it can be clicked (its onPointerDown stops
-   propagation so it seeks instead of starting a drag). */
-.sidebar-replay-band {
+/* Fast-forwarded inactivity stays visible after its 100× width compression.
+   A muted hatch reads as absence, distinct from the outlined activity pills. */
+.action-palette-replay-idle-band {
+  position: absolute;
+  top: 50%;
+  min-width: 3px;
+  height: 5px;
+  transform: translateY(-50%);
+  box-sizing: border-box;
+  border-top: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule-strong);
+  border-radius: 1px;
+  background: repeating-linear-gradient(
+    135deg,
+    transparent 0 2px,
+    var(--ink-dim) 2px 3px
+  );
+  cursor: inherit;
+  opacity: 0.6;
+  z-index: 1;
+}
+
+/* Every replay delta gets a rounded activity bubble. Deltas no more than five
+   seconds apart are grouped into a continuous pill between their timestamps. */
+.action-palette-replay-activity-bubble {
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
-  height: 3px;
+  min-width: 7px;
+  height: 7px;
   border: none;
   padding: 0;
   background: var(--accent-soft);
   border-radius: 999px;
   cursor: pointer;
-  z-index: 1;
-  font-size: 0; /* the label text isn't shown on the band itself — keep the
-                   band thin; the duration lives in the title tooltip */
-}
-.sidebar-replay-band:hover {
-  height: 7px;
-  background: var(--accent-soft);
   outline: 1px solid var(--accent);
+  z-index: 1;
+  font-size: 0; /* the duration lives in the title tooltip */
 }
-.sidebar-replay-band.is-current {
+.action-palette-replay-activity-bubble.is-point {
+  width: 7px;
+  transform: translate(-50%, -50%);
+}
+.action-palette-replay-activity-bubble:hover {
   background: var(--accent);
 }
 
 /* Savepoint tick marks: one per replay step, positioned along the track at
-   that step's time-fraction. Dim so the thumb reads as the live position;
-   pointer-events:none so the track stays the only interactive layer. */
-.sidebar-replay-ticks {
+   that step's time-fraction. The element is a wide, full-height hit target;
+   its pseudo-element draws the narrow line without shrinking that target. */
+.action-palette-replay-ticks {
   position: absolute;
   inset: 0;
   z-index: 2;
   pointer-events: none;
 }
-.sidebar-replay-tick {
+.action-palette-replay-tick {
   position: absolute;
+  top: 0;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: 0.75rem;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.action-palette-replay-tick::before {
+  content: "";
+  position: absolute;
+  left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
   width: 2px;
-  height: 7px;
+  height: 14px;
   background: var(--ink-dim);
   opacity: 0.5;
   border-radius: 1px;
 }
+.action-palette-replay-tick:hover::before {
+  background: var(--accent);
+  opacity: 0.9;
+}
 
-/* Thumb: the live position. Interpolates between ticks during playback (via
-   playFraction), so it glides across the time axis. Above ticks/bands. */
-.sidebar-replay-thumb {
+/* Thumb follows the recorded timestamp during playback. Above ticks/bands. */
+.action-palette-replay-thumb {
   position: absolute;
   top: 50%;
   transform: translate(-50%, -50%);
@@ -6314,11 +7287,425 @@ html[data-theme="light"] .editor-host {
   z-index: 3;
 }
 
+@keyframes replay-thumb-advance {
+  from {
+    left: var(--replay-thumb-from);
+  }
+  to {
+    left: var(--replay-thumb-to);
+  }
+}
+
+.action-palette-replay-thumb.is-advancing {
+  animation: replay-thumb-advance var(--replay-thumb-duration) linear forwards;
+}
 
 /* Empty panel — shown when the open file was deleted. Keeps the panel slot
    reserved instead of crashing on a missing file reference. */
 .panel-empty {
   flex: 1;
+}
+
+/* --- first-run onboarding ---------------------------------------------
+   A printer's-proof treatment that belongs to the Press rather than a generic
+   product-tour layer. The welcome surface arrives before the dense workspace;
+   later coachmarks point at the real controls and advance from their events. */
+.onboarding-welcome {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(16rem, 0.8fr) minmax(24rem, 1.2fr);
+  align-items: center;
+  gap: clamp(2.5rem, 7vw, 7rem);
+  padding: clamp(2rem, 7vw, 7rem);
+  overflow: auto;
+  background: var(--surface);
+}
+
+.onboarding-welcome-proof {
+  position: relative;
+  width: min(100%, 23rem);
+  aspect-ratio: 4 / 3;
+  justify-self: end;
+  background: var(--surface-raised);
+  border: 1px solid var(--rule-strong);
+  box-shadow: 0.75rem 0.75rem 0 var(--accent-soft);
+}
+
+.onboarding-proof-line {
+  position: absolute;
+  left: 18%;
+  right: 18%;
+  top: 50%;
+  height: 1px;
+  background: var(--rule-strong);
+}
+
+.onboarding-proof-node {
+  position: absolute;
+  top: calc(50% - 0.42rem);
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 50%;
+  border: 1px solid var(--ink-dim);
+  background: var(--surface-raised);
+}
+
+.onboarding-proof-node.is-first { left: 18%; }
+.onboarding-proof-node.is-second { left: calc(50% - 0.42rem); }
+.onboarding-proof-node.is-third {
+  right: 18%;
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 0 0 0.45rem var(--accent-soft);
+}
+
+.onboarding-proof-stamp {
+  position: absolute;
+  right: 10%;
+  bottom: 14%;
+  padding: 0.35rem 0.6rem;
+  color: var(--accent);
+  border: 2px solid var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  transform: rotate(-7deg);
+}
+
+.onboarding-welcome-copy {
+  width: min(100%, 37rem);
+}
+
+.onboarding-kicker {
+  margin: 0 0 0.65rem;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+}
+
+.onboarding-welcome h1,
+.onboarding-complete-card h2,
+.onboarding-coachmark h2 {
+  margin: 0;
+  font-family: var(--font-body);
+  font-weight: 500;
+}
+
+.onboarding-welcome h1 {
+  max-width: 10ch;
+  font-size: clamp(2.6rem, 5.2vw, 5rem);
+  line-height: 0.94;
+  letter-spacing: -0.035em;
+}
+
+.onboarding-welcome-lede {
+  max-width: 34rem;
+  margin: 1.6rem 0 0;
+  font-size: clamp(1.08rem, 1.8vw, 1.35rem);
+  line-height: 1.45;
+}
+
+.onboarding-welcome-local {
+  margin: 1rem 0 0;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.onboarding-welcome-actions,
+.onboarding-complete-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 1.7rem;
+}
+
+.onboarding-primary,
+.onboarding-secondary,
+.onboarding-text-button {
+  min-height: 2.45rem;
+  padding: 0.62rem 0.9rem;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.onboarding-primary {
+  color: var(--on-accent);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.onboarding-primary:hover {
+  filter: brightness(1.07);
+}
+
+.onboarding-secondary {
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+}
+
+.onboarding-secondary:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.onboarding-text-button {
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+.onboarding-text-button:hover {
+  color: var(--ink);
+}
+
+.onboarding-reassurance {
+  margin: 0.8rem 0 0;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.67rem;
+}
+
+.onboarding-coachmark {
+  position: fixed;
+  z-index: 1500;
+  width: min(22rem, calc(100vw - 2rem));
+  padding: 1rem 2.3rem 1rem 1rem;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--surface-raised) 96%, transparent);
+  border: 1px solid var(--accent);
+  border-left-width: 3px;
+  box-shadow: 0 0.8rem 2.2rem color-mix(in srgb, var(--ink) 16%, transparent);
+}
+
+.onboarding-coachmark--editor,
+.onboarding-coachmark--replaying {
+  top: calc(var(--header-h) + 1rem);
+  right: 1rem;
+}
+
+.onboarding-coachmark--step,
+.onboarding-coachmark--replay,
+.onboarding-coachmark--model-inspect,
+.onboarding-coachmark--model-run,
+.onboarding-coachmark--model-step,
+.onboarding-coachmark--model-replay {
+  right: 1rem;
+  bottom: 10rem;
+}
+
+.onboarding-coachmark--model-focus,
+.onboarding-coachmark--model-mount,
+.onboarding-coachmark--model-shield {
+  top: calc(var(--header-h) + 1rem);
+  left: calc(var(--sidebar-width) + 1.5rem);
+}
+
+.onboarding-coachmark h2 {
+  font-size: 1.2rem;
+}
+
+.onboarding-coachmark > p:last-child {
+  margin: 0.45rem 0 0;
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.onboarding-coachmark-dismiss {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.5rem;
+  width: 1.55rem;
+  height: 1.55rem;
+  padding: 0;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 0;
+  font-size: 1.15rem;
+  cursor: pointer;
+}
+
+.onboarding-coachmark-dismiss:hover {
+  color: var(--ink);
+}
+
+.onboarding-stage-awaiting-edit .cm-editor,
+.onboarding-stage-awaiting-step .op-save,
+.onboarding-stage-awaiting-replay .action-palette-replay-play {
+  position: relative;
+  z-index: 1;
+  box-shadow: 0 0 0 2px var(--accent), 0 0 0 7px var(--accent-soft) !important;
+}
+
+.onboarding-stage-awaiting-step .op-save,
+.onboarding-stage-awaiting-replay .action-palette-replay-play {
+  animation: onboarding-target-pulse 1.8s ease-in-out infinite;
+}
+
+.onboarding-stage-awaiting-replay .tree-row-tab-focused {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.onboarding-stage-awaiting-replay .action-palette-replay {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.onboarding-stage-context-mount .tree-icon-btn,
+.onboarding-stage-context-shield .tree-icon-btn,
+.onboarding-stage-context-inspect .action-palette-token-count,
+.onboarding-stage-context-run .op-extend,
+.onboarding-stage-context-step .op-save,
+.onboarding-stage-context-replay .action-palette-replay-play {
+  position: relative;
+  z-index: 1;
+  box-shadow: 0 0 0 2px var(--accent), 0 0 0 7px var(--accent-soft) !important;
+}
+
+.models-onboarding {
+  width: 100%;
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+  padding: 0.75rem 0.9rem;
+  color: var(--ink);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-left-width: 3px;
+  text-align: left;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.models-onboarding strong {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+}
+
+@keyframes onboarding-target-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--accent), 0 0 0 6px var(--accent-soft); }
+  50% { box-shadow: 0 0 0 2px var(--accent), 0 0 0 11px transparent; }
+}
+
+.onboarding-complete-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: color-mix(in srgb, var(--surface-sunken) 78%, transparent);
+  backdrop-filter: blur(3px);
+}
+
+.onboarding-complete-card {
+  width: min(38rem, 100%);
+  max-height: calc(100vh - 3rem);
+  overflow: auto;
+  padding: clamp(1.5rem, 4vw, 2.5rem);
+  background: var(--surface-raised);
+  border: 1px solid var(--rule-strong);
+  box-shadow: 0.75rem 0.75rem 0 var(--accent-soft);
+}
+
+.onboarding-complete-card h2 {
+  font-size: clamp(2rem, 4vw, 3.2rem);
+  line-height: 1;
+}
+
+.onboarding-complete-card > p:not(.onboarding-kicker) {
+  max-width: 33rem;
+  margin: 1rem 0 0;
+  font-size: 1.05rem;
+  line-height: 1.45;
+}
+
+.onboarding-gestures {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 1.5rem 0 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}
+
+.onboarding-gestures > div {
+  padding: 0.85rem;
+}
+
+.onboarding-gestures > div + div {
+  border-left: 1px solid var(--rule);
+}
+
+.onboarding-gestures dt {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.onboarding-gestures dd {
+  margin: 0.35rem 0 0;
+  color: var(--ink-dim);
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+
+@media (max-width: 800px) {
+  .onboarding-welcome {
+    grid-template-columns: 1fr;
+    align-content: center;
+    gap: 2.25rem;
+    background: var(--surface);
+  }
+
+  .onboarding-welcome-proof {
+    width: min(70vw, 18rem);
+    justify-self: start;
+  }
+
+  .onboarding-gestures {
+    grid-template-columns: 1fr;
+  }
+
+  .onboarding-gestures > div + div {
+    border-top: 1px solid var(--rule);
+    border-left: 0;
+  }
+
+  /* The palette wraps to more rows at narrow desktop widths. Keep the Step and
+     Replay coachmarks above it so they never cover the control they describe. */
+  .onboarding-coachmark--step,
+  .onboarding-coachmark--replay,
+  .onboarding-coachmark--model-inspect,
+  .onboarding-coachmark--model-run,
+  .onboarding-coachmark--model-step,
+  .onboarding-coachmark--model-replay {
+    bottom: 14.5rem;
+  }
+
+  .models-onboarding {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .onboarding-stage-awaiting-step .op-save,
+  .onboarding-stage-awaiting-replay .action-palette-replay-play {
+    animation: none;
+  }
 }
 
 /* --- folder tab body --------------------------------------------------- */
@@ -6457,37 +7844,30 @@ html[data-theme="light"] .editor-host {
   overflow: hidden;
 }
 
-/* Action palette: the bottom region of the press. Three rows share one
-   column template — identity left, actions, then status right:
-     label/model | key | a1 a2 a3 a4 a5 | (slot) | tokens | error | (slot)
+/* Action palette: the bottom region of the press. Four groups share stable
+   identity columns at the left and an action region at the right:
+     label | key | actions + status
    Row 1: AUTHOR:    | pen | Stp Snd Aff · ·   |  — |  —  | err |  —
-   Row 2: model▾     | inj | Rec Rep Ext Set Sti |  — | 1.2k | err |  —
+   Row 2: MODEL:     | inj | model▾ Rec Rep Ext Set Sti · 1.2k
    Row 3: FILESYSTEM | ·   | File Folder Ref · · · |  — |  —  |  —  |  —
-   The MODEL row's leftmost cell IS the model selector (no "MODEL:" text — the
-   chosen model name reads as the label). The SUBSTRATE row mirrors the AUTHOR
-   row but cycles the external party a scan reads from / a reify writes to.
-   Six equal action tracks. An in-flight op re-renders its own button as the
-   stop control (.action-palette-action.running) rather than a separate Stop button.
-   Model options use the provider card label. */
+   Row 4: REPLAY:    | targets | play pace slider / stepper + status
+   The MODEL row leads with its role label and voice, then places the model
+   selector at the start of the inline controls. The SUBSTRATE row mirrors the
+   AUTHOR row but cycles the external party a scan reads from / a reify writes to.
+   Buttons retain their compact track width and wrap when the remaining inline
+   space runs out. An in-flight op re-renders its own button as the stop control
+   (.action-palette-action.running) rather than a separate Stop button. Model
+   options use the provider card label. */
 .action-palette {
+  /* Two 5.5rem action buttons plus the 0.3rem gap between them. */
+  --action-palette-voice-width: 11.3rem;
+  --action-palette-control-height: 1.75rem;
+  --action-palette-row-height: calc(var(--action-palette-control-height) + 0.45rem + 1px);
   flex: 0 0 auto;
   display: grid;
-  /* Identity, six equal action tracks (the MODEL row's five ops + Run), model
-     + status, then trailing 1fr so the row (and its divider) spans the full palette
-     width. Col 1 holds the AUTHOR: label (AUTHOR row) and the MODEL selector
-     (MODEL row) — sized to fit the select. */
-  grid-template-columns:
-    minmax(5.5rem, 10rem)
-    minmax(5rem, 8rem)
-    repeat(6, minmax(5.75rem, 6.5rem))
-    max-content
-    max-content
-    minmax(0, 10rem)
-    max-content
-    minmax(0, 1fr);
-  column-gap: 0.3rem;
+  grid-template-rows: repeat(4, auto);
   row-gap: 0;
-  align-items: center;
+  align-items: stretch;
   /* Horizontal padding lives on each row so the inter-row border can run
      edge-to-edge across the full action-palette. */
   padding: 0.3rem 0;
@@ -6501,12 +7881,12 @@ html[data-theme="light"] .editor-host {
 }
 .action-palette-group {
   display: grid;
-  grid-template-columns: subgrid;
-  grid-column: 1 / -1;
-  align-items: center;
+  grid-template-columns: minmax(5.5rem, 6.25rem) var(--action-palette-voice-width) minmax(0, 1fr);
+  align-items: start;
   column-gap: 0.3rem;
+  box-sizing: border-box;
   min-width: 0;
-  min-height: 0;
+  min-height: var(--action-palette-row-height);
   padding: 0.15rem 0.6rem;
 }
 /* Full-bleed hairline above each subsequent row (edge to edge of the palette). */
@@ -6514,11 +7894,23 @@ html[data-theme="light"] .editor-host {
   border-top: 1px solid var(--rule);
   padding-top: 0.3rem;
 }
-/* Empty cells keep table columns aligned across rows. */
-.action-palette-slot {
+/* Action controls use the remaining width and form as many top-aligned lines
+   as the container needs. Wrapped lines expand the palette's intrinsic height
+   without vertically centering a short line inside its group. */
+.action-palette-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  align-items: flex-start;
+  gap: 0.3rem;
   min-width: 0;
 }
 .action-palette-label {
+  display: inline-flex;
+  align-self: start;
+  align-items: center;
+  justify-content: flex-end;
+  height: var(--action-palette-control-height);
   color: var(--ink-dim);
   font-size: 0.62rem;
   letter-spacing: 0.04em;
@@ -6546,75 +7938,131 @@ html[data-theme="light"] .editor-host {
   outline: 1px solid var(--rule);
   outline-offset: 1px;
 }
-.action-palette-select {
-  font: inherit;
-  color: inherit;
-  background: var(--surface-raised);
-  border: 1px solid var(--rule);
-  border-radius: 3px;
-  padding: 0.1rem 0.25rem;
-  cursor: pointer;
-  width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
+/* Voice/key selector shared by AUTHOR, MODEL, and substrate. The custom model
+   selector reuses these same structural classes so both kinds of picker have
+   identical chip, popup, option, and focus treatments. */
+.action-palette .voice-chip {
+  min-height: var(--action-palette-control-height);
 }
-/* Model select: long provider labels clip when closed. */
-.action-palette-model-select {
+/* Keep the compact 1px geometry, but use the stronger rule so the controls
+   resolve crisply instead of looking softly pencilled in. */
+.action-palette .action-palette-key-control,
+.action-palette .steps-step-btn,
+.action-palette .action-palette-replay-speed {
+  border-color: var(--rule-strong);
+}
+.action-palette .steps-step-btn,
+.action-palette .action-palette-replay-speed {
+  font-weight: 400;
+}
+/* Disabled controls stay visibly subordinate without washing their labels out
+   against the palette's sunken surface. */
+.action-palette .voice-chip-action:disabled,
+.action-palette .steps-step-btn:disabled {
+  opacity: 0.76;
+}
+.action-palette-key-picker {
+  position: relative;
+  justify-self: start;
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
-/* Wraps the MODEL select + its trailing colon so the pair share col 1 while
-   the row below's KeySelect stays aligned with the AUTHOR row. The select
-   grows to fill; the colon takes its natural width at the cell's right edge. */
+.action-palette-key-picker.is-open {
+  z-index: 30;
+}
+.action-palette-key-control {
+  width: 100%;
+}
+.action-palette-key-trigger {
+  width: auto;
+}
+.action-palette-key-chevron {
+  flex: 0 0 auto;
+  color: currentColor;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  opacity: 0.72;
+}
+.action-palette-key-listbox {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  left: 0;
+  bottom: calc(100% + 0.25rem);
+  z-index: 31;
+  width: 100%;
+  min-width: 0;
+  max-height: min(17rem, 45vh);
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 0.2rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  background: var(--surface-raised);
+  box-shadow: 0 5px 18px rgb(0 0 0 / 0.22);
+}
+.action-palette-key-option {
+  width: 100%;
+  border-color: transparent;
+}
+.action-palette-key-option + .action-palette-key-option {
+  margin-top: 0.14rem;
+}
+.action-palette-key-option:hover,
+.action-palette-key-option:focus-within {
+  border-color: currentColor;
+}
+/* The MODEL provider picker is the first inline control after the voice. It
+   keeps the same width as the voice selector so both choices read as a pair. */
 .action-palette-model-cell {
   display: flex;
   align-items: center;
-  gap: 0.15rem;
+  flex: 0 0 var(--action-palette-voice-width);
   min-width: 0;
-  width: 100%;
+  width: var(--action-palette-voice-width);
 }
-.action-palette-model-cell .action-palette-model-select {
-  flex: 1 1 auto;
+.action-palette-model-cell .action-palette-model-picker {
+  flex: 1 1 0;
   width: auto;
 }
-/* Colon to the right of the MODEL selector — mirrors the AUTHOR: label. */
-.action-palette-model-colon {
-  color: var(--ink-dim);
-  font-size: 0.62rem;
-  line-height: 1;
-  flex: 0 0 auto;
-}
-/* Base action button: fills its grid track (one of six equal columns). */
+/* Fixed action tracks keep every wrapped line on the same clean grid. */
 .action-palette-action {
+  flex: 0 0 5.5rem;
+  max-width: 5.5rem;
   min-width: 0;
-  width: 100%;
+  width: 5.5rem;
   box-sizing: border-box;
-  padding: 0.2rem 0.35rem;
-  border: 1px solid var(--rule);
+  padding: 0.2rem;
+  border: 1px solid var(--rule-strong);
   border-radius: 3px;
   background: transparent;
   color: var(--ink);
   font: inherit;
-  font-weight: 200;
+  font-weight: 400;
   cursor: pointer;
   white-space: nowrap;
   text-align: center;
 }
-/* Scan labels stay on one line. The shared action tracks are wide enough for
-   the longest label, so every action still occupies exactly one column. */
+/* Scan labels stay on one line inside their wrapping button. */
 .action-palette-action.op-scan {
   white-space: nowrap;
+}
+.action-palette-actions > .action-palette-token-count,
+.action-palette-actions > .action-palette-action-done,
+.action-palette-actions > .action-palette-action-error {
+  align-self: center;
+}
+.action-palette-actions > .action-palette-action-error {
+  flex: 1 1 10rem;
 }
 .action-palette-action:hover:not(:disabled) {
   background: var(--surface-raised);
 }
 .action-palette-action:disabled {
   color: var(--ink-dim);
-  opacity: 0.5;
+  opacity: 0.76;
   cursor: default;
 }
 /* The in-flight op's own button becomes the stop control: accent-filled and
@@ -6680,12 +8128,8 @@ html[data-theme="light"] .editor-host {
   color: var(--accent);
 }
 
-/* Fork: the AUTHOR row's escape from a replay-frozen historical view. It's a
-   conditional action (live only when paused on a past step), so it uses the
-   accent color to read as an available escape, distinct from the resting grey
-   of the always-present Step/Send/Attest trio. Disabled (grey) when not on a
-   frozen step. */
-.action-palette-action.action-palette-action-fork:not(:disabled) {
+/* Fork appears only on a replay-frozen historical view. */
+.action-palette-action.action-palette-action-fork {
   color: var(--accent);
   border-color: var(--accent);
 }
@@ -8081,3 +9525,81 @@ html[data-theme="light"] .editor-host {
   gap: 0.6rem;
   margin-top: 0.4rem;
 }
+/* App is not mounted until desktop secret material is unlocked. */
+.security-bootstrap {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  color-scheme: light;
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.security-bootstrap-card {
+  width: min(440px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 28px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  background: var(--surface-raised);
+}
+
+.security-bootstrap-card h1,
+.security-bootstrap-card p { margin: 0; }
+.security-bootstrap-card label { display: grid; gap: 6px; }
+.security-bootstrap-card input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  color: var(--ink);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+}
+.security-bootstrap-card input[type="password"] {
+  -webkit-text-security: disc;
+}
+.security-bootstrap-card input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.security-bootstrap-card input:-webkit-autofill {
+  -webkit-text-fill-color: var(--ink);
+  caret-color: var(--ink);
+  box-shadow: 0 0 0 1000px var(--surface) inset;
+}
+.security-bootstrap-card button {
+  justify-self: start;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--accent);
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  font-weight: 200;
+  cursor: pointer;
+}
+.security-bootstrap-card button:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+.security-bootstrap-card button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.security-bootstrap-card button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.security-bootstrap-kicker { color: var(--accent); letter-spacing: .16em; }
+.security-bootstrap-error { color: var(--reject-fg); }
+
+@media (prefers-color-scheme: dark) {
+  .security-bootstrap { color-scheme: dark; }
+}
+html[data-theme="dark"] .security-bootstrap { color-scheme: dark; }
+html[data-theme="light"] .security-bootstrap { color-scheme: light; }
