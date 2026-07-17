@@ -1,3 +1,7 @@
+import type { ModelLessonResume } from "../ai/model-context-lesson.js";
+
+export type { ModelLessonResume } from "../ai/model-context-lesson.js";
+
 // Keep the v2 key so the v3 completion schema can migrate existing records in place.
 export const ONBOARDING_STORAGE_KEY = "zine.onboarding.v2";
 
@@ -23,15 +27,6 @@ export type OnboardingStage =
   | "scan-file"
   | "scan-complete"
   | "dismissed";
-
-export interface ModelLessonResume {
-  folderPath: string;
-  targetPath: string;
-  sourcePath: string;
-  excludedPath: string;
-  resultNodeId?: string;
-  resultSpanHash?: string;
-}
 
 export interface OnboardingResumeRecord {
   version: 3;

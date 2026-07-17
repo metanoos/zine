@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const app = readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8");
-const inspector = readFileSync(new URL("./PromptInspectorModal.tsx", import.meta.url), "utf8");
+const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+const inspector = readFileSync(new URL("../ai/PromptInspectorModal.tsx", import.meta.url), "utf8");
 
 function functionBody(name: string, next: string): string {
   const start = app.indexOf(`function ${name}`);
@@ -20,13 +20,12 @@ const operations = [
   ["analyzeLLM", "function awaitViewMount"],
 ] as const;
 
-test("all five MODEL actions use approved preparation, stale validation, and no direct write", () => {
+test("all five MODEL actions delegate approved preparation and stale-safe execution", () => {
   for (const [name, next] of operations) {
     const source = functionBody(name, next);
-    assert.match(source, /approvedModelOperation\(/, name);
-    assert.match(source, /executePreparedOperation\(/, name);
-    assert.match(source, /readCurrentTarget: \(\) => readCurrentModelTarget\(prepared\)/, name);
+    assert.match(source, /modelOperationControllerRef\.current!\.executeApproved\(/, name);
     assert.match(source, /onStale: \(recovery\) => setStaleModelResult\(recovery\)/, name);
+    assert.doesNotMatch(source, /approvedModelOperation|executePreparedOperation|readCurrentModelTarget/, name);
     assert.doesNotMatch(source, /\bcomplete\(|backendRef\.current\.writeFile|stepFile\(/, name);
   }
 });
@@ -46,7 +45,7 @@ test("stale session results expose inspect, copy, and retry recovery without mut
 
 test("Analyze produces an ordinary review with citations to every analyzed source head", () => {
   const source = functionBody("analyzeLLM", "function awaitViewMount");
-  assert.match(source, /prepared\.contextSnapshot\.inputs/);
+  assert.match(source, /approved\.contextSnapshot\.inputs/);
   assert.match(source, /editCitations\(newPath, sourceHeadIds\)/);
   assert.match(source, /openInPanel\(newPath, destIdx\)/);
 });
