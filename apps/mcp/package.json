@@ -18,6 +18,7 @@
     "test:relay": "tsc -p tsconfig.integration.json && tsx integration/relay-smoke.ts"
   },
   "dependencies": {
+    "@zine/protocol": "file:../../packages/protocol",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "nostr-tools": "^2.23.9",
     "zod": "^3.25.0"

@@ -4,9 +4,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import type { KEdit } from "@zine/protocol";
 import type { Event, Filter } from "nostr-tools";
-
-import type { KEdit } from "../../client/src/provenance/provenance.js";
 
 import { installNodeStorage } from "../src/storage-node.js";
 import { setHomeRelay } from "../src/relay-config-override.js";
@@ -83,7 +82,7 @@ async function main(): Promise<void> {
   const {
     synthesizeKEditTransition,
     validateKEditTransition,
-  } = await import("../../client/src/workspace/workspace-core.js");
+  } = await import("@zine/protocol");
 
   const queryRelay = async (
     url: string,

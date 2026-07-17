@@ -7,11 +7,9 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { validateKEditTransition, type KEdit } from "@zine/protocol";
 import type { Event } from "nostr-tools";
 import { verifyEvent } from "nostr-tools/pure";
-
-import type { KEdit } from "../../client/src/provenance/provenance.js";
-import { validateKEditTransition } from "../../client/src/workspace/workspace-core.js";
 
 function jsonToolResult(result: unknown): Record<string, unknown> {
   const content = (result as { content?: unknown }).content;

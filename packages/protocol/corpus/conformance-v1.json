@@ -1,0 +1,161 @@
+{
+  "format": "zine-protocol-conformance",
+  "version": 1,
+  "canonical": [
+    {
+      "name": "recursive object-key ordering and UTF-8 text",
+      "value": {
+        "z": 1,
+        "a": {
+          "β": "two",
+          "a": [true, null, "é"]
+        }
+      },
+      "encoded": "{\"a\":{\"a\":[true,null,\"é\"],\"β\":\"two\"},\"z\":1}",
+      "utf8Hex": "7b2261223a7b2261223a5b747275652c6e756c6c2c22c3a9225d2c22ceb2223a2274776f227d2c227a223a317d"
+    }
+  ],
+  "kedits": [
+    {
+      "name": "one atomic replacement",
+      "before": "hello world",
+      "after": "hello Zine",
+      "kedits": [
+        {
+          "op": "repl",
+          "from": 6,
+          "to": 11,
+          "text": "Zine",
+          "voice": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "t": 123,
+          "tx": 7
+        }
+      ],
+      "valid": true
+    },
+    {
+      "name": "overlapping transaction ranges fail closed",
+      "before": "abcd",
+      "after": "xy",
+      "kedits": [
+        {
+          "op": "repl",
+          "from": 0,
+          "to": 3,
+          "text": "x",
+          "voice": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "t": 456,
+          "tx": 0
+        },
+        {
+          "op": "repl",
+          "from": 2,
+          "to": 4,
+          "text": "y",
+          "voice": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "t": 456,
+          "tx": 0
+        }
+      ],
+      "valid": false,
+      "reasonIncludes": "overlapping ranges"
+    }
+  ],
+  "locators": [
+    {
+      "name": "public file locator",
+      "value": {
+        "format": "zine-trace-locator",
+        "version": 1,
+        "kind": "file",
+        "rootId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "traceId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "nodeId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "relativePath": "reports/result.md",
+        "ownerPubkey": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "relayHints": [
+          "wss://relay.example.com"
+        ]
+      },
+      "valid": true,
+      "encoded": "zine-trace:eyJmb3JtYXQiOiJ6aW5lLXRyYWNlLWxvY2F0b3IiLCJ2ZXJzaW9uIjoxLCJraW5kIjoiZmlsZSIsInJvb3RJZCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJ0cmFjZUlkIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsIm5vZGVJZCI6ImNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MiLCJyZWxhdGl2ZVBhdGgiOiJyZXBvcnRzL3Jlc3VsdC5tZCIsIm93bmVyUHVia2V5IjoiZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZCIsInJlbGF5SGludHMiOlsid3NzOi8vcmVsYXkuZXhhbXBsZS5jb20iXX0"
+    },
+    {
+      "name": "non-websocket relay scheme",
+      "value": {
+        "format": "zine-trace-locator",
+        "version": 1,
+        "kind": "file",
+        "rootId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "traceId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "nodeId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "relativePath": "reports/result.md",
+        "ownerPubkey": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "relayHints": [
+          "https://relay.example.com"
+        ]
+      },
+      "valid": false,
+      "reasonIncludes": "plain ws"
+    }
+  ],
+  "traces": [
+    {
+      "name": "two-step Full Trace",
+      "chain": [
+        {
+          "kind": 4290,
+          "created_at": 1700000000,
+          "tags": [["z", "file"], ["F", "essay.md"], ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"], ["action", "import"]],
+          "content": "{\"snapshot\":\"draft\",\"contentHash\":\"7743ce348d9284d677a185f33295b92266cc435a5b5f775029b300066d26693a\",\"kedits\":[{\"op\":\"ins\",\"from\":0,\"to\":0,\"text\":\"draft\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000000000,\"tx\":0}]}",
+          "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "id": "42557f0f148f5876fceb648555c0d839d10864a6a92b38c6f0135f2c85e29654",
+          "sig": "045bc310deadbc507da75cc7d1a328e7c6d96b2b8a866fff2c716e61e5e59df93c4839cff7359091408270c227230de323e5216210f530c49607c18394b3d367"
+        },
+        {
+          "kind": 4290,
+          "created_at": 1700000001,
+          "tags": [["z", "file"], ["F", "essay.md"], ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"], ["action", "edit"], ["e", "42557f0f148f5876fceb648555c0d839d10864a6a92b38c6f0135f2c85e29654", "", "prev"]],
+          "content": "{\"snapshot\":\"final\",\"contentHash\":\"2443630b4620165c8b173e7265e17526fe2787ae594364dd6d839ad58f2fc007\",\"kedits\":[{\"op\":\"repl\",\"from\":0,\"to\":5,\"text\":\"final\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000000001,\"tx\":0}]}",
+          "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "id": "ab2d6df734edc938510116e2349f49b53da7cfca59e146e49cf58cca887a086c",
+          "sig": "6fcc6a1d0b566fc55f3ee4e069adc98669002ccc77e8c70acf64665659f31bd4305fb12960f027a19987bd4fd66616448ec5d750440d5ee11b493cde94f4308f"
+        }
+      ],
+      "status": "full",
+      "stepStatuses": ["full", "full"]
+    },
+    {
+      "name": "readable snapshot without process log",
+      "chain": [
+        {
+          "kind": 4290,
+          "created_at": 1700000002,
+          "tags": [["z", "file"], ["F", "essay.md"], ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"], ["action", "import"]],
+          "content": "{\"snapshot\":\"readable\",\"contentHash\":\"9c49e2bceb8eecb24f3135db28c9482f18b3f9ef3473369b0c0ea85e7fb92d8b\"}",
+          "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "id": "1e84735affded1e18bc4c2ffdc4e8092521b4615a750a9ee3311cdf90a85970a",
+          "sig": "6851aad2545f2e50d9a90c08418d76a6f02d883b76b4c20b6deb2602e10335fb3e752261098ffaad87e42b8672f21641f7ca2b54ce1b481c3a6eef8f60ec998b"
+        }
+      ],
+      "status": "snapshot-only",
+      "stepStatuses": ["snapshot-only"]
+    },
+    {
+      "name": "invalid signature",
+      "chain": [
+        {
+          "kind": 4290,
+          "created_at": 1700000000,
+          "tags": [["z", "file"], ["F", "essay.md"], ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"], ["action", "import"]],
+          "content": "{\"snapshot\":\"draft\",\"contentHash\":\"7743ce348d9284d677a185f33295b92266cc435a5b5f775029b300066d26693a\",\"kedits\":[{\"op\":\"ins\",\"from\":0,\"to\":0,\"text\":\"draft\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000000000,\"tx\":0}]}",
+          "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "id": "42557f0f148f5876fceb648555c0d839d10864a6a92b38c6f0135f2c85e29654",
+          "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "status": "invalid",
+      "stepStatuses": ["invalid"]
+    }
+  ]
+}

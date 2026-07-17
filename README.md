@@ -146,6 +146,7 @@ owning specification, the specification wins.
 
 ```text
 /
+├── packages/protocol/              shared TypeScript protocol kernel and fixed conformance corpus
 ├── docs/                          reader-facing product, protocol, evidence, roadmap, and company
 ├── protocol/                      trace, transport, and rendezvous specifications
 ├── relay/                         Go relay, local sidecar, and hosted peer
