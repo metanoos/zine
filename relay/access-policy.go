@@ -65,16 +65,21 @@ func NewAccessPolicy(path string) *AccessPolicy {
 }
 
 // reload reads the JSON file if it has changed (by mtime). Called once at
-// construction and then every poll interval. Missing/corrupt file = local
-// mode (hasOwner stays false). A file with an empty owner is also local mode
-// — the owner field is what activates networked mode.
+// construction and then every poll interval. A missing file transitions to
+// local mode. An unreadable or corrupt update preserves the last known-good
+// policy and is retried on the next poll. A file with an empty owner is local
+// mode — the owner field is what activates networked mode.
 func (a *AccessPolicy) reload() {
 	info, err := os.Stat(a.path)
 	if err != nil {
-		// File doesn't exist — local mode. Don't clobber a previously-loaded
-		// policy if the file was just deleted; transition to local mode cleanly.
+		if !os.IsNotExist(err) {
+			return
+		}
+		// File doesn't exist — transition to local mode cleanly and forget the
+		// accepted mtime so a recreated policy is always considered.
 		a.mu.Lock()
 		defer a.mu.Unlock()
+		a.modTime = time.Time{}
 		a.hasOwner = false
 		a.owner = ""
 		a.peers = make(map[string]bool)
@@ -82,14 +87,13 @@ func (a *AccessPolicy) reload() {
 		return
 	}
 
-	a.mu.Lock()
+	a.mu.RLock()
 	// Skip if unchanged since last load.
 	if !a.modTime.IsZero() && !info.ModTime().After(a.modTime) {
-		a.mu.Unlock()
+		a.mu.RUnlock()
 		return
 	}
-	a.modTime = info.ModTime()
-	a.mu.Unlock()
+	a.mu.RUnlock()
 
 	// Read and parse outside the lock (file I/O).
 	raw, err := os.ReadFile(a.path)
@@ -103,6 +107,7 @@ func (a *AccessPolicy) reload() {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.modTime = info.ModTime()
 	a.owner = pf.Owner
 	a.hasOwner = isValidPubkey(pf.Owner)
 	a.peers = make(map[string]bool, len(pf.Peers))
