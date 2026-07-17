@@ -3,7 +3,7 @@ import { contentFingerprint, type ContextSnapshot } from "./context-snapshot.js"
 export interface SnapshotDependencies {
   focus: string;
   targetRevision: string;
-  mount: string;
+  mounts: readonly string[];
   shields: readonly string[];
   providerFingerprint: string;
   modelVoicePromptHash: string;
@@ -25,6 +25,7 @@ function stable(value: unknown): string {
 export function snapshotDependencyKey(dependencies: SnapshotDependencies): string {
   return contentFingerprint(stable({
     ...dependencies,
+    mounts: [...dependencies.mounts].sort(),
     shields: [...dependencies.shields].sort(),
     promptLayerVersions: [...dependencies.promptLayerVersions],
   }));

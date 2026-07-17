@@ -15,7 +15,7 @@ const target = {
 function makeSnapshot(order: string[]) {
   return createContextSnapshot({
     target,
-    mount: { kind: "folder", path: "" },
+    mounts: [{ kind: "folder", path: "" }],
     shields: [{ path: "private", decision: "shielded", boundary: "private" }],
     inputs: order.map((path) => ({
       path,
@@ -42,7 +42,7 @@ test("canonical ordering makes randomized gather completion fingerprint-identica
 test("snapshots are deeply immutable and account for UTF-8 bytes", () => {
   const snapshot = createContextSnapshot({
     target: { ...target, body: "你好" },
-    mount: null,
+    mounts: [],
     shields: [],
     inputs: [{
       path: "draft.md", traceId: null, headId: null, body: "你好",
@@ -59,7 +59,7 @@ test("snapshots are deeply immutable and account for UTF-8 bytes", () => {
 test("completeness and total budget are explicit fail-closed state", () => {
   const snapshot = createContextSnapshot({
     target,
-    mount: null,
+    mounts: [],
     shields: [],
     inputs: [],
     renderedBlock: "12345",

@@ -29,6 +29,7 @@ import type { Event } from "nostr-tools";
 
 import type { FileState, FolderRef } from "./workspace-core.js";
 import { flattenRuns } from "./workspace-core.js";
+import { findResolvedBrackets } from "./brackets.js";
 import { fetchChain, fetchFolderNodes } from "./provenance.js";
 import { pathInEffectiveScopes, scopeKey, type ScopeRef } from "./scope-model.js";
 import {
@@ -39,6 +40,12 @@ import {
   renderLimelightLog,
   type LimelightEntry,
 } from "./context-block.js";
+import {
+  createContextSnapshot,
+  type ContextShieldDecision,
+  type ContextSnapshot,
+  type ContextSnapshotFailure,
+} from "./context-snapshot.js";
 
 // Re-export so App.tsx can import the limelight renderer alongside the gather
 // entry point from one module (same pattern as the types below would use).
@@ -46,6 +53,7 @@ export { renderLimelightLog, type LimelightEntry };
 
 /** Memo key → merged directory log entries. */
 const logMemo = new Map<string, DeltaLogEntry[]>();
+const snapshotChainMemo = new Map<string, Event[]>();
 
 /** Drop the whole memo — e.g. on folder switch (see the `folder?.id` effect in
  *  App.tsx). Per-directory invalidation is implicit: the memo key includes a
@@ -53,6 +61,7 @@ const logMemo = new Map<string, DeltaLogEntry[]>();
  *  refetches on the next gather. */
 export function clearChainMemo(): void {
   logMemo.clear();
+  snapshotChainMemo.clear();
 }
 
 /** Gather and render the canonical context block for an op against `activePath`
@@ -85,6 +94,337 @@ export async function gatherContextBlock(
     activePath,
     deltaLog,
   });
+}
+
+export interface ContextGatherOptions {
+  signal?: AbortSignal;
+  concurrency?: number;
+  maxBytes?: number;
+  fetchChain?: (folderId: string, relativePath: string) => Promise<Event[]>;
+  fetchFolderNodes?: (folderId: string) => Promise<Event[]>;
+}
+
+interface CanonicalLogEntry {
+  steppedAt: number;
+  action: string;
+  relativePath: string;
+  source: "file" | "folder";
+  prompt: string | null;
+  summary: string | null;
+  deltas: DeltaSpanView[] | undefined;
+  stableId: string;
+}
+
+interface GatherJobResult {
+  entries: CanonicalLogEntry[];
+  failures: ContextSnapshotFailure[];
+}
+
+/** Gather one immutable, fail-closed snapshot for a prepared MODEL request.
+ * Completion order cannot affect path ordering, log ordering, or the final
+ * fingerprint. The active target is always included even when it sits outside
+ * the mounted context union; mounts add readable context, not write authority. */
+export async function gatherContextSnapshot(
+  folder: FolderRef,
+  files: Record<string, FileState>,
+  scopes: readonly ScopeRef[],
+  activePath: string,
+  shielded: Set<string> = new Set(),
+  options: ContextGatherOptions = {},
+): Promise<ContextSnapshot> {
+  throwIfAborted(options.signal);
+  const targetState = files[activePath];
+  const failures: ContextSnapshotFailure[] = [];
+  if (!targetState || targetState.kind === "folder") {
+    failures.push({
+      stage: "target",
+      path: activePath,
+      message: !targetState
+        ? "focused target is unavailable"
+        : "folder focus is not a document target",
+    });
+  }
+
+  const includedPaths = Object.keys(files)
+    .filter((path) => files[path]?.kind !== "folder")
+    .filter((path) => path === activePath || pathInEffectiveScopes(scopes, shielded, path))
+    .sort();
+  const selectedFiles = Object.fromEntries(
+    includedPaths.map((path) => [path, files[path]]),
+  );
+  const entries = entriesFromFiles(selectedFiles);
+  const chainFetcher = options.fetchChain ?? fetchChain;
+  const folderFetcher = options.fetchFolderNodes ?? fetchFolderNodes;
+  const jobs: Array<() => Promise<GatherJobResult>> = includedPaths
+    .filter((path) => Boolean(files[path]?.nodeId))
+    .map((path) => () => gatherFileChain(
+      folder.id,
+      path,
+      files[path].nodeId,
+      chainFetcher,
+      options.signal,
+      chainFetcher === fetchChain,
+    ));
+  if (scopes.length > 0) {
+    jobs.push(() => gatherFolderLog(
+      folder.id,
+      scopes,
+      activePath,
+      shielded,
+      folderFetcher,
+      options.signal,
+    ));
+  }
+  const results = await mapBounded(
+    jobs,
+    options.concurrency ?? 4,
+    (job) => job(),
+  );
+  throwIfAborted(options.signal);
+  failures.push(...results.flatMap((result) => result.failures));
+  const merged = results.flatMap((result) => result.entries);
+  merged.sort((left, right) =>
+    left.steppedAt - right.steppedAt ||
+    left.relativePath.localeCompare(right.relativePath) ||
+    left.source.localeCompare(right.source) ||
+    left.stableId.localeCompare(right.stableId));
+  const deltaLog: DeltaLogEntry[] = merged.map(
+    ({ stableId: _stableId, ...entry }, index) => ({ seq: index + 1, ...entry }),
+  );
+  const renderedBlock = renderContextBlock({
+    folderLabel: folder.label ?? folder.id.slice(0, 8),
+    entries,
+    activePath,
+    deltaLog,
+    // Prepared requests reject an oversized full snapshot. They never replace
+    // selected file bodies with renderer-level omission stubs.
+    budget: Number.MAX_SAFE_INTEGER,
+  });
+  const targetBody = targetState && targetState.kind !== "folder"
+    ? flattenRuns(targetState.runs)
+    : "";
+
+  return createContextSnapshot({
+    target: {
+      kind: "file",
+      folderId: folder.id,
+      path: activePath,
+      traceId: targetState?.traceId ?? null,
+      headId: targetState?.nodeId || null,
+      body: targetBody,
+    },
+    mounts: scopes.map((scope) => ({ ...scope })),
+    shields: contextShieldDecisions(files, scopes, activePath, shielded),
+    inputs: includedPaths.map((path) => {
+      const state = files[path];
+      const body = flattenRuns(state.runs);
+      return {
+        path,
+        traceId: state.traceId ?? null,
+        headId: state.nodeId || null,
+        body,
+        citations: [
+          ...(state.taggedTraces ?? []),
+          ...findResolvedBrackets(body).map((citation) => citation.nodeId),
+        ],
+        deltaLog: deltaLog.filter((entry) => entry.relativePath === path),
+        unstepped: !state.nodeId,
+      };
+    }),
+    renderedBlock,
+    failures,
+    maxBytes: options.maxBytes,
+  });
+}
+
+async function mapBounded<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  mapper: (value: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const limit = Math.max(1, Math.floor(concurrency));
+  const results = new Array<R>(values.length);
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, values.length) }, async () => {
+      while (cursor < values.length) {
+        const index = cursor++;
+        results[index] = await mapper(values[index], index);
+      }
+    }),
+  );
+  return results;
+}
+
+async function gatherFileChain(
+  folderId: string,
+  path: string,
+  expectedHead: string,
+  fetcher: (folderId: string, relativePath: string) => Promise<Event[]>,
+  signal: AbortSignal | undefined,
+  memoize: boolean,
+): Promise<GatherJobResult> {
+  const key = `${folderId}|${path}|${expectedHead}`;
+  try {
+    throwIfAborted(signal);
+    let chain = memoize ? snapshotChainMemo.get(key) : undefined;
+    if (!chain) {
+      chain = await fetcher(folderId, path);
+      throwIfAborted(signal);
+      if (chain.length === 0 || chain[chain.length - 1]?.id !== expectedHead) {
+        return {
+          entries: [],
+          failures: [{
+            stage: "chain",
+            path,
+            message: "published head is unavailable or changed",
+          }],
+        };
+      }
+      if (memoize) snapshotChainMemo.set(key, chain);
+    }
+    const entries: CanonicalLogEntry[] = [];
+    for (let index = 0; index < chain.length; index++) {
+      const event = chain[index];
+      const previousSnapshot = index > 0 ? parsedSnapshot(chain[index - 1]) : "";
+      let parsed: { steppedAt?: number; summary?: string; deltas?: RawFileDelta[] };
+      try {
+        parsed = JSON.parse(event.content) as typeof parsed;
+      } catch {
+        return {
+          entries: [],
+          failures: [{
+            stage: "chain",
+            path,
+            message: `invalid event ${event.id.slice(0, 8)}…`,
+          }],
+        };
+      }
+      const spans = fileDeltasToViews(parsed.deltas ?? [], previousSnapshot);
+      entries.push({
+        steppedAt: typeof parsed.steppedAt === "number"
+          ? parsed.steppedAt
+          : (event.created_at ?? 0) * 1000,
+        action: event.tags.find((tag) => tag[0] === "action")?.[1] ?? "edit",
+        relativePath: path,
+        source: "file",
+        prompt: null,
+        summary: typeof parsed.summary === "string" ? parsed.summary : null,
+        deltas: spans.length > 0 ? spans : undefined,
+        stableId: event.id,
+      });
+    }
+    return { entries, failures: [] };
+  } catch (error) {
+    if (isAbort(error)) throw error;
+    return {
+      entries: [],
+      failures: [{
+        stage: "chain",
+        path,
+        message: error instanceof Error ? error.message : String(error),
+      }],
+    };
+  }
+}
+
+async function gatherFolderLog(
+  folderId: string,
+  scopes: readonly ScopeRef[],
+  activePath: string,
+  shielded: Set<string>,
+  fetcher: (folderId: string) => Promise<Event[]>,
+  signal?: AbortSignal,
+): Promise<GatherJobResult> {
+  try {
+    throwIfAborted(signal);
+    const nodes = await fetcher(folderId);
+    throwIfAborted(signal);
+    const entries: CanonicalLogEntry[] = [];
+    for (const node of nodes) {
+      let parsed: {
+        steppedAt?: number;
+        deltas?: { type: string; relativePath: string }[];
+      };
+      try {
+        parsed = JSON.parse(node.content) as typeof parsed;
+      } catch {
+        return {
+          entries: [],
+          failures: [{
+            stage: "folder-log",
+            path: "",
+            message: `invalid event ${node.id.slice(0, 8)}…`,
+          }],
+        };
+      }
+      const steppedAt = typeof parsed.steppedAt === "number"
+        ? parsed.steppedAt
+        : (node.created_at ?? 0) * 1000;
+      for (let index = 0; index < (parsed.deltas ?? []).length; index++) {
+        const delta = parsed.deltas![index];
+        if (
+          delta.relativePath !== activePath &&
+          !pathInEffectiveScopes(scopes, shielded, delta.relativePath)
+        ) continue;
+        entries.push({
+          steppedAt,
+          action: delta.type,
+          relativePath: delta.relativePath,
+          source: "folder",
+          prompt: null,
+          summary: null,
+          deltas: undefined,
+          stableId: `${node.id}:${index}`,
+        });
+      }
+    }
+    return { entries, failures: [] };
+  } catch (error) {
+    if (isAbort(error)) throw error;
+    return {
+      entries: [],
+      failures: [{
+        stage: "folder-log",
+        path: "",
+        message: error instanceof Error ? error.message : String(error),
+      }],
+    };
+  }
+}
+
+function contextShieldDecisions(
+  files: Record<string, FileState>,
+  scopes: readonly ScopeRef[],
+  activePath: string,
+  shielded: Set<string>,
+): ContextShieldDecision[] {
+  return Object.keys(files)
+    .filter((path) => files[path]?.kind !== "folder")
+    .sort()
+    .map((path) => {
+      if (path === activePath || pathInEffectiveScopes(scopes, shielded, path)) {
+        return { path, decision: "included" as const, boundary: null };
+      }
+      const boundary = [...shielded]
+        .filter((candidate) =>
+          candidate === "" || path === candidate || path.startsWith(`${candidate}/`))
+        .sort((left, right) => right.length - left.length)[0] ?? null;
+      return boundary
+        ? { path, decision: "shielded" as const, boundary }
+        : { path, decision: "outside-mount" as const, boundary: null };
+    });
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const error = new Error("Context gather was cancelled");
+  error.name = "AbortError";
+  throw error;
+}
+
+function isAbort(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 /** Derive the flat entry list from the in-memory file map. Directories are

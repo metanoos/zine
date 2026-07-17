@@ -31,23 +31,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  assembleOpMessages,
   OP_ORDER,
   OP_LABELS,
   type OpKind,
-  type OpInputs,
 } from "./op-prompts.js";
-import { prepareChatMessages } from "./llm.js";
 import { OP_LENSES, lensForOp, type OpLensId, type OpLensSelections } from "./op-lenses.js";
 import type { ProviderConfig } from "./models-store.js";
+import type { PreparedOperation } from "./prepared-operation.js";
 
 export interface PromptInspectorProps {
   /** The op to show first. Defaults to "extend". */
   defaultOp: OpKind;
-  /** Pre-derived per-op inputs, keyed by op. App.tsx fills these from the live
-   *  editor + scope (seed from selection, loose prose via partitionDoc, etc.).
-   *  An op absent from the map renders with empty/default inputs. */
-  inputs: Partial<Record<OpKind, OpInputs>>;
   /** Per-op notes for inputs that couldn't be derived without a relay fetch
    *  (e.g. Reply's minted traces, Receive's limelight log). Shown inline. */
   inputNotes?: Partial<Record<OpKind, string>>;
@@ -67,6 +61,13 @@ export interface PromptInspectorProps {
   /** Browser-local lens choice for each operation. */
   lensSelections: OpLensSelections;
   onLensChange: (op: OpKind, lensId: OpLensId) => void;
+  /** Exact session objects produced by App's canonical preparation path. */
+  preparedOperations: Partial<Record<OpKind, PreparedOperation>>;
+  preparingOp?: OpKind | null;
+  preparationError?: string | null;
+  approvedRequestHash?: string | null;
+  onOperationChange: (op: OpKind) => void;
+  onApprove: (prepared: PreparedOperation) => void;
   /** Estimates total payload tokens from char count. Passed in so the modal
    *  uses the same ~4 chars/token heuristic as the action-palette indicator. */
   estimateTokens: (chars: number) => number;
@@ -87,7 +88,6 @@ interface MsgRow {
 
 export function PromptInspectorModal({
   defaultOp,
-  inputs,
   inputNotes,
   contextBlock,
   activeFileStepped,
@@ -95,6 +95,12 @@ export function PromptInspectorModal({
   provider,
   lensSelections,
   onLensChange,
+  preparedOperations,
+  preparingOp,
+  preparationError,
+  approvedRequestHash,
+  onOperationChange,
+  onApprove,
   estimateTokens,
   onClose,
 }: PromptInspectorProps) {
@@ -112,22 +118,21 @@ export function PromptInspectorModal({
   }, [onClose]);
 
   const selectedLens = lensForOp(op, lensSelections[op]);
+  const preparedOperation = preparedOperations[op] ?? null;
+  const effectiveContextBlock = preparedOperation?.contextSnapshot.renderedBlock ?? contextBlock;
 
-  // Build every non-provider layer through the live assembler, then apply the
-  // provider system layer through the same helper complete() uses.
+  // Inspector never rebuilds. These are the exact frozen messages which
+  // completePrepared receives after approval.
   const { rows, totalChars } = useMemo(() => {
-    const assembled = assembleOpMessages(op, inputs[op] ?? {}, {
-      voicePrompt,
-      contextBlock,
-      lensId: lensSelections[op],
-    });
-    const prepared = provider ? prepareChatMessages(provider, assembled) : assembled;
-    const hasProviderSystem = prepared.length > assembled.length;
+    const prepared = preparedOperation?.messages ?? [];
+    const hasProviderSystem = Boolean(
+      provider?.instructions?.trim() && prepared[0]?.role === "system",
+    );
 
     const out: MsgRow[] = prepared.map((m, i) => {
       const isProviderSystem = hasProviderSystem && i === 0 && m.role === "system";
       const isFirstUser = m.role === "user" && prepared.slice(0, i).every((x) => x.role !== "user");
-      const ctxPresent = contextBlock.length > 0;
+      const ctxPresent = effectiveContextBlock.length > 0;
       let label = "";
       let hint: string | undefined;
       if (m.role === "system") {
@@ -148,7 +153,7 @@ export function PromptInspectorModal({
 
     const chars = prepared.reduce((n, m) => n + m.content.length, 0);
     return { rows: out, totalChars: chars };
-  }, [op, inputs, voicePrompt, contextBlock, lensSelections, provider]);
+  }, [preparedOperation, effectiveContextBlock, provider]);
 
   const note = inputNotes?.[op];
 
@@ -177,7 +182,10 @@ export function PromptInspectorModal({
               role="tab"
               aria-selected={o === op}
               className={`prompt-inspector-tab${o === op ? " active" : ""}`}
-              onClick={() => setOp(o)}
+              onClick={() => {
+                setOp(o);
+                onOperationChange(o);
+              }}
             >
               {OP_LABELS[o]}
             </button>
@@ -217,7 +225,7 @@ export function PromptInspectorModal({
               {selectedLens.label}
             </span>
           ) : null}
-          {contextBlock.length > 0 ? (
+          {effectiveContextBlock.length > 0 ? (
             <span className="prompt-inspector-flag" title="A context block is injected into the user message">
               context block
             </span>
@@ -229,13 +237,24 @@ export function PromptInspectorModal({
         </div>
 
         {note ? <p className="prompt-inspector-note">{note}</p> : null}
+        {preparingOp === op ? (
+          <p className="prompt-inspector-note">Preparing the exact request…</p>
+        ) : null}
+        {preparationError ? (
+          <p className="prompt-inspector-note">{preparationError}</p>
+        ) : null}
+        {preparedOperation ? (
+          <p className="prompt-inspector-note">
+            Context {preparedOperation.contextSnapshot.budget.totalBytes.toLocaleString()} bytes · prompt layers {preparedOperation.budget.promptLayerBytes.toLocaleString()} bytes · fingerprint {preparedOperation.contextFingerprint.slice(0, 12)}…
+          </p>
+        ) : null}
         {/* The delta log is built from published kind-4290 trace nodes, which
             only exist after a step. An unstepped file has no history on the
             relay, so its edits won't appear under the directory-log header —
             surface that so the absence reads as "not yet published," not
             "missing." (The live ops see the exact same empty log; this note
             makes the gap legible because the inspector exposes the prompt.) */}
-        {contextBlock.length > 0 && !activeFileStepped ? (
+        {effectiveContextBlock.length > 0 && !activeFileStepped ? (
           <p className="prompt-inspector-note">
             The active file isn’t stepped yet, so its edit history isn’t in the
             delta log — the directory-log section lists only already-published
@@ -259,6 +278,19 @@ export function PromptInspectorModal({
             ))
           )}
         </div>
+
+        {preparedOperation ? (
+          <button
+            type="button"
+            className="run-start"
+            onClick={() => onApprove(preparedOperation)}
+            disabled={approvedRequestHash === preparedOperation.preparedRequestHash}
+          >
+            {approvedRequestHash === preparedOperation.preparedRequestHash
+              ? "Approved for this session"
+              : `Approve ${OP_LABELS[op]}`}
+          </button>
+        ) : null}
 
         <p className="run-hint">
           Esc to close · click a tab to switch op

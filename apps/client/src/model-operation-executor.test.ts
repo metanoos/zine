@@ -34,6 +34,7 @@ function fixture(operation: PreparedOperation["operation"] = "extend"): Prepared
       modelVoicePubkey: "model-voice",
       lensId: "default" as const,
       voicePromptHash: "voice-prompt",
+      focusFingerprint: "focus-draft",
       dependencyFingerprint: `dependency-${operation}`,
     }),
     budget: Object.freeze({

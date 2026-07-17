@@ -10,7 +10,7 @@ import {
 const base: SnapshotDependencies = {
   focus: "file:draft.md@0",
   targetRevision: "head:hash",
-  mount: "folder:",
+  mounts: ["folder:"],
   shields: [],
   providerFingerprint: "provider",
   modelVoicePromptHash: "voice",
@@ -26,7 +26,7 @@ function snapshot(complete = true) {
       kind: "file", folderId: "f", path: "draft.md", traceId: "t",
       headId: "h", body: "draft",
     },
-    mount: null,
+    mounts: [],
     shields: [],
     inputs: [],
     renderedBlock: "ctx",

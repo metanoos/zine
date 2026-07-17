@@ -62,7 +62,7 @@ export interface ContextSnapshotBudget {
 export interface ContextSnapshot {
   version: 1;
   target: ContextSnapshotTarget;
-  mount: { kind: "file" | "folder"; path: string } | null;
+  mounts: readonly { kind: "file" | "folder"; path: string }[];
   shields: readonly ContextShieldDecision[];
   inputs: readonly ContextSnapshotInput[];
   renderedBlock: string;
@@ -77,7 +77,7 @@ export interface ContextSnapshot {
 
 export interface CreateContextSnapshotInput {
   target: Omit<ContextSnapshotTarget, "contentHash"> & { contentHash?: string };
-  mount: ContextSnapshot["mount"];
+  mounts: ContextSnapshot["mounts"];
   shields: readonly ContextShieldDecision[];
   inputs: ReadonlyArray<Omit<ContextSnapshotInput, "contentHash"> & { contentHash?: string }>;
   renderedBlock: string;
@@ -142,6 +142,9 @@ export function createContextSnapshot(input: CreateContextSnapshotInput): Contex
     }))
     .sort((a, b) => a.path.localeCompare(b.path));
   const shields = [...input.shields].sort((a, b) => a.path.localeCompare(b.path));
+  const mounts = [...input.mounts]
+    .map((mount) => ({ ...mount }))
+    .sort((a, b) => a.kind.localeCompare(b.kind) || a.path.localeCompare(b.path));
   const failures = [...(input.failures ?? [])].sort((a, b) =>
     a.path.localeCompare(b.path) || a.stage.localeCompare(b.stage) || a.message.localeCompare(b.message));
   const contributions = inputs.map((entry) => {
@@ -183,7 +186,7 @@ export function createContextSnapshot(input: CreateContextSnapshotInput): Contex
   const fingerprint = contentFingerprint(canonicalStringify({
     version: 1,
     target,
-    mount: input.mount,
+    mounts,
     shields,
     inputs,
     renderedBlock: input.renderedBlock,
@@ -193,7 +196,7 @@ export function createContextSnapshot(input: CreateContextSnapshotInput): Contex
   return deepFreeze({
     version: 1 as const,
     target,
-    mount: input.mount,
+    mounts,
     shields,
     inputs,
     renderedBlock: input.renderedBlock,

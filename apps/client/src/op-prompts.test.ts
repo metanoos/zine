@@ -17,7 +17,6 @@ import assert from "node:assert/strict";
 import {
   extendMessages,
   settleMessages,
-  settleDedupeMessages,
   stirMessages,
   replyMessages,
   receiveMessages,
@@ -194,15 +193,6 @@ test("replyMessages: traces block is omitted when empty", () => {
   const noTraces = replyMessages("src", "")[1].content;
   assert.ok(withTraces.startsWith("--- available minted traces ---\nTRACE1"));
   assert.ok(!noTraces.includes("available minted traces"));
-});
-
-test("settleDedupeMessages: each file is numbered and headered", () => {
-  const body = settleDedupeMessages([
-    { path: "a.md", content: "AAA" },
-    { path: "b.md", content: "BBB" },
-  ])[1].content;
-  assert.ok(body.includes("--- FILE 1: a.md ---\nAAA"));
-  assert.ok(body.includes("--- FILE 2: b.md ---\nBBB"));
 });
 
 // ─── dispatch helper ────────────────────────────────────────────────────────

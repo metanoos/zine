@@ -34,7 +34,7 @@ const context = createContextSnapshot({
     kind: "file", folderId: "folder", path: "draft.md", traceId: "trace",
     headId: "head", body: "draft",
   },
-  mount: null,
+  mounts: [],
   shields: [],
   inputs: [{
     path: "draft.md", traceId: "trace", headId: "head", body: "draft",
@@ -51,6 +51,7 @@ test("recording transport receives byte-identical approved messages", async () =
     provider,
     modelVoicePubkey: "a".repeat(64),
     lensId: "default",
+    focusFingerprint: "focus:draft.md@0",
     dirtyTarget: false,
     requestId: "recording-request",
     createdAt: 1,
@@ -67,6 +68,7 @@ test("provider edits invalidate approval before transport", async () => {
     provider,
     modelVoicePubkey: "a".repeat(64),
     lensId: "default",
+    focusFingerprint: "focus:draft.md@0",
     dirtyTarget: false,
   });
   await assert.rejects(

@@ -184,7 +184,21 @@ import {
 import { getVoiceProvider, setVoiceProvider } from "./voice-provider-store.js";
 import { getVoicePrompt } from "./voice-prompt-store.js";
 import { loadProviders, type ProviderConfig } from "./models-store.js";
-import { complete, prepareChatMessages } from "./llm.js";
+import {
+  PREPARED_OPERATION_VERSION,
+  PROMPT_LAYER_VERSIONS,
+  PreparedOperationApproval,
+  prepareOperation,
+  type PreparedOperation,
+} from "./prepared-operation.js";
+import { contentFingerprint } from "./context-snapshot.js";
+import { SnapshotCoordinator, type SnapshotDependencies } from "./snapshot-coordinator.js";
+import { providerProfileFingerprint } from "./provider-fingerprint.js";
+import {
+  executePreparedOperation,
+  type CurrentModelTarget,
+  type RecoverableModelResult,
+} from "./model-operation-executor.js";
 import { captureKEditTransaction, groupKEditsByTransaction } from "./kedit-capture.js";
 import {
   captureStreamingScrollAnchor,
@@ -239,7 +253,13 @@ import {
   setSubstrateSignerKeyId,
   getSubstrateBindingPubkey,
 } from "./external-voice-store.js";
-import { gatherContextBlock, clearChainMemo, renderLimelightLog, isShielded } from "./context-gather.js";
+import {
+  gatherContextBlock,
+  gatherContextSnapshot,
+  clearChainMemo,
+  renderLimelightLog,
+  isShielded,
+} from "./context-gather.js";
 import {
   applyScopeClick,
   mountsForGroupAction,
@@ -267,9 +287,6 @@ import {
   removeReplayPanels,
 } from "./replay-panel-layout.js";
 import {
-  settleDedupeMessages,
-  applyOpPromptLayers,
-  assembleOpMessages,
   type OpKind as PromptOpKind,
   type OpInputs,
 } from "./op-prompts.js";
@@ -599,6 +616,37 @@ function reweaveAnchors(reinvented: string, original: string): string {
   return out;
 }
 
+/** Encode Settle's immutable bracket spans as opaque tokens so the whole
+ * selected range can be prepared and condensed in one atomic request. */
+function encodeSettleAnchors(text: string): { promptText: string; anchors: string[] } {
+  const anchors: string[] = [];
+  let cursor = 0;
+  let promptText = "";
+  for (const bracket of iterBrackets(text)) {
+    promptText += text.slice(cursor, bracket.matchStart);
+    anchors.push(text.slice(bracket.matchStart, bracket.matchEnd));
+    promptText += `__ZINE_ANCHOR_${anchors.length}__`;
+    cursor = bracket.matchEnd;
+  }
+  promptText += text.slice(cursor);
+  return { promptText, anchors };
+}
+
+function restoreSettleAnchors(response: string, anchors: readonly string[]): string {
+  let restored = response;
+  const used = new Set<number>();
+  restored = restored.replace(/__ZINE_ANCHOR_(\d+)__/g, (_match, rawIndex: string) => {
+    const index = Number(rawIndex) - 1;
+    if (!Number.isInteger(index) || !anchors[index]) return "";
+    used.add(index);
+    return anchors[index];
+  });
+  for (let index = 0; index < anchors.length; index++) {
+    if (!used.has(index)) restored += `${restored.endsWith("\n") ? "" : "\n"}${anchors[index]}`;
+  }
+  return restored;
+}
+
 /** Remove [start, end) ranges from `text`, in order, by absolute position.
  *  Used by Stir to drop `(( command ))` spans (sourced from `findCommands`)
  *  without a second regex match that could drift from the parser. Ranges must
@@ -617,35 +665,26 @@ function stripRanges(text: string, ranges: [number, number][]): string {
   return out;
 }
 
-/**
- * Split a Reply model stream into an optional TITLE header + body.
- * The model is asked to emit `TITLE: <name>` as its first line. Until that
- * first line is complete (`headerDone`), the body is withheld so the TITLE
- * line never lands in the editor. If the first line isn't a TITLE, the whole
- * raw string is treated as body (fallback when the model ignores the format).
- */
-function parseReplyOutput(
-  raw: string,
-  streamDone = false,
-): { title: string | null; body: string; headerDone: boolean } {
+/** Split a buffered Reply/Receive response into an optional TITLE header and
+ * body. If the first line is not a TITLE, preserve the whole response. */
+function parseReplyOutput(raw: string): { title: string | null; body: string } {
   const nl = raw.indexOf("\n");
   if (nl < 0) {
-    if (!streamDone) return { title: null, body: "", headerDone: false };
     const m = raw.match(/^TITLE:\s*(.+?)\s*$/i);
     if (m) {
       const title = m[1].trim();
-      return { title: title || null, body: "", headerDone: true };
+      return { title: title || null, body: "" };
     }
-    return { title: null, body: raw, headerDone: true };
+    return { title: null, body: raw };
   }
   const first = raw.slice(0, nl);
   const rest = raw.slice(nl + 1).replace(/^\r?\n/, "");
   const m = first.match(/^TITLE:\s*(.+?)\s*$/i);
   if (m) {
     const title = m[1].trim();
-    return { title: title || null, body: rest, headerDone: true };
+    return { title: title || null, body: rest };
   }
-  return { title: null, body: raw, headerDone: true };
+  return { title: null, body: raw };
 }
 
 // --- tree moves (drag & drop) -----------------------------------------
@@ -6639,6 +6678,8 @@ function App() {
     const label = getRootLabel() ?? DEFAULT_ROOT_LABEL;
     return { id, label };
   });
+  const folderRef = useRef<AttachedFolder | null>(folder);
+  folderRef.current = folder;
   // Incoming forks / sibling heads for the active file (branch detection).
   // Refreshed on folder/path change and after incorporate.
   const [mergeCandidates, setMergeCandidates] = useState<MergeCandidate[]>([]);
@@ -6769,6 +6810,8 @@ function App() {
   // panelWeights) stay length-locked to panels via spawnPanel / moveTabToNewPanel
   // / commitWithCollapse.
   const [panels, setPanels] = useState<PanelState[]>([{ tabs: [], active: "" }]);
+  const panelsRef = useRef<PanelState[]>(panels);
+  panelsRef.current = panels;
   // The cited traces for each open file — every `q` tag on the file's current
   // head node, resolved to a name and exact-step distance via
   // `resolveCitationChip`. This subsumes the old
@@ -6991,6 +7034,10 @@ function App() {
     unsteppedPathSet,
     unsteppedEditCounts,
   } = useProvenance(folder, files, replayActiveRef, replay);
+  const unsteppedPathSetRef = useRef(unsteppedPathSet);
+  unsteppedPathSetRef.current = unsteppedPathSet;
+  const snapshotCoordinatorRef = useRef(new SnapshotCoordinator());
+  const preparedApprovalRef = useRef(new PreparedOperationApproval());
   // Drop the context-block delta-log memo whenever the attached folder changes
   // (attach, switch, detach) — memoized chains are keyed by folder id + path,
   // so a stale folder id's entries must not survive into the new one.
@@ -7147,6 +7194,8 @@ function App() {
     return backendRef.current.writeFile(path, content, tags, signer, runs, undefined, taggedTraces, kedits, localOnly, force);
   };
   const [activePanel, setActivePanel] = useState<number>(0);
+  const activePanelRef = useRef(activePanel);
+  activePanelRef.current = activePanel;
   // Branch detection: rescan incoming forks / sibling heads for the active file.
   // Fires on folder switch, tab focus, foreign-flag change, and after steps that
   // advance the head (nodeId). Debounced slightly so rapid tab flips don't spam.
@@ -7226,6 +7275,8 @@ function App() {
   // (a file, a folder, a palette span, or an editor [[ span ]]); clicking empty
   // space never clears it, so "the last selected trace" is always available.
   const [selection, setSelection] = useState<SelectionRef | null>(null);
+  const selectionRef = useRef<SelectionRef | null>(selection);
+  selectionRef.current = selection;
   // This ordered set stores explicit tree mounts. Effective scope is derived
   // from their folder closures minus shielded boundaries. Mounts are independent
   // from panel/tab focus and change only through explicit mount gestures or
@@ -7341,6 +7392,8 @@ function App() {
   const authorPubkey = authorKey?.pubkey ?? fallbackPubkey;
   const modelKey = keys.find((k) => k.id === modelKeyId) ?? null;
   const modelPubkey = modelKey?.pubkey ?? fallbackPubkey;
+  const modelPubkeyRef = useRef(modelPubkey);
+  modelPubkeyRef.current = modelPubkey;
   // Hand the debounced auto-save a resolver for the AUTHOR key's secret, so
   // the 1500ms debounce step signs as the AUTHOR key — not a hidden active key.
   // Read at fire time (see scheduleStep), so an AUTHOR switch mid-debounce wins.
@@ -8155,6 +8208,10 @@ function App() {
   // Which one ops use is chosen under Press model select (voice-provider-store).
   const [providers, setProviders] = useState<ProviderConfig[]>(() => loadProviders());
   const [opLenses, setOpLenses] = useState(() => loadOpLensSelections());
+  const providersRef = useRef(providers);
+  providersRef.current = providers;
+  const opLensesRef = useRef(opLenses);
+  opLensesRef.current = opLenses;
   useEffect(() => {
     if (activeView === "editor") setProviders(loadProviders());
   }, [activeView]);
@@ -8329,46 +8386,148 @@ function App() {
     return provider;
   }
 
-  /** The browser-local layers shared by the live op and Prompt Inspector. */
-  function opPromptLayers(op: PromptOpKind, contextBlock: string, pubkey = modelPubkey) {
-    return {
-      lensId: opLenses[op],
-      voicePrompt: getVoicePrompt(pubkey),
-      contextBlock,
-    };
+  /** Imperative counterpart of opTargetPanel for provider-time revalidation. */
+  function liveOpTargetPanel(): number {
+    const livePanels = panelsRef.current;
+    const selectedPath = selectionRef.current?.path;
+    if (selectedPath) {
+      const activeHit = livePanels.findIndex((panel) => panel.active === selectedPath);
+      if (activeHit !== -1) return activeHit;
+      const tabHit = livePanels.findIndex((panel) => panel.tabs.includes(selectedPath));
+      if (tabHit !== -1) return tabHit;
+    }
+    return Math.min(activePanelRef.current, livePanels.length - 1);
   }
 
-  /** Gather the canonical context block for the active doc in panel `idx`.
-   *  Returns "" when no folder is attached or no file is active — ops then
-   *  run unchanged from before (no context). Never throws: a chain-fetch
-   *  failure inside drops just the delta-log section.
-   *
-   *  The SCOPE (scopeRef) bounds the gather — its subtree recurses into the
-   *  delta log; `path` (the panel's focused file) is the target, emphasized as
-   *  (ACTIVE). Falls back to the root folder scope when none is set. */
-  async function gatherContextForPanel(idx: number): Promise<string> {
-    if (!folder) return "";
-    const path = panels[idx]?.active;
-    if (!path) return "";
-    return gatherContextBlock(folder, files, scopeRef.current, path, shieldedRef.current);
+  function liveTargetBody(idx: number, path: string, file: FileState): string {
+    const view = panelViews.current[idx];
+    return view && panelsRef.current[idx]?.active === path
+      ? view.state.doc.toString()
+      : flatten(file.runs);
+  }
+
+  function modelFocusIdentity(idx: number, path: string): string {
+    return JSON.stringify({
+      panelIndex: idx,
+      activePanel: activePanelRef.current,
+      path,
+      selectionKind: selectionRef.current?.kind ?? null,
+      selectionPath: selectionRef.current?.path ?? null,
+    });
+  }
+
+  /** Gather and freeze the one request object shared by estimate, Inspector,
+   * approval, and transport. The current multi-mount union remains the context
+   * authority; panel/selection focus remains the write authority. */
+  async function prepareModelOperation(
+    idx: number,
+    operation: PromptOpKind,
+    operationInputs: OpInputs,
+    provider: ProviderConfig,
+    signal?: AbortSignal,
+    lensId: OpLensId = opLenses[operation],
+  ): Promise<PreparedOperation> {
+    const liveFolder = folderRef.current;
+    if (!liveFolder) throw new Error("Open a workspace before running a MODEL operation");
+    const path = panelsRef.current[idx]?.active ?? "";
+    if (
+      !path ||
+      isFolderTab(path) ||
+      liveOpTargetPanel() !== idx ||
+      replayActiveRef.current
+    ) {
+      throw new Error("Focus a live file before running a MODEL operation");
+    }
+    const file = filesRef.current[path];
+    if (!file || file.kind === "folder") {
+      throw new Error("The focused MODEL target is not an editable file");
+    }
+    const body = liveTargetBody(idx, path, file);
+    const voicePrompt = getVoicePrompt(modelPubkey) ?? "";
+    const mounts = scopeRef.current.map((scope) => `${scope.kind}:${scope.path}`).sort();
+    const focusIdentity = modelFocusIdentity(idx, path);
+    const dependencies: SnapshotDependencies = {
+      focus: focusIdentity,
+      targetRevision: JSON.stringify({
+        folderId: liveFolder.id,
+        path,
+        traceId: file.traceId ?? null,
+        headId: file.nodeId || null,
+        contentHash: contentFingerprint(body),
+      }),
+      mounts,
+      shields: [...shieldedRef.current].sort(),
+      providerFingerprint: providerProfileFingerprint(provider),
+      modelVoicePromptHash: contentFingerprint(voicePrompt),
+      lensId,
+      operation,
+      operationInputsHash: contentFingerprint(JSON.stringify(operationInputs)),
+      promptLayerVersions: [
+        ...PROMPT_LAYER_VERSIONS,
+        `prepared-operation:v${PREPARED_OPERATION_VERSION}`,
+      ],
+    };
+    const snapshotFiles = filesRef.current;
+    const snapshotScopes = scopeRef.current.map((scope) => ({ ...scope }));
+    const snapshotShields = new Set(shieldedRef.current);
+    const snapshot = await snapshotCoordinatorRef.current.request(
+      dependencies,
+      (gatherSignal) => gatherContextSnapshot(
+        liveFolder,
+        snapshotFiles,
+        snapshotScopes,
+        path,
+        snapshotShields,
+        { signal: gatherSignal },
+      ),
+      signal,
+    );
+    return prepareOperation({
+      operation,
+      operationInputs,
+      contextSnapshot: snapshot,
+      provider,
+      modelVoicePubkey: modelPubkey,
+      voicePrompt,
+      lensId,
+      focusFingerprint: contentFingerprint(focusIdentity),
+      dirtyTarget: unsteppedPathSetRef.current.has(path),
+    });
+  }
+
+  /** Re-prepare current dependencies only to locate the exact session object
+   * approved in Inspector. Transport receives that object, never the freshly
+   * rebuilt comparison object. */
+  async function approvedModelOperation(
+    idx: number,
+    operation: PromptOpKind,
+    operationInputs: OpInputs,
+    provider: ProviderConfig,
+    signal?: AbortSignal,
+  ): Promise<PreparedOperation> {
+    const current = await prepareModelOperation(idx, operation, operationInputs, provider, signal);
+    const approved = preparedApprovalRef.current.get(
+      current.provenance.dependencyFingerprint,
+    );
+    if (!approved || approved.operation !== operation) {
+      throw new Error("Inspect and approve this MODEL request before running it");
+    }
+    return approved;
   }
 
   // Approximate prompt-size estimate for the token indicator beside the LLM
   // buttons. The number reflects the payload an op would send against the
-  // op-target panel's active file (the same target Extend/Settle/Stir/Reply
-  // run against). The estimate uses the same assembler and provider-system
-  // preparation as a live Extend call, with an empty seed; the context block
-  // still dominates. Debounced so typing doesn't thrash the async gather.
+  // op-target panel's active file. It uses the same prepared object path as
+  // Inspector and transport, so fail-closed context or provenance state has no
+  // misleading context-free estimate. Debounced so typing does not thrash the
+  // async gather.
   const [tokenEstimate, setTokenEstimate] = useState<number | null>(null);
   useEffect(() => {
     if (!folder) {
       setTokenEstimate(null);
       return;
     }
-    const sp = selection?.path;
-    const panelIdx = sp
-      ? panels.findIndex((p) => p.tabs.includes(sp))
-      : Math.min(activePanel, panels.length - 1);
+    const panelIdx = opTargetPanel();
     const path = panelIdx >= 0 ? panels[panelIdx]?.active : undefined;
     if (!path) {
       setTokenEstimate(null);
@@ -8378,16 +8537,26 @@ function App() {
     const timer = setTimeout(() => {
       void (async () => {
         try {
-          const block = await gatherContextBlock(folder, files, scope, path, shielded);
-          const messages = assembleOpMessages(
-            "extend",
-            { seed: "", hasSelection: false },
-            opPromptLayers("extend", block),
-          );
           const provider = resolveVoiceProvider(modelPubkey);
-          const prepared = provider ? prepareChatMessages(provider, messages) : messages;
-          const chars = prepared.reduce((total, message) => total + message.content.length, 0);
-          if (!cancelled) setTokenEstimate(estimateTokens(chars));
+          if (!provider) throw new Error("No MODEL provider configured");
+          const file = filesRef.current[path];
+          if (!file || file.kind === "folder") throw new Error("No editable MODEL target");
+          const view = panelViews.current[panelIdx];
+          const doc = view?.state.doc.toString() ?? flatten(file.runs);
+          const selection = view?.state.selection.main;
+          const hasSelection = Boolean(selection && selection.from !== selection.to);
+          const seed = hasSelection
+            ? view!.state.sliceDoc(selection!.from, selection!.to)
+            : doc.slice(-4000);
+          const rangeFrom = hasSelection ? selection!.from : doc.length;
+          const rangeTo = hasSelection ? selection!.to : doc.length;
+          const prepared = await prepareModelOperation(
+            panelIdx,
+            "extend",
+            { seed, hasSelection, rangeFrom, rangeTo },
+            provider,
+          );
+          if (!cancelled) setTokenEstimate(prepared.budget.estimatedTokens);
         } catch {
           if (!cancelled) setTokenEstimate(null);
         }
@@ -8398,19 +8567,137 @@ function App() {
       clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [folder, files, panels, activePanel, selection?.path, modelPubkey, scope, shielded, providers, opLenses]);
+  }, [folder, files, panels, activePanel, selection, modelPubkey, scope, shielded, providers, opLenses]);
 
   // ─── Prompt inspector ──────────────────────────────────────────────────────
   // Clicking the token-count indicator opens a modal showing exactly what a
   // single-shot op would send. `inspectOp` is null when closed; non-null is
-  // the default op to show first (Extend). The inputs + context block are
-  // gathered once on open (against the op-target panel + scope, mirroring what
-  // the live ops gather) and held in state so the modal can switch op tabs
-  // without re-fetching the (memoized) context block.
+  // the default op to show first (Extend). Each tab requests a frozen prepared
+  // operation from the same path transport uses; the modal never rebuilds it.
   const [inspectOp, setInspectOp] = useState<PromptOpKind | null>(null);
   const [inspectContext, setInspectContext] = useState("");
   const [inspectInputs, setInspectInputs] = useState<Partial<Record<PromptOpKind, OpInputs>>>({});
   const [inspectNotes, setInspectNotes] = useState<Partial<Record<PromptOpKind, string>>>({});
+  const [inspectPrepared, setInspectPrepared] = useState<
+    Partial<Record<PromptOpKind, PreparedOperation>>
+  >({});
+  const [inspectPreparing, setInspectPreparing] = useState<PromptOpKind | null>(null);
+  const [inspectPreparationError, setInspectPreparationError] = useState<string | null>(null);
+  const [approvedRequestHash, setApprovedRequestHash] = useState<string | null>(null);
+  const [staleModelResult, setStaleModelResult] = useState<RecoverableModelResult | null>(null);
+
+  useEffect(() => {
+    snapshotCoordinatorRef.current.invalidate();
+    preparedApprovalRef.current.invalidate();
+    setApprovedRequestHash(null);
+    setInspectPrepared({});
+  }, [folder?.id, files, panels, activePanel, selection, scope, shielded, providers, modelPubkey, opLenses]);
+
+  function operationFocusMatches(prepared: PreparedOperation, idx: number): boolean {
+    if (prepared.operation === "receive") return true;
+    const file = filesRef.current[prepared.targetRevision.path];
+    if (!file || file.kind === "folder") return false;
+    const view = panelViews.current[idx];
+    const body = liveTargetBody(idx, prepared.targetRevision.path, file);
+    const selection = view?.state.selection.main;
+    const hasSelection = Boolean(selection && selection.from !== selection.to);
+    if (prepared.operation === "extend") {
+      const from = hasSelection ? selection!.from : body.length;
+      const to = hasSelection ? selection!.to : body.length;
+      return prepared.operationInputs.hasSelection === hasSelection &&
+        prepared.operationInputs.rangeFrom === from &&
+        prepared.operationInputs.rangeTo === to;
+    }
+    const from = hasSelection ? selection!.from : 0;
+    const to = hasSelection ? selection!.to : body.length;
+    return prepared.operationInputs.rangeFrom === from &&
+      prepared.operationInputs.rangeTo === to;
+  }
+
+  function preparedDependenciesStillCurrent(prepared: PreparedOperation, idx: number): boolean {
+    if (
+      contentFingerprint(modelFocusIdentity(idx, prepared.targetRevision.path)) !==
+      prepared.provenance.focusFingerprint
+    ) return false;
+    if (modelPubkeyRef.current !== prepared.provenance.modelVoicePubkey) return false;
+    if (opLensesRef.current[prepared.operation] !== prepared.provenance.lensId) return false;
+    if (
+      contentFingerprint(getVoicePrompt(modelPubkeyRef.current) ?? "") !==
+      prepared.provenance.voicePromptHash
+    ) return false;
+    const pinnedProviderId = getVoiceProvider(modelPubkeyRef.current);
+    const currentProvider = (
+      pinnedProviderId
+        ? providersRef.current.find((provider) => provider.id === pinnedProviderId)
+        : undefined
+    ) ?? providersRef.current[0];
+    if (
+      !currentProvider ||
+      providerProfileFingerprint(currentProvider) !== prepared.providerFingerprint
+    ) return false;
+
+    const currentMounts = scopeRef.current
+      .map((scope) => ({ ...scope }))
+      .sort((left, right) => left.kind.localeCompare(right.kind) || left.path.localeCompare(right.path));
+    if (JSON.stringify(currentMounts) !== JSON.stringify(prepared.contextSnapshot.mounts)) return false;
+
+    const targetPath = prepared.targetRevision.path;
+    const currentInputPaths = Object.keys(filesRef.current)
+      .filter((path) => filesRef.current[path]?.kind !== "folder")
+      .filter((path) =>
+        path === targetPath ||
+        pathInEffectiveScopes(scopeRef.current, shieldedRef.current, path))
+      .sort();
+    if (
+      JSON.stringify(currentInputPaths) !==
+      JSON.stringify(prepared.contextSnapshot.inputs.map((input) => input.path))
+    ) return false;
+
+    for (const input of prepared.contextSnapshot.inputs) {
+      const state = filesRef.current[input.path];
+      if (!state || state.kind === "folder" || unsteppedPathSetRef.current.has(input.path)) {
+        return false;
+      }
+      const body = flatten(state.runs);
+      const citations = [...new Set([
+        ...(state.taggedTraces ?? []),
+        ...findResolvedBrackets(body).map((citation) => citation.nodeId),
+      ])].sort();
+      if (
+        (state.traceId ?? null) !== input.traceId ||
+        (state.nodeId || null) !== input.headId ||
+        contentFingerprint(body) !== input.contentHash ||
+        JSON.stringify(citations) !== JSON.stringify(input.citations)
+      ) return false;
+    }
+    return true;
+  }
+
+  function readCurrentModelTarget(
+    prepared: PreparedOperation,
+    idx: number,
+  ): CurrentModelTarget | null {
+    const liveFolder = folderRef.current;
+    const liveFile = filesRef.current[prepared.targetRevision.path];
+    if (!liveFolder || !liveFile || liveFile.kind === "folder") return null;
+    return {
+      folderId: liveFolder.id,
+      path: prepared.targetRevision.path,
+      traceId: liveFile.traceId ?? "",
+      headId: liveFile.nodeId,
+      contentHash: contentFingerprint(
+        liveTargetBody(idx, prepared.targetRevision.path, liveFile),
+      ),
+      focused: Boolean(
+        liveOpTargetPanel() === idx &&
+        panelsRef.current[idx]?.active === prepared.targetRevision.path &&
+        !panelsRef.current[idx]?.replayOwned &&
+        !replayActiveRef.current &&
+        operationFocusMatches(prepared, idx) &&
+        preparedDependenciesStillCurrent(prepared, idx)
+      ),
+    };
+  }
 
   /** Derive the per-op `OpInputs` from the op-target panel's live editor state,
    *  the same way the ops themselves do. Extend seeds from the selection or doc
@@ -8421,51 +8708,81 @@ function App() {
     const idx = opTargetPanel();
     const path = panels[idx]?.active;
     const view = panelViews.current[idx];
-    if (!path || !view) return {};
-    const doc = view.state.doc.toString();
-    const sel = view.state.selection.main;
-    const hasSel = sel.from !== sel.to;
+    const state = path ? files[path] : null;
+    if (!path || !state || state.kind === "folder") return {};
+    const doc = view?.state.doc.toString() ?? flatten(state.runs);
+    const sel = view?.state.selection.main;
+    const hasSel = Boolean(sel && sel.from !== sel.to);
     // Extend: seed from selection, else doc tail (matches extendLLM).
-    const seed = hasSel ? view.state.sliceDoc(sel.from, sel.to) : doc.slice(-4000);
+    const seed = hasSel ? view!.state.sliceDoc(sel!.from, sel!.to) : doc.slice(-4000);
     // Stir: gather commands + loose prose + anchor count over the selection
     // (or whole doc), mirroring shakeLLM.
-    const stirText = hasSel ? view.state.sliceDoc(sel.from, sel.to) : doc;
+    const stirText = hasSel ? view!.state.sliceDoc(sel!.from, sel!.to) : doc;
     const cmds = findCommands(stirText);
     const stripped = stripRanges(stirText, cmds.map((c) => [c.matchStart, c.matchEnd] as [number, number]));
     const loose = partitionDoc(stripped).filter((p) => p.kind === "loose").map((p) => p.text).join("\n").trim();
     const anchorCount = [...iterBrackets(stirText)].length;
-    // Settle condenses each loose segment independently; the preview shows the
-    // first non-empty one as a representative body.
-    const settleLoose = partitionDoc(stirText).find((p) => p.kind === "loose" && p.text.trim().length > 0)?.text ?? "";
+    const from = hasSel ? sel!.from : 0;
+    const to = hasSel ? sel!.to : doc.length;
+    const settlePrompt = encodeSettleAnchors(stirText).promptText;
     return {
-      extend: { seed, hasSelection: hasSel },
-      settle: { loose: settleLoose },
-      stir: { loose, anchorCount, commands: cmds.map((c) => c.command) },
+      extend: { seed, hasSelection: hasSel, rangeFrom: hasSel ? from : doc.length, rangeTo: hasSel ? to : doc.length },
+      settle: { loose: settlePrompt, rangeFrom: from, rangeTo: to },
+      stir: { loose, anchorCount, commands: cmds.map((c) => c.command), rangeFrom: from, rangeTo: to },
       // Reply/Receive relay-backed bodies are filled by openInspector.
-      reply: { source: stirText },
+      reply: { source: stirText, rangeFrom: from, rangeTo: to },
       receive: {},
     };
+  }
+
+  async function prepareInspectorOperation(
+    operation: PromptOpKind,
+    inputs: Partial<Record<PromptOpKind, OpInputs>> = inspectInputs,
+    lensId: OpLensId = opLenses[operation],
+  ): Promise<void> {
+    const idx = opTargetPanel();
+    const provider = resolveVoiceProvider(modelPubkey);
+    if (!provider) {
+      setInspectPreparationError("No MODEL provider is configured.");
+      return;
+    }
+    setInspectPreparing(operation);
+    setInspectPreparationError(null);
+    try {
+      const prepared = await prepareModelOperation(
+        idx,
+        operation,
+        inputs[operation] ?? {},
+        provider,
+        undefined,
+        lensId,
+      );
+      setInspectPrepared((current) => ({ ...current, [operation]: prepared }));
+      setInspectContext(prepared.contextSnapshot.renderedBlock);
+    } catch (error) {
+      setInspectPrepared((current) => {
+        const next = { ...current };
+        delete next[operation];
+        return next;
+      });
+      setInspectPreparationError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setInspectPreparing((current) => current === operation ? null : current);
+    }
   }
 
   /** Open the inspector: gather the context block + derive inputs against the
    *  op-target panel, then show the modal. Async because the context block's
    *  directory-log fetch is async (memoized). */
-  async function openInspector() {
+  async function openInspector(defaultOperation: PromptOpKind = "extend") {
     const inputs = deriveInspectInputs();
     const notes: Partial<Record<PromptOpKind, string>> = {
-      settle: "Settle sends one call per loose segment; this tab shows the first non-empty segment from the current selection or document.",
+      settle: "Bracket spans appear as protected anchor tokens in the request and are restored byte-for-byte after the complete response.",
     };
-    const [contextResult, paletteResult, focusResult] = await Promise.allSettled([
-      gatherContextForPanel(opTargetPanel()),
+    const [paletteResult, focusResult] = await Promise.allSettled([
       fetchPalette(),
       folder ? focusTimeline(folder.id) : Promise.resolve([] as FocusEntry[]),
     ]);
-    const context = contextResult.status === "fulfilled" ? contextResult.value : "";
-    if (contextResult.status === "rejected") {
-      for (const op of ["extend", "settle", "stir", "reply", "receive"] as PromptOpKind[]) {
-        notes[op] = "The context gather failed; the preview shows the context-free fallback a call would use.";
-      }
-    }
     if (paletteResult.status === "fulfilled") {
       inputs.reply = {
         ...inputs.reply,
@@ -8488,9 +8805,12 @@ function App() {
       notes.receive = "The limelight fetch failed; Receive would continue with the delta log and file contents only.";
     }
     setInspectInputs(inputs);
-    setInspectContext(context);
+    setInspectContext("");
     setInspectNotes(notes);
-    setInspectOp("extend");
+    setInspectPrepared({});
+    setInspectPreparationError(null);
+    setInspectOp(defaultOperation);
+    await prepareInspectorOperation(defaultOperation, inputs);
   }
 
   /** Begin an op: mark running and arm an AbortController. The op voice is
@@ -8648,69 +8968,54 @@ function App() {
     const { controller } = started;
     let llmMeta: LlmStepMeta | null = null;
     const view = panelViews.current[idx]!;
-    // Summoning the model is a deliberate human gesture (a button click), so
-    // the baseline it runs against is stepped first by the AUTHOR key — same path
-    // as a manual Save. The write-back then lands as its own subsequent node
-    // chained off this baseline (see stepGate / suppressStep in endOp).
-    {
-      const signer = secretKeyForVoice(authorPubkey);
-      const path = panels[idx]?.active;
-      if (path && files[path] && signer) await stepFile(path, signer);
-    }
-    // With a selection, Extend seeds from the selected text and continues right
-    // after it; otherwise it seeds from the end of the document and appends.
-    const sel = view.state.selection.main;
-    const hasSel = sel.from !== sel.to;
-    const seed = hasSel
-      ? view.state.sliceDoc(sel.from, sel.to)
-      : view.state.doc.toString().slice(-4000);
-    const messages = assembleOpMessages(
-      "extend",
-      { seed, hasSelection: hasSel },
-      opPromptLayers("extend", await gatherContextForPanel(idx), pubkey),
-    );
-    llmMeta = await prepareLlmMeta(idx, "extend", provider, seed, 4096);
-    const anchor = hasSel ? sel.to : view.state.doc.length;
-    // Begin the continuation on its own line: if the char right before the
-    // anchor isn't already a line break (and the anchor isn't the doc start),
-    // prepend "\n" to the first inserted chunk. Skipped when the anchor already
-    // sits at the head of a line, so an existing trailing newline isn't doubled.
-    const prefix = anchor > 0 && view.state.doc.sliceString(anchor - 1, anchor) !== "\n"
-      ? "\n"
-      : "";
-    let acc = "";
-    let firstDelta = true;
     try {
-      const full = await complete(provider, messages, {
+      const sel = view.state.selection.main;
+      const hasSel = sel.from !== sel.to;
+      const seed = hasSel
+        ? view.state.sliceDoc(sel.from, sel.to)
+        : view.state.doc.toString().slice(-4000);
+      const anchor = hasSel ? sel.to : view.state.doc.length;
+      const inputs: OpInputs = {
+        seed,
+        hasSelection: hasSel,
+        rangeFrom: hasSel ? sel.from : anchor,
+        rangeTo: anchor,
+      };
+      const prepared = await approvedModelOperation(
+        idx,
+        "extend",
+        inputs,
+        provider,
+        controller.signal,
+      );
+      llmMeta = await prepareLlmMeta(idx, "extend", provider, seed, 4096);
+      const result = await executePreparedOperation({
+        prepared,
+        provider,
         maxTokens: 4096,
         signal: controller.signal,
-        onDelta: (delta) => {
-          if (firstDelta) {
-            delta = prefix + delta;
-            firstDelta = false;
-          }
-          acc += delta;
-          // Clamp to the live doc length: an external sync (relay push, a
-          // concurrent write to this file, or the step write-back) can swap the
-          // doc to a shorter one mid-stream, leaving the captured `anchor`
-          // past the end. Without this the dispatch throws
-          // "Invalid change range … (in doc of length …)".
-          const insertAt = Math.min(
-            anchor + acc.length - delta.length,
-            view.state.doc.length,
-          );
+        readCurrentTarget: () => readCurrentModelTarget(prepared, idx),
+        onStale: (recovery) => setStaleModelResult(recovery),
+        apply: (response) => {
+          const insertAt = prepared.operationInputs.rangeTo ?? anchor;
+          const prefix = insertAt > 0 && view.state.doc.sliceString(insertAt - 1, insertAt) !== "\n"
+            ? "\n"
+            : "";
           view.dispatch({
-            changes: { from: insertAt, insert: delta },
+            changes: { from: insertAt, insert: prefix + response },
             effects: opVoiceEffect.of(pubkey),
           });
         },
       });
-      if (!acc && full)
-        view.dispatch({
-          changes: { from: Math.min(anchor, view.state.doc.length), insert: prefix + full },
-          effects: opVoiceEffect.of(pubkey),
-        });
-      setOpStatus(idx, "done");
+      if (result.status === "cancelled") {
+        setOpStatus(idx, "idle");
+        return;
+      }
+      if (result.status === "stale") {
+        setOpStatus(idx, "error", "MODEL response held because focus or the file changed");
+        return;
+      }
+      setOpStatus(idx, "done", undefined, "extend");
     } catch (e) {
       if (controller.signal.aborted) {
         setOpStatus(idx, "idle");
@@ -8722,102 +9027,14 @@ function App() {
     }
   }
 
-  /** Settle (de-dupe mode): collapse near-duplicate files in the scope subtree
-   *  into one voiced revision. Triggered when Settle runs with a FOLDER in scope
-   *  (the whole-subtree target) rather than a single file focus. Candidate
-   *  duplicates are grouped by a cheap content signature (normalized prefix);
-   *  each group of 2+ is sent to the LLM to merge, the merged result overwrites
-   *  the first (keeper) file, and the redundant copies are deleted.
-   *
-   *  This is the deliberate gesture that collapses scan-introduced redundancy:
-   *  scanning the same path twice yields two copies by design, and Settle is
-   *  how the trace consolidates them. Nothing happens between gestures. */
-  async function settleDeDupeLLM(idx: number) {
-    const pubkey = modelPubkey;
-    const provider = resolveOpProvider(idx, pubkey);
-    if (!provider) return;
-    const started = beginOp(idx, secretKeyForVoice(pubkey) ?? undefined, "settle");
-    if (!started) return;
-    const { controller } = started;
-    // Collect candidates from the full multi-scope union. De-dupe stays a
-    // folder operation: at least one explicitly scoped folder is required.
-    const scopes = scopeRef.current;
-    if (!scopes.some((item) => item.kind === "folder")) {
-      setOpStatus(idx, "error", "De-dupe needs a folder in scope");
-      endOp(idx);
-      return;
-    }
-    const inScope = Object.entries(files).filter(
-      ([p, s]) =>
-        s.kind !== "folder" &&
-        pathInEffectiveScopes(scopes, shieldedRef.current, p),
+  /** Folder Settle is withheld until one reviewed batch can capture every
+   * provider call, keeper revision, and deletion before the first network hop. */
+  function settleDeDupeLLM(idx: number) {
+    setOpStatus(
+      idx,
+      "error",
+      "Folder Settle needs a dedicated reviewed batch; focus one stepped file for now",
     );
-    // Group by a normalized content signature: lowercased, whitespace-collapsed
-    // first ~240 chars. Exact/near re-scans of the same source share it.
-    const sig = (text: string): string =>
-      text.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 240);
-    const groups = new Map<string, { path: string; content: string }[]>();
-    for (const [path, state] of inScope) {
-      const content = flatten(state.runs);
-      const key = sig(content);
-      if (!key) continue; // skip empty files — never a duplicate worth merging
-      const arr = groups.get(key) ?? [];
-      arr.push({ path, content });
-      groups.set(key, arr);
-    }
-    const dupGroups = [...groups.values()].filter((g) => g.length >= 2);
-    if (dupGroups.length === 0) {
-      setOpStatus(idx, "done", "nothing to de-dupe");
-      endOp(idx);
-      return;
-    }
-    try {
-      const signer = secretKeyForVoice(pubkey) ?? undefined;
-      for (const group of dupGroups) {
-        if (controller.signal.aborted) break;
-        const merged = await complete(
-          provider,
-          applyOpPromptLayers(
-            "settle",
-            settleDedupeMessages(group),
-            opPromptLayers("settle", "", pubkey),
-          ),
-          { maxTokens: 2048, signal: controller.signal },
-        );
-        // Keeper = first file; overwrite it with the merge. The rest are deleted.
-        const [keeper, ...redundant] = group;
-        await backendRef.current.writeFile(keeper.path, merged, [], signer, [{ voice: pubkey, text: merged }]);
-        for (const r of redundant) {
-          setFiles((prev) => {
-            const next = { ...prev };
-            delete next[r.path];
-            return next;
-          });
-          // Close the tab if open, then tombstone on disk + relay.
-          setPanels((prev) =>
-            prev.map((p) =>
-              p.tabs.includes(r.path)
-                ? { ...p, tabs: p.tabs.filter((t) => t !== r.path), active: p.active === r.path ? (p.tabs.filter((t) => t !== r.path)[0] ?? "") : p.active }
-                : p,
-            ),
-          );
-          void backendRef.current.deletePath(r.path, false).catch((e) =>
-            console.warn(`[settle-de-dupe] deletePath failed for ${r.path}:`, e),
-          );
-        }
-        // Open the keeper so the merged result is visible.
-        openInActivePanel(keeper.path);
-      }
-      setOpStatus(idx, "done", `de-duped ${dupGroups.length} group(s)`);
-    } catch (e) {
-      if (controller.signal.aborted) {
-        setOpStatus(idx, "idle");
-        return;
-      }
-      setOpStatus(idx, "error", e instanceof Error ? e.message : String(e));
-    } finally {
-      endOp(idx);
-    }
   }
 
   /** SETTLE - condense the loose (non-bracketed) prose in place; preserve
@@ -8834,12 +9051,6 @@ function App() {
     const { controller } = started;
     let llmMeta: LlmStepMeta | null = null;
     const view = panelViews.current[idx]!;
-    // Step the baseline under the AUTHOR key before the model runs (see extendLLM).
-    {
-      const signer = secretKeyForVoice(authorPubkey);
-      const path = panels[idx]?.active;
-      if (path && files[path] && signer) await stepFile(path, signer);
-    }
     try {
       const sel = view.state.selection.main;
       const hasSel = sel.from !== sel.to;
@@ -8847,40 +9058,48 @@ function App() {
       const to = hasSel ? sel.to : view.state.doc.length;
       const text = view.state.sliceDoc(from, to);
       llmMeta = await prepareLlmMeta(idx, "settle", provider, text, 512);
-      const parts = partitionDoc(text);
-      const ctx = await gatherContextForPanel(idx);
-      // Condense each loose segment independently; brackets pass through.
-      const rebuilt: string[] = [];
-      for (const part of parts) {
-        if (part.kind === "bracket") {
-          rebuilt.push(part.text);
-          continue;
-        }
-        if (part.text.trim().length === 0) {
-          rebuilt.push(part.text);
-          continue;
-        }
-        const condensed = await complete(provider, assembleOpMessages(
-          "settle",
-          { loose: part.text },
-          opPromptLayers("settle", ctx, pubkey),
-        ), {
-          maxTokens: 512,
-          signal: controller.signal,
-        });
-        rebuilt.push(condensed);
+      const encoded = encodeSettleAnchors(text);
+      const inputs: OpInputs = {
+        loose: encoded.promptText,
+        rangeFrom: from,
+        rangeTo: to,
+      };
+      const prepared = await approvedModelOperation(
+        idx,
+        "settle",
+        inputs,
+        provider,
+        controller.signal,
+      );
+      const result = await executePreparedOperation({
+        prepared,
+        provider,
+        maxTokens: 512,
+        signal: controller.signal,
+        readCurrentTarget: () => readCurrentModelTarget(prepared, idx),
+        onStale: (recovery) => setStaleModelResult(recovery),
+        apply: (response) => {
+          const next = restoreSettleAnchors(response, encoded.anchors);
+          if (next === text) return;
+          view.dispatch({
+            changes: {
+              from: prepared.operationInputs.rangeFrom ?? from,
+              to: prepared.operationInputs.rangeTo ?? to,
+              insert: next,
+            },
+            effects: opVoiceEffect.of(pubkey),
+          });
+        },
+      });
+      if (result.status === "cancelled") {
+        setOpStatus(idx, "idle");
+        return;
       }
-      const next = rebuilt.join("");
-      if (next !== text) {
-        // Clamp the stale selection range to the live doc: the await above can
-        // span an external doc-sync that shrank the body (see extendLLM).
-        const end = Math.min(to, view.state.doc.length);
-        view.dispatch({
-          changes: { from: Math.min(from, end), to: end, insert: next },
-          effects: opVoiceEffect.of(pubkey),
-        });
+      if (result.status === "stale") {
+        setOpStatus(idx, "error", "MODEL response held because focus or the file changed");
+        return;
       }
-      setOpStatus(idx, "done");
+      setOpStatus(idx, "done", undefined, "settle");
     } catch (e) {
       if (controller.signal.aborted) {
         setOpStatus(idx, "idle");
@@ -8906,12 +9125,6 @@ function App() {
     const { controller } = started;
     let llmMeta: LlmStepMeta | null = null;
     const view = panelViews.current[idx]!;
-    // Step the baseline under the AUTHOR key before the model runs (see extendLLM).
-    {
-      const signer = secretKeyForVoice(authorPubkey);
-      const path = panels[idx]?.active;
-      if (path && files[path] && signer) await stepFile(path, signer);
-    }
     try {
       const sel = view.state.selection.main;
       const hasSel = sel.from !== sel.to;
@@ -8934,27 +9147,48 @@ function App() {
         .join("\n")
         .trim();
       const anchorCount = [...iterBrackets(text)].length;
-      const ctx = await gatherContextForPanel(idx);
-      const reinvented = await complete(
+      const inputs: OpInputs = {
+        loose,
+        anchorCount,
+        commands: cmds.map((c) => c.command),
+        rangeFrom: from,
+        rangeTo: to,
+      };
+      const prepared = await approvedModelOperation(
+        idx,
+        "stir",
+        inputs,
         provider,
-        assembleOpMessages(
-          "stir",
-          { loose, anchorCount, commands: cmds.map((c) => c.command) },
-          opPromptLayers("stir", ctx, pubkey),
-        ),
-        { maxTokens: 1024, signal: controller.signal },
+        controller.signal,
       );
-      // Rebuild: reinvented loose prose, with the verbatim bracket anchors
-      // re-inserted at the positions the model placed [[ANCHOR N]] markers. If
-      // the model ignored the markers, fall back to appending anchors after.
-      const next = reweaveAnchors(reinvented, text);
-      // Clamp the stale selection range to the live doc (see extendLLM).
-      const end = Math.min(to, view.state.doc.length);
-      view.dispatch({
-        changes: { from: Math.min(from, end), to: end, insert: next },
-        effects: opVoiceEffect.of(pubkey),
+      const result = await executePreparedOperation({
+        prepared,
+        provider,
+        maxTokens: 1024,
+        signal: controller.signal,
+        readCurrentTarget: () => readCurrentModelTarget(prepared, idx),
+        onStale: (recovery) => setStaleModelResult(recovery),
+        apply: (response) => {
+          const next = reweaveAnchors(response, text);
+          view.dispatch({
+            changes: {
+              from: prepared.operationInputs.rangeFrom ?? from,
+              to: prepared.operationInputs.rangeTo ?? to,
+              insert: next,
+            },
+            effects: opVoiceEffect.of(pubkey),
+          });
+        },
       });
-      setOpStatus(idx, "done");
+      if (result.status === "cancelled") {
+        setOpStatus(idx, "idle");
+        return;
+      }
+      if (result.status === "stale") {
+        setOpStatus(idx, "error", "MODEL response held because focus or the file changed");
+        return;
+      }
+      setOpStatus(idx, "done", undefined, "stir");
     } catch (e) {
       if (controller.signal.aborted) {
         setOpStatus(idx, "idle");
@@ -8966,16 +9200,15 @@ function App() {
     }
   }
 
-  /** RESPOND — write an AI response into a NEW sibling doc, citing existing
+  /** RESPOND — buffer an AI response, then write it into a NEW sibling doc after
+   * the approved source revision and focus are revalidated. It may cite existing
    *  coins via [[ phrase | nodeId ]], and citing the source itself
    *  via `replyingTo` (spec §reply-to delta type) so the reply chain
-   *  stays legible from the trace alone. The response is streamed into the
-   *  new file's runs as it arrives. Placement: the sibling opens in a fresh
+   *  stays legible from the trace alone. Placement: the sibling opens in a fresh
    *  column immediately to the right of the source panel (`idx`) — auto-spawning
    *  that column first so the reply always lands alongside its origin.
    *  The model names the file via a leading `TITLE:` line (see
-   *  RESPOND_MESSAGES); we open under a temp path and rebase once the title
-   *  arrives. The TITLE line is stripped from the stepped body. */
+   *  RESPOND_MESSAGES); the TITLE line is stripped from the stepped body. */
   async function replyLLM(idx: number) {
     if (!folder) return;
     // Reply writes into a new file (not the live editor) so there's no facet
@@ -8998,13 +9231,6 @@ function App() {
     try {
       const view = panelViews.current[idx];
       const srcRel = panels[idx].active || "";
-      // Step the source doc under the AUTHOR key before the model runs, so the
-      // response is anchored to a signed baseline (see extendLLM). The source
-      // is what the model replies to; Reply's own output writes to newPath.
-      {
-        const signer = secretKeyForVoice(authorPubkey);
-        if (srcRel && files[srcRel] && signer) await stepFile(srcRel, signer);
-      }
       // Reply to just the selected passage when there is one; otherwise the
       // whole document. The response always lands in a new sibling file.
       // Selection requires the live CM view; the whole-doc case reads from
@@ -9016,7 +9242,6 @@ function App() {
       const sourceText = hasSel
         ? view!.state.sliceDoc(sel!.from, sel!.to)
         : (srcRel && files[srcRel] ? flatten(files[srcRel].runs) : "");
-      llmMeta = await prepareLlmMeta(idx, "reply", provider, sourceText, 1024);
       // Pull the palette so the model can cite coins by nodeId.
       let palette: PaletteItem[] = [];
       try {
@@ -9025,20 +9250,27 @@ function App() {
         /* no palette is fine — the response just won't carry citations */
       }
       const traces = palette.slice(0, 20).map((p) => `- "${p.text}" (nodeId ${p.nodeId})`).join("\n");
-      const ctx = await gatherContextForPanel(idx);
-      const messages = assembleOpMessages(
+      const inputs: OpInputs = {
+        source: sourceText,
+        traces,
+        rangeFrom: hasSel ? sel!.from : 0,
+        rangeTo: hasSel ? sel!.to : sourceText.length,
+      };
+      const prepared = await approvedModelOperation(
+        idx,
         "reply",
-        { source: sourceText, traces },
-        opPromptLayers("reply", ctx, modelVoice),
+        inputs,
+        provider,
+        controller.signal,
       );
-      // Open under a temporary sibling name; rebase to the LLM TITLE once the
-      // first line arrives. Keep the source's directory so the response lands
-      // next to its origin (e.g. notes/essay.md -> notes/<title>.md).
+      llmMeta = await prepareLlmMeta(idx, "reply", provider, sourceText, 1024);
+      // Keep the source's directory so the response lands next to its origin
+      // (e.g. notes/essay.md -> notes/<title>.md).
       const sourceName = srcRel || "doc.md";
       // The source's stepped head at the moment Reply runs — pinned into the
       // response's own genesis node via `replyingTo` below, so the citation
       // stays honest even if the source is edited further afterward.
-      const sourceNodeId = files[srcRel]?.nodeId || undefined;
+      const sourceNodeId = prepared.targetRevision.headId || undefined;
       const slash = sourceName.lastIndexOf("/");
       const srcDir = slash >= 0 ? sourceName.slice(0, slash + 1) : "";
       const stem = sourceName.replace(/\.md$/, "").split("/").pop() || "doc";
@@ -9047,113 +9279,55 @@ function App() {
       // title below. Second precision (not minute) so two replies in the same
       // minute don't collide on the prefix. No colons to stay filesystem-safe.
       const datePrefix = formatLocalSecondStamp(new Date());
-      newPath = `${srcDir}${datePrefix}-${stem}-reply.md`;
-      const taken = new Set(Object.keys(files));
-      taken.add(newPath);
-      let titled = false;
 
-      /** Rebase the optimistic in-memory path (not yet on disk) when the
-       *  TITLE arrives. Disk write happens once at the end under final newPath. */
-      const rebaseOptimisticPath = (from: string, to: string) => {
-        if (from === to) return;
-        pendingPaths.current.delete(from);
-        pendingPaths.current.add(to);
-        setFiles((prev) => {
-          const next = { ...prev };
-          if (next[from]) {
-            next[to] = next[from];
-            delete next[from];
-          }
-          return next;
-        });
-        setPanels((prev) =>
-          prev.map((panel) => ({
-            tabs: panel.tabs.map((p) => (p === from ? to : p)),
-            active: panel.active === from ? to : panel.active,
-          })),
-        );
-        setTabModes((prev) => {
-          if (!(from in prev)) return prev;
-          const next = { ...prev };
-          next[to] = next[from];
-          delete next[from];
-          return next;
-        });
-        // Carry resolved-citation state across the rename so the cited-trace
-        // chips reappear on the new path without a refetch.
-        setCitationsByPath((prev) => {
-          if (!(from in prev)) return prev;
-          const next = { ...prev };
-          next[to] = next[from];
-          delete next[from];
-          return next;
-        });
-        setCitationHeadByPath((prev) => {
-          if (!(from in prev)) return prev;
-          const next = { ...prev };
-          next[to] = next[from];
-          delete next[from];
-          return next;
-        });
-      };
-
-      const applyReplyText = (raw: string, streamDone: boolean) => {
-        const parsed = parseReplyOutput(raw, streamDone);
-        if (parsed.headerDone && parsed.title && !titled) {
-          titled = true;
-          const dest = uniquePath(
-            `${srcDir}${datePrefix}-${slugifyFilename(parsed.title.replace(/\.md$/i, ""))}.md`,
-            taken,
-          );
-          taken.add(dest);
-          const from = newPath;
-          newPath = dest;
-          rebaseOptimisticPath(from, dest);
-        }
-        // While the TITLE line is still buffering, keep the editor empty so
-        // the header never flashes into the document body.
-        editFile(newPath, [{ voice: modelVoice, text: parsed.body }]);
-      };
-
-      // Mark this path as pending so a mid-stream rescan (5s interval or window
-      // focus) doesn't drop the optimistic file before writeFile persists it —
-      // same protection scheduleStep gives to user edits. Cleared in finally.
-      pendingPaths.current.add(newPath);
-      // Optimistic empty file so the editor opens immediately.
-      editFile(newPath, [{ voice: modelVoice, text: "" }]);
-      // Land the response in a fresh column immediately to the right of the
-      // source panel (`idx`) so the reply always appears alongside its origin,
-      // not just when a spare column already exists. spawnPanel reconciles all
-      // parallel per-panel structures; openInPanel fills the new column.
-      const destIdx = idx + 1;
-      spawnPanel(destIdx);
-      openInPanel(newPath, destIdx);
-      let acc = "";
-      const full = await complete(provider, messages, {
+      const result = await executePreparedOperation({
+        prepared,
+        provider,
         maxTokens: 1024,
         signal: controller.signal,
-        onDelta: (delta) => {
-          acc += delta;
-          applyReplyText(acc, false);
+        readCurrentTarget: () => readCurrentModelTarget(prepared, idx),
+        onStale: (recovery) => setStaleModelResult(recovery),
+        apply: async (response) => {
+          const parsed = parseReplyOutput(response);
+          const label = parsed.title
+            ? slugifyFilename(parsed.title.replace(/\.md$/i, ""))
+            : `${stem}-reply`;
+          newPath = uniquePath(
+            `${srcDir}${datePrefix}-${label}.md`,
+            new Set(Object.keys(filesRef.current)),
+          );
+          const runs = [{ voice: modelVoice, text: parsed.body }];
+          pendingPaths.current.add(newPath);
+          editFile(newPath, runs);
+          const destIdx = idx + 1;
+          spawnPanel(destIdx);
+          openInPanel(newPath, destIdx);
+          try {
+            if (llmMeta) setPendingLlmMeta(newPath, llmMeta);
+            await backendRef.current.writeFile(
+              newPath,
+              parsed.body,
+              [],
+              signer,
+              runs,
+              sourceNodeId,
+            );
+          } catch (error) {
+            console.warn(`[reply] writeFile failed for ${newPath}:`, error);
+          } finally {
+            clearPendingLlmMeta(newPath);
+          }
         },
       });
-      const rawFinal = acc || full || "";
-      applyReplyText(rawFinal, true);
-      // Persist + step the new file, citing the source's stepped head via
-      // `replyingTo` (spec §reply-to delta type) so the reply chain is
-      // legible from the trace alone, not just from sibling placement.
-      // Signed as the MODEL voice (`signer`) so the genesis node's author is
-      // the replying voice, not the AUTHOR default.
-      const finalText = parseReplyOutput(rawFinal, true).body;
-      try {
-        if (llmMeta) setPendingLlmMeta(newPath, llmMeta);
-        await backendRef.current.writeFile(newPath, finalText, [], signer, undefined, sourceNodeId);
-      } catch (e) {
-        console.warn(`[reply] writeFile failed for ${newPath}:`, e);
-      } finally {
-        clearPendingLlmMeta(newPath);
+      if (result.status === "cancelled") {
+        setOpStatus(idx, "idle");
+        return;
       }
-      setOpStatus(idx, "done");
+      if (result.status === "stale") {
+        setOpStatus(idx, "error", "MODEL response held because focus or the source changed");
+        return;
+      }
+      setOpStatus(idx, "done", undefined, "reply");
     } catch (e) {
       if (controller.signal.aborted) {
         setOpStatus(idx, "idle");
@@ -9169,8 +9343,8 @@ function App() {
     }
   }
 
-  /** Receive: run the analyst persona over the folder's delta + limelight logs
-   *  and stream the process analysis into a new sibling file. Structurally a
+  /** Receive: run the analyst persona over the folder's delta + limelight logs,
+   *  buffer it, then create a sibling only after source revalidation. It is a
    *  trimmed Reply (no palette, no source citation, no `replyingTo`): the
    *  model reads the whole context block — delta log + file contents — plus a
    *  rendered limelight log (panel-occupancy history from focusTimeline, which
@@ -9201,94 +9375,69 @@ function App() {
       } catch {
         /* no focus chain is fine — the persona covers the missing-data case */
       }
-      llmMeta = await prepareLlmMeta(idx, "receive", provider, limelightLog, 2048);
-      const ctx = await gatherContextForPanel(idx);
-      const messages = assembleOpMessages(
+      const inputs: OpInputs = { limelightLog };
+      const prepared = await approvedModelOperation(
+        idx,
         "receive",
-        { limelightLog },
-        opPromptLayers("receive", ctx, modelVoice),
+        inputs,
+        provider,
+        controller.signal,
       );
+      llmMeta = await prepareLlmMeta(idx, "receive", provider, limelightLog, 2048);
       const sourceName = srcRel || "doc.md";
       const slash = sourceName.lastIndexOf("/");
       const srcDir = slash >= 0 ? sourceName.slice(0, slash + 1) : "";
       const stem = sourceName.replace(/\.md$/, "").split("/").pop() || "doc";
       const datePrefix = formatLocalSecondStamp(new Date());
-      newPath = `${srcDir}${datePrefix}-${stem}-receive.md`;
-      const taken = new Set(Object.keys(files));
-      taken.add(newPath);
-      let titled = false;
 
-      const rebaseOptimisticPath = (from: string, to: string) => {
-        if (from === to) return;
-        pendingPaths.current.delete(from);
-        pendingPaths.current.add(to);
-        setFiles((prev) => {
-          const next = { ...prev };
-          if (next[from]) {
-            next[to] = next[from];
-            delete next[from];
-          }
-          return next;
-        });
-        setPanels((prev) =>
-          prev.map((panel) => ({
-            tabs: panel.tabs.map((p) => (p === from ? to : p)),
-            active: panel.active === from ? to : panel.active,
-          })),
-        );
-        setTabModes((prev) => {
-          if (!(from in prev)) return prev;
-          const next = { ...prev };
-          next[to] = next[from];
-          delete next[from];
-          return next;
-        });
-      };
-
-      const applyReceiveText = (raw: string, streamDone: boolean) => {
-        const parsed = parseReplyOutput(raw, streamDone);
-        if (parsed.headerDone && parsed.title && !titled) {
-          titled = true;
-          const dest = uniquePath(
-            `${srcDir}${datePrefix}-${slugifyFilename(parsed.title.replace(/\.md$/i, ""))}.md`,
-            taken,
-          );
-          taken.add(dest);
-          const from = newPath;
-          newPath = dest;
-          rebaseOptimisticPath(from, dest);
-        }
-        editFile(newPath, [{ voice: modelVoice, text: parsed.body }]);
-      };
-
-      pendingPaths.current.add(newPath);
-      editFile(newPath, [{ voice: modelVoice, text: "" }]);
-      const destIdx = idx + 1;
-      spawnPanel(destIdx);
-      openInPanel(newPath, destIdx);
-      let acc = "";
-      const full = await complete(provider, messages, {
+      const result = await executePreparedOperation({
+        prepared,
+        provider,
         maxTokens: 2048,
         signal: controller.signal,
-        onDelta: (delta) => {
-          acc += delta;
-          applyReceiveText(acc, false);
+        readCurrentTarget: () => readCurrentModelTarget(prepared, idx),
+        onStale: (recovery) => setStaleModelResult(recovery),
+        apply: async (response) => {
+          const parsed = parseReplyOutput(response);
+          const label = parsed.title
+            ? slugifyFilename(parsed.title.replace(/\.md$/i, ""))
+            : `${stem}-receive`;
+          newPath = uniquePath(
+            `${srcDir}${datePrefix}-${label}.md`,
+            new Set(Object.keys(filesRef.current)),
+          );
+          const runs = [{ voice: modelVoice, text: parsed.body }];
+          pendingPaths.current.add(newPath);
+          editFile(newPath, runs);
+          const destIdx = idx + 1;
+          spawnPanel(destIdx);
+          openInPanel(newPath, destIdx);
+          try {
+            if (llmMeta) setPendingLlmMeta(newPath, llmMeta);
+            await backendRef.current.writeFile(
+              newPath,
+              parsed.body,
+              [],
+              signer,
+              runs,
+              undefined,
+            );
+          } catch (error) {
+            console.warn(`[receive] writeFile failed for ${newPath}:`, error);
+          } finally {
+            clearPendingLlmMeta(newPath);
+          }
         },
       });
-      const rawFinal = acc || full || "";
-      applyReceiveText(rawFinal, true);
-      const finalText = parseReplyOutput(rawFinal, true).body;
-      // No `replyingTo` here — Receive observes the folder, it doesn't reply to
-      // a stepped source passage. The genesis node just carries the analysis.
-      try {
-        if (llmMeta) setPendingLlmMeta(newPath, llmMeta);
-        await backendRef.current.writeFile(newPath, finalText, [], signer, undefined, undefined);
-      } catch (e) {
-        console.warn(`[receive] writeFile failed for ${newPath}:`, e);
-      } finally {
-        clearPendingLlmMeta(newPath);
+      if (result.status === "cancelled") {
+        setOpStatus(idx, "idle");
+        return;
       }
-      setOpStatus(idx, "done");
+      if (result.status === "stale") {
+        setOpStatus(idx, "error", "MODEL response held because focus or the source changed");
+        return;
+      }
+      setOpStatus(idx, "done", undefined, "receive");
     } catch (e) {
       if (controller.signal.aborted) {
         setOpStatus(idx, "idle");
@@ -9331,8 +9480,8 @@ function App() {
   /** Dispatch a top-bar action to the op-target panel. The LLM ops step their
    *  output as the MODEL voice; Save/zine step as the AUTHOR voice.
    *
-   *  Extend/Settle/Stir stream into the target panel's mounted CodeMirror view
-   *  via view.dispatch, so they need that view live AND showing the selected
+   *  Extend/Settle/Stir apply into the target panel's mounted CodeMirror view,
+   *  so they need that view live AND showing the selected
    *  file. opTargetPanel prefers a panel whose active tab is the file (view
    *  mounted there), but a file that's only a background tab — or a focused
    *  panel stuck on its empty/folder state — leaves no editor mounted, and
@@ -13764,10 +13913,53 @@ function App() {
                   }}
                 />
               )}
+              {staleModelResult && createPortal(
+                <div className="compose-overlay" onClick={() => setStaleModelResult(null)}>
+                  <div
+                    className="compose-dialog prompt-inspector-dialog"
+                    role="dialog"
+                    aria-label="Held MODEL response"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <div className="run-head">
+                      <h2 className="run-title">MODEL response held</h2>
+                      <button
+                        type="button"
+                        className="attest-close"
+                        aria-label="Close"
+                        onClick={() => setStaleModelResult(null)}
+                      >×</button>
+                    </div>
+                    <p className="run-blurb">
+                      Focus or the source revision changed while the provider was working, so nothing was edited.
+                    </p>
+                    <pre className="prompt-inspector-pre">
+                      {staleModelResult.response || "(No response was sent because the target was already stale.)"}
+                    </pre>
+                    <div className="run-actions">
+                      <button
+                        type="button"
+                        className="run-save"
+                        disabled={!staleModelResult.response}
+                        onClick={() => void navigator.clipboard.writeText(staleModelResult.response)}
+                      >Copy response</button>
+                      <button
+                        type="button"
+                        className="run-start"
+                        onClick={() => {
+                          const operation = staleModelResult.operation;
+                          setStaleModelResult(null);
+                          void openInspector(operation);
+                        }}
+                      >Inspect to retry</button>
+                    </div>
+                  </div>
+                </div>,
+                document.body,
+              )}
               {inspectOp && (
                 <PromptInspectorModal
                   defaultOp={inspectOp}
-                  inputs={inspectInputs}
                   inputNotes={inspectNotes}
                   contextBlock={inspectContext}
                   activeFileStepped={(() => {
@@ -13777,7 +13969,26 @@ function App() {
                   voicePrompt={getVoicePrompt(modelPubkey) ?? ""}
                   provider={resolveVoiceProvider(modelPubkey)}
                   lensSelections={opLenses}
-                  onLensChange={chooseOpLens}
+                  onLensChange={(operation, lensId) => {
+                    chooseOpLens(operation, lensId);
+                    snapshotCoordinatorRef.current.invalidate();
+                    preparedApprovalRef.current.invalidate();
+                    setApprovedRequestHash(null);
+                    setInspectPrepared({});
+                    void prepareInspectorOperation(operation, inspectInputs, lensId);
+                  }}
+                  preparedOperations={inspectPrepared}
+                  preparingOp={inspectPreparing}
+                  preparationError={inspectPreparationError}
+                  approvedRequestHash={approvedRequestHash}
+                  onOperationChange={(operation) => {
+                    setInspectOp(operation);
+                    void prepareInspectorOperation(operation);
+                  }}
+                  onApprove={(prepared) => {
+                    preparedApprovalRef.current.approve(prepared);
+                    setApprovedRequestHash(prepared.preparedRequestHash);
+                  }}
                   estimateTokens={estimateTokens}
                   onClose={() => setInspectOp(null)}
                 />

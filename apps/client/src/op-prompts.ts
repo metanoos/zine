@@ -82,25 +82,12 @@ function composeSettleSystem(): string {
     "YOUR ROLE — Settle: the condenser. You take one passage of loose prose " +
     "and return a terse, dense version: cut filler, tighten phrasing, keep " +
     "every load-bearing idea. You do NOT add new content, arguments, or " +
-    "facts. You do NOT emit brackets of any kind (Settle never creates " +
+    "facts. Protected tokens shaped like `__ZINE_ANCHOR_N__` stand for " +
+    "immutable bracket spans: copy each token exactly once and in order. " +
+    "You do NOT emit any other brackets (Settle never creates " +
     "sediment — only the human does, by hand). The passage after the " +
     "context block, under no header, is the text to condense. Return ONLY " +
     "the condensed prose — no preamble, no commentary, no fences."
-  );
-}
-
-/** Settle (de-dupe) has its own distinct preamble — not a variable of Settle. */
-function composeSettleDedupeSystem(): string {
-  return (
-    `${SYSTEM_PREAMBLE}\n\n` +
-    "YOUR ROLE — Settle (de-dupe): the reconciler. You are given several " +
-    "files that are near-duplicates of the same content (acquired by " +
-    "repeated scans of the same source). Merge them into ONE coherent, " +
-    "complete version: keep every load-bearing idea that appears in ANY " +
-    "copy, reconcile differences by preferring the more specific/complete " +
-    "reading, and drop pure redundancy. You do NOT add new content beyond " +
-    "what the copies contain. You do NOT emit fences, headers, or preamble. " +
-    "Return ONLY the merged text."
   );
 }
 
@@ -245,19 +232,6 @@ export function settleMessages(loose: string): ChatMessage[] {
   ];
 }
 
-/** Settle (de-dupe): collapse near-duplicate files into one. NOT an inspector
- *  tab op (it's a folder-scoped variant of Settle), but its preamble lives here
- *  so the live op and any future reconstructor agree. */
-export function settleDedupeMessages(duplicates: { path: string; content: string }[]): ChatMessage[] {
-  const body = duplicates
-    .map((d, i) => `--- FILE ${i + 1}: ${d.path} ---\n${d.content}`)
-    .join("\n\n");
-  return [
-    { role: "system", content: composeSettleDedupeSystem() },
-    { role: "user", content: body },
-  ];
-}
-
 /** Stir messages. `loose` is the prose to rewrite; `anchorCount` and `commands`
  *  are pre-parsed from the doc by the caller (via iterBrackets / findCommands). */
 export function stirMessages(loose: string, anchorCount: number, commands: string[]): ChatMessage[] {
@@ -315,6 +289,10 @@ export function editMessages(path: string, content: string, instruction: string)
  *  every field is used by every op; pass what you have. Fields the chosen op
  *  doesn't need are ignored. */
 export interface OpInputs {
+  /** Captured replacement/insertion range. It does not enter the prompt, but
+   *  it participates in PreparedOperation dependencies and atomic apply. */
+  rangeFrom?: number;
+  rangeTo?: number;
   /** Extend: selected passage or doc tail. */
   seed?: string;
   /** Extend: was there a live selection? */

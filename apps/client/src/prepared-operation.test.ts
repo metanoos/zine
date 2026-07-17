@@ -25,7 +25,7 @@ function snapshot(options: { sourceUnstepped?: boolean; failure?: boolean } = {}
       kind: "file", folderId: "folder", path: "draft.md", traceId: "trace",
       headId: "head", body: "draft body",
     },
-    mount: { kind: "folder", path: "" },
+    mounts: [{ kind: "folder", path: "" }],
     shields: [],
     inputs: [
       { path: "draft.md", traceId: "trace", headId: "head", body: "draft body", citations: [], deltaLog: [], unstepped: false },
@@ -45,6 +45,7 @@ test("prepared operation freezes the exact provider-adjusted messages and metada
     modelVoicePubkey: "a".repeat(64),
     voicePrompt: "Use short sentences.",
     lensId: "default",
+    focusFingerprint: "focus:draft.md@0",
     dirtyTarget: false,
     requestId: "request-1",
     createdAt: 1,
@@ -56,6 +57,24 @@ test("prepared operation freezes the exact provider-adjusted messages and metada
   assert.equal(Object.isFrozen(prepared.messages), true);
   assert.equal(prepared.targetRevision.headId, "head");
   assert.equal(prepared.contextFingerprint, prepared.contextSnapshot.fingerprint);
+
+  const refocused = prepareOperation({
+    operation: "extend",
+    operationInputs: { seed: "continue", hasSelection: false },
+    contextSnapshot: snapshot(),
+    provider: { ...provider, personality: "friendly" },
+    modelVoicePubkey: "a".repeat(64),
+    voicePrompt: "Use short sentences.",
+    lensId: "default",
+    focusFingerprint: "focus:draft.md@1",
+    dirtyTarget: false,
+    requestId: "request-1",
+    createdAt: 1,
+  });
+  assert.notEqual(
+    prepared.provenance.dependencyFingerprint,
+    refocused.provenance.dependencyFingerprint,
+  );
 });
 
 test("provider fingerprint changes for transport-affecting profile edits, never credential bytes", () => {
@@ -74,6 +93,7 @@ test("dirty targets, unstepped mounts, incomplete gather, and oversize all block
     modelVoicePubkey: "a".repeat(64),
     voicePrompt: "",
     lensId: "default" as const,
+    focusFingerprint: "focus:draft.md@0",
   };
   assert.throws(
     () => prepareOperation({ ...base, contextSnapshot: snapshot(), dirtyTarget: true }),
