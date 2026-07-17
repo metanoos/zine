@@ -40,11 +40,21 @@ test("pending LLM metadata is single-use and explicitly clearable", () => {
 test("pending metadata marks only its matching write as an LLM Step", () => {
   const input: PublishEditInput = {
     prevEventId: null,
+    previousSnapshot: "",
     relativePath: "a.md",
     folderId: "folder",
     deltas: [],
     snapshot: "answer",
     contentHash: "hash",
+    kedits: [{
+      op: "ins",
+      from: 0,
+      to: 0,
+      text: "answer",
+      voice: "voice",
+      t: 1,
+      tx: 0,
+    }],
   };
   setPendingLlmMeta("a.md", meta("model-a"));
 

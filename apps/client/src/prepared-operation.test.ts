@@ -8,6 +8,7 @@ import {
   providerProfileFingerprint,
 } from "./prepared-operation.js";
 import type { ProviderConfig } from "./models-store.js";
+import type { DeltaLogEntry } from "./context-block.js";
 
 const provider: ProviderConfig = {
   id: "p1",
@@ -19,7 +20,32 @@ const provider: ProviderConfig = {
   credentialConfigured: true,
 };
 
-function snapshot(options: { sourceUnstepped?: boolean; failure?: boolean } = {}) {
+function snapshot(options: { sourceUnstepped?: boolean; failure?: boolean; trace?: boolean } = {}) {
+  const traceDelta: DeltaLogEntry[] = options.trace ? [{
+    seq: 3,
+    action: "edit",
+    steppedAt: 2_000,
+    relativePath: "draft.md",
+    source: "file",
+    prompt: null,
+    summary: null,
+    nodeId: "head",
+    process: {
+      status: "complete",
+      transactions: [{
+        tx: 7,
+        at: 1_900,
+        changes: [{
+          op: "repl",
+          from: 0,
+          to: 5,
+          inserted: "final",
+          deleted: "draft",
+          voice: "a".repeat(64),
+        }],
+      }],
+    },
+  }] : [];
   return createContextSnapshot({
     target: {
       kind: "file", folderId: "folder", path: "draft.md", traceId: "trace",
@@ -28,7 +54,7 @@ function snapshot(options: { sourceUnstepped?: boolean; failure?: boolean } = {}
     mount: { kind: "folder", path: "" },
     shields: [],
     inputs: [
-      { path: "draft.md", traceId: "trace", headId: "head", body: "draft body", citations: [], deltaLog: [], unstepped: false },
+      { path: "draft.md", traceId: "trace", headId: "head", body: "draft body", citations: [], deltaLog: traceDelta, unstepped: false },
       { path: "source.md", traceId: "source", headId: options.sourceUnstepped ? null : "source-head", body: "source", citations: [], deltaLog: [], unstepped: options.sourceUnstepped ?? false },
     ],
     renderedBlock: "=== CONTEXT ===\nsource\n=== END CONTEXT ===",
@@ -64,6 +90,24 @@ test("provider fingerprint changes for transport-affecting profile edits, never 
     providerProfileFingerprint({ ...provider, modelId: "model-2" }),
   );
   assert.doesNotMatch(providerProfileFingerprint(provider), /api-key/);
+});
+
+test("Analyze freezes the exact validated trace log into inputs, messages, and request identity", () => {
+  const prepared = prepareOperation({
+    operation: "analyze",
+    operationInputs: { limelightLog: "PANEL 1" },
+    contextSnapshot: snapshot({ trace: true }),
+    provider,
+    modelVoicePubkey: "a".repeat(64),
+    lensId: "forensic-process-analyst",
+    dirtyTarget: false,
+    requestId: "analysis-1",
+    createdAt: 1,
+  });
+  assert.match(prepared.operationInputs.traceLog ?? "", /\[#3\.1\]/);
+  assert.match(prepared.operationInputs.traceLog ?? "", /− 0:5 "draft"/);
+  assert.match(prepared.messages.at(-1)?.content ?? "", /\[#3\.1\]/);
+  assert.match(prepared.messages.at(-1)?.content ?? "", /PANEL 1/);
 });
 
 test("dirty targets, unstepped mounts, incomplete gather, and oversize all block preparation", () => {

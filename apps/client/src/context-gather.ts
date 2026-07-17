@@ -56,6 +56,11 @@ import {
   type ContextSnapshot,
   type ContextSnapshotFailure,
 } from "./context-snapshot.js";
+import { traceProcessFromEvent, type TraceProcessView } from "./trace-process.js";
+import {
+  verifyFileTraceChain,
+  type TraceConformanceStatus,
+} from "./trace-conformance.js";
 
 // Re-export so App.tsx can import the limelight renderer alongside the gather
 // entry point from one module (same pattern as the types below would use).
@@ -125,6 +130,10 @@ interface CanonicalMerged {
   prompt: string | null;
   summary: string | null;
   deltas: DeltaSpanView[] | undefined;
+  process: TraceProcessView | undefined;
+  conformance: TraceConformanceStatus | undefined;
+  conformanceReason: string | undefined;
+  nodeId: string | undefined;
   stableId: string;
 }
 
@@ -283,6 +292,10 @@ async function gatherFileChain(
       }
       if (memoize) chainMemo.set(key, chain);
     }
+    const conformance = await verifyFileTraceChain(chain);
+    const conformanceByNode = new Map(
+      conformance.steps.map((step) => [step.nodeId, step.status]),
+    );
     const merged: CanonicalMerged[] = [];
     for (let index = 0; index < chain.length; index++) {
       const event = chain[index];
@@ -296,7 +309,12 @@ async function gatherFileChain(
           failures: [{ stage: "chain", path, message: `invalid event ${event.id.slice(0, 8)}…` }],
         };
       }
-      const spans = fileDeltasToViews(parsed.deltas ?? [], prevSnapshot);
+      const stepConformance = conformance.status === "invalid"
+        ? "invalid"
+        : conformanceByNode.get(event.id) ?? conformance.status;
+      const spans = stepConformance === "invalid"
+        ? []
+        : fileDeltasToViews(parsed.deltas ?? [], prevSnapshot);
       merged.push({
         steppedAt: typeof parsed.steppedAt === "number"
           ? parsed.steppedAt
@@ -307,6 +325,14 @@ async function gatherFileChain(
         prompt: null,
         summary: typeof parsed.summary === "string" ? parsed.summary : null,
         deltas: spans.length > 0 ? spans : undefined,
+        process: stepConformance === "invalid"
+          ? undefined
+          : traceProcessFromEvent(event, prevSnapshot),
+        conformance: stepConformance,
+        conformanceReason: conformance.issues.find(
+          (issue) => issue.nodeId === event.id,
+        )?.message,
+        nodeId: event.id,
         stableId: event.id,
       });
     }
@@ -361,6 +387,10 @@ async function gatherFolderLog(
           prompt: null,
           summary: null,
           deltas: undefined,
+          process: undefined,
+          conformance: undefined,
+          conformanceReason: undefined,
+          nodeId: node.id,
           stableId: `${node.id}:${delta.type}:${delta.relativePath}`,
         });
       }
@@ -517,6 +547,10 @@ export async function loadDirectoryLog(
     prompt: string | null;
     summary: string | null;
     deltas: DeltaSpanView[] | undefined;
+    process: TraceProcessView | undefined;
+    conformance: TraceConformanceStatus | undefined;
+    conformanceReason: string | undefined;
+    nodeId: string | undefined;
   };
   const merged: Merged[] = [];
   // File events: walk each descendant's prev-chain in genesis→head order
@@ -534,6 +568,10 @@ export async function loadDirectoryLog(
     } catch {
       continue; // relay hiccup on this descendant — skip it, others may still land.
     }
+    const conformance = await verifyFileTraceChain(chain);
+    const conformanceByNode = new Map(
+      conformance.steps.map((step) => [step.nodeId, step.status]),
+    );
     for (let i = 0; i < chain.length; i++) {
       const event = chain[i];
       const prevSnapshot = i > 0 ? parsedSnapshot(chain[i - 1]) : "";
@@ -553,7 +591,12 @@ export async function loadDirectoryLog(
         continue;
       }
       const action = event.tags.find((t) => t[0] === "action")?.[1] ?? "edit";
-      const spans = fileDeltasToViews(parsed.deltas ?? [], prevSnapshot);
+      const stepConformance = conformance.status === "invalid"
+        ? "invalid"
+        : conformanceByNode.get(event.id) ?? conformance.status;
+      const spans = stepConformance === "invalid"
+        ? []
+        : fileDeltasToViews(parsed.deltas ?? [], prevSnapshot);
       merged.push({
         steppedAt,
         action,
@@ -562,6 +605,14 @@ export async function loadDirectoryLog(
         prompt: null,
         summary,
         deltas: spans.length > 0 ? spans : undefined,
+        process: stepConformance === "invalid"
+          ? undefined
+          : traceProcessFromEvent(event, prevSnapshot),
+        conformance: stepConformance,
+        conformanceReason: conformance.issues.find(
+          (issue) => issue.nodeId === event.id,
+        )?.message,
+        nodeId: event.id,
       });
     }
   }
@@ -593,6 +644,10 @@ export async function loadDirectoryLog(
         prompt: null,
         summary: null,
         deltas: undefined, // membership events have no content payload
+        process: undefined,
+        conformance: undefined,
+        conformanceReason: undefined,
+        nodeId: node.id,
       });
     }
   } catch {

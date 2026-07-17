@@ -20,7 +20,7 @@ import {
 test("each operation exposes only relevant editorial lenses", () => {
   assert.ok(OP_LENSES.settle.some((lens) => lens.id === "conservative-line-editor"));
   assert.ok(OP_LENSES.reply.some((lens) => lens.id === "psychoanalytic-reading"));
-  assert.ok(OP_LENSES.receive.some((lens) => lens.id === "forensic-process-analyst"));
+  assert.ok(OP_LENSES.analyze.some((lens) => lens.id === "forensic-process-analyst"));
   assert.ok(!OP_LENSES.settle.some((lens) => lens.id === "psychoanalytic-reading"));
 });
 

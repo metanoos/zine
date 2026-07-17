@@ -56,6 +56,7 @@ test("desktop handoff opens one exact, verified file chain without importing it"
     ids.map((id) => byId.get(id)).filter((event) => event !== undefined),
   );
   assert.equal(opened.historyComplete, true);
+  assert.equal(opened.conformance.status, "snapshot-only");
   assert.deepEqual(opened.steps.map((step) => step.snapshot), ["draft\n", "final\n"]);
   assert.deepEqual(opened.steps.map((step) => step.action), ["import", "edit"]);
 });
@@ -79,7 +80,53 @@ test("desktop handoff opens the exact sent nucleus when private ancestry is unav
     ids.includes(head.id) ? [head] : [],
   );
   assert.equal(opened.historyComplete, false);
+  assert.equal(opened.conformance.status, "snapshot-only");
+  assert.ok(opened.conformance.issues.some((issue) => issue.code === "history-incomplete"));
   assert.deepEqual(opened.steps.map((step) => step.snapshot), ["shared result\n"]);
+});
+
+test("desktop handoff rejects a false trace identity for an available genesis", async () => {
+  const genesis = await node("genesis\n");
+  const locator: TraceLocator = {
+    format: "zine-trace-locator",
+    version: 1,
+    kind: "file",
+    rootId: ROOT,
+    traceId: "b".repeat(64),
+    nodeId: genesis.id,
+    relativePath: "result.md",
+    ownerPubkey: OWNER,
+    relayHints: ["wss://relay.example.com"],
+  };
+
+  await assert.rejects(
+    openTraceLocator(locator, async () => [genesis]),
+    /resolved genesis does not match the requested trace identity/,
+  );
+});
+
+test("desktop handoff rejects malformed available ancestry", async () => {
+  const malformedAncestor = await node("broken ancestry\n", "not-a-node-id");
+  const head = await node("shared result\n", malformedAncestor.id);
+  const byId = new Map([malformedAncestor, head].map((event) => [event.id, event]));
+  const locator: TraceLocator = {
+    format: "zine-trace-locator",
+    version: 1,
+    kind: "file",
+    rootId: ROOT,
+    traceId: "c".repeat(64),
+    nodeId: head.id,
+    relativePath: "result.md",
+    ownerPubkey: OWNER,
+    relayHints: ["wss://relay.example.com"],
+  };
+
+  await assert.rejects(
+    openTraceLocator(locator, async (ids) =>
+      ids.map((id) => byId.get(id)).filter((event) => event !== undefined),
+    ),
+    /prev edge does not carry a canonical event id/,
+  );
 });
 
 test("sensitive relay hints require exact approval before any loader runs", async () => {

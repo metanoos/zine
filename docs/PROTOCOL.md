@@ -237,6 +237,20 @@ Parallel anthologies with the same informal name are not a conflict.
 
 Who wrote what. Two layers, in priority order.
 
+**Process replay.** Every file Step carries a `kedits` array whose atomic
+transactions replay the previous snapshot to the current signed snapshot.
+Genesis replays from the empty string; a metadata-only checkpoint carries an
+explicit `[]`. Interactive writing preserves the captured editor transactions,
+including undo and redo. A discrete import, fork, scan, AI file creation, or
+headless tool write is recorded as one atomic transition rather than being
+misrepresented as physical typing.
+
+The snapshot remains the self-contained materialized body, so a node can still
+be read in one fetch. But a missing, malformed, or replay-mismatched KEdit log
+is not a valid Full Trace: readers may show the signed body only with the
+process record marked nonconforming. A Step keeps this record local; Send
+publishes it, including intermediate text and timing that may be identifying.
+
 **Per-delta attribution (primary).** A body-edit delta may carry an `author`
 index into the node's local `voices` table. Without it, the delta belongs to
 the node signer. A reader can therefore recover attribution in one forward

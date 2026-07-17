@@ -8,6 +8,7 @@ import {
   type KEdit,
 } from "./provenance.js";
 import { pathInTraceScopes, type TraceRef } from "./scope-model.js";
+import { traceProcessFromEvent } from "./trace-process.js";
 import {
   applyKEditTransaction,
   flattenRuns,
@@ -469,8 +470,9 @@ export function buildReplayTimeline(
         parsed = {};
       }
       const kedits = keditsFromEvent(event);
+      const process = traceProcessFromEvent(event, flattenRuns(runs));
       let stepDelta: ReplayActionDelta | undefined;
-      if (kedits.length > 0) {
+      if (process.status === "complete" && kedits.length > 0) {
         let replayRuns = runs;
         let replayDelta: ReplayActionDelta | undefined;
         const replayFrames: PlayFrame[] = [];
@@ -496,16 +498,13 @@ export function buildReplayTimeline(
             ...(delta ? { delta } : {}),
           });
         }
-        // KEdits are advisory. Only expose their intermediate states when the
-        // complete valid log reproduces the signed snapshot exactly.
-        if (
-          typeof parsed.snapshot === "string" &&
-          flattenRuns(replayRuns) === parsed.snapshot
-        ) {
-          runs = replayRuns;
-          stepDelta = replayDelta;
-          frames.push(...replayFrames);
-        }
+        // traceProcessFromEvent validated transaction ids, atomic ranges,
+        // operation labels, and the final snapshot before Replay exposes any
+        // intermediate state. Nonconforming process falls through to the
+        // visibly labelled snapshot-only checkpoint below.
+        runs = replayRuns;
+        stepDelta = replayDelta;
+        frames.push(...replayFrames);
       }
       if (
         typeof parsed.snapshot === "string" &&

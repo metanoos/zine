@@ -90,29 +90,7 @@ func main() {
 		// writers may publish only their own events, and peers are read-only. See
 		// transport.md §5.
 		func(ctx context.Context, ev *nostr.Event) (bool, string) {
-			if !policy.Active() {
-				return false, ""
-			}
-			authed := khatru.GetAuthed(ctx)
-			if authed == "" {
-				return true, "auth-required: this relay requires NIP-42 authentication"
-			}
-			if policy.IsOwner(authed) {
-				return false, "" // owner may write
-			}
-			// Writer: may publish events signed as ITSELF, never impersonating
-			// the owner. The ev.PubKey == authed guard is the security boundary
-			// — khatru verifies the signature upstream, so a match proves the
-			// writer authored this event. The canonical writer is a headless
-			// press (zine-mcp) publishing traces as a distinct attributable
-			// author on the chain (§3.6/§R5).
-			if policy.IsWriter(authed) && ev.PubKey == authed {
-				return false, ""
-			}
-			if policy.IsPeer(authed) {
-				return true, "restricted: peers have read-only access"
-			}
-			return true, "auth-required: pubkey not in peer list"
+			return authorizeEvent(policy, khatru.GetAuthed(ctx), ev.PubKey)
 		},
 		policies.RejectEventsWithBase64Media,
 		// Loopback-exempted 20 events/min, burst 100. On the desktop sidecar the
@@ -133,17 +111,7 @@ func main() {
 		// Read-side AUTH gate — same shape as the event gate. In networked mode,
 		// unauthed readers get challenged; owner, writers, and peers may read.
 		func(ctx context.Context, _ nostr.Filter) (bool, string) {
-			if !policy.Active() {
-				return false, ""
-			}
-			authed := khatru.GetAuthed(ctx)
-			if authed == "" {
-				return true, "auth-required: this relay requires NIP-42 authentication"
-			}
-			if !policy.AllowRead(authed) {
-				return true, "restricted: pubkey not in peer list"
-			}
-			return false, ""
+			return authorizeRead(policy, khatru.GetAuthed(ctx))
 		},
 		policies.NoComplexFilters,
 		// Folder reads fan out across membership, TraceHead, and immutable-node
@@ -157,17 +125,7 @@ func main() {
 		// learn aggregate facts (e.g. "how many events on this relay") without
 		// being authed as owner, writer, or peer.
 		func(ctx context.Context, _ nostr.Filter) (bool, string) {
-			if !policy.Active() {
-				return false, ""
-			}
-			authed := khatru.GetAuthed(ctx)
-			if authed == "" {
-				return true, "auth-required: this relay requires NIP-42 authentication"
-			}
-			if !policy.AllowRead(authed) {
-				return true, "restricted: pubkey not in peer list"
-			}
-			return false, ""
+			return authorizeRead(policy, khatru.GetAuthed(ctx))
 		},
 	)
 
@@ -192,6 +150,42 @@ func main() {
 	if err := http.ListenAndServe(addr, relay); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// authorizeEvent contains the local relay's NIP-42 write decision independently
+// of khatru's request context so the complete role matrix can be regression
+// tested. Khatru verifies the event signature before this policy runs.
+func authorizeEvent(policy *AccessPolicy, authed, eventPubkey string) (bool, string) {
+	if !policy.Active() {
+		return false, ""
+	}
+	if authed == "" {
+		return true, "auth-required: this relay requires NIP-42 authentication"
+	}
+	if policy.IsOwner(authed) {
+		return false, ""
+	}
+	if policy.IsWriter(authed) && eventPubkey == authed {
+		return false, ""
+	}
+	if policy.IsPeer(authed) {
+		return true, "restricted: peers have read-only access"
+	}
+	return true, "auth-required: pubkey not in peer list"
+}
+
+// authorizeRead applies identically to subscriptions and count queries.
+func authorizeRead(policy *AccessPolicy, authed string) (bool, string) {
+	if !policy.Active() {
+		return false, ""
+	}
+	if authed == "" {
+		return true, "auth-required: this relay requires NIP-42 authentication"
+	}
+	if !policy.AllowRead(authed) {
+		return true, "restricted: pubkey not in peer list"
+	}
+	return false, ""
 }
 
 func pollAccessPolicy(policy *AccessPolicy, ticks <-chan time.Time) {

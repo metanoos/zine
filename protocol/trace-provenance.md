@@ -73,7 +73,7 @@ replaceable Voice Identity (`d` = pubkey), so `TraceAnnotation` cannot use it.
 
 ## 3. TraceNode (kind `4290`)
 
-One stepped checkpoint of one trace. Every node is self-sufficient: it MUST carry its full `snapshot` (§3.2), so resolving any cited node is one bounded fetch, never a chain replay.
+One stepped checkpoint of one trace. Every node is self-sufficient: it MUST carry its full `snapshot` (§3.2), so resolving any cited node is one bounded fetch, never a chain replay. Every file node also carries the complete node-local `kedits` transition needed to replay how its text moved from the prior snapshot to this one.
 
 ### 3.1 Tags
 
@@ -136,28 +136,37 @@ For folder nodes, `snapshot` is instead:
 
 `kind` is `"file"` or `"folder"`. `relativePath` is single-segment (no `/`); it names the member within its immediate parent only — hierarchy is expressed via folder-members, not slash-joined paths. `contentHash` semantics are per-kind: the file body hash (SHA-256 of the snapshot text) for `kind: "file"`; the folder's own canonical folder body hash (§2) for `kind: "folder"`. The folder-member's hash is precomputed at its own step and stored on the parent's entry, never recomputed by walking the member's chain (shallow-local, §2).
 
-- `snapshot` — REQUIRED on every node this protocol's triggers produce. Full file text, or full ordered membership. Retention may shed `deltas` and `kedits`, never `snapshot` (§9).
+- `snapshot` — REQUIRED on every node this protocol's triggers produce. Full file text, or full ordered membership. It is the materialized body used for bounded reads; the required file-node KEdit replay is its process-integrity check, not a replacement storage format.
 - `contentHash` — REQUIRED. Files: SHA-256 of the UTF-8 snapshot text. Folders: SHA-256 of the canonical folder body (§2) — the projection, not the raw snapshot, so resolution metadata (`latestNodeId`) never perturbs the hash. `contentHash` MUST NOT incorporate any name or path.
 - `authors` — OPTIONAL per-character attribution; see §3.6.
 - `voices` — OPTIONAL symbol table for per-delta attribution (§3.3, §3.6). An array of pubkeys; the node signer SHOULD be `voices[0]` so a delta that omits `author` (defaults to signer) and one that carries `"author": 0` resolve to the same key. A delta's `"author": <index>` resolves as `voices[index]`. It is absent on mono-author nodes. The table is local to this node — every node that needs it carries its own — so a reader never resolves across events.
-- `kedits` — OPTIONAL high-resolution editor-action log accumulated since the
-  previous Step. It is advisory process evidence, not an integrity input:
-  `snapshot` remains authoritative and readers MAY ignore this field. Each
-  entry carries one changed range from an editor transaction. `op` is `ins`
+- `kedits` — REQUIRED on every file node and MUST be absent on folder nodes.
+  It is the complete sequence of content-changing transactions recorded by the
+  press since the previous Step. Genesis replays from the empty string. An
+  unchanged metadata-only or forced checkpoint carries the explicit array
+  `[]`; a file node whose snapshot changes MUST carry at least one entry.
+  Imports, forks, scans, headless tool writes, and other transitions that do
+  not originate in an interactive editor are represented as one atomic KEdit
+  for the discrete operation. That honestly records the transition the press
+  performed without inventing physical keystrokes. Each entry carries one
+  changed range from a transaction. `op` is `ins`
   when `from == to`, `del` when `text` is empty, and `repl` otherwise; `from`
   and `to` are UTF-16 offsets into the pre-transaction document; `text` is the
   inserted replacement; `voice` is the asserted author pubkey; and `t` is the
   transaction time in Unix milliseconds. `tx` is a non-negative integer
   scoped to this node: consecutive entries with the same `tx` are ranges from
   one transaction and MUST be applied atomically against the same pre-state.
-  Writers MUST emit `tx`; readers MUST discard KEdit entries without a valid
-  `tx`. `intent` is OPTIONAL and may be only
+  Writers MUST emit `tx`; invalid entries invalidate the node's process log.
+  `intent` is OPTIONAL and may be only
   `undo` or `redo`; when present, every entry in that transaction MUST carry
   the same value. Its absence means only "no recorded history intent," not
-  "ordinary typing." Applying valid KEdit transactions to `prev.snapshot`
-  SHOULD reproduce `snapshot`; on mismatch, readers discard the advisory log
-  rather than the node. KEdits expose timing and intermediate states, including
-  work later undone. Step keeps them local; Send publishes them with the node.
+  "ordinary typing." Applying the complete KEdit array to `prev.snapshot`
+  (or `""` for genesis) MUST reproduce `snapshot` exactly. A reader MAY still
+  display the self-contained signed snapshot when this check fails or the
+  field is missing, but MUST label the file node nonconforming and MUST NOT
+  present it as a complete or valid Full Trace. KEdits expose timing and
+  intermediate states, including work later undone. Step keeps them local;
+  Send publishes them with the node.
   Published timing is also a **behavioral biometric**: inter-edit rhythm
   (keystroke dynamics) can fingerprint an author and link pseudonymous keys
   across traces, defeating the transport layer's metadata privacy
@@ -169,7 +178,11 @@ For folder nodes, `snapshot` is instead:
 
 ### 3.3 Deltas
 
-`deltas` is OPTIONAL: absent on genesis, on nodes whose producer has nothing to say about *how* the body arrived, or shed under retention. When present, applying the deltas in order to `prev.snapshot` MUST reproduce `snapshot` exactly (§3.5).
+`deltas` is OPTIONAL: it may be absent on genesis or on nodes whose producer
+has nothing to say about *how* the body arrived. When present, applying the
+deltas in order to `prev.snapshot` MUST reproduce `snapshot` exactly (§3.5).
+A signed event is immutable; retention may discard the whole event but cannot
+strip this field while preserving the event identity (§9).
 
 Body-edit types (file nodes):
 
@@ -292,8 +305,29 @@ prior node — never the whole chain. A node that legitimately omits or has shed
 replay check.
 
 - **Cheap:** `hash(body) === contentHash` (per §2).
-- **Full (when `deltas` are present):** apply them to `prev.snapshot`, compare
-  to `snapshot`. O(content), independent of chain depth.
+- **Full Trace (file nodes):** validate every KEdit and atomically apply each
+  transaction to `prev.snapshot` (or the empty string for genesis); the result
+  MUST equal `snapshot`. Missing, malformed, overlapping, out-of-range, or
+  mismatched KEdits make the process record nonconforming even when the signed
+  snapshot remains readable. O(content + KEdits), independent of chain depth.
+- **Delta cross-check (when `deltas` are present):** apply them to
+  `prev.snapshot`, compare to `snapshot`. O(content), independent of chain
+  depth. Deltas remain an optional semantic summary; they do not substitute
+  for the required file-process log.
+
+Reader surfaces use one derived verdict vocabulary; these labels are not new
+wire fields:
+
+- **FULL TRACE** — event ids/signatures, snapshot hashes, ownership/`prev`
+  lineage, every required KEdit transition, and every present body-delta summary
+  validate.
+- **SNAPSHOT ONLY** — the signed, hash-valid snapshot is readable, but its
+  KEdit transition is missing, malformed, mismatched, or cannot be checked
+  because the previous private snapshot is unavailable. Readers MUST NOT use
+  the absent process as evidence or animate invented intermediate states.
+- **INVALID** — signed-artifact integrity or lineage fails (for example an
+  invalid id/signature, snapshot-hash mismatch, ambiguous `prev`, or owner
+  change). A reader MUST NOT present this as a verified snapshot or Full Trace.
 
 ### 3.6 Attribution
 
@@ -342,9 +376,10 @@ Everything outside brackets is fluid by default. A bare bracket is rewrite prote
 authored text without first creating a mutable source trace. It follows the
 same one-node, `action: import`, named Mint-member, local-Step, and `x` rules,
 but its `content.coin.origin` is `{ "kind": "direct" }` and it MUST NOT emit
-`extracted-from`. The composer MAY retain its pre-mint `kedits` as advisory
-process evidence applied from the empty string; those KEdits do not create a
-`prev` history and the final snapshot remains authoritative.
+`extracted-from`. The node MUST carry the composer's KEdits applied from the
+empty string. If the phrase entered through a single non-editor operation, the
+node carries that one atomic insertion. Those KEdits do not create a `prev`
+history; they validate the genesis transition to the final snapshot.
 
 Coining captures what's there *now* as a fresh trace; it does not reconstruct a pre-mint chain for the text. Once struck, the coin's identity and sole nucleus are stable — later rounds cite the same trace. Coining is a local Step, not a Send: the coin becomes a social signal only if its own node is Sent or a Sent container carries a `q` citation to it. Sending a container does not recursively publish the cited coin or the private Mint folder. A coin MAY be reified as a plain text file, but that is an exported materialization, not another Step or a conversion of the coin into a mutable file trace. A cosmetic alias MAY still be attached via `TraceOpinion` (§5); it does not replace the structural `F` name.
 
@@ -512,7 +547,7 @@ A Step appends one signed trace node to its chain. Steps are triggered by:
 
 **Local vs. published is destination, not signing.** Local storage is itself a relay, bound to 127.0.0.1; every event needs a valid signature to be accepted at all. What's opt-in is whether a stepped trace ever leaves the machine.
 
-**Every trigger is discrete and bounded-frequency — none fires per keystroke or per click.** Continuous typing stays in a raw local buffer until a Step. A writer MAY fold that buffer into the Step's optional `kedits` metadata, but it never creates per-keystroke events; focus observations likewise batch into the triggers above. The protocol only sees checkpoints a human or agent chose to make and any advisory process evidence they carry. This is the load-bearing fact behind unconditional snapshots (§R1).
+**Every trigger is discrete and bounded-frequency — none fires per keystroke or per click.** Continuous typing and its KEdit journal stay in a raw local buffer until a Step. A file Step MUST fold that journal into its required `kedits` field, but it never creates per-keystroke events; focus observations likewise batch into the triggers above. The protocol only sees checkpoints a human or agent chose to make. This is the load-bearing fact behind unconditional snapshots (§R1).
 
 ## 9. Reconstruction and retention
 
@@ -521,7 +556,13 @@ TraceNode without a valid snapshot is non-conforming and MUST NOT be
 reconstructed from deltas. `deltas` remain useful for per-span provenance and
 edit-rhythm analytics.
 
-**Retention is one-directional:** an old node MAY shed `deltas` and `kedits`, never `snapshot`. Downstream integrity is unaffected — later nodes check their own deltas against *this* node's snapshot, never the reverse. Policy (keep full logs for recent nodes, compress older ones) is operator/client territory, not protocol.
+**Retention is event-granular:** a signed regular event is immutable bytes. A
+relay or archive MAY discard a whole node under its retention policy, but MUST
+NOT expose a field-stripped rewrite as that node: removing `snapshot`,
+`deltas`, or `kedits` changes the event id and invalidates its signature. A
+store that advertises Full Trace retention therefore preserves every retained
+file node's required KEdit array. Derived indexes and caches remain operator
+territory and may be rebuilt or discarded freely.
 
 ## 10. Relay requirements
 
@@ -580,7 +621,7 @@ Nothing in this part is normative. Each argument appears once.
 
 ## R1. Unconditional snapshots buy bounded resolution
 
-`snapshot` is required on every node because a cited node must resolve as one fetch against a self-contained object — O(source snapshot), not a replay through the source's chain. Everything the protocol offers as an import/composite/package story rests on that guarantee, not on the delta log. The cost is affordable for exactly one reason: steps are discrete, bounded-frequency events (§8). The high-frequency case — continuous typing — is buffered locally and may be batched as advisory `kedits` on the next Step; it never drives event cadence. If steps ever became per-keystroke, unconditional snapshotting would collapse; that is why both KEdits and `focus` observations batch rather than mint (§R7).
+`snapshot` is required on every node because a cited node must resolve as one fetch against a self-contained object — O(source snapshot), not a replay through the source's chain. Everything the protocol offers as an import/composite/package story rests on that guarantee, not on the delta log. The cost is affordable for exactly one reason: steps are discrete, bounded-frequency events (§8). The high-frequency case — continuous typing — is journaled locally and batched as required `kedits` on the next file Step; it never drives event cadence. If steps ever became per-keystroke, unconditional snapshotting would collapse; that is why both KEdits and `focus` observations batch rather than mint (§R7).
 
 The same trade shows up one level up in injection (§3.7): don't store a manufactured artifact (the assembled prompt), store what's needed to remanufacture it — the same move `deltas` makes by omitting `oldValue`.
 
@@ -618,7 +659,7 @@ Cross-author text legitimately enters a document by exactly three routes — quo
 
 **Co-signing was rejected** for two reasons beyond coordination cost. Semantically, an author already attested their words when stepping their own node; co-signing someone else's step is really *endorsement of a new context* — a different speech act, and conflating them invites "Bob signed a document quoting him out of context." Structurally, it hands every quoted author a veto over your step, contradicting a load-bearing principle: citing has never needed the source's cooperation. If context-endorsement is wanted it fits as an asynchronous, optional `attest`-flavored event later — never a step blocker.
 
-**Per-delta events were rejected** and stay rejected. Signatures at delta granularity within one author add nothing (same signer) — the marginal value exists only at cross-author seams, which are exactly the edges already signed. Per-keystroke event volume abandons bounded-frequency stepping (§R1), publishes partial state before an author-chosen checkpoint, and multiplies signatures without adding evidence. Optional `kedits` (§3.2, §R11.27) make a narrower trade: high-resolution actions ride inside one chosen Step, can remain local, and may be shed under retention. Per-delta `author` likewise adds no events, signatures, or cadence. The earlier rejection of per-delta *events* is exactly why batched metadata inside the Step is the right boundary.
+**Per-delta events were rejected** and stay rejected. Signatures at delta granularity within one author add nothing (same signer) — the marginal value exists only at cross-author seams, which are exactly the edges already signed. Per-keystroke event volume abandons bounded-frequency stepping (§R1), publishes partial state before an author-chosen checkpoint, and multiplies signatures without adding evidence. Required node-local `kedits` (§3.2, §R11.28) take the narrower path: high-resolution actions ride inside one chosen Step and remain local until Send. Per-delta `author` likewise adds no events, signatures, or cadence. The earlier rejection of per-delta *events* is exactly why a batched process log inside the Step is the right boundary.
 
 What remains genuinely uncoverable: two humans under one key in one session — no chain, no seam, no `author` distinction (the step sees one signer, one buffer). That case is *asserted*-attributable only if the two humans take turns under distinct in-app voices that the editor tracks; otherwise it is permanently attributed to the single signer. Multi-author that you can *verify* still means multi-chain, joined by merge; in-session co-authorship is asserted-attributed via per-delta `author` and the spec says so rather than pretending otherwise.
 
@@ -733,12 +774,16 @@ would strengthen both.
 ## R11. Design history (reversals)
 
 Entry numbers are **stable and never renumbered** — normative sections and
-`rendezvous.md` cite entries as §R11.N. Entries 27 down to 15 carry stable
+`rendezvous.md` cite entries as §R11.N. Entries 29 down to 15 carry stable
 numbers and are listed newest first; the block numbered 1–14 below them is the
 original list, retained with its original numbers rather than reordered into
 the newer scheme.
 
-27. **High-resolution KEdit logs adopted as optional Step metadata; undo/redo intent made explicit.** The earlier telemetry boundary correctly rejected a signed event per keystroke, but stated the privacy consequence too broadly: it also ruled out batching editor actions inside a checkpoint the author deliberately chose. `kedits` now carry that optional, retention-sheddable process evidence on one Step without changing event cadence (§3.2, §8). This is a real disclosure trade: Send publishes intermediate states and timing along with the node, including work later undone; `snapshot` remains authoritative and operators may shed the log. The timing half of the trade is biometric, not just informational — see §3.2's keystroke-dynamics warning.
+29. **One reader verdict vocabulary adopted across human and machine surfaces.** The KEdit invariant in §R11.28 was easy to weaken accidentally if Replay called a malformed log “replayable,” Analyze called it “invalid evidence,” and handoff merely said “signature valid.” Readers now derive one of `FULL TRACE`, `SNAPSHOT ONLY`, or `INVALID` (§3.5). The middle state is load-bearing: missing or uncheckable process never destroys a self-contained signed snapshot, while a readable snapshot never promotes absent process into evidence. This adds no event field and changes no wire format; it standardizes the derived result exposed by Replay, Analyze, handoff/Reify, and machine inspection.
+
+28. **KEdit storage made mandatory for every file Step.** The optional-log posture in §R11.27 contradicted the product invariant: a file with a polished snapshot but no process transition is readable content, not a Full Trace. File nodes now carry an explicit KEdit array whose atomic replay from the previous snapshot (or the empty string at genesis) MUST produce the signed snapshot. Empty arrays are valid only for unchanged text. Discrete non-editor operations use one atomic transition rather than fabricating physical keystrokes. Writers fail before signing on mismatch; readers may render the snapshot but must mark missing or invalid logs nonconforming. Retention is event-granular because a relay cannot remove a signed field without changing the event id and invalidating the signature. This supersedes §R11.27's optional and retention-sheddable posture while preserving its batching, transaction grouping, undo/redo, privacy-warning, and no-per-keystroke-events decisions.
+
+27. **High-resolution KEdit logs adopted as optional Step metadata; undo/redo intent made explicit (optional/retention posture superseded by §R11.28).** The earlier telemetry boundary correctly rejected a signed event per keystroke, but stated the privacy consequence too broadly: it also ruled out batching editor actions inside a checkpoint the author deliberately chose. This revision first introduced `kedits` as optional, retention-sheddable process evidence on one Step without changing event cadence. §R11.28 later made the field mandatory and non-sheddable for conforming file nodes. The disclosure trade remains: Send publishes intermediate states and timing along with the node, including work later undone. The timing half of the trade is biometric, not just informational — see §3.2's keystroke-dynamics warning.
 
   History actions need semantic identity as well as their concrete inverse mutations. Without `intent`, Cmd/Ctrl+Z is indistinguishable from manually deleting the same range, and redo is indistinguishable from retyping it. Writers therefore preserve the editor's direct `undo`/`redo` transaction annotation. A node-local `tx` groups every range in one editor transaction because multi-cursor and grouped history changes share one pre-state coordinate space; replay applies the group atomically. KEdits without `tx` are invalid and discarded. This supersedes only the blanket rejection of batched keystroke metadata in §R5/§R11.21; per-keystroke events remain rejected.
 
@@ -774,7 +819,7 @@ the newer scheme.
 
 21. **Per-delta attribution adopted; per-delta signing stays rejected.** Body-edit deltas now carry an OPTIONAL `author` index naming the voice that produced that span's text (§3.3), resolved through a node-local `voices` table (§3.2); when absent or out of range, the delta defaults to the node signer (`event.pubkey`). This makes per-character attribution recoverable in one forward pass over a single node's deltas — O(content), independent of chain depth — without an `authors` map, a sum-check, or a reconstruction tier. Per-delta is the primary attribution path; `authors` (§3.6) is the secondary carrier retained for `src`-pointer verification of cross-author runs (merge/fork/quote seam edges).
 
-  **Why the reversal.** §R5's earlier draft rejected "attribution at delta granularity" but its objections were aimed at per-delta *events* (new signed events per delta): event volume and cadence destruction. Those objections hold and per-delta signing stays rejected. The broader rejection of a batched keystroke stream was later superseded by §R11.27's optional KEdit log. Per-delta `author` reintroduces none of the event-level costs — it is one field on an already-batched, already-stepped event. The earlier draft conflated the two and rejected the package; they are unbound.
+  **Why the reversal.** §R5's earlier draft rejected "attribution at delta granularity" but its objections were aimed at per-delta *events* (new signed events per delta): event volume and cadence destruction. Those objections hold and per-delta signing stays rejected. The broader rejection of a batched keystroke stream was first superseded by §R11.27's KEdit log and then tightened to the required file-node invariant in §R11.28. Per-delta `author` reintroduces none of the event-level costs — it is one field on an already-batched, already-stepped event. The earlier draft conflated the two and rejected the package; they are unbound.
 
   The clincher is the human–AI loop. `authors`' verification model (corroborate a run via a seam edge to a node the attributed author signed) has no purchase on in-session co-authorship: the AI's text enters the buffer through an in-process function call, not via incorporation from a foreign chain, so there is no seam to walk. For the case that is zine's center of gravity — human + AI co-authorship on one chain under keys the human controls — `authors`' machinery offers no advantage over plain per-delta `author`, and per-delta is cheaper, per-delta-independent (one bad delta doesn't poison the whole map, unlike the all-or-nothing `authors` sum-check), and needs no reconstruction. The verification model is retained for the case it actually serves (verifiable cross-authorship via merge); the common case gets the O(1) path.
 

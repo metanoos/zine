@@ -232,6 +232,121 @@ export function minimalTextChange(before: string, after: string): MinimalTextCha
   return { from, to: oldEnd, insert: after.slice(from, newEnd) };
 }
 
+/** Build the one atomic editor transaction used when a content transition did
+ * not originate in CodeMirror (imports, forks, headless writes, or AI-created
+ * files). This keeps KEdit storage total without pretending a synthetic import
+ * was a stream of physical keystrokes. */
+export function synthesizeKEditTransition(
+  before: string,
+  after: string,
+  voice: string,
+  t = Date.now(),
+  tx = 0,
+): KEdit[] {
+  const change = minimalTextChange(before, after);
+  if (!change) return [];
+  return [{
+    op: change.from === change.to ? "ins" : change.insert === "" ? "del" : "repl",
+    from: change.from,
+    to: change.to,
+    text: change.insert,
+    voice,
+    t,
+    tx,
+  }];
+}
+
+export interface KEditTransitionValidation {
+  valid: boolean;
+  reason?: string;
+}
+
+/** Validate and replay a node-local KEdit log against its signed transition.
+ * KEdit offsets are UTF-16 positions in each transaction's pre-state. All
+ * ranges sharing a tx id apply atomically; transaction ids must be strictly
+ * increasing. An empty log is valid only for an unchanged snapshot. */
+export function validateKEditTransition(
+  before: string,
+  after: string,
+  kedits: readonly KEdit[],
+): KEditTransitionValidation {
+  let current = before;
+  let cursor = 0;
+  let previousTx = -1;
+
+  while (cursor < kedits.length) {
+    const first = kedits[cursor];
+    if (!isValidKEdit(first)) return { valid: false, reason: "malformed KEdit entry" };
+    if (first.tx <= previousTx) {
+      return { valid: false, reason: "transaction ids are not strictly increasing" };
+    }
+    previousTx = first.tx;
+
+    const group: { edit: KEdit; index: number }[] = [];
+    while (cursor < kedits.length && kedits[cursor]?.tx === first.tx) {
+      const edit = kedits[cursor];
+      if (!isValidKEdit(edit)) return { valid: false, reason: "malformed KEdit entry" };
+      if (edit.t !== first.t) {
+        return { valid: false, reason: `transaction ${first.tx} has inconsistent timestamps` };
+      }
+      if (edit.intent !== first.intent) {
+        return { valid: false, reason: `transaction ${first.tx} has inconsistent history intent` };
+      }
+      group.push({ edit, index: group.length });
+      cursor += 1;
+    }
+
+    const ordered = [...group].sort(
+      (left, right) => left.edit.from - right.edit.from || left.edit.to - right.edit.to || left.index - right.index,
+    );
+    let priorEnd = -1;
+    for (const { edit } of ordered) {
+      if (edit.to > current.length) {
+        return { valid: false, reason: `transaction ${first.tx} addresses text outside its pre-state` };
+      }
+      if (edit.from < priorEnd) {
+        return { valid: false, reason: `transaction ${first.tx} contains overlapping ranges` };
+      }
+      const expectedOp = edit.from === edit.to ? "ins" : edit.text === "" ? "del" : "repl";
+      if (edit.op !== expectedOp) {
+        return { valid: false, reason: `transaction ${first.tx} has an inconsistent operation label` };
+      }
+      priorEnd = edit.to;
+    }
+
+    // Apply right-to-left in pre-state coordinates. Equal-offset changes run
+    // in reverse source order so their authored insertion order is preserved.
+    const descending = [...group].sort(
+      (left, right) => right.edit.from - left.edit.from || right.edit.to - left.edit.to || right.index - left.index,
+    );
+    for (const { edit } of descending) {
+      current = `${current.slice(0, edit.from)}${edit.text}${current.slice(edit.to)}`;
+    }
+  }
+
+  return current === after
+    ? { valid: true }
+    : { valid: false, reason: "editor transactions do not reproduce the signed snapshot" };
+}
+
+function isValidKEdit(value: unknown): value is KEdit {
+  if (!value || typeof value !== "object") return false;
+  const edit = value as Partial<KEdit>;
+  return (
+    (edit.op === "ins" || edit.op === "del" || edit.op === "repl") &&
+    Number.isInteger(edit.from) &&
+    Number.isInteger(edit.to) &&
+    (edit.from as number) >= 0 &&
+    (edit.to as number) >= (edit.from as number) &&
+    typeof edit.text === "string" &&
+    typeof edit.voice === "string" &&
+    Number.isFinite(edit.t) &&
+    Number.isInteger(edit.tx) &&
+    (edit.tx as number) >= 0 &&
+    (edit.intent === undefined || edit.intent === "undo" || edit.intent === "redo")
+  );
+}
+
 /** Reconcile one contiguous external rewrite while retaining the unchanged
  * prefix and suffix runs. This is for metadata rewrites such as changing one
  * citation id: the id is the current author's gesture, but the quoted/model
@@ -489,9 +604,10 @@ export interface Workspace {
     runs?: Run[],
     replyingTo?: string,
     citationIds?: string[],
-    /** The keystroke log drained from the editor's `keditField` at step time.
-     *  One `KEdit` per discrete editor change since the previous step. Landed
-     *  on the node's `kedits` content field for full typo-level replayability. */
+    /** The transaction log drained from the editor's `keditField` at Step
+     *  time. When omitted by a non-editor caller, the backend records the
+     *  content transition as one atomic KEdit. Every published file node still
+     *  receives a replay-valid `kedits` array. */
     kedits?: KEdit[],
     /** When true, step to the home relay only — don't fan out to external
      *  write relays. This is the Step gesture (protocol §8): a local

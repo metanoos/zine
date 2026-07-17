@@ -22,6 +22,8 @@ import {
   nextKEditTx,
   reconcileRunsText,
   spliceRuns,
+  synthesizeKEditTransition,
+  validateKEditTransition,
 } from "./workspace-core.js";
 import type { Run } from "./workspace-core.js";
 import type { KEdit } from "./provenance.js";
@@ -97,6 +99,40 @@ test("minimalTextChange localizes a whole-document citation rewrite", () => {
   assert.deepEqual(
     minimalTextChange("[[ model words | old-id ]]", "[[ model words | new-id ]]"),
     { from: 17, to: 20, insert: "new" },
+  );
+});
+
+test("synthetic KEdit records a non-editor transition as one atomic replacement", () => {
+  const kedits = synthesizeKEditTransition("hello world", "hello Zine", B, 123, 7);
+  assert.deepEqual(kedits, [{
+    op: "repl",
+    from: 6,
+    to: 11,
+    text: "Zine",
+    voice: B,
+    t: 123,
+    tx: 7,
+  }]);
+  assert.deepEqual(validateKEditTransition("hello world", "hello Zine", kedits), { valid: true });
+});
+
+test("an empty KEdit log is valid only for an unchanged transition", () => {
+  assert.deepEqual(validateKEditTransition("same", "same", []), { valid: true });
+  assert.equal(validateKEditTransition("", "changed", []).valid, false);
+});
+
+test("KEdit transition validation fails closed on bad ranges and replay mismatch", () => {
+  assert.match(
+    validateKEditTransition("abc", "x", [{
+      op: "repl", from: 0, to: 4, text: "x", voice: A, t: 1, tx: 0,
+    }]).reason ?? "",
+    /outside/,
+  );
+  assert.match(
+    validateKEditTransition("abc", "abd", [{
+      op: "repl", from: 2, to: 3, text: "x", voice: A, t: 1, tx: 0,
+    }]).reason ?? "",
+    /do not reproduce/,
   );
 });
 

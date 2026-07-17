@@ -1,22 +1,22 @@
 /**
  * Single source of truth for the per-op LLM message builders.
  *
- * Every single-shot LLM op (Extend / Settle / Stir / Reply / Receive, plus the
+ * Every single-shot LLM op (Extend / Settle / Stir / Reply / Analyze, plus the
  * de-dupe and edit variants) assembles its `messages[]` here. The live actions
  * and the pre-send prompt inspector read these exact strings:
  *
  *   1. The live ops in App.tsx — `extendLLM` / `settleLLM` / `shakeLLM` /
- *      `respondLLM` / `receiveLLM` build their messages here, then pass them
+ *      `respondLLM` / `analyzeLLM` build their messages here, then pass them
  *      through `assembleOpMessages()` before calling `complete()`.
  *   2. PromptInspectorModal.tsx — uses the same assembler as App.
  *
  * Keeping the strings here prevents the live operation and preview from
  * drifting. `op-prompts.test.ts` snapshots role tails and variable infixes.
  *
- * On variable infixes: three ops (Extend, Stir, Receive) bake a runtime value
+ * On variable infixes: three ops (Extend, Stir, Analyze) bake a runtime value
  * into the system prompt itself — Extend's seed-kind sentence depends on
  * whether there's a selection; Stir's anchor line depends on the bracket count;
- * Receive's limelight section depends on whether a log exists. The builders
+ * Analyze's limelight section depends on whether a log exists. The builders
  * accept those values explicitly, so both live calls and previews stay honest.
  *
  * What lives here: the per-op system-prompt composers + role preambles, the
@@ -33,10 +33,10 @@ import { SYSTEM_PREAMBLE } from "./system-preamble.js";
 /** The closed set of op kinds the prompt assembly knows. Matches the
  *  `params.op` carried in the `ctx-block-v1` inject manifest, so the
  *  reconstructor can switch on the same values. */
-export type OpKind = "extend" | "settle" | "stir" | "reply" | "receive";
+export type OpKind = "extend" | "settle" | "stir" | "reply" | "analyze";
 
 /** Ops that have a dedicated tab in the prompt inspector, in display order. */
-export const OP_ORDER: OpKind[] = ["extend", "settle", "stir", "reply", "receive"];
+export const OP_ORDER: OpKind[] = ["extend", "settle", "stir", "reply", "analyze"];
 
 /** Tab labels for the inspector. Capitalized to match the action-palette op buttons. */
 export const OP_LABELS: Record<OpKind, string> = {
@@ -44,7 +44,7 @@ export const OP_LABELS: Record<OpKind, string> = {
   settle: "Settle",
   stir: "Stir",
   reply: "Reply",
-  receive: "Receive",
+  analyze: "Analyze",
 };
 
 // ─── per-op system-prompt composers ─────────────────────────────────────────
@@ -152,8 +152,8 @@ function composeReplySystem(): string {
   );
 }
 
-/** The limelight section baked into Receive's system prompt. */
-function receiveLimelightSection(limelightLog: string): string {
+/** The limelight section baked into Analyze's system prompt. */
+function analyzeLimelightSection(limelightLog: string): string {
   return limelightLog
     ? `\n\nAfter the context block you will see \`--- limelight log: <folder>/ ---\` ` +
       "(which file was mounted in which panel and when). Read it as evidence " +
@@ -167,14 +167,16 @@ function receiveLimelightSection(limelightLog: string): string {
       "and say so where that leaves a gap.\n\n";
 }
 
-function composeReceiveSystem(limelightLog: string): string {
+function composeAnalyzeSystem(limelightLog: string): string {
   return (
     `${SYSTEM_PREAMBLE}\n\n` +
-    "You are Receive. You observe the delta log of a zine folder and " +
+    "YOUR ROLE — Analyze: the process reader. You observe the exact editor " +
+    "transactions and Step history of a zine folder and " +
     "produce an analysis of the recorded writing process — rhythm, revision " +
     "intensity, retention and loss, panel occupancy, and relationships between " +
     "files over time.\n\n" +
     "You will receive:\n" +
+    "- The exact validated trace process log (transaction anchors, timestamps, voices, and inserted/deleted text)\n" +
     "- The directory action log (timestamped edits with character deltas and `Δ` intervals)\n" +
     "- The limelight log (which file was mounted in which panel and when)\n" +
     "- Access to the current contents of files for grounding\n\n" +
@@ -190,13 +192,15 @@ function composeReceiveSystem(limelightLog: string): string {
     "- **Cross-file relationships**: temporal sequences; claim influence only when content evidence supports it\n" +
     "- **Limelight behavior**: what was visible when changes were made\n\n" +
     "Write as prose observations, not bullet points. Every paragraph that " +
-    "contains an interpretation MUST cite at least one `[#seq]`, exact " +
+    "contains an interpretation MUST cite at least one transaction anchor " +
+    "(`[#seq.tx]`) or Step anchor (`[#seq]`), exact " +
     "timestamp, character delta, or panel number. Use direct language for " +
     "logged facts and calibrated language (`may`, `could`, `is consistent " +
     "with`) for inference. Never infer mood, motive, diagnosis, personality, " +
     "or mental state. Acknowledge uncertainty rather than narrate beyond the " +
     "evidence. You are interpreting a footprint, not describing the walker.\n\n" +
-    "Your output is saved as a file the user can audit. Write accordingly: " +
+    "Your output is saved as an ordinary cited Zine file whose human author " +
+    "can continue the analysis with AI and whose own composition is traced. Write accordingly: " +
     "with humility, with precision, and with the understanding that " +
     "someone will check your work.\n\n" +
     "FORMAT — first line MUST be exactly `TITLE: <short descriptive name>` " +
@@ -204,8 +208,9 @@ function composeReceiveSystem(limelightLog: string): string {
     "Then the analysis body only — no other preamble, no meta-commentary, " +
     "no fences. The TITLE line names the new document; it is stripped " +
     "before the body is saved." +
-    receiveLimelightSection(limelightLog) +
-    "The delta log and full file contents are in the context block above."
+    analyzeLimelightSection(limelightLog) +
+    "The delta log and full file contents are in the context block above. " +
+    "The exact transaction log follows it in the user message."
   );
 }
 
@@ -291,13 +296,15 @@ export function replyMessages(source: string, traces: string): ChatMessage[] {
   ];
 }
 
-/** Receive messages. `limelightLog` is the pre-formatted panel-occupancy log. */
-export function receiveMessages(limelightLog: string): ChatMessage[] {
+/** Analyze messages. Both logs are frozen into the prepared request. */
+export function analyzeMessages(traceLog: string, limelightLog: string): ChatMessage[] {
   return [
-    { role: "system", content: composeReceiveSystem(limelightLog) },
+    { role: "system", content: composeAnalyzeSystem(limelightLog) },
     {
       role: "user",
-      content: limelightLog ? `--- limelight log ---\n${limelightLog}` : "(no limelight log for this folder)",
+      content:
+        `${traceLog || "(no high-resolution trace process log for this folder)"}\n\n` +
+        (limelightLog ? `--- limelight log ---\n${limelightLog}` : "(no limelight log for this folder)"),
     },
   ];
 }
@@ -335,7 +342,9 @@ export interface OpInputs {
   source?: string;
   /** Reply: pre-formatted citable traces block. */
   traces?: string;
-  /** Receive: pre-formatted limelight log. */
+  /** Analyze: exact validated editor-transaction log. */
+  traceLog?: string;
+  /** Analyze: pre-formatted limelight log. */
   limelightLog?: string;
 }
 
@@ -352,8 +361,8 @@ export function buildOpMessages(op: OpKind, inputs: OpInputs): ChatMessage[] {
       return stirMessages(inputs.loose ?? "", inputs.anchorCount ?? 0, inputs.commands ?? []);
     case "reply":
       return replyMessages(inputs.source ?? "", inputs.traces ?? "");
-    case "receive":
-      return receiveMessages(inputs.limelightLog ?? "");
+    case "analyze":
+      return analyzeMessages(inputs.traceLog ?? "", inputs.limelightLog ?? "");
   }
 }
 

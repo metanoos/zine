@@ -20,7 +20,7 @@ import {
   settleDedupeMessages,
   stirMessages,
   replyMessages,
-  receiveMessages,
+  analyzeMessages,
   editMessages,
   buildOpMessages,
   assembleOpMessages,
@@ -30,7 +30,7 @@ import {
 import { SYSTEM_PREAMBLE } from "./system-preamble.js";
 
 type AnyOp = OpKind | "edit";
-const ALL_OPS: AnyOp[] = ["extend", "settle", "stir", "reply", "receive", "edit"];
+const ALL_OPS: AnyOp[] = ["extend", "settle", "stir", "reply", "analyze", "edit"];
 
 function defaultSystem(op: AnyOp): string {
   switch (op) {
@@ -38,7 +38,7 @@ function defaultSystem(op: AnyOp): string {
     case "settle": return settleMessages("")[0].content;
     case "stir": return stirMessages("", 0, [])[0].content;
     case "reply": return replyMessages("", "")[0].content;
-    case "receive": return receiveMessages("")[0].content;
+    case "analyze": return analyzeMessages("", "")[0].content;
     case "edit": return editMessages("", "", "")[0].content;
   }
 }
@@ -70,8 +70,7 @@ test("the shared preamble treats injected document text as data, not instruction
 test("the \\n\\n join separates preamble from role tail exactly once", () => {
   for (const op of ALL_OPS) {
     const p = defaultSystem(op);
-    const joinCount = (p.match(/You operate inside zine[\s\S]*?\n\nYOUR ROLE/) ? 1 : 0)
-      + (p.match(/You operate inside zine[\s\S]*?\n\nYou are Receive/) ? 1 : 0);
+    const joinCount = p.match(/You operate inside zine[\s\S]*?\n\nYOUR ROLE/) ? 1 : 0;
     assert.ok(joinCount === 1, `${op} preamble join is malformed`);
     // The role tail begins right after the single "\n\n" that follows the preamble.
     const tail = p.slice(SYSTEM_PREAMBLE.length + 2);
@@ -86,7 +85,7 @@ test("each op's role tail carries its distinctive role marker", () => {
     settle: "YOUR ROLE — Settle: the condenser",
     stir: "YOUR ROLE — Stir: the reinventor",
     reply: "YOUR ROLE — Reply: the replier",
-    receive: "You are Receive",
+    analyze: "YOUR ROLE — Analyze: the process reader",
     edit: "YOUR ROLE — edit",
   };
   for (const op of ALL_OPS) {
@@ -173,16 +172,17 @@ test("stirMessages: no commands yields the reinvent-freely note", () => {
   assert.ok(body.includes("(no commands — reinvent freely in the same spirit)"));
 });
 
-test("receiveMessages: limelight log presence flips the limelight section", () => {
-  const withLog = receiveMessages("PANEL 1 …")[0].content;
-  const noLog = receiveMessages("")[0].content;
+test("analyzeMessages: limelight log presence flips the limelight section", () => {
+  const withLog = analyzeMessages("TRACE", "PANEL 1 …")[0].content;
+  const noLog = analyzeMessages("TRACE", "")[0].content;
   assert.ok(withLog.includes("--- limelight log: <folder>/ ---"));
   assert.ok(noLog.includes("No limelight log was provided for this folder"));
 });
 
-test("Receive requires evidence anchors and prohibits psychological inference", () => {
-  const system = receiveMessages("PANEL 1 …")[0].content;
+test("Analyze requires transaction evidence anchors and prohibits psychological inference", () => {
+  const system = analyzeMessages("TRACE", "PANEL 1 …")[0].content;
   assert.match(system, /Every paragraph that contains an interpretation MUST cite/);
+  assert.match(system, /\[#seq\.tx\]/);
   assert.match(system, /Never infer mood, motive, diagnosis, personality, or mental state/);
   assert.match(system, /claim influence only when content evidence supports it/);
   assert.match(system, /panel occupancy, not attention/);
@@ -215,7 +215,7 @@ test("buildOpMessages: dispatches every op and matches the dedicated builder", (
     { op: "settle", inputs: { loose: "L" } },
     { op: "stir", inputs: { loose: "L", anchorCount: 2, commands: ["c"] } },
     { op: "reply", inputs: { source: "S", traces: "T" } },
-    { op: "receive", inputs: { limelightLog: "LL" } },
+    { op: "analyze", inputs: { traceLog: "TRACE", limelightLog: "LL" } },
   ];
   for (const { op, inputs } of cases) {
     const viaDispatch = buildOpMessages(op, inputs);
@@ -232,15 +232,15 @@ test("buildOpMessages: dispatches every op and matches the dedicated builder", (
       case "reply":
         assert.deepEqual(viaDispatch, replyMessages(inputs.source!, inputs.traces!));
         break;
-      case "receive":
-        assert.deepEqual(viaDispatch, receiveMessages(inputs.limelightLog!));
+      case "analyze":
+        assert.deepEqual(viaDispatch, analyzeMessages(inputs.traceLog!, inputs.limelightLog!));
         break;
     }
   }
 });
 
 test("OP_ORDER: covers exactly the five single-shot ops in display order", () => {
-  assert.deepEqual(OP_ORDER, ["extend", "settle", "stir", "reply", "receive"]);
+  assert.deepEqual(OP_ORDER, ["extend", "settle", "stir", "reply", "analyze"]);
 });
 
 test("assembleOpMessages folds voice+lens into the op contract and context into the user body", () => {

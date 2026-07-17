@@ -13,7 +13,7 @@ The working interview lasts 24 hours from kickoff to handoff. It is paid. The ca
 
 const EXCLUDED_BODY = `# Private reviewer note
 
-Internal compensation ceiling and reviewer calibration notes. This file is deliberately shielded and must not enter the MODEL request.`;
+Internal compensation ceiling and reviewer calibration notes. This file is deliberately shielded and must not enter the AI request.`;
 
 export interface ModelContextLesson extends ModelLessonResume {
   artifacts: readonly {

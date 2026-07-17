@@ -172,3 +172,147 @@ func TestTorPeerDoesNotBypassFilterRateLimit(t *testing.T) {
 		t.Fatalf("Tor peer decision = (called=%v, reject=%v, message=%q), want limiter rejection", called, reject, message)
 	}
 }
+
+func TestAuthorizeEventMatrix(t *testing.T) {
+	local, networked, owner, writer, peer, unknown := authorizationTestPolicies(t)
+
+	tests := []struct {
+		name        string
+		policy      *AccessPolicy
+		authed      string
+		eventPubkey string
+		wantReject  bool
+		wantMessage string
+	}{
+		{
+			name:        "local mode does not require auth",
+			policy:      local,
+			eventPubkey: unknown,
+		},
+		{
+			name:        "networked mode challenges unauthenticated writer",
+			policy:      networked,
+			eventPubkey: unknown,
+			wantReject:  true,
+			wantMessage: "auth-required: this relay requires NIP-42 authentication",
+		},
+		{
+			name:        "owner may publish any valid event",
+			policy:      networked,
+			authed:      owner,
+			eventPubkey: unknown,
+		},
+		{
+			name:        "writer may publish own event",
+			policy:      networked,
+			authed:      writer,
+			eventPubkey: writer,
+		},
+		{
+			name:        "writer may not publish another authors event",
+			policy:      networked,
+			authed:      writer,
+			eventPubkey: owner,
+			wantReject:  true,
+			wantMessage: "auth-required: pubkey not in peer list",
+		},
+		{
+			name:        "peer has read-only access",
+			policy:      networked,
+			authed:      peer,
+			eventPubkey: peer,
+			wantReject:  true,
+			wantMessage: "restricted: peers have read-only access",
+		},
+		{
+			name:        "unknown authenticated key is rejected",
+			policy:      networked,
+			authed:      unknown,
+			eventPubkey: unknown,
+			wantReject:  true,
+			wantMessage: "auth-required: pubkey not in peer list",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reject, message := authorizeEvent(test.policy, test.authed, test.eventPubkey)
+			if reject != test.wantReject || message != test.wantMessage {
+				t.Fatalf("authorizeEvent() = (%v, %q), want (%v, %q)",
+					reject, message, test.wantReject, test.wantMessage)
+			}
+		})
+	}
+}
+
+func TestAuthorizeReadMatrix(t *testing.T) {
+	local, networked, owner, writer, peer, unknown := authorizationTestPolicies(t)
+
+	tests := []struct {
+		name        string
+		policy      *AccessPolicy
+		authed      string
+		wantReject  bool
+		wantMessage string
+	}{
+		{name: "local mode does not require auth", policy: local},
+		{
+			name:        "networked mode challenges unauthenticated reader",
+			policy:      networked,
+			wantReject:  true,
+			wantMessage: "auth-required: this relay requires NIP-42 authentication",
+		},
+		{name: "owner may read", policy: networked, authed: owner},
+		{name: "writer may read", policy: networked, authed: writer},
+		{name: "peer may read", policy: networked, authed: peer},
+		{
+			name:        "unknown authenticated key is rejected",
+			policy:      networked,
+			authed:      unknown,
+			wantReject:  true,
+			wantMessage: "restricted: pubkey not in peer list",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reject, message := authorizeRead(test.policy, test.authed)
+			if reject != test.wantReject || message != test.wantMessage {
+				t.Fatalf("authorizeRead() = (%v, %q), want (%v, %q)",
+					reject, message, test.wantReject, test.wantMessage)
+			}
+		})
+	}
+}
+
+func authorizationTestPolicies(t *testing.T) (
+	local *AccessPolicy,
+	networked *AccessPolicy,
+	owner string,
+	writer string,
+	peer string,
+	unknown string,
+) {
+	t.Helper()
+	dir := t.TempDir()
+	local = NewAccessPolicy(filepath.Join(dir, "missing.json"))
+	owner = strings.Repeat("a", 64)
+	writer = strings.Repeat("b", 64)
+	peer = strings.Repeat("c", 64)
+	unknown = strings.Repeat("d", 64)
+
+	raw, err := json.Marshal(PeersFile{
+		Owner:   owner,
+		Writers: []string{writer},
+		Peers:   []string{peer},
+	})
+	if err != nil {
+		t.Fatalf("encode authorization test policy: %v", err)
+	}
+	path := filepath.Join(dir, "peers.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write authorization test policy: %v", err)
+	}
+	networked = NewAccessPolicy(path)
+	return local, networked, owner, writer, peer, unknown
+}

@@ -20,6 +20,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { Event } from "nostr-tools";
+import { verifyEvent } from "nostr-tools/pure";
 
 import {
   attestNode,
@@ -30,7 +32,7 @@ import {
   isTraceNodeSent,
   publishHardenedSpan,
   resolveTraceIdentity,
-  sendStep,
+  sendHistoricalStep,
   sha256HexLocal,
   upsertManifestEntry,
 } from "../../client/src/provenance.js";
@@ -58,6 +60,11 @@ import {
   encodeTraceLocator,
   type TraceLocator,
 } from "../../client/src/trace-locator.js";
+import {
+  inspectFileTraceNucleus,
+  verifyFileTraceChain,
+  type TraceConformanceVerdict,
+} from "../../client/src/trace-conformance.js";
 
 /** The headless press's signing key. Seeded on first call, persisted via the
  *  localStorage shim into the selected profile. Distinct from the desktop app's
@@ -115,6 +122,28 @@ export function createMcpWorkspace(voice: Voice = agentVoice()): Workspace {
   });
 }
 
+/** Publish exactly one immutable file Step for the MCP Send gesture.
+ *
+ * The shared live-trace Send helper also refreshes a replaceable TraceHead.
+ * That cache is useful for ordinary press discovery, but the headless handoff
+ * contract is narrower: expose only the selected signed nucleus and leave all
+ * private process ancestry (and mutable head metadata) at home. */
+export async function publishExactMcpStep(event: Event): Promise<void> {
+  const reifications = event.tags.filter((tag) => tag[0] === "z");
+  const roots = event.tags.filter((tag) => tag[0] === "f");
+  const paths = event.tags.filter((tag) => tag[0] === "F");
+  if (
+    !verifyEvent(event) ||
+    event.kind !== 4290 ||
+    reifications.length !== 1 || reifications[0]?.[1] !== "file" ||
+    roots.length !== 1 || !roots[0]?.[1] ||
+    paths.length !== 1 || !paths[0]?.[1]
+  ) {
+    throw new Error("refusing to Send anything except one valid signed file Step");
+  }
+  await sendHistoricalStep(event);
+}
+
 export interface McpToolContext {
   profile: string;
   configPath: string;
@@ -155,7 +184,11 @@ async function handoffForEvent(
   rootId: string,
   relativePath: string,
   relayHints: readonly string[],
-): Promise<{ locator: TraceLocator; encoded: string }> {
+): Promise<{
+  locator: TraceLocator;
+  encoded: string;
+  conformance: TraceConformanceVerdict;
+}> {
   const traceId = await resolveTraceIdentity(event.id);
   if (!traceId) throw new Error(`cannot resolve trace identity for ${event.id}`);
   const locator: TraceLocator = {
@@ -169,7 +202,18 @@ async function handoffForEvent(
     ownerPubkey: event.pubkey,
     relayHints: [...new Set(relayHints)],
   };
-  return { locator, encoded: encodeTraceLocator(locator) };
+  const inspection = await inspectFileTraceNucleus(event, fetchEventById, {
+    expectedOwnerPubkey: event.pubkey,
+    expectedRootId: rootId,
+    expectedRelativePath: relativePath,
+    expectedNucleusId: event.id,
+    expectedTraceId: traceId,
+  });
+  return {
+    locator,
+    encoded: encodeTraceLocator(locator),
+    conformance: inspection.verdict,
+  };
 }
 
 /**
@@ -246,13 +290,16 @@ export function registerTools(
     "zine_get_history",
     "Walk a file's trace chain (genesis → head), returning each stepped node's " +
       "id, advisory action, step time, and optional summary. Ordering is the " +
-      "prev-chain, never created_at (spec §2).",
+      "prev-chain, never created_at (spec §2). Includes the shared FULL TRACE, " +
+      "SNAPSHOT ONLY, or INVALID reader verdict.",
     { relativePath: z.string() },
     async ({ relativePath }) => {
       const ref = requireFolder(workspace);
       const chain = await fetchChain(ref.id, relativePath);
+      const conformance = await verifyFileTraceChain(chain);
       return jsonResult({
         relativePath,
+        conformance,
         history: chain.map((e) => {
           const meta = eventMeta(e);
           const summary = (() => {
@@ -280,7 +327,8 @@ export function registerTools(
     "zine_get_node",
     "Fetch one trace node by id and return its full, self-sufficient payload " +
       "(snapshot, contentHash, authors, citations). Per spec §R1, a cited node " +
-      "resolves as one bounded fetch — never a chain replay.",
+      "resolves as one bounded fetch — never a chain replay. Ancestry is checked " +
+      "when available and the reader verdict is returned explicitly.",
     { nodeId: z.string().describe("64-char lowercase hex event id") },
     async ({ nodeId }) => {
       const event = await fetchEventById(nodeId);
@@ -295,6 +343,7 @@ export function registerTools(
         summary?: string;
       } | null;
       const meta = eventMeta(event);
+      const inspection = await inspectFileTraceNucleus(event, fetchEventById);
       return jsonResult({
         nodeId: event.id,
         kind: event.kind,
@@ -309,6 +358,8 @@ export function registerTools(
         voices: payload?.voices ?? null,
         summary: payload?.summary ?? null,
         steppedAtMs: meta.steppedAtMs ?? null,
+        historyComplete: inspection.historyComplete,
+        conformance: inspection.verdict,
         payload,
         event,
       });
@@ -318,7 +369,8 @@ export function registerTools(
   server.tool(
     "zine_get_handoff",
     "Return a portable single-file locator that the desktop press can open. " +
-      "The locator carries ids and relay hints only; the signed trace remains authoritative.",
+      "The locator carries ids and relay hints only; the signed trace remains authoritative. " +
+      "The response also carries the shared reader verdict.",
     { relativePath: z.string() },
     async ({ relativePath }) => {
       const ref = requireFolder(workspace);
@@ -371,7 +423,9 @@ export function registerTools(
         undefined,
         replyingTo,
         citationIds,
-        undefined, // no editor keystroke log in the headless press
+        // No interactive editor log: the workspace records this tool call as
+        // one atomic agent KEdit from the previous snapshot to this one.
+        undefined,
         true, // localOnly — the sovereignty filter
         true, // an explicit Step always mints one checkpoint
       );
@@ -407,13 +461,15 @@ export function registerTools(
         undefined,
         replyingTo,
         citationIds,
-        undefined, // no editor keystroke log in the headless press
+        // No interactive editor log: changed content becomes one atomic agent
+        // KEdit; unchanged Send reuses the latest Step below.
+        undefined,
         true, // Record pending changes locally before distribution.
         false, // Unchanged Send reuses the latest Step.
       );
       const event = await fetchEventById(nodeId);
       if (!event) throw new Error("latest Step is unavailable from local trace storage");
-      await sendStep(event, signer);
+      await publishExactMcpStep(event);
       const handoff = await handoffForEvent(
         event,
         ref.id,

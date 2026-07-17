@@ -45,6 +45,6 @@ test("in-place MODEL operations retain the AUTHOR ownership context for later St
 test("folder Settle never bypasses focused-file preparation or writes automatically", () => {
   const source = functionSource("settleDeDupeLLM", "/** SETTLE - condense");
 
-  assert.match(source, /MODEL Settle needs one focused, stepped file/);
+  assert.match(source, /AI Settle needs one focused, stepped file/);
   assert.doesNotMatch(source, /complete\(|writeFile\(|deletePath\(/);
 });

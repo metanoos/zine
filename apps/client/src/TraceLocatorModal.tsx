@@ -11,6 +11,7 @@ import {
   relayHintsRequiringApproval,
   type TraceLocator,
 } from "./trace-locator.js";
+import { traceConformanceLabel } from "./trace-conformance.js";
 
 function shortId(value: string): string {
   return value.length > 16 ? `${value.slice(0, 16)}…` : value;
@@ -157,6 +158,12 @@ export function TraceLocatorModal({ onClose }: { onClose: () => void }) {
               ))}
             </div>
             <div className="trace-locator-verification">
+              <span
+                className={`trace-conformance-badge is-${opened.conformance.status}`}
+                title={opened.conformance.issues.map((issue) => issue.message).join(" · ")}
+              >
+                {traceConformanceLabel(opened.conformance.status)}
+              </span>
               Signature valid · exact nucleus · {opened.historyComplete
                 ? `${opened.steps.length} signed Step${opened.steps.length === 1 ? "" : "s"}`
                 : "private history unavailable"}

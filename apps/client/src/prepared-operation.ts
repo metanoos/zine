@@ -8,14 +8,16 @@ import {
   contentFingerprint,
   type ContextSnapshot,
 } from "./context-snapshot.js";
+import { renderTraceProcessLog } from "./trace-process.js";
 
 const encoder = new TextEncoder();
 export const PREPARED_OPERATION_VERSION = 1;
 export const PREPARED_REQUEST_MAX_BYTES = 300_000;
 export const PROMPT_LAYER_VERSIONS = [
   "system-preamble:v1",
-  "op-prompts:v1",
+  "op-prompts:v2",
   "context-snapshot:v1",
+  "trace-process:v1",
 ] as const;
 
 export interface PreparedTargetRevision {
@@ -115,7 +117,7 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
   const target = input.contextSnapshot.target;
   if (input.dirtyTarget) issues.push(`${target.path} has unstepped changes`);
   if (!target.traceId || !target.headId) issues.push(`${target.path} has no stepped provenance identity`);
-  if (!input.modelVoicePubkey) issues.push("MODEL voice has no provenance identity");
+  if (!input.modelVoicePubkey) issues.push("AI voice has no provenance identity");
   if (!input.provider.baseUrl) issues.push(`provider ${input.provider.label} has no base URL`);
   if (!input.provider.modelId) issues.push(`provider ${input.provider.label} has no model id`);
   const unsteppedSources = input.contextSnapshot.inputs
@@ -127,6 +129,23 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
   if (issues.length > 0) throw new PreparedOperationError(issues);
 
   const operationInputs = copyInputs(input.operationInputs);
+  if (input.operation === "analyze") {
+    operationInputs.traceLog = renderTraceProcessLog(
+      input.contextSnapshot.inputs.flatMap((contextInput) =>
+        contextInput.deltaLog
+          .filter((entry) => entry.source === "file")
+          .map((entry) => ({
+            seq: entry.seq,
+            nodeId: entry.nodeId,
+            steppedAt: entry.steppedAt,
+            relativePath: entry.relativePath,
+            process: entry.process,
+            conformance: entry.conformance,
+            conformanceReason: entry.conformanceReason,
+          })),
+      ),
+    );
+  }
   const assembled = assembleOpMessages(input.operation, operationInputs, {
     voicePrompt: input.voicePrompt ?? "",
     contextBlock: input.contextSnapshot.renderedBlock,

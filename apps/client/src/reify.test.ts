@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Event, EventTemplate } from "nostr-tools";
-import { finalizeEvent } from "nostr-tools/pure";
+import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 
 import {
   prepareReifyExport,
@@ -22,6 +22,7 @@ const OTHER_SECRET = Uint8Array.from([
   0, 0, 0, 0, 0, 0, 0, 0,
   0, 0, 0, 0, 0, 0, 0, 2,
 ]);
+const ROOT = "f".repeat(64);
 
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -35,9 +36,14 @@ async function fileNode(
   contentHash?: string,
   secret = SECRET,
 ): Promise<Event> {
+  const previousSnapshot = previous
+    ? (JSON.parse(previous.content) as { snapshot: string }).snapshot
+    : "";
+  const voice = getPublicKey(secret);
   const tags = [
     ["z", "file"],
     ["F", "essay.md"],
+    ["f", ROOT],
     ["action", previous ? "edit" : "import"],
   ];
   if (previous) tags.push(["e", previous.id, "", "prev"]);
@@ -45,7 +51,21 @@ async function fileNode(
     kind: 4290,
     created_at: createdAt,
     tags,
-    content: JSON.stringify({ snapshot, contentHash: contentHash ?? await sha256Hex(snapshot) }),
+    content: JSON.stringify({
+      snapshot,
+      contentHash: contentHash ?? await sha256Hex(snapshot),
+      kedits: previousSnapshot === snapshot
+        ? []
+        : [{
+            op: previousSnapshot.length === 0 ? "ins" : snapshot.length === 0 ? "del" : "repl",
+            from: 0,
+            to: previousSnapshot.length,
+            text: snapshot,
+            voice,
+            t: createdAt * 1000,
+            tx: 0,
+          }],
+    }),
   };
   return finalizeEvent(template, secret);
 }
@@ -68,6 +88,7 @@ test("Reify writes the chosen signed snapshot, never caller-owned working text",
     { relativePath: "essay.md", content: "exact nucleus\n" },
   ]);
   assert.equal(exported.trace, undefined);
+  assert.deepEqual(exported.conformance.map((target) => target.status), ["full"]);
 });
 
 test("optional trace keeps raw signed events separate and reports from the bundle", async () => {
@@ -87,6 +108,8 @@ test("optional trace keeps raw signed events separate and reports from the bundl
       traceId: genesis.id,
       nucleusId: head.id,
       eventIds: [genesis.id, head.id],
+      conformance: "full",
+      conformanceIssues: [],
     },
   ]);
   assert.deepEqual(exported.trace.events, [genesis, head]);
@@ -103,10 +126,24 @@ test("optional trace keeps raw signed events separate and reports from the bundl
 
   const report = renderTraceReport(exported.trace);
   assert.match(report, /raw signed events are authoritative/i);
+  assert.match(report, /FULL TRACE/);
   assert.match(report, /essay\.md/);
   assert.match(report, /\| 0 \|.*import/);
   assert.match(report, /\| 1 \|.*edit/);
   assert.doesNotMatch(report, /finished/);
+});
+
+test("ordinary Reify preserves a readable nucleus while labeling private ancestry snapshot-only", async () => {
+  const genesis = await fileNode("private draft\n", 1_700_000_000);
+  const head = await fileNode("shared result\n", 1_700_000_100, genesis);
+  const exported = await prepareReifyExport(
+    [{ relativePath: "essay.md", nucleusId: head.id }],
+    loader([head]),
+  );
+
+  assert.equal(exported.entries[0]?.content, "shared result\n");
+  assert.equal(exported.conformance[0]?.status, "snapshot-only");
+  assert.ok(exported.conformance[0]?.issues.some((issue) => issue.code === "history-incomplete"));
 });
 
 test("Reify rejects an invalid signature and a signed snapshot-hash mismatch", async () => {

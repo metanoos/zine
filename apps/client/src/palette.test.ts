@@ -123,7 +123,7 @@ test("palette statuses render in the row that owns the operation", () => {
   for (const op of ["step", "send", "attest", "fork"]) {
     assert.equal(paletteStatusRow(op), "author", op);
   }
-  for (const op of ["receive", "reply", "extend", "stir", "settle", "run"]) {
+  for (const op of ["analyze", "reply", "extend", "stir", "settle", "run"]) {
     assert.equal(paletteStatusRow(op), "model", op);
   }
   for (const op of ["scan", "reify"]) {
@@ -215,7 +215,7 @@ test("an empty model catalog keeps the model selector visible", () => {
   assert.match(appSource, /<div className="action-palette-model-cell">\s*<ModelProviderSelect/);
   assert.match(appSource, /label=\{selected \? providerLabel\(selected\) : "Choose a model…"\}/);
   assert.match(appSource, /disabled: providers\.length === 0/);
-  assert.match(appSource, /MODEL_ALIASES = \["MODEL", "AUTOMATIC", "AUTOMATON", "AI", "LLM"\]/);
+  assert.match(appSource, /MODEL_ALIASES = \["AI", "ASSISTANT", "AUTOMATIC", "AUTOMATON", "LLM"\]/);
   assert.match(appSource, /localStorage\.setItem\(MODEL_LABEL_KEY, next\)/);
   assert.match(appSource, /Configure a model in Models to use AI operations/);
   assert.doesNotMatch(appSource, /onOpenModels|onAddModel|Add a model…|NO MODEL/);
