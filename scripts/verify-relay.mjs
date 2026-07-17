@@ -124,7 +124,7 @@ try {
   const agentSecretHex = Buffer.from(agentSecret).toString("hex");
   const agentPubkey = getPublicKey(agentSecret);
   const configPath = join(tempRoot, "mcp.json");
-  writeFileSync(configPath, JSON.stringify({ "zine.voice.secretHex": agentSecretHex }, null, 2), { mode: 0o600 });
+  writeFileSync(configPath, JSON.stringify({ "zine.headless.voice.secretHex": agentSecretHex }, null, 2), { mode: 0o600 });
 
   const binary = buildRelay();
   const homeHost = "127.0.0.1";

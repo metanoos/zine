@@ -14,7 +14,7 @@ test("MCP key storage is created with owner-only permissions", () => {
   assert.equal(statSync(path).mode & 0o777, 0o600);
 });
 
-test("MCP key storage repairs permissions from older versions", () => {
+test("MCP key storage repairs insecure existing permissions", () => {
   const path = join(mkdtempSync(join(tmpdir(), "zine-mcp-storage-")), "mcp.json");
   installNodeStorage(path);
   globalThis.localStorage.setItem("secret", "nsec");

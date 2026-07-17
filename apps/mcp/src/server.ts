@@ -35,8 +35,6 @@ interface Args {
   homeRelay: string | undefined;
   publishRelays: string[];
   config: string | undefined;
-  usedLegacyRelay: boolean;
-  usedLegacyFolder: boolean;
 }
 
 /** Parse the flat --flag value form. No interactive prompts — a spawned stdio
@@ -48,8 +46,6 @@ function parseArgs(argv: string[]): Args {
     homeRelay: undefined,
     publishRelays: [],
     config: undefined,
-    usedLegacyRelay: false,
-    usedLegacyFolder: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -58,30 +54,10 @@ function parseArgs(argv: string[]): Args {
       if (v === undefined) throw new Error(`missing value for ${a}`);
       return v;
     };
-    if (a === "--source-folder") {
-      if (args.usedLegacyFolder) {
-        throw new Error("--source-folder cannot be combined with --folder");
-      }
-      args.sourceFolder = next();
-    }
-    else if (a === "--folder") {
-      if (args.sourceFolder !== undefined) {
-        throw new Error("--folder cannot be combined with --source-folder");
-      }
-      args.sourceFolder = next();
-      args.usedLegacyFolder = true;
-    }
+    if (a === "--source-folder") args.sourceFolder = next();
     else if (a === "--profile") args.profile = next();
-    else if (a === "--home-relay") {
-      if (args.usedLegacyRelay) throw new Error("--home-relay cannot be combined with --relay");
-      args.homeRelay = next();
-    }
+    else if (a === "--home-relay") args.homeRelay = next();
     else if (a === "--publish-relay") args.publishRelays.push(next());
-    else if (a === "--relay") {
-      if (args.homeRelay !== undefined) throw new Error("--relay cannot be combined with --home-relay");
-      args.homeRelay = next();
-      args.usedLegacyRelay = true;
-    }
     else if (a === "--config") args.config = next();
     else if (a === "-h" || a === "--help") {
       process.stderr.write(USAGE);
@@ -110,8 +86,6 @@ Optional:
   --config         explicit key/state file (overrides the profile path)
                    default profile: ~/.zine/mcp.json
                    named profiles: ~/.zine/profiles/<name>.json
-  --folder         deprecated alias for --source-folder
-  --relay          deprecated alias for --home-relay (loopback only)
 
 The home relay is synchronized when available; offline Steps remain durable in
 the profile's signed-event outbox. Send publishes the same signed node to every
@@ -137,7 +111,7 @@ function isLoopback(url: URL): boolean {
   return (
     host === "localhost" ||
     host === "0.0.0.0" ||
-    host.startsWith("127.") ||
+    /^127(?:\.\d{1,3}){3}$/.test(host) ||
     host === "::1" ||
     host === "[::1]"
   );
@@ -179,13 +153,6 @@ async function main(): Promise<void> {
     process.stderr.write(`${(e as Error).message}\n\n${USAGE}`);
     process.exit(2);
   }
-  if (args.usedLegacyRelay) {
-    process.stderr.write("zine-mcp: --relay is deprecated; use --home-relay.\n");
-  }
-  if (args.usedLegacyFolder) {
-    process.stderr.write("zine-mcp: --folder is deprecated; use --source-folder.\n");
-  }
-
   // Steps 2 & 3: install storage BEFORE importing the shared client modules.
   // The order matters: setHomeRelay only writes an env var, while the Node
   // storage installer only provides a browser global. Neither helper imports
@@ -198,7 +165,12 @@ async function main(): Promise<void> {
   // config file cannot silently retain a stale publication destination.
   const { replaceExternalRelays } = await import("../../client/src/relay-config.js");
   replaceExternalRelays(args.publishRelays);
-  const { createMcpWorkspace, registerTools, agentVoice } = await import("./tools.js");
+  const {
+    createMcpWorkspace,
+    registerTools,
+    agentVoice,
+    initializeMcpKeySession,
+  } = await import("./tools.js");
   const { resolveWorkspaceBinding } = await import("./folder-binding.js");
   const { registerAgentWriter } = await import("./register-writer.js");
   const { flushLocalEventOutbox } = await import("../../client/src/provenance.js");
@@ -209,6 +181,7 @@ async function main(): Promise<void> {
   // the relay polls peers.json every 5s, so registering now gives it time to
   // recognize the key while attach()'s retry loop tolerates the brief window.
   const voice = agentVoice();
+  await initializeMcpKeySession(voice);
   const reg = registerAgentWriter(voice.publicKey);
   if (reg === "registered") {
     process.stderr.write(
@@ -249,7 +222,7 @@ async function main(): Promise<void> {
 
   // Bind localStorage immediately. Relay reconciliation is background work, so
   // an unavailable sidecar does not block machine-local Step/read operations.
-  const workspace = createMcpWorkspace();
+  const workspace = createMcpWorkspace(voice);
   let attached: { files: Record<string, unknown> };
   try {
     attached = await workspace.attach({ id: binding.folderId });

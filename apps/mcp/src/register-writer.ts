@@ -13,17 +13,13 @@
  * key. The owner can remove the writer via the desktop app at any time.
  *
  * Idempotent: if the key is already a writer, this is a no-op. The MCP server
- * and desktop shell share a short-lived peers.json.lock around migration and
+ * and desktop shell share a short-lived peers.json.lock around the
  * read-modify-write, preventing either process from discarding the other's
  * ACL update. The relay polls every 5s, so the new writer is picked up without
  * a restart.
  *
  * If peers.json doesn't exist (local mode — no owner set), this is a no-op:
  * there's no ACL to join, the relay accepts everyone.
- *
- * Migration: if peers.json is absent but the legacy friends.json exists, this
- * renames it into place first (the relay and the Rust app run the same check,
- * so whichever process reads first wins). Tolerant of a `friends` JSON key.
  */
 import {
   closeSync,
@@ -40,7 +36,6 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 const PEERS_PATH = join(homedir(), ".tracer", "peers.json");
-const LEGACY_FRIENDS_PATH = join(homedir(), ".tracer", "friends.json");
 const LOCK_PATH = PEERS_PATH + ".lock";
 const LOCK_TIMEOUT_MS = 2_000;
 const STALE_LOCK_MS = 30_000;
@@ -48,9 +43,6 @@ const STALE_LOCK_MS = 30_000;
 interface PeersFile {
   owner?: string;
   peers?: string[];
-  /** Legacy alias for `peers`, from before the rename. Tolerated on read. */
-  friends?: string[];
-  /** Absent on older files — treated as empty. */
   writers?: string[];
 }
 
@@ -96,32 +88,6 @@ export function withExclusiveFileLock<T>(
 }
 
 /**
- * One-shot migration: rename friends.json → peers.json (remapping the `friends`
- * JSON key to `peers`). No-op if peers.json already exists or friends.json is
- * absent. Idempotent across the three processes that read this file.
- */
-function migrateLegacyFile(): void {
-  if (existsSync(PEERS_PATH) || !existsSync(LEGACY_FRIENDS_PATH)) return;
-  try {
-    const raw = readFileSync(LEGACY_FRIENDS_PATH, "utf8");
-    const generic = JSON.parse(raw) as Record<string, unknown>;
-    if (generic.peers === undefined && generic.friends !== undefined) {
-      generic.peers = generic.friends;
-      delete generic.friends;
-    }
-    const dir = dirname(PEERS_PATH);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const tmp = PEERS_PATH + ".tmp";
-    writeFileSync(tmp, JSON.stringify(generic, null, 2), "utf8");
-    renameSync(tmp, PEERS_PATH);
-  } catch {
-    // Corrupt legacy file — leave it; the relay/Rust reader will try again,
-    // and a failure here just degrades to the attach() auth error surfacing.
-    return;
-  }
-}
-
-/**
  * Ensure `pubkey` is in peers.json's `writers` array. No-op if it's already
  * there, or if the file doesn't exist (local mode). Logs what it did. Never
  * throws — a failure here degrades to the attach() retry surfacing the auth
@@ -135,7 +101,6 @@ export function registerAgentWriter(pubkey: string): "registered" | "already" | 
     return "skipped";
   }
   return withExclusiveFileLock(LOCK_PATH, () => {
-    migrateLegacyFile();
     if (!existsSync(PEERS_PATH)) {
       // Local mode — no ACL. The relay accepts all connections; nothing to join.
       return "local-mode";

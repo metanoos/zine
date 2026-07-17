@@ -102,7 +102,7 @@ export async function resolveFolderBinding(
     };
   }
 
-  const fork = await forkFolder(sourceFolderId, null, {
+  const fork = await forkFolder(sourceFolderId, {
     signer,
     localOnly: true,
   });

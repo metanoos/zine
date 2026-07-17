@@ -55,7 +55,7 @@ test("startup rejects an unavailable source folder instead of binding an empty c
     tsx,
     [
       join(packageRoot, "src", "server.ts"),
-      "--folder",
+      "--source-folder",
       "a".repeat(64),
       "--home-relay",
       "ws://127.0.0.1:1",
@@ -82,7 +82,7 @@ test("startup rejects a non-loopback home before connecting", () => {
     tsx,
     [
       join(packageRoot, "src", "server.ts"),
-      "--folder",
+      "--source-folder",
       "a".repeat(64),
       "--home-relay",
       "wss://relay.example.com",
@@ -96,6 +96,23 @@ test("startup rejects a non-loopback home before connecting", () => {
   assert.doesNotMatch(result.stderr, /could not bind source folder/);
 });
 
+test("a hostname beginning with 127 is not treated as loopback", () => {
+  const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const tsx = join(packageRoot, "node_modules", ".bin", "tsx");
+  const result = spawnSync(
+    tsx,
+    [
+      join(packageRoot, "src", "server.ts"),
+      "--home-relay",
+      "ws://127.attacker.example:4869",
+    ],
+    { encoding: "utf8", timeout: 45_000 },
+  );
+
+  assert.equal(result.status, 2, result.stderr || result.error?.message);
+  assert.match(result.stderr, /--home-relay must be loopback/);
+});
+
 test("startup rejects a loopback publication destination", () => {
   const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const tsx = join(packageRoot, "node_modules", ".bin", "tsx");
@@ -103,7 +120,7 @@ test("startup rejects a loopback publication destination", () => {
     tsx,
     [
       join(packageRoot, "src", "server.ts"),
-      "--folder",
+      "--source-folder",
       "a".repeat(64),
       "--publish-relay",
       "ws://127.0.0.1:7777",

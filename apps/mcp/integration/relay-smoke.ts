@@ -28,6 +28,7 @@ async function main(): Promise<void> {
   // installed before the shared browser modules evaluate under Node.
   const { loadOrCreateVoice } = await import("../../client/src/identity.js");
   const { nodeVoice } = await import("../../client/src/keys-store.js");
+  const { initializeMcpKeySession } = await import("../src/tools.js");
   const { replaceExternalRelays } = await import("../../client/src/relay-config.js");
   const {
     attestNode,
@@ -55,6 +56,7 @@ async function main(): Promise<void> {
   const { Relay } = await import("nostr-tools/relay");
 
   const voice = loadOrCreateVoice();
+  await initializeMcpKeySession(voice);
   assert.equal(voice.publicKey, expectedAgent, "seeded agent key changed");
   assert.equal(nodeVoice(), expectedAgent, "NODE role must authenticate as the authorized writer");
   assert.notEqual(voice.publicKey, expectedRelayOwner, "agent must be distinct from relay owner");
@@ -80,10 +82,7 @@ async function main(): Promise<void> {
     created_at: Math.floor(queuedAt / 1_000),
     tags: [
       ["z", "file"],
-      ["file", "outbox-probe.md"],
-      ["folder", automaticRoot.folderId],
       ["F", "outbox-probe.md"],
-      ["D", automaticRoot.folderId],
       ["f", automaticRoot.folderId],
       ["action", "import"],
       ["x", queuedHash],

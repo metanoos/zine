@@ -69,8 +69,8 @@ class NodeLocalStorage implements StorageLike {
       return this.map;
     }
     try {
-      // This file contains the headless press's signing key. Repair files
-      // created by older versions before reading any secret material.
+      // This file contains the headless press's signing key. Enforce private
+      // permissions before reading any secret material.
       chmodSync(this.path, 0o600);
       const raw = readFileSync(this.path, "utf8");
       const parsed = JSON.parse(raw) as unknown;

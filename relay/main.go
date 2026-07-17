@@ -150,7 +150,7 @@ func main() {
 		// filters. Keep the non-loopback limit, but do not let the desktop's own
 		// loopback client exhaust the shared bucket and turn present history into
 		// an empty query result. This mirrors the event-publish exemption above.
-		loopbackExemptFilter(policies.FilterIPRateLimiter(20, time.Minute, 100)),
+		loopbackExemptFilter(policy, policies.FilterIPRateLimiter(20, time.Minute, 100)),
 	)
 	relay.RejectCountFilter = append(relay.RejectCountFilter,
 		// Count is a read op — gate it identically to filters so a caller can't
@@ -249,11 +249,9 @@ func resetLocalState(dbPath string) (int64, error) {
 	// would make the running relay reject the fresh first-run key. The relay's
 	// access-policy poll notices these removals and returns to local mode.
 	dataDir := filepath.Dir(dbPath)
-	for _, name := range []string{"peers.json", "friends.json"} {
-		path := filepath.Join(dataDir, name)
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return deleted, fmt.Errorf("remove %s: %w", path, err)
-		}
+	path := filepath.Join(dataDir, "peers.json")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return deleted, fmt.Errorf("remove %s: %w", path, err)
 	}
 
 	// Reclaim disk after a large trace history when SQLite can take the lock.
@@ -281,12 +279,34 @@ func loopbackExempt(fn func(context.Context, *nostr.Event) (bool, string)) func(
 	}
 }
 
-func loopbackExemptFilter(fn func(context.Context, nostr.Filter) (bool, string)) func(context.Context, nostr.Filter) (bool, string) {
+func loopbackExemptFilter(policy *AccessPolicy, fn func(context.Context, nostr.Filter) (bool, string)) func(context.Context, nostr.Filter) (bool, string) {
 	return func(ctx context.Context, filter nostr.Filter) (bool, string) {
-		return applyLoopbackExemption(khatru.GetIP(ctx), func() (bool, string) {
-			return fn(ctx, filter)
-		})
+		return applyTrustedFilterExemption(
+			khatru.GetIP(ctx),
+			khatru.GetAuthed(ctx),
+			policy,
+			func() (bool, string) {
+				return fn(ctx, filter)
+			},
+		)
 	}
+}
+
+// Tor forwards peer queries from loopback too, so IP alone cannot distinguish
+// the desktop owner from a remote read-only peer. In local mode loopback is
+// trusted; once an ACL is active only the authenticated owner and writers get
+// the burst exemption. Peers still pass the AUTH gate but consume limiter
+// tokens like other remote readers.
+func applyTrustedFilterExemption(
+	ip string,
+	authed string,
+	policy *AccessPolicy,
+	reject func() (bool, string),
+) (bool, string) {
+	if isLoopback(ip) && (!policy.Active() || policy.IsOwner(authed) || policy.IsWriter(authed)) {
+		return false, ""
+	}
+	return reject()
 }
 
 // Keep the bypass decision separate so tests can prove that a loopback request

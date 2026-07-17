@@ -35,7 +35,20 @@ import {
   upsertManifestEntry,
 } from "../../client/src/provenance.js";
 import { createLocalWorkspace } from "../../client/src/workspace-local.js";
-import { loadOrCreateVoice } from "../../client/src/identity.js";
+import { loadOrCreateVoice, type Voice } from "../../client/src/identity.js";
+import {
+  identityFromPubkey,
+  keySecretRef,
+  saveKeys,
+  setAuthorKeyId,
+  setModelKeyId,
+  setNodeKeyId,
+} from "../../client/src/keys-store.js";
+import {
+  MemorySecretStore,
+  putSecret,
+  unlockSecretSession,
+} from "../../client/src/secret-store.js";
 import type { Workspace } from "../../client/src/workspace-core.js";
 import { getOrCreateMintFolder } from "../../client/src/root.js";
 import { MINT, mintedPath } from "../../client/src/generated-paths.js";
@@ -53,9 +66,53 @@ export function agentVoice() {
   return loadOrCreateVoice();
 }
 
+/** Bridge the owner-only MCP profile key into the shared session-only signing
+ * boundary. Desktop secrets remain Stronghold-backed; the headless press
+ * already persists this key in its chmod-0600 atomic profile and exposes only
+ * an opaque ref to shared key-role consumers such as NIP-42 authentication. */
+export async function initializeMcpKeySession(voice: Voice): Promise<void> {
+  const id = "mcp-agent";
+  const secretRef = keySecretRef(id);
+  await unlockSecretSession(new MemorySecretStore({
+    persistent: false,
+    signing: true,
+    model: false,
+  }));
+  await putSecret(secretRef, voice.secretKey);
+
+  let createdAt = Date.now();
+  try {
+    const stored = JSON.parse(localStorage.getItem("zine.keys") ?? "[]") as Array<{
+      id?: unknown;
+      pubkey?: unknown;
+      createdAt?: unknown;
+    }>;
+    const prior = stored.find((entry) => entry.id === id && entry.pubkey === voice.publicKey);
+    if (typeof prior?.createdAt === "number") createdAt = prior.createdAt;
+  } catch {
+    // A corrupt public profile is replaced from the authoritative MCP key.
+  }
+  saveKeys([{
+    id,
+    label: "agent",
+    secretRef,
+    pubkey: voice.publicKey,
+    identity: identityFromPubkey(voice.publicKey),
+    schemaVersion: 1,
+    createdAt,
+  }]);
+  setAuthorKeyId(id);
+  setModelKeyId(id);
+  setNodeKeyId(id);
+}
+
 /** Build the local-first workspace the headless press binds to. */
-export function createMcpWorkspace(): Workspace {
-  return createLocalWorkspace({ requireRelayOnAttach: false });
+export function createMcpWorkspace(voice: Voice = agentVoice()): Workspace {
+  return createLocalWorkspace({
+    requireRelayOnAttach: false,
+    signerForVoice: (pubkey) =>
+      !pubkey || pubkey === voice.publicKey ? voice.secretKey : null,
+  });
 }
 
 export interface McpToolContext {
@@ -294,12 +351,12 @@ export function registerTools(
         .string()
         .optional()
         .describe("node id this write replies to (cite role: reply, §3.3)"),
-      taggedTraces: z
+      citationIds: z
         .array(z.string())
         .optional()
         .describe("node ids tagged onto this file without an inline quote (cite role: tag)"),
     },
-    async ({ relativePath, content, tags, replyingTo, taggedTraces }) => {
+    async ({ relativePath, content, tags, replyingTo, citationIds }) => {
       const ref = requireFolder(workspace);
       const signer = agentVoice().secretKey;
       // Step steps locally (localOnly=true); Send is a separate, deliberate act.
@@ -313,7 +370,7 @@ export function registerTools(
         // diffing against the prior snapshot, which the chain already records.
         undefined,
         replyingTo,
-        taggedTraces,
+        citationIds,
         undefined, // no editor keystroke log in the headless press
         true, // localOnly — the sovereignty filter
         true, // an explicit Step always mints one checkpoint
@@ -337,9 +394,9 @@ export function registerTools(
       content: z.string().describe("the file's full present text"),
       tags: z.array(z.string()).optional().describe("user-authored topical labels"),
       replyingTo: z.string().optional().describe("node id this write replies to"),
-      taggedTraces: z.array(z.string()).optional().describe("node ids tagged onto this file"),
+      citationIds: z.array(z.string()).optional().describe("node ids tagged onto this file"),
     },
-    async ({ relativePath, content, tags, replyingTo, taggedTraces }) => {
+    async ({ relativePath, content, tags, replyingTo, citationIds }) => {
       const ref = requireFolder(workspace);
       const signer = agentVoice().secretKey;
       const nodeId = await workspace.writeFile(
@@ -349,7 +406,7 @@ export function registerTools(
         signer,
         undefined,
         replyingTo,
-        taggedTraces,
+        citationIds,
         undefined, // no editor keystroke log in the headless press
         true, // Record pending changes locally before distribution.
         false, // Unchanged Send reuses the latest Step.
