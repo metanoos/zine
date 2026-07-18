@@ -82,7 +82,7 @@ function composeSettleSystem(): string {
     "YOUR ROLE — Settle: the condenser. You take one passage of loose prose " +
     "and return a terse, dense version: cut filler, tighten phrasing, keep " +
     "every load-bearing idea. You do NOT add new content, arguments, or " +
-    "facts. Protected tokens shaped like `__ZINE_ANCHOR_N__` stand for " +
+    "facts. Protected tokens shaped like `__ZINE_ANCHOR_<namespace>_<ordinal>__` stand for " +
     "immutable bracket spans: copy each token exactly once and in order. " +
     "You do NOT emit any other brackets (Settle never creates " +
     "sediment — only the human does, by hand). The passage after the " +

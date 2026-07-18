@@ -131,12 +131,12 @@ work into the receiving owner's chain.
 ## Sovereign by key, connected by citation
 
 Zine is peer-to-peer in the plainest sense: no platform sits between writers.
-Every press holds its own keys — separate NODE, AUTHOR, and MODEL roles — and
-writes signed history to its own relay on localhost. The NODE key can derive
-a stable `.onion` address, so a laptop can serve its published work without a
-server, and a private, never-published ACL decides who may connect, read, or
-write. Reachability degrades before identity ever does: lose Tor and you lose
-metadata privacy, never your name.
+Every press holds its own keys: separate keys own the relay, sign the
+writing, and mark AI edits, so rotating a pen never changes who owns the
+node. The relay's key can derive a stable `.onion` address, so a laptop can
+serve its published work without a server, and a private, never-published ACL
+decides who may connect, read, or write. Reachability degrades before
+identity ever does: lose Tor and you lose metadata privacy, never your name.
 
 A **coin** is how strangers find each other. When a phrase strikes you as
 worth keeping, you mint it: one deliberate gesture — Step, Publish, and

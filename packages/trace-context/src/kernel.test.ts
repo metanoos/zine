@@ -289,6 +289,29 @@ test("compiled records retain exact instruction bytes and one-shot-ready identit
   assert.equal(Object.isFrozen(directive), true);
 });
 
+test("directive markers choose a deterministic namespace absent from source prose", () => {
+  const text = "literal ⟪ZINE_DIRECTIVE_V1_0001_39_50⟫\n((tighten))";
+  const from = text.indexOf("((tighten))");
+  const result = compileAuthoringSyntax({
+    text,
+    operation: "extend",
+    actingAuthorId: "author-a",
+    authoritySpans: [{
+      id: "manual",
+      actorId: "author-a",
+      origin: "manual",
+      instructionEligible: true,
+      fromUtf16: from,
+      toUtf16: from + "((tighten))".length,
+    }],
+  });
+
+  assert.equal(result.ok, true);
+  assert.notEqual(result.directives[0]?.marker, "⟪ZINE_DIRECTIVE_V1_0001_39_50⟫");
+  assert.match(result.directives[0]?.marker ?? "", /ZINE_DIRECTIVE_V1_N1_/);
+  assert.match(result.renderedText, /^literal ⟪ZINE_DIRECTIVE_V1_0001_39_50⟫/);
+});
+
 test("protected-output validation requires every exact fragment in source order", () => {
   const scan = scanAuthoringSyntax("A [[ first ]] B [[ second ]] C");
   const valid = validateProtectedOutput(
