@@ -1578,6 +1578,48 @@ test("concurrent retries with different fresh preparations cannot fork one paren
   assert.equal(child.attempt.attemptId, desktopOperationRetryAttemptIdV1(keyFor(parent)));
 });
 
+test("retry retention cannot expire a deterministic child while its parent remains retryable", async () => {
+  const repository = new MemoryRepository();
+  const clock = new MutableClock();
+  repository.expiryNowMs = () => clock.value;
+  const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({ repository, clock }));
+  const parent = await runtime.cancel(keyFor(await persist(
+    runtime,
+    target("retry-retention-parent"),
+    provider(),
+    {
+      operationId: "operation-retry-retention-parent",
+      attemptId: "attempt-retry-retention-parent",
+      retainForMs: 100,
+    },
+  )));
+  const createdAtMs = parent.updatedAtMs + 1;
+  const exactRetainForMs = parent.retention.deleteByMs - createdAtMs;
+  await assert.rejects(
+    () => runtime.retry(keyFor(parent), {
+      createdAtMs,
+      retainForMs: exactRetainForMs - 1,
+    }),
+    /cover the parent attempt privacy deadline/,
+  );
+  assert.equal(repository.records.size, 1, "a short-lived claim is never persisted");
+
+  clock.value = createdAtMs + exactRetainForMs - 1;
+  assert.ok(clock.value < parent.retention.deleteByMs);
+  const afterRestart = new DesktopOperationRuntimeV1(runtimeDependencies({ repository, clock }));
+  const exact = await afterRestart.retry(keyFor(parent), { retainForMs: 1 });
+  assert.equal(exact.retention.deleteByMs, parent.retention.deleteByMs);
+  assert.equal(repository.records.size, 2);
+
+  const secondRestart = new DesktopOperationRuntimeV1(runtimeDependencies({ repository, clock }));
+  const converged = await secondRestart.retry(keyFor(parent), { retainForMs: 1 });
+  assert.equal(
+    hashDesktopOperationEnvelopeV1(converged),
+    hashDesktopOperationEnvelopeV1(exact),
+  );
+  assert.equal(repository.records.size, 2, "restart converges instead of recreating child bytes");
+});
+
 test("recovery deletes every expired envelope before any surviving side effect", async () => {
   const repository = new MemoryRepository();
   const clock = new MutableClock();

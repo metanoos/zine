@@ -46,7 +46,10 @@ legacy linked children before creating the deterministic id; compatible callers
 converge on the existing child, while a different preparation,
 acknowledgement, retention duration, explicit id, or second legacy child fails
 closed. Retry time must strictly advance beyond the parent attempt's last
-durable update.
+durable update. Its deletion deadline must also be at least the parent's
+deadline. A short-lived deterministic claim therefore cannot expire while the
+parent remains retryable and later be recreated with different bytes; equality
+at the parent's deadline is valid.
 
 The envelope retains, as private local data:
 
@@ -264,13 +267,19 @@ head lands on another page. A separate bounded 16-operation current-head
 overlay keeps newly completed work visible regardless of record-id order and
 deduplicates it against the archive head. Lineage keys are the composite
 operation-plus-attempt identity, so identical attempt ids in different
-operations cannot collide. Reduction uses retry-parent edges rather than
-timestamps or opaque ids, accepts only the newest durable snapshot of one
-attempt, and requires exactly one unambiguous head. Disconnected attempts,
-siblings, cycles, or equal-version byte conflicts are archive-only and fail
-closed. A malformed current-session lineage reserves only its operation id in a
-bounded activation fence; it consumes none of the 16 visible pins and a later
-partial callback cannot resurrect it. Fence overflow hides the entire overlay.
+operations cannot collide. For every operation represented on the visible
+page, the full scan retains only attempt id, parent id, update time, and a
+snapshot hash, with a strict 64-attempt per-operation cap. It requires one root,
+every retry parent present, one child per parent, a connected acyclic path, and
+exactly one head. Reduction uses those retry-parent edges rather than timestamps
+or opaque ids and accepts only the newest durable snapshot of one attempt. A
+missing parent, disconnected attempt, sibling, cycle, cap overflow, or equal-
+version byte conflict blocks the whole operation. A malformed current-session
+lineage reserves only its operation id in a bounded activation fence; it
+consumes none of the 16 visible pins and a later partial callback cannot
+resurrect it. The fence also remembers the verified cut for each visible head,
+so later lifecycle snapshots of that same proven chain need not retain all of
+its ancestors in the 16-pin overlay. Fence overflow hides the entire overlay.
 Scan failure or vault-session change clears archive actions rather than
 projecting a partial lineage. The deterministic retry claim reuses the existing
 encrypted envelope and opaque keyed row id; no operation id, attempt id,

@@ -1458,6 +1458,19 @@ test("retries keep operation identity, create a linked attempt, and require ambi
     attemptId: "attempt-retry-equal-time",
     createdAtMs: cancelled.updatedAtMs,
   }), /advance past the parent attempt/);
+  const exactBoundaryCreatedAtMs = cancelled.updatedAtMs + 1;
+  const exactBoundaryRetainForMs = cancelled.retention.deleteByMs - exactBoundaryCreatedAtMs;
+  assert.throws(() => createDesktopOperationRetryV1(cancelled, {
+    attemptId: "attempt-retry-short-retention",
+    createdAtMs: exactBoundaryCreatedAtMs,
+    retainForMs: exactBoundaryRetainForMs - 1,
+  }), /cover the parent attempt privacy deadline/);
+  const exactBoundaryRetry = createDesktopOperationRetryV1(cancelled, {
+    attemptId: "attempt-retry-exact-retention",
+    createdAtMs: exactBoundaryCreatedAtMs,
+    retainForMs: exactBoundaryRetainForMs,
+  });
+  assert.equal(exactBoundaryRetry.retention.deleteByMs, cancelled.retention.deleteByMs);
   const safeRetry = createDesktopOperationRetryV1(cancelled, {
     attemptId: "attempt-retry-0001",
     createdAtMs: cancelled.updatedAtMs + 1,

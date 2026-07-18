@@ -367,6 +367,27 @@ test("same-attempt lifecycle refresh wins, while equal-version conflicts and sib
     assert.deepEqual(desktopOperationReviewQueueV1(ordered), []);
     assert.deepEqual(mergeDesktopOperationPinnedHeadsV1([], ordered), []);
   }
+
+  const linkedParent = attempt(73, "attempt-proven-cut-parent", 50);
+  const linkedHead = attempt(
+    73,
+    "attempt-proven-cut-head",
+    51,
+    linkedParent.attempt.attemptId,
+  );
+  const linkedFence = createDesktopOperationPinnedLineageFenceV1();
+  const provenHead = mergeDesktopOperationPinnedHeadsV1(
+    [],
+    [linkedParent, linkedHead],
+    16,
+    linkedFence,
+  );
+  const refreshedHead = { ...linkedHead, updatedAtMs: 52 };
+  assert.deepEqual(
+    mergeDesktopOperationPinnedHeadsV1(provenHead, [refreshedHead], 16, linkedFence),
+    [refreshedHead],
+    "a stateful fence retains proof for the prior valid root-to-head cut",
+  );
 });
 
 test("blocked lineage reserves no visible pin capacity and cannot be resurrected by a partial callback", () => {
@@ -421,4 +442,76 @@ test("archive lineage keys attempt ids by operation and returns the latest same-
     [oldSnapshot, otherOperation],
   );
   assert.deepEqual(composite.map(({ operationId }) => operationId), [otherOperation.operationId]);
+});
+
+test("a singleton retry orphan is blocked in pins and every archive position", async () => {
+  const orphan = attempt(600, "attempt-orphan-child", 20, "attempt-orphan-missing-parent");
+  const fence = createDesktopOperationPinnedLineageFenceV1();
+  assert.deepEqual(mergeDesktopOperationPinnedHeadsV1([], [orphan], 16, fence), []);
+  assert.equal(fence.blockedOperationIds.has(orphan.operationId), true);
+
+  const first = attempt(601, "attempt-orphan-neighbor-a", 30);
+  const second = attempt(602, "attempt-orphan-neighbor-b", 40);
+  for (const recordOrder of permutations([first, orphan, second])) {
+    for (const pageOrder of [
+      [orphan],
+      [orphan, first, second],
+      [first, orphan, second],
+      [first, second, orphan],
+    ]) {
+      const resolved = await resolveDesktopOperationPageLineageV1(
+        pagedRepository(recordOrder),
+        pageOrder,
+        { pageSize: 3 },
+      );
+      assert.equal(
+        resolved.some(({ operationId }) => operationId === orphan.operationId),
+        false,
+      );
+    }
+  }
+});
+
+test("lineage accepts the exact per-operation depth cap and blocks overflow", async () => {
+  const boundaryChain: DesktopOperationEnvelopeV1[] = [];
+  for (let index = 0; index < 64; index += 1) {
+    boundaryChain.push(attempt(
+      610,
+      `attempt-depth-${String(index).padStart(2, "0")}`,
+      100 + index,
+      index === 0 ? null : boundaryChain[index - 1]!.attempt.attemptId,
+    ));
+  }
+  const boundaryHead = boundaryChain.at(-1)!;
+  assert.deepEqual(
+    mergeDesktopOperationPinnedHeadsV1([], boundaryChain).map(({ attempt }) => attempt.attemptId),
+    [boundaryHead.attempt.attemptId],
+  );
+  assert.deepEqual(
+    (await resolveDesktopOperationPageLineageV1(
+      pagedRepository([...boundaryChain].reverse()),
+      [boundaryHead],
+    )).map(({ attempt }) => attempt.attemptId),
+    [boundaryHead.attempt.attemptId],
+  );
+
+  const overflow = attempt(
+    610,
+    "attempt-depth-overflow",
+    200,
+    boundaryHead.attempt.attemptId,
+  );
+  const fence = createDesktopOperationPinnedLineageFenceV1();
+  assert.deepEqual(
+    mergeDesktopOperationPinnedHeadsV1(boundaryChain, [overflow], 16, fence),
+    [],
+  );
+  assert.equal(fence.blockedOperationIds.has(overflow.operationId), true);
+  assert.deepEqual(
+    await resolveDesktopOperationPageLineageV1(
+      pagedRepository([overflow, ...boundaryChain]),
+      [overflow],
+    ),
+    [],
+  );
 });

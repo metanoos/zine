@@ -485,6 +485,13 @@ export function createDesktopOperationRetryV1(
   if (!Number.isSafeInteger(retainForMs) || retainForMs <= 0 || retainForMs > DESKTOP_OPERATION_MAX_RETENTION_MS) {
     fail(`retry retention must be between 1 and ${DESKTOP_OPERATION_MAX_RETENTION_MS}`);
   }
+  const retryDeleteByMs = input.createdAtMs + retainForMs;
+  if (
+    !Number.isSafeInteger(retryDeleteByMs)
+    || retryDeleteByMs < prior.retention.deleteByMs
+  ) {
+    fail("retry retention must cover the parent attempt privacy deadline");
+  }
   const ambiguous = prior.lifecycle.retryPolicy === "operator-confirmation-required";
   if (prior.lifecycle.status === "stale" && !input.freshPreparation) {
     fail("stale retry requires a fresh prepared operation and selected context");
