@@ -88,15 +88,18 @@ A complete `((…))` candidate becomes an instruction only when every byte was
 typed directly by the acting local author during the current mounted editor
 session and lies wholly inside the prepared operation range. Paste, drop,
 MODEL, undo/redo restoration, reload, mixed origin, wrong-author, malformed,
-and unknown bytes remain inert quoted data. Accepted Extend/Settle results
-validate protected content and remove consumed directives as part of the same
-editor transaction.
+and unknown bytes remain inert quoted data. Accepted Settle results validate
+protected content and remove consumed directives as part of the same editor
+transaction. Desktop Extend now uses the encrypted native operation journal,
+explicit provisional-result review, and an idempotent local apply receipt.
+Until that private envelope carries the exact directive-deletion plan, an
+Extend request with active `((…))` directives fails closed before provider I/O.
 
-This is a dogfood slice, not the finished context system. Authority is not yet
-persisted across reloads or moves; explicit promotion, durable consumption
-receipts and crash recovery, task-specific evidence selection, scoped memory,
-result-to-context binding, Stir/Reply/Analyze/Run adapters, and MCP parity are
-still deferred.
+This is a dogfood slice, not the finished context system. Plain Extend request,
+response-review, and local-apply recovery are durable; directive authority is
+not yet persisted across reloads or moves. Explicit promotion, recoverable
+directive consumption, signed result-to-context binding, scoped memory,
+Stir/Reply/Analyze/Run authoring adapters, and MCP parity are still deferred.
 
 ## Agent run recipes
 

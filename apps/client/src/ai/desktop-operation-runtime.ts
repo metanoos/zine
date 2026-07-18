@@ -263,6 +263,9 @@ function bindApprovedDesktopExtendPreparationV1(
   if (prepared.operation !== "extend") fail("durable Phase 2 execution supports Extend only");
   const selected = prepared.traceContextSelection;
   if (!selected) fail("approved Extend request has no exact trace-context selection");
+  if ((prepared.traceAuthoring?.stagedDirectiveDeletions.length ?? 0) > 0) {
+    fail("durable Extend cannot yet recover active directive consumption");
+  }
   if (provider.id !== prepared.providerId) fail("provider id changed after request approval");
   if (providerProfileFingerprint(provider) !== prepared.providerFingerprint) {
     fail("provider configuration changed after request approval");

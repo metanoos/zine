@@ -153,11 +153,14 @@ are closed without weakening those boundaries.
 
 ## Phase 2: one complete desktop vertical slice
 
-This phase has an initial read-only dogfood slice: Extend and Settle prepare
-through the shared syntax kernel, and Prompt Inspector can present the frozen
-boundary. Exclusion, correction, explicit promotion, persisted authority,
-durable receipts, and crash recovery are still required before the vertical
-slice is complete.
+This phase now has one durable desktop Extend path: Prompt Inspector freezes the
+selected signed-chain boundary, the encrypted native journal persists before
+provider I/O, a private strip presents provisional results, and acceptance
+writes an idempotent local crash-pad receipt before one editor transaction.
+Active directive consumption remains fail-closed until the private envelope
+carries its exact deletion plan. Exclusion, correction, explicit promotion,
+persisted authority, signed Step linkage, and Settle lifecycle reuse are still
+required before the broader vertical slice is complete.
 
 Integrate Extend and Settle first because continuation and revision expose
 different ways trace may help. Preserve today's Stir behavior through the new

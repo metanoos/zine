@@ -94,7 +94,7 @@ test("Settle retains current-session authoring while durable Extend accepts thro
 });
 
 test("Inspector binds Extend to the fetched signed-chain selector boundary", () => {
-  const prepare = functionBody("prepareInspectorOperation", "/** Read the authoritative local Mint inventory");
+  const prepare = functionBody("prepareInspectorOperation", "/** Render bounded, exact excerpts");
   assert.match(prepare, /operation === "extend"[\s\S]*fetchChain\(liveFolder\.id, activePath\)/);
   assert.match(prepare, /policy: "selected-trace-v1"/);
   assert.match(prepare, /verifyEvent/);

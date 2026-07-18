@@ -1,9 +1,9 @@
 # Desktop operation lifecycle
 
-This note defines the private, local Phase 2 contract that can make one desktop
-Extend operation recoverable without changing the Zine protocol. It is an
-integration boundary for the desktop UI and native operation store, not a wire
-format, signed provenance claim, or completed product capability.
+This note defines the implemented private, local Phase 2 contract for one
+recoverable desktop Extend operation without changing the Zine protocol. It is
+an integration boundary for the desktop UI and native operation store, not a
+wire format or signed provenance claim.
 
 ## Boundary
 
@@ -154,7 +154,7 @@ native store removes the entire envelope; Phase 2 keeps no tombstone or retained
 hashes. The native store must keep vaults isolated and must not copy the envelope
 to relay events, logs, crash reports, or analytics.
 
-The desktop now has a native journal substrate for this contract. Each active
+The desktop has a native journal substrate for this contract. Each active
 vault owns a separate `press.sqlite3`, never the relay's `relay.sqlite3`. The
 native runtime derives a domain-separated journal key from the workspace key at
 activation, keeps only zeroizing derived key material, and encrypts the whole
@@ -168,23 +168,25 @@ The narrow TypeScript adapter validates the strict V1 contract before writes
 and after reads. It exposes create/update CAS, recovery load/list,
 whole-envelope deletion, and expiry deletion. Production construction names the
 native authority explicitly; browser tests may inject a backend, but there is
-no silent local-storage fallback. This is storage substrate only—the app does
-not yet route Extend through it. Selective portable commitments and disclosure
-belong to Phase 3 after the trust/schema review.
+no silent local-storage fallback. The desktop app now routes ordinary Extend
+requests through this store, presents completed responses in a private review
+strip, and writes an encrypted crash-pad receipt before its one local editor
+transaction. Active `((…))` directive consumption remains fail-closed because
+the V1 envelope does not yet carry a recoverable deletion plan. Selective
+portable commitments and disclosure belong to Phase 3 after schema review.
 
 ## Not included
 
-This contract intentionally does not:
+The envelope and reducer intentionally do not themselves:
 
 - change protocol or relay schemas;
 - create or encode signed Steps;
-- dispatch a provider request itself;
-- apply text to the editor;
-- perform compare-and-set or directive-consumption transactions;
+- resolve credentials or dispatch a provider request without the runtime adapter;
+- apply text without the desktop editor adapter;
+- consume active directives or encode their deletion plan;
 - add Settle, Stir, Reply, Analyze, Run, or multi-provider orchestration; or
 - claim that selected trace improves writing.
 
-The next integration can wire Extend through this contract, a vault-scoped
-native store, explicit result review, compare-and-set application, and the
-separate accepted MODEL Step transaction. Settle should reuse the lifecycle
-rather than invent a second one.
+The next integration should revise the private schema for recoverable directive
+consumption and then add the separate accepted MODEL Step transaction. Settle
+should reuse the lifecycle rather than invent a second one.

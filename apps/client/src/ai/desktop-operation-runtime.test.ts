@@ -451,6 +451,22 @@ test("factory binds the approved selector, unique user-message placement, and cr
     }),
     /no exact trace-context selection/,
   );
+  assert.throws(
+    () => createApprovedDesktopExtendEnvelopeV1({
+      prepared: {
+        ...prepared,
+        traceAuthoring: {
+          stagedDirectiveDeletions: [{ fromUtf16: 0, toUtf16: 4 }],
+        } as unknown as NonNullable<PreparedOperation["traceAuthoring"]>,
+      },
+      provider: providerFixture,
+      maxOutputTokens: 1_024,
+      operationId: "operation-factory-directive",
+      attemptId: "attempt-factory-directive",
+      createdAtMs: BASE_TIME,
+    }),
+    /cannot yet recover active directive consumption/,
+  );
 });
 
 test("happy path persists every boundary before provider and artifact side effects", async () => {
