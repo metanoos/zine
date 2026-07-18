@@ -15,10 +15,12 @@ import {
 } from "../../protocol/src/index.js";
 import parityCorpusJson from "../corpus/selector-parity-v1.json" with { type: "json" };
 import {
+  projectTraceProcessCandidatesV1,
   selectTraceContextV1,
   type EvidenceCandidateV1,
   type EvidenceSelectionDecisionV1,
   type TraceContextSelectionInputV1,
+  type TraceContextProcessProjectionInputV1,
   type TraceProcessFactV1,
 } from "./index.js";
 
@@ -48,19 +50,46 @@ interface FailureExpected {
 
 interface ParityCase {
   name: string;
+  scope: "process-adapter-projectable" | "selector-only";
   protocolFixture?: string;
-  exactBudgetProbe?: true;
+  processProjection?: TraceContextProcessProjectionInputV1;
+  budgetEdge?: "context-ceiling" | "request-remainder";
   input: TraceContextSelectionInputV1;
   expected: SuccessExpected | FailureExpected;
+}
+
+interface ProjectionCase {
+  name: string;
+  verificationBoundary: "native-neutral-non-cryptographic";
+  input: TraceContextProcessProjectionInputV1;
+  expectedCandidates: Extract<EvidenceCandidateV1, { kind: "process-fact" }>[];
+}
+
+interface AdapterRejectionMutation {
+  name: string;
+  fixture: string;
+  mutation: {
+    target: string;
+    operation: string;
+    value: unknown;
+  };
+  expected: {
+    accepted: false;
+    reason: string;
+  };
 }
 
 const corpus = parityCorpusJson as unknown as {
   format: string;
   version: 1;
   contract: string;
+  projectorContract: string;
   runtimeBoundary: string;
+  scopeDefinitions: Record<ParityCase["scope"], string>;
   protocolFixtures: ProtocolFixture[];
   cases: ParityCase[];
+  processProjectionCases: ProjectionCase[];
+  adapterRejectionMutations: AdapterRejectionMutation[];
 };
 
 const protocolCorpus = protocolCorpusJson as unknown as {
@@ -77,20 +106,31 @@ test("selector parity corpus is strict portable JSON with the package-local boun
   assert.equal(corpus.format, "zine-trace-context-selector-parity");
   assert.equal(corpus.version, 1);
   assert.equal(corpus.contract, "package-local-non-normative-v1");
+  assert.equal(corpus.projectorContract, "surface-neutral-process-candidates-v1");
   assert.match(corpus.runtimeBoundary, /desktop and MCP/i);
+  assert.match(corpus.runtimeBoundary, /only for process-adapter-projectable cases/i);
   assert.deepEqual(
     corpus.cases.map((fixture) => fixture.name),
     [
       "two-step full trace",
       "text-only projection",
       "unicode bytes",
-      "exact rendered budget edge",
+      "context-limited exact budget edge",
+      "request-remainder-limited exact budget edge",
       "snapshot-only failure",
       "invalid trace failure",
       "trace source mismatch",
       "head source mismatch",
     ],
   );
+  assert.deepEqual(
+    corpus.cases.map((fixture) => fixture.scope),
+    ["process-adapter-projectable", ...Array<string>(8).fill("selector-only")],
+  );
+  assert.deepEqual(Object.keys(corpus.scopeDefinitions).sort(), [
+    "process-adapter-projectable",
+    "selector-only",
+  ]);
 
   const sourceUrl = new URL("../corpus/selector-parity-v1.json", import.meta.url);
   const source = await readFile(sourceUrl, "utf8");
@@ -106,6 +146,53 @@ test("selector parity corpus is strict portable JSON with the package-local boun
     if (available.error) continue;
     const parsed = spawnSync(command, args, { encoding: "utf8" });
     assert.equal(parsed.status, 0, `${command}: ${parsed.stderr}`);
+  }
+});
+
+test("native-neutral projector cases pin nonzero source ids and no-op enumeration", () => {
+  assert.deepEqual(
+    corpus.processProjectionCases.map((fixture) => fixture.name),
+    [
+      "nonzero source KEdit tx uses process-array ordinals",
+      "no-op range omits only zero-effect change",
+    ],
+  );
+  for (const fixture of corpus.processProjectionCases) {
+    assert.equal(fixture.verificationBoundary, "native-neutral-non-cryptographic");
+    assert.deepEqual(projectTraceProcessCandidatesV1(fixture.input), fixture.expectedCandidates);
+  }
+
+  const nonzero = corpus.processProjectionCases[0]!;
+  assert.equal(nonzero.input.steps[0]!.transactions[0]!.sourceTransactionId, 7);
+  assert.deepEqual(
+    nonzero.expectedCandidates.map((candidate) => candidate.source.transactionIndex),
+    [0, 0, 0],
+  );
+  const noOp = corpus.processProjectionCases[1]!;
+  assert.deepEqual(
+    noOp.expectedCandidates.map((candidate) => candidate.fact.kind),
+    ["step-summary", "transaction"],
+  );
+});
+
+test("adapter rejection descriptors pin strict drift failures", () => {
+  assert.deepEqual(
+    corpus.adapterRejectionMutations.map((descriptor) => descriptor.mutation.target),
+    [
+      "verdict.steps[1].process.transactions[0].capturedAtMs",
+      "chain[1].content",
+      "read.headId",
+      "processProjection.steps[0].nodeId",
+      "processProjection.steps[0].chainDistance",
+      "projectedCandidate.source.transactionIndex",
+    ],
+  );
+  assert.equal(new Set(corpus.adapterRejectionMutations.map((item) => item.name)).size, 6);
+  assert.equal(new Set(corpus.adapterRejectionMutations.map((item) => item.expected.reason)).size, 6);
+  for (const descriptor of corpus.adapterRejectionMutations) {
+    assert.equal(descriptor.fixture, "two-step-full-trace");
+    assert.equal(descriptor.expected.accepted, false);
+    assert.ok(descriptor.mutation.operation.length > 0);
   }
 });
 
@@ -158,6 +245,21 @@ test("protocol-derived facts independently match every applicable selector input
   }
 });
 
+test("the adapter-projectable selector input is exactly the shared protocol projection", () => {
+  const parityCase = corpus.cases.find((fixture) => fixture.scope === "process-adapter-projectable");
+  assert.ok(parityCase?.protocolFixture);
+  assert.ok(parityCase.processProjection);
+  const fixture = corpus.protocolFixtures.find((item) => item.name === parityCase.protocolFixture);
+  assert.ok(fixture);
+
+  const independentlyDerived = deriveProjection(fixture.chain);
+  assert.deepEqual(parityCase.processProjection, independentlyDerived);
+  assert.deepEqual(
+    parityCase.input.candidates,
+    projectTraceProcessCandidatesV1(independentlyDerived),
+  );
+});
+
 for (const parityCase of corpus.cases) {
   test(`selector parity: ${parityCase.name}`, async () => {
     const result = await selectTraceContextV1(parityCase.input);
@@ -198,17 +300,32 @@ for (const parityCase of corpus.cases) {
       result.manifest.budget.usedRenderedBytes,
     );
 
-    if (parityCase.exactBudgetProbe) {
+    if (parityCase.budgetEdge) {
       assert.equal(
         result.manifest.budget.usedRenderedBytes,
-        parityCase.input.operation.maxContextBytes,
+        326,
       );
       assert.equal(
         result.manifest.budget.effectiveContextBytes,
-        parityCase.input.operation.maxContextBytes,
+        326,
       );
       const oneByteShort = structuredClone(parityCase.input);
-      oneByteShort.operation.maxContextBytes -= 1;
+      if (parityCase.budgetEdge === "context-ceiling") {
+        assert.equal(parityCase.input.operation.maxContextBytes, 326);
+        assert.ok(
+          parityCase.input.operation.preparedRequestMaxBytes
+            - parityCase.input.operation.reservedPromptBytes > 326,
+        );
+        oneByteShort.operation.maxContextBytes -= 1;
+      } else {
+        assert.ok(parityCase.input.operation.maxContextBytes > 326);
+        assert.equal(
+          parityCase.input.operation.preparedRequestMaxBytes
+            - parityCase.input.operation.reservedPromptBytes,
+          326,
+        );
+        oneByteShort.operation.preparedRequestMaxBytes -= 1;
+      }
       const shortResult = await selectTraceContextV1(oneByteShort);
       assert.equal(shortResult.ok, false);
       if (!shortResult.ok) {
@@ -239,19 +356,19 @@ function deriveFacts(chain: readonly ProtocolEvent[]): Map<string, TraceProcessF
       undoCount: summary.undo,
       redoCount: summary.redo,
     });
-    for (const transaction of process.transactions) {
-      facts.set(`${event.id}:tx:${transaction.tx}`, {
+    process.transactions.forEach((transaction, transactionIndex) => {
+      facts.set(`${event.id}:tx:${transactionIndex}`, {
         kind: "transaction",
-        transactionIndex: transaction.tx,
+        transactionIndex,
         capturedAtMs: transaction.at,
         ...(transaction.intent ? { intent: transaction.intent } : {}),
         changeCount: transaction.changes.length,
         voiceIds: [...new Set(transaction.changes.map((change) => change.voice))].sort(),
       });
       transaction.changes.forEach((change, changeIndex) => {
-        facts.set(`${event.id}:tx:${transaction.tx}:change:${changeIndex}`, {
+        facts.set(`${event.id}:tx:${transactionIndex}:change:${changeIndex}`, {
           kind: "change",
-          transactionIndex: transaction.tx,
+          transactionIndex,
           operation: change.op === "ins" ? "insert" : change.op === "del" ? "delete" : "replace",
           range: { fromUtf16: change.from, toUtf16: change.to },
           insertedCodePointCount: [...change.inserted].length,
@@ -259,11 +376,49 @@ function deriveFacts(chain: readonly ProtocolEvent[]): Map<string, TraceProcessF
           voiceId: change.voice,
         });
       });
-    }
+    });
     const parsed = JSON.parse(event.content) as { snapshot: string };
     previousSnapshot = parsed.snapshot;
   }
   return facts;
+}
+
+function deriveProjection(chain: readonly ProtocolEvent[]): TraceContextProcessProjectionInputV1 {
+  assert.ok(chain.length > 0);
+  let previousSnapshot = "";
+  const steps = chain.map((event, eventIndex) => {
+    const process = traceProcessFromEvent(event, previousSnapshot);
+    assert.equal(process.status, "complete", `${event.id}: ${process.reason}`);
+    const parsed = JSON.parse(event.content) as { snapshot: string };
+    previousSnapshot = parsed.snapshot;
+    return {
+      version: 1 as const,
+      nodeId: event.id,
+      chainDistance: chain.length - eventIndex - 1,
+      transactions: process.transactions.map((transaction) => ({
+        version: 1 as const,
+        sourceTransactionId: transaction.tx,
+        capturedAtMs: transaction.at,
+        ...(transaction.intent ? { intent: transaction.intent } : {}),
+        changes: transaction.changes.map((change) => ({
+          version: 1 as const,
+          operation: change.op === "ins"
+            ? "insert" as const
+            : change.op === "del" ? "delete" as const : "replace" as const,
+          range: { fromUtf16: change.from, toUtf16: change.to },
+          insertedText: change.inserted,
+          deletedText: change.deleted,
+          voiceId: change.voice,
+        })),
+      })),
+    };
+  });
+  return {
+    version: 1,
+    traceId: chain[0]!.id,
+    headId: chain.at(-1)!.id,
+    steps,
+  };
 }
 
 function factKey(candidate: Extract<EvidenceCandidateV1, { kind: "process-fact" }>): string {
