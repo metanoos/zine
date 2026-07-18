@@ -9,13 +9,19 @@ import {
 import { contentFingerprint } from "./context-snapshot.js";
 import {
   createDesktopOperationEnvelopeV1,
+  hashDesktopOperationEnvelopeV1,
   type DesktopOperationEnvelopeV1,
 } from "./desktop-operation-envelope.js";
+import {
+  captureDesktopOperationJournalSessionV1,
+  clearDesktopOperationJournalSessionV1,
+} from "./desktop-operation-journal-session.js";
 import {
   reduceDesktopOperationV1,
   type DesktopOperationTransitionV1,
 } from "./desktop-operation-lifecycle.js";
 import {
+  createNativeDesktopOperationJournalBackendV1,
   DesktopOperationStoreV1,
   type DesktopOperationJournalBackendV1,
 } from "./desktop-operation-store.js";
@@ -125,32 +131,38 @@ async function envelope(suffix = "0001"): Promise<DesktopOperationEnvelopeV1> {
 class FakeJournalBackend implements DesktopOperationJournalBackendV1 {
   readonly records = new Map<string, { revision: number; envelope: string }>();
   createCalls = 0;
-  updateCalls = 0;
+  replaceCalls = 0;
   nextLoadOverride: unknown = undefined;
-  updateBarrier: Promise<void> | null = null;
+  nextListOverride: unknown = undefined;
+  replaceBarrier: Promise<void> | null = null;
+  nowMs = BASE_TIME;
 
   async create(serialized: string): Promise<unknown> {
     this.createCalls += 1;
     const key = identity(serialized);
     const existing = this.records.get(key);
-    if (existing) {
-      if (existing.envelope !== serialized) throw new Error("conflict");
-      return { revision: existing.revision };
-    }
+    if (existing) return "exists";
     this.records.set(key, { revision: 1, envelope: serialized });
-    return { revision: 1 };
+    return "created";
   }
 
-  async update(expectedRevision: number, serialized: string): Promise<unknown> {
-    this.updateCalls += 1;
-    if (this.updateBarrier) await this.updateBarrier;
-    const key = identity(serialized);
+  async replace(
+    operationId: string,
+    attemptId: string,
+    expectedEnvelopeSha256: string,
+    serialized: string,
+  ): Promise<unknown> {
+    this.replaceCalls += 1;
+    if (this.replaceBarrier) await this.replaceBarrier;
+    const key = `${operationId}\0${attemptId}`;
     const existing = this.records.get(key);
-    if (!existing || existing.revision !== expectedRevision) throw new Error("conflict");
-    if (existing.envelope === serialized) return { revision: existing.revision };
+    if (!existing) return "missing";
+    if (existing.envelope === serialized) return "replaced";
+    const current = JSON.parse(existing.envelope) as DesktopOperationEnvelopeV1;
+    if (hashDesktopOperationEnvelopeV1(current) !== expectedEnvelopeSha256) return "conflict";
     const revision = existing.revision + 1;
     this.records.set(key, { revision, envelope: serialized });
-    return { revision };
+    return "replaced";
   }
 
   async load(operationId: string, attemptId: string): Promise<unknown> {
@@ -162,32 +174,51 @@ class FakeJournalBackend implements DesktopOperationJournalBackendV1 {
     return this.records.get(`${operationId}\0${attemptId}`) ?? null;
   }
 
-  async list(): Promise<unknown> {
-    return [...this.records.values()];
+  async listPage(cursor: string | null, limit: number): Promise<unknown> {
+    if (this.nextListOverride !== undefined) {
+      const override = this.nextListOverride;
+      this.nextListOverride = undefined;
+      return override;
+    }
+    const records = [...this.records.values()];
+    const from = cursor === null ? 0 : Number.parseInt(cursor, 16);
+    const page = records.slice(from, from + limit);
+    const next = from + page.length;
+    return {
+      records: page,
+      nextCursor: next < records.length ? next.toString(16).padStart(64, "0") : null,
+    };
   }
 
   async delete(
     operationId: string,
     attemptId: string,
-    expectedRevision: number,
+    expectedEnvelopeSha256: string,
   ): Promise<unknown> {
     const key = `${operationId}\0${attemptId}`;
     const existing = this.records.get(key);
-    if (!existing) return false;
-    if (existing.revision !== expectedRevision) throw new Error("conflict");
-    return this.records.delete(key);
+    if (!existing) return "missing";
+    const current = JSON.parse(existing.envelope) as DesktopOperationEnvelopeV1;
+    if (hashDesktopOperationEnvelopeV1(current) !== expectedEnvelopeSha256) return "conflict";
+    this.records.delete(key);
+    return "deleted";
   }
 
-  async deleteExpired(nowMs: number): Promise<unknown> {
+  async deleteExpired(limit: number): Promise<unknown> {
     let deleted = 0;
     for (const [key, record] of this.records) {
       const parsed = JSON.parse(record.envelope) as DesktopOperationEnvelopeV1;
-      if (parsed.retention.deleteByMs <= nowMs) {
+      if (parsed.retention.deleteByMs <= this.nowMs) {
         this.records.delete(key);
         deleted += 1;
+        if (deleted === limit) break;
       }
     }
-    return deleted;
+    const hasMore = [...this.records.values()].some((record) => {
+      const parsed = JSON.parse(record.envelope) as DesktopOperationEnvelopeV1;
+      return parsed.retention.deleteByMs <= this.nowMs;
+    });
+    return { deleted, hasMore };
   }
 }
 
@@ -200,16 +231,16 @@ test("store validates before writes and strictly validates native reads", async 
   await assert.rejects(store.create(invalid), /unsupported envelope version or contract/);
   assert.equal(backend.createCalls, 0);
 
-  const created = await store.create(valid);
-  assert.equal(created.revision, 1);
-  assert.equal(Object.isFrozen(created.envelope), true);
-  const loaded = await store.load(valid.operationId, valid.attempt.attemptId);
-  assert.equal(loaded?.envelope.prepared.requestSha256, valid.prepared.requestSha256);
-  assert.equal(Object.isFrozen(loaded?.envelope), true);
+  assert.equal(await store.create(valid), "created");
+  assert.equal(await store.create(valid), "exists");
+  const key = { operationId: valid.operationId, attemptId: valid.attempt.attemptId };
+  const loaded = await store.load(key);
+  assert.equal(loaded?.prepared.requestSha256, valid.prepared.requestSha256);
+  assert.equal(Object.isFrozen(loaded), true);
 
   backend.nextLoadOverride = { revision: 1, envelope: "{" };
   await assert.rejects(
-    store.load(valid.operationId, valid.attempt.attemptId),
+    store.load(key),
     /serialized envelope is not valid JSON/,
   );
 });
@@ -224,62 +255,115 @@ test("store rejects mismatched and duplicate native recovery records", async () 
 
   backend.nextLoadOverride = backend.records.get(`${second.operationId}\0${second.attempt.attemptId}`);
   await assert.rejects(
-    store.load(first.operationId, first.attempt.attemptId),
+    store.load({ operationId: first.operationId, attemptId: first.attempt.attemptId }),
     /different operation attempt/,
   );
 
   const duplicate = backend.records.get(`${first.operationId}\0${first.attempt.attemptId}`)!;
-  const originalList = backend.list.bind(backend);
-  backend.list = async () => [duplicate, duplicate];
-  await assert.rejects(store.list(), /duplicate operation attempt/);
-  backend.list = originalList;
-  assert.equal((await store.list()).length, 2);
+  backend.nextListOverride = { records: [duplicate, duplicate], nextCursor: null };
+  await assert.rejects(store.listPage(), /duplicate operation attempt/);
+  const page = await store.listPage();
+  assert.equal(page.records.length, 2);
+  assert.equal("revision" in page.records[0]!, false, "native revisions must not leak");
 });
 
-test("persistReduction completes CAS storage before exposing effects", async () => {
+test("replace validates envelope-hash CAS and waits for native durability", async () => {
   const backend = new FakeJournalBackend();
   const store = new DesktopOperationStoreV1(backend);
-  let current = await store.create(await envelope("2001"));
-  let atMs = BASE_TIME + 1;
-
-  for (const type of ["approve", "record-dispatch-intent"] as const) {
-    const reduction = reduceDesktopOperationV1(current.envelope, transition(type, atMs));
-    current = (await store.persistReduction(current, reduction)).stored;
-    atMs += 1;
-  }
+  const current = await envelope("2001");
+  await store.create(current);
+  const reduction = reduceDesktopOperationV1(current, transition("approve", BASE_TIME + 1));
+  const key = { operationId: current.operationId, attemptId: current.attempt.attemptId };
 
   let release!: () => void;
-  backend.updateBarrier = new Promise<void>((resolve) => {
+  backend.replaceBarrier = new Promise<void>((resolve) => {
     release = resolve;
   });
-  const dispatch = reduceDesktopOperationV1(
-    current.envelope,
-    transition("record-provider-io-may-have-started", atMs),
-  );
   let resolved = false;
-  const pending = store.persistReduction(current, dispatch).then((result) => {
+  const pending = store.replace(
+    key,
+    hashDesktopOperationEnvelopeV1(current),
+    reduction.envelope,
+  ).then((result) => {
     resolved = true;
     return result;
   });
   await Promise.resolve();
-  assert.equal(backend.updateCalls, 3);
-  assert.equal(resolved, false, "effects must not be exposed while persistence is pending");
+  assert.equal(backend.replaceCalls, 1);
+  assert.equal(resolved, false, "replace must wait for native persistence");
   release();
-  const persisted = await pending;
-  assert.equal(persisted.effects[0]?.kind, "dispatch-provider-request");
-  assert.equal(persisted.stored.envelope.lifecycle.status, "provider-io");
+  assert.equal(await pending, "replaced");
+  assert.equal((await store.load(key))?.lifecycle.status, "approved");
 });
 
-test("delete and deleteExpired use explicit native authority", async () => {
+test("delete uses envelope CAS and reports deleted, conflict, and missing", async () => {
   const backend = new FakeJournalBackend();
   const store = new DesktopOperationStoreV1(backend);
-  const first = await store.create(await envelope("3001"));
-  const second = await store.create(await envelope("3002"));
+  const first = await envelope("3001");
+  const second = await envelope("3002");
+  await store.create(first);
+  await store.create(second);
 
-  assert.equal(await store.delete(first), true);
-  assert.equal(await store.load(first.envelope.operationId, first.envelope.attempt.attemptId), null);
-  assert.equal(await store.deleteExpired(second.envelope.retention.deleteByMs), 1);
-  assert.equal((await store.list()).length, 0);
+  const key = {
+    operationId: first.operationId,
+    attemptId: first.attempt.attemptId,
+  };
+  assert.equal(await store.delete(key, hashDesktopOperationEnvelopeV1(second)), "conflict");
+  assert.notEqual(await store.load(key), null);
+  assert.equal(await store.delete(key, hashDesktopOperationEnvelopeV1(first)), "deleted");
+  assert.equal(await store.delete(key, hashDesktopOperationEnvelopeV1(first)), "missing");
+  assert.equal(await store.load(key), null);
+});
+
+test("deleteExpired uses a bounded native-clock batch", async () => {
+  const backend = new FakeJournalBackend();
+  const store = new DesktopOperationStoreV1(backend);
+  await store.create(await envelope("3101"));
+  await store.create(await envelope("3102"));
+  await store.create(await envelope("3103"));
+  backend.nowMs = BASE_TIME + 60_000;
+
+  assert.deepEqual(await store.deleteExpired(2), { deleted: 2, hasMore: true });
+  assert.deepEqual(await store.deleteExpired(2), { deleted: 1, hasMore: false });
+  assert.equal((await store.listPage()).records.length, 0);
+});
+
+test("native backend stays bound to its construction-time activation session", async () => {
+  const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+  const nativeInvoke = async (command: string, args?: Record<string, unknown>) => {
+    calls.push({ command, args });
+    if (command === "desktop_operation_journal_list_page") {
+      return { records: [], nextCursor: null };
+    }
+    if (command === "desktop_operation_journal_delete_expired") {
+      return { deleted: 0, hasMore: false };
+    }
+    return null;
+  };
+  captureDesktopOperationJournalSessionV1({
+    journalSessionId: "a".repeat(64),
+    journalGeneration: 41,
+  });
+  const backend = createNativeDesktopOperationJournalBackendV1(nativeInvoke);
+  await backend.listPage(null, 2);
+  captureDesktopOperationJournalSessionV1({
+    journalSessionId: "b".repeat(64),
+    journalGeneration: 42,
+  });
+  await backend.deleteExpired(2);
+  const nextBackend = createNativeDesktopOperationJournalBackendV1(nativeInvoke);
+  await nextBackend.listPage(null, 2);
+  assert.deepEqual(calls.map((call) => call.args), [
+    { journalSessionId: "a".repeat(64), journalGeneration: 41, cursor: null, limit: 2 },
+    { journalSessionId: "a".repeat(64), journalGeneration: 41, limit: 2 },
+    { journalSessionId: "b".repeat(64), journalGeneration: 42, cursor: null, limit: 2 },
+  ]);
+
+  clearDesktopOperationJournalSessionV1();
+  assert.throws(
+    () => createNativeDesktopOperationJournalBackendV1(nativeInvoke),
+    /Unlock a vault/,
+  );
 });
 
 function identity(serialized: string): string {

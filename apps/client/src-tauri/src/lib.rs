@@ -80,6 +80,7 @@ struct ActiveVaultRuntime {
     generation: u64,
     closing: bool,
     journal_key: desktop_operation_journal::JournalKey,
+    journal_session_id: String,
 }
 
 impl std::fmt::Debug for ActiveVaultRuntime {
@@ -91,8 +92,16 @@ impl std::fmt::Debug for ActiveVaultRuntime {
             .field("generation", &self.generation)
             .field("closing", &self.closing)
             .field("journal_key", &"[REDACTED]")
+            .field("journal_session_id", &"[REDACTED]")
             .finish()
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultRuntimeActivation {
+    journal_session_id: String,
+    journal_generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -615,6 +624,43 @@ fn vault_runtime_directory(data_dir: &Path, vault: &SecretVaultRecord) -> Result
     vault_directory(data_dir, vault)
 }
 
+fn prepare_vault_runtime_directory(path: &Path) -> Result<PathBuf, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+                return Err("The vault runtime directory is unsafe".into());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("The vault runtime directory is unavailable".into()),
+    }
+    ensure_private_directory(path)
+        .map_err(|_| "The vault runtime directory is unavailable".to_string())?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| "The vault runtime directory is unavailable".to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err("The vault runtime directory is unsafe".into());
+    }
+    let canonical = fs::canonicalize(path)
+        .map_err(|_| "The vault runtime directory is unavailable".to_string())?;
+    revalidate_pinned_vault_runtime_directory(&canonical)?;
+    Ok(canonical)
+}
+
+pub(crate) fn revalidate_pinned_vault_runtime_directory(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| "The vault runtime directory is unavailable".to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err("The vault runtime directory is unsafe".into());
+    }
+    let canonical = fs::canonicalize(path)
+        .map_err(|_| "The vault runtime directory is unavailable".to_string())?;
+    if canonical != path {
+        return Err("The vault runtime directory binding is stale".into());
+    }
+    Ok(())
+}
+
 fn active_vault_runtime() -> Result<ActiveVaultRuntime, String> {
     let active = ACTIVE_VAULT_RUNTIME
         .lock()
@@ -695,7 +741,7 @@ fn activate_vault_runtime(
     app: tauri::AppHandle,
     id: String,
     workspace_key: Vec<u8>,
-) -> Result<(), String> {
+) -> Result<VaultRuntimeActivation, String> {
     let _gate = VAULT_RUNTIME_GATE
         .lock()
         .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
@@ -709,9 +755,7 @@ fn activate_vault_runtime(
     if !vault_snapshot_path(&data_dir, vault)?.is_file() {
         return Err("Finish creating the encrypted vault before activating it".into());
     }
-    let directory = vault_runtime_directory(&data_dir, vault)?;
-    ensure_private_directory(&directory)
-        .map_err(|error| format!("create vault runtime directory: {error}"))?;
+    let directory = prepare_vault_runtime_directory(&vault_runtime_directory(&data_dir, vault)?)?;
     let verified = verify_vault_runtime_key(&directory, &workspace_key);
     verified?;
     let journal_key = desktop_operation_journal::JournalKey::derive(&workspace_key, &id)?;
@@ -724,18 +768,30 @@ fn activate_vault_runtime(
             return Err("The active vault is locking; wait for shutdown to finish".into());
         }
         if existing.id == id {
-            return Ok(());
+            return Ok(VaultRuntimeActivation {
+                journal_session_id: existing.journal_session_id.clone(),
+                journal_generation: existing.generation,
+            });
         }
         return Err(format!("Lock vault {} before activating {id}", existing.id));
     }
+    let generation = next_vault_runtime_generation()?;
+    let mut session_nonce = [0u8; 32];
+    getrandom::fill(&mut session_nonce)
+        .map_err(|_| "The vault journal session cannot be created".to_string())?;
+    let journal_session_id = hex::encode(session_nonce);
     *active = Some(ActiveVaultRuntime {
         id,
         directory,
-        generation: next_vault_runtime_generation()?,
+        generation,
         closing: false,
         journal_key,
+        journal_session_id: journal_session_id.clone(),
     });
-    Ok(())
+    Ok(VaultRuntimeActivation {
+        journal_session_id,
+        journal_generation: generation,
+    })
 }
 
 fn stop_owned_relay() -> Result<(), String> {
@@ -2464,9 +2520,9 @@ pub fn run() {
             rendezvous_relay::rendezvous_sample_relay,
             rendezvous_relay::rendezvous_cancel_relay_sample,
             desktop_operation_journal::desktop_operation_journal_create,
-            desktop_operation_journal::desktop_operation_journal_update,
+            desktop_operation_journal::desktop_operation_journal_replace,
             desktop_operation_journal::desktop_operation_journal_load,
-            desktop_operation_journal::desktop_operation_journal_list,
+            desktop_operation_journal::desktop_operation_journal_list_page,
             desktop_operation_journal::desktop_operation_journal_delete,
             desktop_operation_journal::desktop_operation_journal_delete_expired,
         ])
@@ -2730,6 +2786,74 @@ mod tests {
         fs::remove_dir_all(dir).expect("remove protected directory test fixture");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn vault_runtime_rejects_symlink_and_non_directory_leaves() {
+        use std::os::unix::fs::symlink;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "zine-unsafe-vault-leaf-{}-{nonce}",
+            std::process::id()
+        ));
+        let sentinel = root.join("sentinel");
+        let symlink_leaf = root.join("symlink-vault");
+        let file_leaf = root.join("file-vault");
+        fs::create_dir_all(&sentinel).expect("create sentinel directory");
+        fs::write(sentinel.join("keep"), b"sentinel").expect("write sentinel");
+        symlink(&sentinel, &symlink_leaf).expect("create vault symlink");
+        fs::write(&file_leaf, b"not a directory").expect("write non-directory leaf");
+
+        assert!(prepare_vault_runtime_directory(&symlink_leaf).is_err());
+        assert!(prepare_vault_runtime_directory(&file_leaf).is_err());
+        assert_eq!(
+            fs::read(sentinel.join("keep")).expect("read sentinel"),
+            b"sentinel"
+        );
+        assert!(!sentinel.join("press.sqlite3").exists());
+        fs::remove_dir_all(root).expect("remove unsafe leaf fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_revalidates_a_pinned_vault_path_before_deleting() {
+        use std::os::unix::fs::symlink;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "zine-replaced-vault-leaf-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create replacement fixture");
+        let leaf = root.join("vault");
+        let pinned = prepare_vault_runtime_directory(&leaf).expect("pin vault directory");
+        let displaced = root.join("displaced-vault");
+        fs::rename(&leaf, &displaced).expect("displace pinned vault directory");
+        let sentinel = root.join("sentinel");
+        fs::create_dir_all(&sentinel).expect("create sentinel directory");
+        fs::write(sentinel.join("keep"), b"sentinel").expect("write sentinel");
+        fs::write(sentinel.join("press.sqlite3"), b"do not delete")
+            .expect("write sentinel database");
+        symlink(&sentinel, &leaf).expect("replace vault leaf with symlink");
+
+        assert!(desktop_operation_journal::remove_database_files(&pinned).is_err());
+        assert_eq!(
+            fs::read(sentinel.join("keep")).expect("read sentinel"),
+            b"sentinel"
+        );
+        assert_eq!(
+            fs::read(sentinel.join("press.sqlite3")).expect("read sentinel database"),
+            b"do not delete"
+        );
+        fs::remove_dir_all(root).expect("remove replacement fixture");
+    }
+
     #[test]
     fn native_runtime_requires_the_workspace_key_sealed_by_the_vault() {
         let nonce = SystemTime::now()
@@ -2760,6 +2884,7 @@ mod tests {
             closing: true,
             journal_key: desktop_operation_journal::JournalKey::derive(&[0x41; 32], "vault-a")
                 .expect("derive closing test journal key"),
+            journal_session_id: "a".repeat(64),
         };
         assert!(usable_vault_runtime(Some(closing))
             .expect_err("closing generation must reject native commands")
@@ -2772,6 +2897,7 @@ mod tests {
             closing: false,
             journal_key: desktop_operation_journal::JournalKey::derive(&[0x42; 32], "vault-a")
                 .expect("derive open test journal key"),
+            journal_session_id: "b".repeat(64),
         };
         assert_eq!(
             usable_vault_runtime(Some(open.clone()))
@@ -2866,6 +2992,7 @@ mod tests {
             closing: false,
             journal_key: desktop_operation_journal::JournalKey::derive(&[0xa1; 32], "vault-a")
                 .expect("derive vault A test journal key"),
+            journal_session_id: "a".repeat(64),
         };
         let vault_b = ActiveVaultRuntime {
             id: "vault-b".into(),
@@ -2874,6 +3001,7 @@ mod tests {
             closing: false,
             journal_key: desktop_operation_journal::JournalKey::derive(&[0xb2; 32], "vault-b")
                 .expect("derive vault B test journal key"),
+            journal_session_id: "b".repeat(64),
         };
         let path_a = peers_json_path(&vault_a);
         let path_b = peers_json_path(&vault_b);

@@ -5,18 +5,30 @@ import {
   serializeDesktopOperationEnvelopeV1,
   type DesktopOperationEnvelopeV1,
 } from "./desktop-operation-envelope.js";
-import type {
-  DesktopOperationEffectV1,
-  DesktopOperationReductionV1,
-} from "./desktop-operation-lifecycle.js";
+import { requireDesktopOperationJournalSessionV1 } from "./desktop-operation-journal-session.js";
 
 export interface NativeDesktopOperationJournalRecordV1 {
   revision: number;
   envelope: string;
 }
 
-export interface NativeDesktopOperationJournalWriteReceiptV1 {
-  revision: number;
+export interface DesktopOperationJournalKeyV1 {
+  operationId: string;
+  attemptId: string;
+}
+
+export type DesktopOperationJournalDeleteResultV1 = "deleted" | "conflict" | "missing";
+export type DesktopOperationJournalCreateResultV1 = "created" | "exists";
+export type DesktopOperationJournalReplaceResultV1 = "replaced" | "conflict" | "missing";
+
+export interface DesktopOperationPageV1 {
+  records: readonly DesktopOperationEnvelopeV1[];
+  nextCursor: string | null;
+}
+
+export interface DesktopOperationExpiryBatchV1 {
+  deleted: number;
+  hasMore: boolean;
 }
 
 /**
@@ -25,23 +37,20 @@ export interface NativeDesktopOperationJournalWriteReceiptV1 {
  */
 export interface DesktopOperationJournalBackendV1 {
   create(envelope: string): Promise<unknown>;
-  update(expectedRevision: number, envelope: string): Promise<unknown>;
+  replace(
+    operationId: string,
+    attemptId: string,
+    expectedEnvelopeSha256: string,
+    envelope: string,
+  ): Promise<unknown>;
   load(operationId: string, attemptId: string): Promise<unknown>;
-  list(): Promise<unknown>;
-  delete(operationId: string, attemptId: string, expectedRevision: number): Promise<unknown>;
-  deleteExpired(nowMs: number): Promise<unknown>;
-}
-
-export interface StoredDesktopOperationEnvelopeV1 {
-  revision: number;
-  envelope: DesktopOperationEnvelopeV1;
-}
-
-export interface PersistedDesktopOperationReductionV1 {
-  version: 1;
-  stored: StoredDesktopOperationEnvelopeV1;
-  /** Interpret only after `persistReduction` resolves successfully. */
-  effects: readonly DesktopOperationEffectV1[];
+  listPage(cursor: string | null, limit: number): Promise<unknown>;
+  delete(
+    operationId: string,
+    attemptId: string,
+    expectedEnvelopeSha256: string,
+  ): Promise<unknown>;
+  deleteExpired(limit: number): Promise<unknown>;
 }
 
 export class DesktopOperationStoreError extends Error {
@@ -54,122 +63,164 @@ export class DesktopOperationStoreError extends Error {
 export class DesktopOperationStoreV1 {
   constructor(private readonly backend: DesktopOperationJournalBackendV1) {}
 
-  async create(envelope: DesktopOperationEnvelopeV1): Promise<StoredDesktopOperationEnvelopeV1> {
+  async create(envelope: DesktopOperationEnvelopeV1): Promise<DesktopOperationJournalCreateResultV1> {
     const serialized = serializeDesktopOperationEnvelopeV1(envelope);
-    const receipt = requireWriteReceipt(await this.backend.create(serialized));
-    return stored(receipt.revision, parseDesktopOperationEnvelopeV1(serialized));
-  }
-
-  async update(
-    expectedRevision: number,
-    envelope: DesktopOperationEnvelopeV1,
-  ): Promise<StoredDesktopOperationEnvelopeV1> {
-    requireRevision(expectedRevision, "expected revision");
-    const serialized = serializeDesktopOperationEnvelopeV1(envelope);
-    const receipt = requireWriteReceipt(
-      await this.backend.update(expectedRevision, serialized),
-    );
-    if (
-      receipt.revision !== expectedRevision
-      && receipt.revision !== expectedRevision + 1
-    ) {
-      fail("native write revision is not the expected idempotent CAS result");
+    const result = await this.backend.create(serialized);
+    if (result !== "created" && result !== "exists") {
+      fail("native create result is invalid");
     }
-    return stored(receipt.revision, parseDesktopOperationEnvelopeV1(serialized));
+    return result;
   }
 
-  async load(
-    operationId: string,
-    attemptId: string,
-  ): Promise<StoredDesktopOperationEnvelopeV1 | null> {
-    const raw = await this.backend.load(operationId, attemptId);
-    if (raw === null) return null;
-    const record = parseNativeRecord(raw);
+  async replace(
+    key: DesktopOperationJournalKeyV1,
+    expectedEnvelopeSha256: string,
+    envelope: DesktopOperationEnvelopeV1,
+  ): Promise<DesktopOperationJournalReplaceResultV1> {
+    validateKey(key);
+    requireSha256(expectedEnvelopeSha256, "expected envelope hash");
+    const serialized = serializeDesktopOperationEnvelopeV1(envelope);
     if (
-      record.envelope.operationId !== operationId
-      || record.envelope.attempt.attemptId !== attemptId
+      envelope.operationId !== key.operationId
+      || envelope.attempt.attemptId !== key.attemptId
+    ) {
+      fail("replacement envelope belongs to a different operation attempt");
+    }
+    const result = await this.backend.replace(
+      key.operationId,
+      key.attemptId,
+      expectedEnvelopeSha256,
+      serialized,
+    );
+    if (result !== "replaced" && result !== "conflict" && result !== "missing") {
+      fail("native replace result is invalid");
+    }
+    return result;
+  }
+
+  async load(key: DesktopOperationJournalKeyV1): Promise<DesktopOperationEnvelopeV1 | null> {
+    validateKey(key);
+    const raw = await this.backend.load(key.operationId, key.attemptId);
+    if (raw === null) return null;
+    const envelope = parseNativeRecord(raw);
+    if (
+      envelope.operationId !== key.operationId
+      || envelope.attempt.attemptId !== key.attemptId
     ) {
       fail("native lookup returned a different operation attempt");
     }
-    return record;
+    return envelope;
   }
 
-  async list(): Promise<readonly StoredDesktopOperationEnvelopeV1[]> {
-    const raw = await this.backend.list();
-    if (!Array.isArray(raw)) fail("native list result is invalid");
-    const records = raw.map(parseNativeRecord);
+  async listPage(cursor: string | null = null, limit = 8): Promise<DesktopOperationPageV1> {
+    requireCursor(cursor);
+    requirePageLimit(limit);
+    const raw = await this.backend.listPage(cursor, limit);
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      fail("native list page is invalid");
+    }
+    const page = raw as Record<string, unknown>;
+    if (
+      Object.keys(page).some((key) => key !== "records" && key !== "nextCursor")
+      || !Array.isArray(page.records)
+    ) {
+      fail("native list page is invalid");
+    }
+    requireCursor(page.nextCursor);
+    if (page.records.length > limit) fail("native list page exceeds its requested limit");
+    const records = page.records.map(parseNativeRecord);
     const identities = new Set<string>();
-    for (const record of records) {
-      const identity = `${record.envelope.operationId}\0${record.envelope.attempt.attemptId}`;
+    for (const envelope of records) {
+      const identity = `${envelope.operationId}\0${envelope.attempt.attemptId}`;
       if (identities.has(identity)) fail("native list returned a duplicate operation attempt");
       identities.add(identity);
     }
-    return Object.freeze(records);
+    return Object.freeze({
+      records: Object.freeze(records),
+      nextCursor: page.nextCursor,
+    });
   }
 
   async delete(
-    record: StoredDesktopOperationEnvelopeV1,
-  ): Promise<boolean> {
-    const revision = requireRevision(record.revision, "record revision");
-    serializeDesktopOperationEnvelopeV1(record.envelope);
-    const deleted = await this.backend.delete(
-      record.envelope.operationId,
-      record.envelope.attempt.attemptId,
-      revision,
+    key: DesktopOperationJournalKeyV1,
+    expectedEnvelopeSha256: string,
+  ): Promise<DesktopOperationJournalDeleteResultV1> {
+    validateKey(key);
+    requireSha256(expectedEnvelopeSha256, "expected envelope hash");
+    const result = await this.backend.delete(
+      key.operationId,
+      key.attemptId,
+      expectedEnvelopeSha256,
     );
-    if (typeof deleted !== "boolean") fail("native delete result is invalid");
-    return deleted;
-  }
-
-  async deleteExpired(nowMs: number): Promise<number> {
-    requireNonNegativeSafeInteger(nowMs, "expiry time");
-    const deleted = await this.backend.deleteExpired(nowMs);
-    return requireNonNegativeSafeInteger(deleted, "native expired-delete count");
-  }
-
-  /**
-   * The reducer's next envelope is durably CAS-stored before effects become
-   * available to an interpreter. A rejected write returns no effects.
-   */
-  async persistReduction(
-    current: StoredDesktopOperationEnvelopeV1,
-    reduction: DesktopOperationReductionV1,
-  ): Promise<PersistedDesktopOperationReductionV1> {
-    if (reduction.mustPersistBeforeEffects !== true) {
-      fail("reduction does not require store-before-effects ordering");
+    if (result !== "deleted" && result !== "conflict" && result !== "missing") {
+      fail("native delete result is invalid");
     }
+    return result;
+  }
+
+  async deleteExpired(limit = 8): Promise<DesktopOperationExpiryBatchV1> {
+    requirePageLimit(limit);
+    const raw = await this.backend.deleteExpired(limit);
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      fail("native expired-delete result is invalid");
+    }
+    const result = raw as Record<string, unknown>;
     if (
-      current.envelope.operationId !== reduction.envelope.operationId
-      || current.envelope.attempt.attemptId !== reduction.envelope.attempt.attemptId
+      Object.keys(result).some((key) => key !== "deleted" && key !== "hasMore")
+      || typeof result.hasMore !== "boolean"
     ) {
-      fail("reduction belongs to a different operation attempt");
+      fail("native expired-delete result is invalid");
     }
-    const next = await this.update(current.revision, reduction.envelope);
     return Object.freeze({
-      version: 1,
-      stored: next,
-      effects: Object.freeze([...reduction.effects]),
+      deleted: requireNonNegativeSafeInteger(result.deleted, "native expired-delete count"),
+      hasMore: result.hasMore,
     });
   }
 }
 
-export function createNativeDesktopOperationJournalBackendV1(): DesktopOperationJournalBackendV1 {
+export type DesktopOperationJournalInvokeV1 = (
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown>;
+
+export function createNativeDesktopOperationJournalBackendV1(
+  nativeInvoke: DesktopOperationJournalInvokeV1 = (command, args) => invoke(command, args),
+): DesktopOperationJournalBackendV1 {
+  // A store is a capability for exactly one activation. Never consult the
+  // mutable renderer-global binding again: after lock/switch, native rejects
+  // this captured session instead of silently rebinding the old store.
+  const session = requireDesktopOperationJournalSessionV1();
+  const args = (commandArgs: Record<string, unknown> = {}): Record<string, unknown> => ({
+    ...session,
+    ...commandArgs,
+  });
   const backend: DesktopOperationJournalBackendV1 = {
-    create: (envelope) => invoke("desktop_operation_journal_create", { envelope }),
-    update: (expectedRevision, envelope) => invoke("desktop_operation_journal_update", {
-      expectedRevision,
-      envelope,
-    }),
-    load: (operationId, attemptId) => invoke("desktop_operation_journal_load", {
+    create: async (envelope) => nativeInvoke("desktop_operation_journal_create", args({ envelope })),
+    replace: async (operationId, attemptId, expectedEnvelopeSha256, envelope) => nativeInvoke(
+      "desktop_operation_journal_replace",
+      args({
+        operationId,
+        attemptId,
+        expectedEnvelopeSha256,
+        envelope,
+      }),
+    ),
+    load: async (operationId, attemptId) => nativeInvoke("desktop_operation_journal_load", args({
       operationId,
       attemptId,
-    }),
-    list: () => invoke("desktop_operation_journal_list"),
-    delete: (operationId, attemptId, expectedRevision) => invoke(
-      "desktop_operation_journal_delete",
-      { operationId, attemptId, expectedRevision },
+    })),
+    listPage: async (cursor, limit) => nativeInvoke(
+      "desktop_operation_journal_list_page",
+      args({ cursor, limit }),
     ),
-    deleteExpired: (nowMs) => invoke("desktop_operation_journal_delete_expired", { nowMs }),
+    delete: async (operationId, attemptId, expectedEnvelopeSha256) => nativeInvoke(
+      "desktop_operation_journal_delete",
+      args({ operationId, attemptId, expectedEnvelopeSha256 }),
+    ),
+    deleteExpired: async (limit) => nativeInvoke(
+      "desktop_operation_journal_delete_expired",
+      args({ limit }),
+    ),
   };
   return Object.freeze(backend);
 }
@@ -179,7 +230,7 @@ export function createNativeDesktopOperationStoreV1(): DesktopOperationStoreV1 {
   return new DesktopOperationStoreV1(createNativeDesktopOperationJournalBackendV1());
 }
 
-function parseNativeRecord(value: unknown): StoredDesktopOperationEnvelopeV1 {
+function parseNativeRecord(value: unknown): DesktopOperationEnvelopeV1 {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     fail("native record is invalid");
   }
@@ -187,36 +238,55 @@ function parseNativeRecord(value: unknown): StoredDesktopOperationEnvelopeV1 {
   if (Object.keys(record).some((key) => key !== "revision" && key !== "envelope")) {
     fail("native record has unsupported fields");
   }
-  const revision = requireRevision(record.revision, "native record revision");
+  requireRevision(record.revision, "native record revision");
   if (typeof record.envelope !== "string") fail("native record envelope is invalid");
-  return stored(revision, parseDesktopOperationEnvelopeV1(record.envelope));
-}
-
-function requireWriteReceipt(value: unknown): NativeDesktopOperationJournalWriteReceiptV1 {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    fail("native write receipt is invalid");
-  }
-  const receipt = value as Record<string, unknown>;
-  if (Object.keys(receipt).some((key) => key !== "revision")) {
-    fail("native write receipt has unsupported fields");
-  }
-  return Object.freeze({
-    revision: requireRevision(receipt.revision, "native write revision"),
-  });
-}
-
-function stored(
-  revision: number,
-  envelope: DesktopOperationEnvelopeV1,
-): StoredDesktopOperationEnvelopeV1 {
-  serializeDesktopOperationEnvelopeV1(envelope);
-  return Object.freeze({ revision, envelope });
+  return parseDesktopOperationEnvelopeV1(record.envelope);
 }
 
 function requireRevision(value: unknown, subject: string): number {
   const revision = requireNonNegativeSafeInteger(value, subject);
   if (revision < 1) fail(`${subject} must be positive`);
   return revision;
+}
+
+function requireCursor(value: unknown): asserts value is string | null {
+  if (value !== null && (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value))) {
+    fail("native list cursor is invalid");
+  }
+}
+
+function requirePageLimit(value: unknown): asserts value is number {
+  if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > 16) {
+    fail("page limit must be an integer between 1 and 16");
+  }
+}
+
+function requireIdentity(value: unknown, subject: string): asserts value is string {
+  if (
+    typeof value !== "string"
+    || value.length < 8
+    || value.length > 128
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value)
+  ) {
+    fail(`${subject} is invalid`);
+  }
+}
+
+function validateKey(key: DesktopOperationJournalKeyV1): void {
+  if (key === null || typeof key !== "object" || Array.isArray(key)) {
+    fail("operation key is invalid");
+  }
+  if (Object.keys(key).some((field) => field !== "operationId" && field !== "attemptId")) {
+    fail("operation key has unsupported fields");
+  }
+  requireIdentity(key.operationId, "operation id");
+  requireIdentity(key.attemptId, "attempt id");
+}
+
+function requireSha256(value: unknown, subject: string): asserts value is string {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) {
+    fail(`${subject} is invalid`);
+  }
 }
 
 function requireNonNegativeSafeInteger(value: unknown, subject: string): number {

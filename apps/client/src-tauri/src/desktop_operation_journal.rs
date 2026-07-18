@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -10,15 +10,21 @@ use rusqlite::config::DbConfig;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use serde_json::Value;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::{active_vault_runtime, ensure_private_directory, sync_directory, VAULT_RUNTIME_GATE};
+use crate::{
+    active_vault_runtime, revalidate_pinned_vault_runtime_directory, sync_directory,
+    VAULT_RUNTIME_GATE,
+};
 
 const JOURNAL_FILENAME: &str = "press.sqlite3";
-const JOURNAL_SCHEMA_VERSION: i64 = 1;
+const JOURNAL_SCHEMA_VERSION: i64 = 2;
 const MAX_ENVELOPE_BYTES: usize = 2 * 1_024 * 1_024;
+const MAX_CIPHERTEXT_BYTES: usize = MAX_ENVELOPE_BYTES + 16;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const DEFAULT_PAGE_LIMIT: usize = 8;
+const MAX_PAGE_LIMIT: usize = 16;
 const NONCE_BYTES: usize = 24;
 const KEY_BYTES: usize = 64;
 const ENCRYPTION_KEY_BYTES: usize = 32;
@@ -26,6 +32,7 @@ const KDF_SALT: &[u8] = b"zine.desktop-operation-journal.hkdf.v1";
 const KDF_INFO_PREFIX: &[u8] = b"zine.desktop-operation-journal.key.v1\0";
 const RECORD_ID_DOMAIN: &[u8] = b"zine.desktop-operation-journal.record-id.v1\0";
 const AEAD_DOMAIN: &[u8] = b"zine.desktop-operation-journal.envelope.v1\0";
+const ENVELOPE_HASH_DOMAIN: &[u8] = b"zine.desktop-operation.envelope.v1\0";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -72,10 +79,41 @@ pub(crate) struct NativeJournalRecord {
     envelope: String,
 }
 
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum NativeJournalCreateResult {
+    Created,
+    Exists,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum NativeJournalReplaceResult {
+    Replaced,
+    Conflict,
+    Missing,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum NativeJournalDeleteResult {
+    Deleted,
+    Conflict,
+    Missing,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NativeJournalPage {
+    records: Vec<NativeJournalRecord>,
+    next_cursor: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct NativeJournalWriteReceipt {
-    revision: u64,
+pub(crate) struct NativeExpiryBatch {
+    deleted: u64,
+    has_more: bool,
 }
 
 struct EnvelopeMetadata {
@@ -99,17 +137,13 @@ struct JournalStore {
 
 impl JournalStore {
     fn new(directory: &Path, key: JournalKey) -> Result<Self, String> {
-        ensure_private_directory(directory).map_err(|_| storage_unavailable())?;
-        // SQLite's NOFOLLOW flag rejects symlinks in every path component.
-        // Canonicalizing the already-authorized private vault directory keeps
-        // the final database entry protected without rejecting macOS `/var`.
-        let canonical_directory = fs::canonicalize(directory).map_err(|_| storage_unavailable())?;
-        let path = canonical_directory.join(JOURNAL_FILENAME);
+        revalidate_pinned_vault_runtime_directory(directory).map_err(|_| storage_unavailable())?;
+        let path = directory.join(JOURNAL_FILENAME);
         prepare_private_database_file(&path)?;
         let store = Self { path, key };
         let connection = store.open()?;
         drop(connection);
-        sync_directory(&canonical_directory).map_err(|_| storage_unavailable())?;
+        sync_directory(directory).map_err(|_| storage_unavailable())?;
         protect_database_files(&store.path)?;
         Ok(store)
     }
@@ -154,7 +188,7 @@ impl JournalStore {
         Ok(connection)
     }
 
-    fn create(&self, envelope: &str) -> Result<u64, String> {
+    fn create(&self, envelope: &str) -> Result<NativeJournalCreateResult, String> {
         let metadata = validate_envelope(envelope)?;
         let record_id = self.record_id(&metadata.operation_id, &metadata.attempt_id)?;
         let mut connection = self.open()?;
@@ -162,15 +196,10 @@ impl JournalStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| storage_unavailable())?;
         if let Some(existing) = load_stored(&transaction, &record_id)? {
-            let plaintext = self.decrypt(&existing)?;
-            if plaintext.as_slice() == envelope.as_bytes()
-                && existing.delete_by_ms == metadata.delete_by_ms
-            {
-                transaction.commit().map_err(|_| storage_unavailable())?;
-                protect_database_files(&self.path)?;
-                return Ok(existing.revision);
-            }
-            return Err(conflict());
+            self.decrypt_and_validate(&existing)?;
+            transaction.commit().map_err(|_| storage_unavailable())?;
+            protect_database_files(&self.path)?;
+            return Ok(NativeJournalCreateResult::Exists);
         }
         let revision = 1;
         let (nonce, ciphertext) = self.encrypt(
@@ -194,39 +223,48 @@ impl JournalStore {
             .map_err(|_| storage_unavailable())?;
         transaction.commit().map_err(|_| storage_unavailable())?;
         protect_database_files(&self.path)?;
-        Ok(revision)
+        Ok(NativeJournalCreateResult::Created)
     }
 
-    fn update(&self, expected_revision: u64, envelope: &str) -> Result<u64, String> {
-        if expected_revision == 0 || expected_revision > MAX_SAFE_INTEGER {
-            return Err(conflict());
-        }
+    fn replace(
+        &self,
+        operation_id: &str,
+        attempt_id: &str,
+        expected_envelope_sha256: &str,
+        envelope: &str,
+    ) -> Result<NativeJournalReplaceResult, String> {
+        validate_portable_id(operation_id)?;
+        validate_portable_id(attempt_id)?;
+        validate_sha256(expected_envelope_sha256)?;
         let metadata = validate_envelope(envelope)?;
-        let record_id = self.record_id(&metadata.operation_id, &metadata.attempt_id)?;
+        if metadata.operation_id != operation_id || metadata.attempt_id != attempt_id {
+            return Err("The replacement envelope belongs to a different operation attempt".into());
+        }
+        let record_id = self.record_id(operation_id, attempt_id)?;
         let mut connection = self.open()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| storage_unavailable())?;
-        let existing = load_stored(&transaction, &record_id)?.ok_or_else(conflict)?;
+        let Some(existing) = load_stored(&transaction, &record_id)? else {
+            transaction.commit().map_err(|_| storage_unavailable())?;
+            return Ok(NativeJournalReplaceResult::Missing);
+        };
+        let plaintext = self.decrypt_and_validate(&existing)?;
         if existing.delete_by_ms != metadata.delete_by_ms {
             // Retention is fixed at attempt creation. A lifecycle update may
             // never postpone or accelerate whole-envelope deletion.
-            return Err(conflict());
+            return Ok(NativeJournalReplaceResult::Conflict);
         }
-        let plaintext = self.decrypt(&existing)?;
-        let exact_desired = plaintext.as_slice() == envelope.as_bytes();
-        if exact_desired
-            && (existing.revision == expected_revision
-                || existing.revision == expected_revision.saturating_add(1))
-        {
+        if plaintext == envelope {
             transaction.commit().map_err(|_| storage_unavailable())?;
             protect_database_files(&self.path)?;
-            return Ok(existing.revision);
+            return Ok(NativeJournalReplaceResult::Replaced);
         }
-        if existing.revision != expected_revision {
-            return Err(conflict());
+        if envelope_sha256(&plaintext) != expected_envelope_sha256 {
+            transaction.commit().map_err(|_| storage_unavailable())?;
+            return Ok(NativeJournalReplaceResult::Conflict);
         }
-        let next_revision = expected_revision.checked_add(1).ok_or_else(conflict)?;
+        let next_revision = existing.revision.checked_add(1).ok_or_else(conflict)?;
         if next_revision > MAX_SAFE_INTEGER {
             return Err(conflict());
         }
@@ -246,7 +284,7 @@ impl JournalStore {
                     &nonce,
                     &ciphertext,
                     &record_id,
-                    expected_revision as i64,
+                    existing.revision as i64,
                 ],
             )
             .map_err(|_| storage_unavailable())?;
@@ -255,7 +293,7 @@ impl JournalStore {
         }
         transaction.commit().map_err(|_| storage_unavailable())?;
         protect_database_files(&self.path)?;
-        Ok(next_revision)
+        Ok(NativeJournalReplaceResult::Replaced)
     }
 
     fn load(
@@ -277,40 +315,65 @@ impl JournalStore {
         }))
     }
 
-    fn list(&self) -> Result<Vec<NativeJournalRecord>, String> {
+    fn list_page(
+        &self,
+        cursor: Option<&str>,
+        requested_limit: Option<u32>,
+    ) -> Result<NativeJournalPage, String> {
+        let limit = page_limit(requested_limit)?;
+        let cursor = decode_cursor(cursor)?;
         let connection = self.open()?;
-        let mut statement = connection
-            .prepare(
-                "SELECT record_id, revision, delete_by_ms, nonce, ciphertext \
-                 FROM desktop_operation_envelopes ORDER BY delete_by_ms, record_id",
-            )
-            .map_err(|_| storage_unavailable())?;
-        let rows = statement
-            .query_map([], stored_from_row)
-            .map_err(|_| storage_unavailable())?;
-        let mut records = Vec::new();
-        for row in rows {
-            let stored = row.map_err(|_| storage_unavailable())?;
+        let fetch_limit = limit + 1;
+        let mut stored_records = if let Some(cursor) = cursor.as_deref() {
+            collect_stored(
+                &connection,
+                "SELECT record_id, revision, delete_by_ms, nonce, length(ciphertext), ciphertext \
+                 FROM desktop_operation_envelopes WHERE record_id > ?1 \
+                 ORDER BY record_id LIMIT ?2",
+                params![cursor, fetch_limit as i64],
+            )?
+        } else {
+            collect_stored(
+                &connection,
+                "SELECT record_id, revision, delete_by_ms, nonce, length(ciphertext), ciphertext \
+                 FROM desktop_operation_envelopes ORDER BY record_id LIMIT ?1",
+                params![fetch_limit as i64],
+            )?
+        };
+        let has_more = stored_records.len() > limit;
+        if has_more {
+            stored_records.truncate(limit);
+        }
+        let next_cursor = if has_more {
+            stored_records
+                .last()
+                .map(|record| hex::encode(&record.record_id))
+        } else {
+            None
+        };
+        let mut records = Vec::with_capacity(stored_records.len());
+        for stored in stored_records {
             let envelope = self.decrypt_and_validate(&stored)?;
             records.push(NativeJournalRecord {
                 revision: stored.revision,
                 envelope,
             });
         }
-        Ok(records)
+        Ok(NativeJournalPage {
+            records,
+            next_cursor,
+        })
     }
 
     fn delete(
         &self,
         operation_id: &str,
         attempt_id: &str,
-        expected_revision: u64,
-    ) -> Result<bool, String> {
+        expected_envelope_sha256: &str,
+    ) -> Result<NativeJournalDeleteResult, String> {
         validate_portable_id(operation_id)?;
         validate_portable_id(attempt_id)?;
-        if expected_revision == 0 || expected_revision > MAX_SAFE_INTEGER {
-            return Err(conflict());
-        }
+        validate_sha256(expected_envelope_sha256)?;
         let record_id = self.record_id(operation_id, attempt_id)?;
         let mut connection = self.open()?;
         let transaction = connection
@@ -318,16 +381,17 @@ impl JournalStore {
             .map_err(|_| storage_unavailable())?;
         let Some(current) = load_stored(&transaction, &record_id)? else {
             transaction.commit().map_err(|_| storage_unavailable())?;
-            return Ok(false);
+            return Ok(NativeJournalDeleteResult::Missing);
         };
-        if current.revision != expected_revision {
-            return Err(conflict());
+        let current_envelope = self.decrypt_and_validate(&current)?;
+        if envelope_sha256(&current_envelope) != expected_envelope_sha256 {
+            transaction.commit().map_err(|_| storage_unavailable())?;
+            return Ok(NativeJournalDeleteResult::Conflict);
         }
-        self.decrypt_and_validate(&current)?;
         let changed = transaction
             .execute(
                 "DELETE FROM desktop_operation_envelopes WHERE record_id = ?1 AND revision = ?2",
-                params![&record_id, expected_revision as i64],
+                params![&record_id, current.revision as i64],
             )
             .map_err(|_| storage_unavailable())?;
         if changed != 1 {
@@ -335,34 +399,29 @@ impl JournalStore {
         }
         transaction.commit().map_err(|_| storage_unavailable())?;
         protect_database_files(&self.path)?;
-        Ok(true)
+        Ok(NativeJournalDeleteResult::Deleted)
     }
 
-    fn delete_expired(&self, now_ms: u64) -> Result<u64, String> {
+    fn delete_expired_at(
+        &self,
+        now_ms: u64,
+        requested_limit: Option<u32>,
+    ) -> Result<NativeExpiryBatch, String> {
         if now_ms > MAX_SAFE_INTEGER {
             return Err("The operation journal expiry is invalid".into());
         }
+        let limit = page_limit(requested_limit)?;
         let mut connection = self.open()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| storage_unavailable())?;
-        let due = {
-            let mut statement = transaction
-                .prepare(
-                    "SELECT record_id, revision, delete_by_ms, nonce, ciphertext \
-                     FROM desktop_operation_envelopes WHERE delete_by_ms <= ?1 \
-                     ORDER BY delete_by_ms, record_id",
-                )
-                .map_err(|_| storage_unavailable())?;
-            let rows = statement
-                .query_map(params![now_ms as i64], stored_from_row)
-                .map_err(|_| storage_unavailable())?;
-            let mut due = Vec::new();
-            for row in rows {
-                due.push(row.map_err(|_| storage_unavailable())?);
-            }
-            due
-        };
+        let due = collect_stored(
+            &transaction,
+            "SELECT record_id, revision, delete_by_ms, nonce, length(ciphertext), ciphertext \
+             FROM desktop_operation_envelopes WHERE delete_by_ms <= ?1 \
+             ORDER BY delete_by_ms, record_id LIMIT ?2",
+            params![now_ms as i64, limit as i64],
+        )?;
         for stored in &due {
             // The deadline is plaintext only so SQLite can select candidates.
             // Authenticate its AEAD binding before allowing it to delete data.
@@ -377,9 +436,19 @@ impl JournalStore {
                 return Err(conflict());
             }
         }
+        let has_more: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM desktop_operation_envelopes WHERE delete_by_ms <= ?1)",
+                params![now_ms as i64],
+                |row| row.get(0),
+            )
+            .map_err(|_| storage_unavailable())?;
         transaction.commit().map_err(|_| storage_unavailable())?;
         protect_database_files(&self.path)?;
-        u64::try_from(due.len()).map_err(|_| storage_unavailable())
+        Ok(NativeExpiryBatch {
+            deleted: u64::try_from(due.len()).map_err(|_| storage_unavailable())?,
+            has_more,
+        })
     }
 
     fn record_id(&self, operation_id: &str, attempt_id: &str) -> Result<Vec<u8>, String> {
@@ -451,55 +520,85 @@ impl JournalStore {
 
 #[tauri::command]
 pub(crate) fn desktop_operation_journal_create(
+    journal_session_id: String,
+    journal_generation: u64,
     envelope: String,
-) -> Result<NativeJournalWriteReceipt, String> {
-    with_active_store(|store| {
-        store
-            .create(&envelope)
-            .map(|revision| NativeJournalWriteReceipt { revision })
+) -> Result<NativeJournalCreateResult, String> {
+    with_active_store(&journal_session_id, journal_generation, |store| {
+        store.create(&envelope)
     })
 }
 
 #[tauri::command]
-pub(crate) fn desktop_operation_journal_update(
-    expected_revision: u64,
+pub(crate) fn desktop_operation_journal_replace(
+    journal_session_id: String,
+    journal_generation: u64,
+    operation_id: String,
+    attempt_id: String,
+    expected_envelope_sha256: String,
     envelope: String,
-) -> Result<NativeJournalWriteReceipt, String> {
-    with_active_store(|store| {
-        store
-            .update(expected_revision, &envelope)
-            .map(|revision| NativeJournalWriteReceipt { revision })
+) -> Result<NativeJournalReplaceResult, String> {
+    with_active_store(&journal_session_id, journal_generation, |store| {
+        store.replace(
+            &operation_id,
+            &attempt_id,
+            &expected_envelope_sha256,
+            &envelope,
+        )
     })
 }
 
 #[tauri::command]
 pub(crate) fn desktop_operation_journal_load(
+    journal_session_id: String,
+    journal_generation: u64,
     operation_id: String,
     attempt_id: String,
 ) -> Result<Option<NativeJournalRecord>, String> {
-    with_active_store(|store| store.load(&operation_id, &attempt_id))
+    with_active_store(&journal_session_id, journal_generation, |store| {
+        store.load(&operation_id, &attempt_id)
+    })
 }
 
 #[tauri::command]
-pub(crate) fn desktop_operation_journal_list() -> Result<Vec<NativeJournalRecord>, String> {
-    with_active_store(|store| store.list())
+pub(crate) fn desktop_operation_journal_list_page(
+    journal_session_id: String,
+    journal_generation: u64,
+    cursor: Option<String>,
+    limit: Option<u32>,
+) -> Result<NativeJournalPage, String> {
+    with_active_store(&journal_session_id, journal_generation, |store| {
+        store.list_page(cursor.as_deref(), limit)
+    })
 }
 
 #[tauri::command]
 pub(crate) fn desktop_operation_journal_delete(
+    journal_session_id: String,
+    journal_generation: u64,
     operation_id: String,
     attempt_id: String,
-    expected_revision: u64,
-) -> Result<bool, String> {
-    with_active_store(|store| store.delete(&operation_id, &attempt_id, expected_revision))
+    expected_envelope_sha256: String,
+) -> Result<NativeJournalDeleteResult, String> {
+    with_active_store(&journal_session_id, journal_generation, |store| {
+        store.delete(&operation_id, &attempt_id, &expected_envelope_sha256)
+    })
 }
 
 #[tauri::command]
-pub(crate) fn desktop_operation_journal_delete_expired(now_ms: u64) -> Result<u64, String> {
-    with_active_store(|store| store.delete_expired(now_ms))
+pub(crate) fn desktop_operation_journal_delete_expired(
+    journal_session_id: String,
+    journal_generation: u64,
+    limit: Option<u32>,
+) -> Result<NativeExpiryBatch, String> {
+    let now_ms = native_unix_time_ms()?;
+    with_active_store(&journal_session_id, journal_generation, |store| {
+        store.delete_expired_at(now_ms, limit)
+    })
 }
 
 pub(crate) fn remove_database_files(directory: &Path) -> Result<(), String> {
+    revalidate_pinned_vault_runtime_directory(directory).map_err(|_| storage_unavailable())?;
     let database = directory.join(JOURNAL_FILENAME);
     // Remove transient sidecars before the main file so a crash cannot leave
     // an old WAL beside a newly-created database on the next activation.
@@ -514,36 +613,140 @@ pub(crate) fn remove_database_files(directory: &Path) -> Result<(), String> {
 }
 
 fn with_active_store<T>(
+    journal_session_id: &str,
+    journal_generation: u64,
     operation: impl FnOnce(&JournalStore) -> Result<T, String>,
 ) -> Result<T, String> {
     let _gate = VAULT_RUNTIME_GATE
         .lock()
         .map_err(|_| "The operation journal is unavailable".to_string())?;
     let runtime = active_vault_runtime()?;
+    require_active_journal_session(&runtime, journal_session_id, journal_generation)?;
     let store = JournalStore::new(&runtime.directory, runtime.journal_key)?;
     operation(&store)
+}
+
+fn require_active_journal_session(
+    runtime: &crate::ActiveVaultRuntime,
+    journal_session_id: &str,
+    journal_generation: u64,
+) -> Result<(), String> {
+    let valid_generation = journal_generation > 0
+        && journal_generation <= MAX_SAFE_INTEGER
+        && journal_generation == runtime.generation;
+    let valid_session = valid_journal_session_id(journal_session_id)
+        && constant_time_equal(
+            runtime.journal_session_id.as_bytes(),
+            journal_session_id.as_bytes(),
+        );
+    if !valid_generation || !valid_session {
+        return Err("The operation journal command belongs to a stale vault session".into());
+    }
+    Ok(())
+}
+
+fn valid_journal_session_id(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn constant_time_equal(expected: &[u8], candidate: &[u8]) -> bool {
+    if expected.len() != candidate.len() {
+        return false;
+    }
+    expected
+        .iter()
+        .zip(candidate)
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
+fn native_unix_time_ms() -> Result<u64, String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "The operation journal native clock is unavailable".to_string())?;
+    let now_ms = u64::try_from(elapsed.as_millis())
+        .map_err(|_| "The operation journal native clock is unavailable".to_string())?;
+    if now_ms > MAX_SAFE_INTEGER {
+        return Err("The operation journal native clock is unavailable".into());
+    }
+    Ok(now_ms)
+}
+
+fn page_limit(requested: Option<u32>) -> Result<usize, String> {
+    let limit = requested
+        .map(|value| value as usize)
+        .unwrap_or(DEFAULT_PAGE_LIMIT);
+    if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
+        return Err(format!(
+            "The operation journal page limit must be between 1 and {MAX_PAGE_LIMIT}"
+        ));
+    }
+    Ok(limit)
+}
+
+fn decode_cursor(cursor: Option<&str>) -> Result<Option<Vec<u8>>, String> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    if !valid_journal_session_id(cursor) {
+        return Err("The operation journal cursor is invalid".into());
+    }
+    let decoded = hex::decode(cursor).map_err(|_| "The operation journal cursor is invalid")?;
+    if decoded.len() != 32 {
+        return Err("The operation journal cursor is invalid".into());
+    }
+    Ok(Some(decoded))
 }
 
 fn migrate(connection: &Connection) -> Result<(), String> {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|_| storage_unavailable())?;
+    let table = format!(
+        "CREATE TABLE desktop_operation_envelopes (
+           record_id BLOB PRIMARY KEY NOT NULL
+             CHECK(typeof(record_id) = 'blob' AND length(record_id) = 32),
+           revision INTEGER NOT NULL CHECK(revision >= 1),
+           delete_by_ms INTEGER NOT NULL CHECK(delete_by_ms >= 0),
+           nonce BLOB NOT NULL
+             CHECK(typeof(nonce) = 'blob' AND length(nonce) = {NONCE_BYTES}),
+           ciphertext BLOB NOT NULL
+             CHECK(typeof(ciphertext) = 'blob'
+               AND length(ciphertext) >= 16
+               AND length(ciphertext) <= {MAX_CIPHERTEXT_BYTES})
+         ) WITHOUT ROWID;"
+    );
     match version {
         0 => connection
-            .execute_batch(
+            .execute_batch(&format!(
                 "BEGIN IMMEDIATE;
-                 CREATE TABLE desktop_operation_envelopes (
-                   record_id BLOB PRIMARY KEY NOT NULL CHECK(length(record_id) = 32),
-                   revision INTEGER NOT NULL CHECK(revision >= 1),
-                   delete_by_ms INTEGER NOT NULL CHECK(delete_by_ms >= 0),
-                   nonce BLOB NOT NULL CHECK(length(nonce) = 24),
-                   ciphertext BLOB NOT NULL
-                 ) WITHOUT ROWID;
+                 {table}
                  CREATE INDEX desktop_operation_envelopes_expiry
                    ON desktop_operation_envelopes(delete_by_ms);
-                 PRAGMA user_version = 1;
-                 COMMIT;",
-            )
+                 PRAGMA user_version = {JOURNAL_SCHEMA_VERSION};
+                 COMMIT;"
+            ))
+            .map_err(|_| storage_unavailable()),
+        1 => connection
+            .execute_batch(&format!(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE desktop_operation_envelopes
+                   RENAME TO desktop_operation_envelopes_v1;
+                 DROP INDEX desktop_operation_envelopes_expiry;
+                 {table}
+                 INSERT INTO desktop_operation_envelopes
+                   (record_id, revision, delete_by_ms, nonce, ciphertext)
+                   SELECT record_id, revision, delete_by_ms, nonce, ciphertext
+                   FROM desktop_operation_envelopes_v1;
+                 DROP TABLE desktop_operation_envelopes_v1;
+                 CREATE INDEX desktop_operation_envelopes_expiry
+                   ON desktop_operation_envelopes(delete_by_ms);
+                 PRAGMA user_version = {JOURNAL_SCHEMA_VERSION};
+                 COMMIT;"
+            ))
             .map_err(|_| storage_unavailable()),
         JOURNAL_SCHEMA_VERSION => Ok(()),
         _ => Err("The operation journal schema is unsupported".into()),
@@ -553,7 +756,7 @@ fn migrate(connection: &Connection) -> Result<(), String> {
 fn load_stored(connection: &Connection, record_id: &[u8]) -> Result<Option<StoredRecord>, String> {
     connection
         .query_row(
-            "SELECT record_id, revision, delete_by_ms, nonce, ciphertext \
+            "SELECT record_id, revision, delete_by_ms, nonce, length(ciphertext), ciphertext \
              FROM desktop_operation_envelopes WHERE record_id = ?1",
             params![record_id],
             stored_from_row,
@@ -562,13 +765,34 @@ fn load_stored(connection: &Connection, record_id: &[u8]) -> Result<Option<Store
         .map_err(|_| storage_unavailable())
 }
 
+fn collect_stored<P: rusqlite::Params>(
+    connection: &Connection,
+    sql: &str,
+    parameters: P,
+) -> Result<Vec<StoredRecord>, String> {
+    let mut statement = connection.prepare(sql).map_err(|_| storage_unavailable())?;
+    let rows = statement
+        .query_map(parameters, stored_from_row)
+        .map_err(|_| storage_unavailable())?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row.map_err(|_| storage_unavailable())?);
+    }
+    Ok(records)
+}
+
 fn stored_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRecord> {
     let revision: i64 = row.get(1)?;
     let delete_by_ms: i64 = row.get(2)?;
+    // Inspect SQLite's scalar length before asking rusqlite to materialize the
+    // attacker-controlled BLOB into a Vec.
+    let ciphertext_len: i64 = row.get(4)?;
     if revision <= 0
         || revision as u64 > MAX_SAFE_INTEGER
         || delete_by_ms < 0
         || delete_by_ms as u64 > MAX_SAFE_INTEGER
+        || ciphertext_len < 16
+        || ciphertext_len as usize > MAX_CIPHERTEXT_BYTES
     {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -577,7 +801,7 @@ fn stored_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRecord> {
         revision: revision as u64,
         delete_by_ms: delete_by_ms as u64,
         nonce: row.get(3)?,
-        ciphertext: row.get(4)?,
+        ciphertext: row.get(5)?,
     })
 }
 
@@ -684,6 +908,21 @@ fn validate_portable_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_sha256(value: &str) -> Result<(), String> {
+    if valid_journal_session_id(value) {
+        Ok(())
+    } else {
+        Err("The operation journal envelope hash is invalid".into())
+    }
+}
+
+fn envelope_sha256(serialized: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(ENVELOPE_HASH_DOMAIN);
+    hasher.update(serialized.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 fn associated_data(record_id: &[u8], revision: u64, delete_by_ms: u64) -> Vec<u8> {
     let mut data = Vec::with_capacity(AEAD_DOMAIN.len() + record_id.len() + 16);
     data.extend_from_slice(AEAD_DOMAIN);
@@ -765,10 +1004,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        std::env::temp_dir().join(format!(
+        let path = std::env::temp_dir().join(format!(
             "zine-operation-journal-{label}-{}-{nonce}",
             std::process::id()
-        ))
+        ));
+        crate::prepare_vault_runtime_directory(&path).expect("prepare pinned journal directory")
     }
 
     fn key(seed: u8, vault_id: &str) -> JournalKey {
@@ -804,13 +1044,24 @@ mod tests {
         let directory = temp_directory("cas");
         let store = JournalStore::new(&directory, key(0x11, "vault-cas")).expect("open store");
         let initial = envelope("operation-cas", "attempt-cas", 20_000, "prompt one", "");
-        assert_eq!(store.create(&initial).expect("create"), 1);
-        assert_eq!(store.create(&initial).expect("idempotent create"), 1);
+        assert_eq!(
+            store.create(&initial).expect("create"),
+            NativeJournalCreateResult::Created
+        );
+        assert_eq!(
+            store.create(&initial).expect("idempotent create"),
+            NativeJournalCreateResult::Exists
+        );
         assert_eq!(
             store
-                .update(1, &initial)
+                .replace(
+                    "operation-cas",
+                    "attempt-cas",
+                    &envelope_sha256(&initial),
+                    &initial,
+                )
                 .expect("idempotent current update"),
-            1
+            NativeJournalReplaceResult::Replaced
         );
 
         let changed = envelope(
@@ -820,12 +1071,27 @@ mod tests {
             "prompt one",
             "response two",
         );
-        assert_eq!(store.update(1, &changed).expect("CAS update"), 2);
         assert_eq!(
             store
-                .update(1, &changed)
+                .replace(
+                    "operation-cas",
+                    "attempt-cas",
+                    &envelope_sha256(&initial),
+                    &changed,
+                )
+                .expect("CAS update"),
+            NativeJournalReplaceResult::Replaced
+        );
+        assert_eq!(
+            store
+                .replace(
+                    "operation-cas",
+                    "attempt-cas",
+                    &envelope_sha256(&initial),
+                    &changed,
+                )
                 .expect("idempotent retried update"),
-            2
+            NativeJournalReplaceResult::Replaced
         );
         let stale = envelope(
             "operation-cas",
@@ -834,7 +1100,17 @@ mod tests {
             "different",
             "response two",
         );
-        assert!(store.update(1, &stale).unwrap_err().contains("changed"));
+        assert_eq!(
+            store
+                .replace(
+                    "operation-cas",
+                    "attempt-cas",
+                    &envelope_sha256(&initial),
+                    &stale,
+                )
+                .expect("stale replace"),
+            NativeJournalReplaceResult::Conflict
+        );
         let retimed = envelope(
             "operation-cas",
             "attempt-cas",
@@ -842,7 +1118,17 @@ mod tests {
             "prompt one",
             "response two",
         );
-        assert!(store.update(2, &retimed).unwrap_err().contains("changed"));
+        assert_eq!(
+            store
+                .replace(
+                    "operation-cas",
+                    "attempt-cas",
+                    &envelope_sha256(&changed),
+                    &retimed,
+                )
+                .expect("retimed replace"),
+            NativeJournalReplaceResult::Conflict
+        );
 
         let reopened = JournalStore::new(&directory, key(0x11, "vault-cas")).expect("reopen store");
         let loaded = reopened
@@ -851,6 +1137,64 @@ mod tests {
             .expect("record exists");
         assert_eq!(loaded.revision, 2);
         assert_eq!(loaded.envelope, changed);
+        fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[test]
+    fn delete_uses_exact_envelope_hash_cas() {
+        let directory = temp_directory("delete-cas");
+        let store =
+            JournalStore::new(&directory, key(0x12, "vault-delete-cas")).expect("open store");
+        let current = envelope(
+            "operation-delete",
+            "attempt-delete",
+            20_000,
+            "current",
+            "response",
+        );
+        let stale = envelope(
+            "operation-delete",
+            "attempt-delete",
+            20_000,
+            "stale",
+            "response",
+        );
+        store.create(&current).expect("create delete candidate");
+
+        assert_eq!(
+            store
+                .delete(
+                    "operation-delete",
+                    "attempt-delete",
+                    &envelope_sha256(&stale),
+                )
+                .expect("stale delete"),
+            NativeJournalDeleteResult::Conflict
+        );
+        assert!(store
+            .load("operation-delete", "attempt-delete")
+            .expect("load after conflict")
+            .is_some());
+        assert_eq!(
+            store
+                .delete(
+                    "operation-delete",
+                    "attempt-delete",
+                    &envelope_sha256(&current),
+                )
+                .expect("current delete"),
+            NativeJournalDeleteResult::Deleted
+        );
+        assert_eq!(
+            store
+                .delete(
+                    "operation-delete",
+                    "attempt-delete",
+                    &envelope_sha256(&current),
+                )
+                .expect("missing delete"),
+            NativeJournalDeleteResult::Missing
+        );
         fs::remove_dir_all(directory).expect("remove fixture");
     }
 
@@ -872,7 +1216,7 @@ mod tests {
             .load("operation-shared", "attempt-shared")
             .expect("opaque lookup")
             .is_none());
-        assert!(expect_error(store_b.list()).contains("authenticated"));
+        assert!(expect_error(store_b.list_page(None, None)).contains("authenticated"));
         fs::remove_dir_all(directory).expect("remove fixture");
     }
 
@@ -927,7 +1271,7 @@ mod tests {
             .expect("tamper expiry");
         drop(connection);
         assert!(store
-            .delete_expired(1)
+            .delete_expired_at(1, None)
             .unwrap_err()
             .contains("authenticated"));
         let count: i64 = Connection::open(directory.join(JOURNAL_FILENAME))
@@ -964,8 +1308,12 @@ mod tests {
                 "",
             ))
             .expect("create late");
-        assert_eq!(store.delete_expired(999).expect("before expiry"), 0);
-        assert_eq!(store.delete_expired(1_000).expect("at expiry"), 1);
+        let before = store.delete_expired_at(999, None).expect("before expiry");
+        assert_eq!(before.deleted, 0);
+        assert!(!before.has_more);
+        let at_expiry = store.delete_expired_at(1_000, None).expect("at expiry");
+        assert_eq!(at_expiry.deleted, 1);
+        assert!(!at_expiry.has_more);
         assert!(store
             .load("operation-early", "attempt-early")
             .expect("load early")
@@ -988,6 +1336,147 @@ mod tests {
     }
 
     #[test]
+    fn oversized_raw_ciphertext_is_rejected_before_record_materialization() {
+        let directory = temp_directory("raw-blob-limit");
+        let store = JournalStore::new(&directory, key(0x52, "vault-raw-blob")).expect("open store");
+        store
+            .create(&envelope(
+                "operation-raw-blob",
+                "attempt-raw-blob",
+                20_000,
+                "prompt",
+                "response",
+            ))
+            .expect("create record");
+        let connection =
+            Connection::open(directory.join(JOURNAL_FILENAME)).expect("open raw database");
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints=ON;")
+            .expect("enable raw corruption fixture");
+        connection
+            .execute(
+                "UPDATE desktop_operation_envelopes SET ciphertext = zeroblob(?1)",
+                params![(MAX_CIPHERTEXT_BYTES + 1) as i64],
+            )
+            .expect("inject oversized raw ciphertext");
+        drop(connection);
+
+        assert!(
+            expect_error(store.load("operation-raw-blob", "attempt-raw-blob"))
+                .contains("storage is unavailable")
+        );
+        fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[test]
+    fn list_uses_bounded_opaque_cursor_pages() {
+        use std::collections::HashSet;
+
+        let directory = temp_directory("pagination");
+        let store =
+            JournalStore::new(&directory, key(0x54, "vault-pagination")).expect("open store");
+        for suffix in 0..5 {
+            store
+                .create(&envelope(
+                    &format!("operation-page-{suffix}"),
+                    &format!("attempt-page-{suffix}"),
+                    20_000,
+                    "prompt",
+                    "response",
+                ))
+                .expect("create paginated record");
+        }
+
+        let mut cursor = None;
+        let mut seen = HashSet::new();
+        let mut page_sizes = Vec::new();
+        loop {
+            let page = store
+                .list_page(cursor.as_deref(), Some(2))
+                .expect("list journal page");
+            page_sizes.push(page.records.len());
+            for record in page.records {
+                let operation_id = validate_envelope(&record.envelope)
+                    .expect("validate listed envelope")
+                    .operation_id;
+                assert!(seen.insert(operation_id), "pages must not repeat records");
+            }
+            let Some(next) = page.next_cursor else {
+                break;
+            };
+            assert!(valid_journal_session_id(&next), "cursor stays opaque");
+            cursor = Some(next);
+        }
+        assert_eq!(page_sizes, vec![2, 2, 1]);
+        assert_eq!(seen.len(), 5);
+        assert!(store.list_page(None, Some(0)).is_err());
+        assert!(store
+            .list_page(None, Some((MAX_PAGE_LIMIT + 1) as u32))
+            .is_err());
+        fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[test]
+    fn expiry_deletion_is_bounded_and_reports_remaining_work() {
+        let directory = temp_directory("expiry-batches");
+        let store =
+            JournalStore::new(&directory, key(0x55, "vault-expiry-batches")).expect("open store");
+        for suffix in 0..5 {
+            store
+                .create(&envelope(
+                    &format!("operation-expiry-{suffix}"),
+                    &format!("attempt-expiry-{suffix}"),
+                    1_000,
+                    "prompt",
+                    "response",
+                ))
+                .expect("create expiring record");
+        }
+
+        let first = store
+            .delete_expired_at(1_000, Some(2))
+            .expect("delete first batch");
+        let second = store
+            .delete_expired_at(1_000, Some(2))
+            .expect("delete second batch");
+        let third = store
+            .delete_expired_at(1_000, Some(2))
+            .expect("delete final batch");
+        assert_eq!((first.deleted, first.has_more), (2, true));
+        assert_eq!((second.deleted, second.has_more), (2, true));
+        assert_eq!((third.deleted, third.has_more), (1, false));
+        assert!(store
+            .list_page(None, Some(2))
+            .expect("list after expiry")
+            .records
+            .is_empty());
+        fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[test]
+    fn journal_commands_reject_stale_activation_bindings() {
+        let runtime = crate::ActiveVaultRuntime {
+            id: "vault-session".into(),
+            directory: PathBuf::from("vault-session"),
+            generation: 7,
+            closing: false,
+            journal_key: key(0x56, "vault-session"),
+            journal_session_id: "a".repeat(64),
+        };
+        assert!(require_active_journal_session(&runtime, &"a".repeat(64), 7).is_ok());
+        assert!(require_active_journal_session(&runtime, &"a".repeat(64), 6).is_err());
+        assert!(require_active_journal_session(&runtime, &"b".repeat(64), 7).is_err());
+
+        let reopened = crate::ActiveVaultRuntime {
+            generation: 8,
+            journal_session_id: "b".repeat(64),
+            ..runtime
+        };
+        assert!(require_active_journal_session(&reopened, &"a".repeat(64), 7).is_err());
+        assert!(require_active_journal_session(&reopened, &"b".repeat(64), 8).is_ok());
+    }
+
+    #[test]
     fn sqlite_uses_wal_full_synchronous_and_busy_timeout() {
         let directory = temp_directory("pragmas");
         let store = JournalStore::new(&directory, key(0x53, "vault-pragmas")).expect("open store");
@@ -1005,6 +1494,47 @@ mod tests {
         assert_eq!(synchronous, 2, "SQLite FULL synchronous is numeric mode 2");
         assert_eq!(busy_timeout, 5_000);
         drop(connection);
+        fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[test]
+    fn version_one_database_migrates_to_ciphertext_size_constraints() {
+        let directory = temp_directory("migration-v1");
+        let database = directory.join(JOURNAL_FILENAME);
+        let connection = Connection::open(&database).expect("open v1 database");
+        connection
+            .execute_batch(
+                "CREATE TABLE desktop_operation_envelopes (
+                   record_id BLOB PRIMARY KEY NOT NULL CHECK(length(record_id) = 32),
+                   revision INTEGER NOT NULL CHECK(revision >= 1),
+                   delete_by_ms INTEGER NOT NULL CHECK(delete_by_ms >= 0),
+                   nonce BLOB NOT NULL CHECK(length(nonce) = 24),
+                   ciphertext BLOB NOT NULL
+                 ) WITHOUT ROWID;
+                 CREATE INDEX desktop_operation_envelopes_expiry
+                   ON desktop_operation_envelopes(delete_by_ms);
+                 PRAGMA user_version = 1;",
+            )
+            .expect("create v1 schema");
+        drop(connection);
+
+        let store =
+            JournalStore::new(&directory, key(0x53, "vault-migration")).expect("migrate store");
+        let version: i64 = store
+            .open()
+            .expect("open migrated database")
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("read migrated version");
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION);
+        store
+            .create(&envelope(
+                "operation-migrate",
+                "attempt-migrate",
+                20_000,
+                "prompt",
+                "response",
+            ))
+            .expect("write after migration");
         fs::remove_dir_all(directory).expect("remove fixture");
     }
 
