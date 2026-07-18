@@ -1,8 +1,8 @@
 # Product
 
 Zine records how a file or folder was actually made — by people, by AI, or
-both — as signed, replayable history. A **zine** is that stably identified file
-or folder together with its trace.
+both — as signed, replayable history. A **zine** is that file or folder
+together with its trace.
 Zine uses the trace to help the next act of writing, not only the later audit.
 This page explains the daily loop, the initial buyer, and the evidence still
 required. The accepted migration direction is recorded in

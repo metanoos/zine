@@ -46,8 +46,8 @@ describes only part of that activity.
 - **Text** is a file zine's Markdown arrangement: the composed state a reader
   encounters.
 - **Content tree** is a folder zine's recursive arrangement of child zines.
-- A **zine** is one stably identified file or folder together with its trace.
-  The **Root zine** is the topmost folder; there is no separate project object.
+- A **zine** is one file or folder together with its trace. The **Root zine**
+  is the topmost folder; there is no separate project object.
 - **Trace** is the process or performance: keystrokes, pauses, deletions,
   rewrites, pasted material, structural changes, descendant activity, voice
   changes, AI interactions, and other observable actions that produced the

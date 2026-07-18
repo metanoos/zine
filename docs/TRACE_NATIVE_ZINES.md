@@ -16,8 +16,7 @@ calls, and decisions about proposed work.
 
 The file case is text plus trace. The general case is:
 
-> A zine is a stably identified file or folder together with its complete
-> scoped trace.
+> A zine is a file or folder together with its complete scoped trace.
 
 The reference product is a **press** named **Zine**. It produces file zines,
 folder zines, Root zines, editions, and coins. There is no separate project

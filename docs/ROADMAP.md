@@ -8,8 +8,9 @@ where it fails; it does not postpone building the system required to test it.
 The execution posture is therefore conviction with gates. Build the complete
 trace-aware loop, keep text-only and bounded-history comparisons inside the
 architecture, and promote claims only when measured outcomes support them.
-Accountable teams remain the initial distribution and paid wedge. Managed
-services and global network work remain downstream of actual retained use.
+Individual writers remain the first audience; accountable teams remain the
+initial paid wedge. Managed services and global network work remain downstream
+of actual retained use.
 
 ## Sequencing rule
 

@@ -12,9 +12,9 @@ content alone. At file scope that means text plus trace; at folder scope it
 means a content tree plus trace. This thesis is under active evaluation, not
 a proven claim.
 
-Zine records the process at the point of writing. A **zine** is one stably
-identified file or folder together with its signed **trace**. File zines replay
-one Markdown history. Folder zines replay the changing descendant tree and the
+Zine records the process at the point of writing. A **zine** is a file or
+folder together with its signed **trace**. File zines replay one Markdown
+history. Folder zines replay the changing descendant tree and the
 interactions across it. Human and model voices remain visible. Draft
 checkpoints stay local until their author sends them.
 
@@ -68,21 +68,27 @@ protected bytes, and current-session author authority. Coverage is
 deliberately partial; the [evidence ledger](docs/EVIDENCE.md) records exactly
 which operations and guarantees exist today.
 
-## Start with accountable agents
+## Writers first, teams close behind
 
-The first product wedge is teams that let AI agents edit durable files such as
-reports, research, policies, and editorial work. When the result matters, a
-reviewer should be able to answer:
+Zine is individual-first. One writer with a sovereign press gets the complete
+product — trace-aware assistance, replay, and portable proof — with no
+account, hosted service, or organization required. If adoption compounds, it
+should compound the way Git's did: writers first, organizations following the
+writers.
+
+Accountable teams are where paid demand is expected first. Organizations
+letting AI agents edit durable files — reports, research, policies, editorial
+work — have an immediate reason to care how a result was produced. When the
+result matters, a reviewer should be able to answer:
 
 - Which agent key made each change?
 - Which exact file states and changes did that key sign?
 - Which version was opened for discussion, and which version was endorsed?
 - Can another party inspect the evidence without access to the original app?
 
-That remains the initial buyer wedge: accountability gives a team a concrete
-reason to adopt the trace while the trace-aware writing loop supplies daily
-value. Customer discovery and writing-outcome evaluation run alongside the
-pivot. Managed services and network layers remain evidence-gated.
+Accountability gives a team a concrete reason to pay for the trace the writer
+already keeps. Customer discovery and writing-outcome evaluation run alongside
+the pivot. Managed services and network layers remain evidence-gated.
 
 Native model operations in the desktop press can also record the prompt,
 model configuration, and cited context. Threading equivalent harness-supplied
@@ -93,8 +99,8 @@ through Zine under its own key. The [desktop press](apps/client/README.md) is
 the reference authoring and review experience.
 
 Each named headless profile owns one permanent Root, its topmost folder zine;
-no source folder or live relay is required. Offline Steps persist as exact signed events and synchronize
-to the loopback home later. LLMs consume the raw trace directly, while a Send
+no source folder or live relay is required. Offline Steps persist as exact
+signed events and synchronize to the loopback home later. LLMs consume the raw trace directly, while a Send
 can return a locator for the desktop to verify and render for a human.
 
 Read the [documentation hub](docs/README.md), or go directly to the

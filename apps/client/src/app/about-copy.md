@@ -2,8 +2,8 @@
 # Product
 
 Zine records how a file or folder was actually made — by people, by AI, or
-both — as signed, replayable history. A **zine** is that stably identified file
-or folder together with its trace.
+both — as signed, replayable history. A **zine** is that file or folder
+together with its trace.
 Zine uses the trace to help the next act of writing, not only the later audit.
 This page explains the daily loop, the initial buyer, and the evidence still
 required. The accepted migration direction is recorded in
@@ -254,9 +254,9 @@ process is gone. Ordinary version history does not reliably say what a model
 saw, which passages it produced, what a person accepted, or where copied
 material came from. Looking only at the final text is too late.
 
-A **zine** is a stably identified file or folder together with its
-high-fidelity **trace**. You can play a file zine or a whole folder subtree
-and see how the work changed, not just where it ended. Each checkpoint is signed and self-contained,
+A **zine** is a file or folder together with its high-fidelity **trace**. You
+can play a file zine or a whole folder subtree and see how the work changed,
+not just where it ended. Each checkpoint is signed and self-contained,
 so another reader can inspect the evidence without trusting one editor account.
 
 That history gives human and LLM readers something plain text loses: process.
@@ -866,8 +866,9 @@ where it fails; it does not postpone building the system required to test it.
 The execution posture is therefore conviction with gates. Build the complete
 trace-aware loop, keep text-only and bounded-history comparisons inside the
 architecture, and promote claims only when measured outcomes support them.
-Accountable teams remain the initial distribution and paid wedge. Managed
-services and global network work remain downstream of actual retained use.
+Individual writers remain the first audience; accountable teams remain the
+initial paid wedge. Managed services and global network work remain downstream
+of actual retained use.
 
 ## Sequencing rule
 
