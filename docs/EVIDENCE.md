@@ -91,6 +91,15 @@ The normative trust posture is in
 
 ## What we have not proven yet
 
+- That, across representative writing tasks and providers, supplying selected
+  trace plus text improves context adherence, writing quality, unsupported
+  inference, correction burden, or reviewer preference over text alone.
+- That independently minting the same distinctive coin type predicts broader
+  corpus affinity better than chance after controlling for topic and
+  popularity.
+- That longitudinal style, process, and conditional-compression features add
+  calibrated vetting value beyond lexical overlap without being mistaken for
+  proof of humanity or identity.
 - Named teams returning week after week to multi-AI task and correspondence
   work on real artifacts.
 - A cross-model handoff whose trace answers a consequential question that

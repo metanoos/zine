@@ -12,6 +12,15 @@ repository and the app's About view.
 | [Roadmap](ROADMAP.md) | What is being built now, and which evidence gates each later phase |
 | [Company](COMPANY.md) | How an open sovereign protocol can support an optional paid layer |
 
+## Accepted migration direction
+
+The [Trace-Native Zines](TRACE_NATIVE_ZINES.md) design records the accepted
+pre-product pivot: a zine is Markdown plus its complete trace; Publish replaces
+Send; Mint creates a manually attested coin; and exact AI-operation evidence,
+portable analysis, supply, and corpus vetting become first-class. It is the
+non-normative migration target until the owning specifications and
+implementation make the schema cut together.
+
 ## Authority
 
 These documents package the product for readers; they do not define the wire.

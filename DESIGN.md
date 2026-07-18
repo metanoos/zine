@@ -49,6 +49,13 @@ describes only part of that activity.
   Trace as interchangeable names.
 - **Step** is a signed, durable landmark within the trace. It is not a synonym
   for the continuous process.
+- A **zine** is one canonical Markdown text together with its complete trace
+  and stable work identity. **Zine** is the reference press that produces
+  zines.
+- An **edition** is an immutable publication at one exact Step. **Publish** is
+  the disclosure/reachability gesture; **Attest** is the separate commitment
+  to stand behind that edition. Product language migrates from Send to Publish
+  with the accepted schema cut.
 
 The trace is a creative medium, not an audit screen hidden behind the final
 document. Interfaces may reveal compositional patterns such as hesitation,

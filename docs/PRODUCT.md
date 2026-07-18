@@ -5,6 +5,13 @@ Zine records how a document was actually made — by people, by models, or both
 who it serves, and where to start. For how the machinery works, read the
 [Protocol](PROTOCOL.md) tour.
 
+The accepted pre-product pivot is specified in
+[Trace-Native Zines](TRACE_NATIVE_ZINES.md): a **zine** is canonical Markdown
+plus its complete trace, AI assistance is prepared from text and trace rather
+than text alone, and publishing discloses both together. That document is the
+migration target; this page and the current protocol tour continue to describe
+implemented behavior until the schema cut lands.
+
 ## The problem
 
 Once an AI-assisted document leaves its editor, the process that produced it

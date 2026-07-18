@@ -6,6 +6,13 @@ Zine records how a document was actually made — by people, by models, or both
 who it serves, and where to start. For how the machinery works, read the
 [Protocol](PROTOCOL.md) tour.
 
+The accepted pre-product pivot is specified in
+[Trace-Native Zines](TRACE_NATIVE_ZINES.md): a **zine** is canonical Markdown
+plus its complete trace, AI assistance is prepared from text and trace rather
+than text alone, and publishing discloses both together. That document is the
+migration target; this page and the current protocol tour continue to describe
+implemented behavior until the schema cut lands.
+
 ## The problem
 
 Once an AI-assisted document leaves its editor, the process that produced it
@@ -664,6 +671,15 @@ The normative trust posture is in
 
 ## What we have not proven yet
 
+- That, across representative writing tasks and providers, supplying selected
+  trace plus text improves context adherence, writing quality, unsupported
+  inference, correction burden, or reviewer preference over text alone.
+- That independently minting the same distinctive coin type predicts broader
+  corpus affinity better than chance after controlling for topic and
+  popularity.
+- That longitudinal style, process, and conditional-compression features add
+  calibrated vetting value beyond lexical overlap without being mistaken for
+  proof of humanity or identity.
 - Named teams returning week after week to multi-AI task and correspondence
   work on real artifacts.
 - A cross-model handoff whose trace answers a consequential question that
