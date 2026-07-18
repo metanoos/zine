@@ -33,6 +33,9 @@ rust-argon2 = "2.1"
 sha2 = "0.10"
 zeroize = "1"
 
+[dev-dependencies]
+argon2-legacy = { package = "rust-argon2", version = "=1.0.0" }
+
 # Stronghold's password and snapshot KDFs are intentionally expensive. In an
 # otherwise-unoptimized dev build their inner loops take minutes, which makes a
 # vault appear hung. Optimize only the crypto hot-path dependencies; release

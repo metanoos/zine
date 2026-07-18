@@ -18,6 +18,7 @@ import { VaultSessionContext, type VaultSession } from "./vault-session.js";
 import {
   closeVaultSession,
   openVaultSession,
+  shouldMigrateLegacyWorkspace,
   VaultSessionRollbackError,
 } from "./vault-lifecycle.js";
 import { ensureVaultWorkspaceKey } from "./vault-workspace-key.js";
@@ -27,6 +28,7 @@ import {
   discardEmptyVaultRecord,
   listVaults,
   lockVaultRuntime,
+  startVaultRelay,
   type VaultSummary,
 } from "./vaults.js";
 
@@ -158,6 +160,7 @@ export function SecurityBootstrap({ children }: { children: ReactNode }) {
       migrateSecrets: (freshVault) => migrateLegacySecrets({ freshVault }),
       initializeKeys: initializeKeyStoreForAuthoring,
       activateRuntime: activateVaultRuntime,
+      startRelay: startVaultRelay,
       listPeers,
       setOwner,
       nodeVoice,
@@ -186,7 +189,7 @@ export function SecurityBootstrap({ children }: { children: ReactNode }) {
       const opened = await establishSession(
         vault,
         passphrase,
-        !vault.snapshotExists && state.vaults.every((candidate) => !candidate.snapshotExists),
+        shouldMigrateLegacyWorkspace(vault, state.vaults),
       );
       setPassphrase("");
       setConfirmation("");

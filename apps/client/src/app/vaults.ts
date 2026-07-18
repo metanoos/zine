@@ -24,6 +24,10 @@ export async function activateVaultRuntime(id: string, workspaceKey: Uint8Array)
   await invoke("activate_vault_runtime", { id, workspaceKey: Array.from(workspaceKey) });
 }
 
+export async function startVaultRelay(): Promise<void> {
+  await invoke("spawn_relay");
+}
+
 export async function lockVaultRuntime(): Promise<void> {
   await invoke("lock_vault_runtime");
 }

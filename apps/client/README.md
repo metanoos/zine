@@ -53,7 +53,9 @@ that changed. Appearance preferences such as theme and navigation width remain
 shared across the install. The **Vaults** view, immediately before **Keys**,
 can lock the active vault, switch to another vault, or create a new one.
 Locking is fail-closed: another vault is never selectable until Stronghold,
-relay, and Tor reachability have all confirmed shutdown.
+relay, and Tor reachability have all confirmed shutdown. Normal application
+exit performs the same native shutdown; an unexpected stale listener blocks
+the next unlock instead of being reused across vaults.
 
 Installs created before multi-vault support are adopted in place as a vault
 named **Personal**. Its Stronghold snapshot and KDF salt are neither moved nor

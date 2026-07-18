@@ -198,6 +198,15 @@ fn create_or_read_vault_salt(path: &Path) -> Result<[u8; 32], String> {
     }
 }
 
+fn derive_stronghold_key_v1(passphrase: &[u8], salt: &[u8]) -> Vec<u8> {
+    // KDF v1 is the exact rust-argon2 1.0 default used by
+    // tauri-plugin-stronghold 2.3.1. Never replace this with Config::default:
+    // rust-argon2 2.x changed that default to Argon2id with stronger but
+    // incompatible parameters, which would make existing snapshots unreadable.
+    argon2::hash_raw(passphrase, salt, &argon2::Config::original())
+        .expect("could not derive secure-vault encryption key")
+}
+
 fn derive_stronghold_key(data_dir: &Path, encoded: &str) -> Vec<u8> {
     let parsed = serde_json::from_str::<StrongholdKdfEnvelope>(encoded)
         .ok()
@@ -210,8 +219,7 @@ fn derive_stronghold_key(data_dir: &Path, encoded: &str) -> Vec<u8> {
         vault_salt_path(data_dir, vault_id.as_deref()).expect("invalid secure-vault KDF envelope");
     let salt =
         create_or_read_vault_salt(&salt_path).expect("could not initialize secure-vault KDF salt");
-    let derived = argon2::hash_raw(passphrase.as_bytes(), &salt, &Default::default())
-        .expect("could not derive secure-vault encryption key");
+    let derived = derive_stronghold_key_v1(passphrase.as_bytes(), &salt);
     passphrase.zeroize();
     derived
 }
@@ -1955,7 +1963,7 @@ fn read_control_reply<R: BufRead>(reader: &mut R, label: &str) -> Result<Vec<Str
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -1996,8 +2004,16 @@ pub fn run() {
             add_writer,
             remove_writer,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if let Err(error) = lock_vault_runtime(app_handle.clone()) {
+                eprintln!("could not stop the active vault runtime: {error}");
+                api.prevent_exit();
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -2197,6 +2213,37 @@ mod tests {
             first.file_name().and_then(|name| name.to_str()),
             Some(SECRET_VAULT_SALT_FILENAME)
         );
+    }
+
+    #[test]
+    fn kdf_v1_matches_the_legacy_stronghold_plugin() {
+        let passphrase = b"legacy vault passphrase";
+        let salt = [0x5au8; 32];
+        let legacy = argon2_legacy::hash_raw(passphrase, &salt, &argon2_legacy::Config::default())
+            .expect("legacy plugin KDF vector");
+
+        assert_eq!(derive_stronghold_key_v1(passphrase, &salt), legacy);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_relay_can_stop_and_relaunch_without_leaving_a_child() {
+        let _gate = VAULT_RUNTIME_GATE
+            .lock()
+            .expect("vault runtime operation lock");
+
+        for _ in 0..2 {
+            let child = Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn relay stand-in");
+            *RELAY_CHILD.lock().expect("relay process lock") = Some(child);
+            RELAY_SPAWNED.store(true, Ordering::SeqCst);
+
+            stop_owned_relay().expect("stop relay stand-in");
+            assert!(!RELAY_SPAWNED.load(Ordering::SeqCst));
+            assert!(RELAY_CHILD.lock().expect("relay process lock").is_none());
+        }
     }
 
     #[cfg(unix)]

@@ -7525,26 +7525,6 @@ function useProvenance(
   // that attach already loaded as current. Cleared by the boot effect in App().
   const ready = useRef(false);
 
-  // Spawn the relay sidecar once on mount. Desktop-only: the sidecar is a
-  // Tauri command, so in a plain browser (`npm run dev` or the hosted webapp)
-  // this is a real no-op — `isTauri()` short-circuits before the dynamic
-  // import. Without that gate the import resolves but `invoke` reaches for
-  // `window.__TAURI_INTERNALS__.invoke`, and `__TAURI_INTERNALS__` is
-  // undefined in a browser, throwing "Cannot read properties of undefined
-  // (reading 'invoke')" on every boot.
-  useEffect(() => {
-    if (!isTauri()) return;
-    let cancelled = false;
-    import("@tauri-apps/api/core")
-      .then(({ invoke }) => invoke("spawn_relay"))
-      .catch((e: unknown) => {
-        if (!cancelled) console.warn("[provenance] spawn_relay failed (relay may already be up):", e);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   // Debounced crash-pad refresh for metadata and belt-and-suspenders recovery.
   // Content plus KEdits are journaled synchronously in editFile at transaction
   // time; this pass catches non-editor state changes such as tags.

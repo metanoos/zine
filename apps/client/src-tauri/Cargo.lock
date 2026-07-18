@@ -666,6 +666,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "reqwest",
+ "rust-argon2 1.0.0",
  "rust-argon2 2.1.0",
  "serde",
  "serde_json",

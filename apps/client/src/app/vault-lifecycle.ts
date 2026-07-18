@@ -10,6 +10,7 @@ export interface VaultOpenOperations {
   migrateSecrets(freshVault: boolean): Promise<unknown>;
   initializeKeys(): Promise<unknown>;
   activateRuntime(id: string, workspaceKey: Uint8Array): Promise<void>;
+  startRelay(): Promise<void>;
   listPeers(): Promise<PeersState>;
   setOwner(pubkey: string): Promise<PeersState>;
   nodeVoice(): string;
@@ -28,6 +29,17 @@ export interface OpenVaultOptions {
   /** Adopt pre-vault plaintext workspace records into the first completed
    * vault. Existing multi-vault sessions never set this for later vaults. */
   migrateLegacyWorkspace?: boolean;
+}
+
+/** The first vault remains the legacy-workspace migration target across
+ * retries, even if a failed open already created its Stronghold snapshot. */
+export function shouldMigrateLegacyWorkspace(
+  vault: VaultSummary,
+  vaults: readonly VaultSummary[],
+): boolean {
+  return vaults.every(
+    (candidate) => candidate.id === vault.id || !candidate.snapshotExists,
+  );
 }
 
 /** An open failed and at least one acquired resource could not be released.
@@ -104,6 +116,7 @@ export async function openVaultSession(
     } finally {
       workspaceKey.fill(0);
     }
+    await operations.startRelay();
     await operations.migrateSecrets(!vault.snapshotExists);
     await operations.initializeKeys();
 
