@@ -45,8 +45,8 @@ The envelope retains, as private local data:
 - the exact ordered provider-neutral messages and operation inputs;
 - the exact prepared target revision and apply range;
 - generation limits and credential-free provider identity;
-- the exact selected-context manifest and operation range, rendered context,
-  and its message index plus UTF-16 range in the prepared request;
+- the exact selected-context manifest and selected source range, rendered
+  context, and its message index plus UTF-16 range in the prepared request;
 - the exact completed response, if one exists;
 - an ordered receipt of transition type, from/to status, stable id, timestamp,
   and action hash; and
@@ -67,13 +67,14 @@ machine:
 
 ```text
 prepared -> approved -> dispatch-intent -> provider-io
-                                             |   |   |
-                                             |   |   +-> unknown
+                                             |   |   +-> unknown -> abandoned
                                              |   +-----> failed
                                              +---------> response-completed
-                                                               |       |
-                                                               v       v
-                                                           accepted  rejected
+                                                               |    |    |
+                                                               v    v    v
+                                                        accepted  stale  rejected
+                                                            |
+                                                            +------> stale
 ```
 
 Prepared, approved, and dispatch-intent records are known not to have reached a
@@ -88,12 +89,27 @@ provider-completed-without-result attempt requires explicit operator
 confirmation and creates a newly linked attempt. This may spend another model
 call, but it cannot silently duplicate one.
 
+An operator may instead permanently abandon an `unknown` attempt. Abandonment
+retains `may-have-dispatched` certainty and the structured dispatch-unknown
+fault; it never rewrites ambiguous history as known not dispatched, and
+recovery treats the record as terminal.
+
 A completed response is presented for review. Rejection never creates an
 artifact intent. Acceptance creates one local, idempotent artifact intent bound
 to the operation, attempt, exact target revision, apply range, request,
 selected-context manifest, and response. Recording a local application receipt
 does not create, sign, or publish a MODEL Step; durable signed provenance remains
 Phase 3 work.
+
+The caller rechecks the captured target before acceptance and uses compare-and-
+set when applying an accepted intent. A failed recheck moves
+`response-completed` to durable `stale` with a `TARGET_STALE` review fault. A
+compare-and-set race after persisted acceptance moves `accepted` to `stale`
+with an apply fault and clears the accepted intent and receipt, so recovery can
+never reapply it. Both paths preserve the recorded response, emit no automatic
+effect, and offer review, discard, or a safe linked retry without a
+duplicate-dispatch acknowledgement. An explicitly rejected recorded response
+has the same safe linked-retry policy.
 
 ## Fault and recovery contract
 
@@ -107,6 +123,7 @@ The recovery projection gives native and UI integrations closed effects for:
 - resuming the pre-I/O dispatch handshake;
 - converting a may-have-started attempt to unknown;
 - presenting a completed result for review;
+- presenting a stale result for operator review without applying it;
 - replaying an accepted but unreceipted local artifact intent; and
 - deleting the expired private operation envelope.
 
@@ -136,7 +153,7 @@ This contract intentionally does not:
 - create or encode signed Steps;
 - dispatch a provider request itself;
 - apply text to the editor;
-- decide compare-and-set or directive-consumption transactions;
+- perform compare-and-set or directive-consumption transactions;
 - add Settle, Stir, Reply, Analyze, Run, or multi-provider orchestration; or
 - claim that selected trace improves writing.
 

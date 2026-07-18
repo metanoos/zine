@@ -34,6 +34,7 @@ export type DesktopOperationTransitionV1 =
   | (OperationTransitionBaseV1 & { type: "cancel"; diagnosticRef?: string })
   | (OperationTransitionBaseV1 & { type: "mark-dispatch-unknown"; diagnosticRef?: string })
   | (OperationTransitionBaseV1 & { type: "accept-result"; artifactIntentId: string })
+  | (OperationTransitionBaseV1 & { type: "mark-target-stale"; diagnosticRef?: string })
   | (OperationTransitionBaseV1 & { type: "reject-result" })
   | (OperationTransitionBaseV1 & { type: "abandon" })
   | (OperationTransitionBaseV1 & {
@@ -270,22 +271,47 @@ export function reduceDesktopOperationV1(
       }];
       break;
     }
+    case "mark-target-stale": {
+      requireCurrent(envelope, transition.type, "response-completed", "accepted");
+      if (envelope.lifecycle.status === "accepted" && envelope.artifactReceipt) {
+        fail("an applied artifact cannot later be marked target-stale");
+      }
+      const fault: OperationFaultV1 = {
+        version: 1,
+        code: "TARGET_STALE",
+        stage: envelope.lifecycle.status === "accepted" ? "apply" : "review",
+        observedAtMs: transition.atMs,
+        ...(transition.diagnosticRef ? { diagnosticRef: transition.diagnosticRef } : {}),
+      };
+      next = withLifecycle(envelope, transition, actionSha256, {
+        status: "stale",
+        executionCertainty: "response-recorded",
+        retryPolicy: "safe-new-attempt",
+      }, {
+        fault,
+        artifactIntent: null,
+        artifactReceipt: null,
+      });
+      break;
+    }
     case "reject-result":
-      requireCurrent(envelope, transition.type, "response-completed");
+      requireCurrent(envelope, transition.type, "response-completed", "stale");
       next = withLifecycle(envelope, transition, actionSha256, {
         status: "rejected",
         executionCertainty: "response-recorded",
-        retryPolicy: "not-eligible",
-      });
+        retryPolicy: "safe-new-attempt",
+      }, { fault: null, artifactIntent: null, artifactReceipt: null });
       break;
-    case "abandon":
-      requireCurrent(envelope, transition.type, "prepared", "approved", "dispatch-intent");
+    case "abandon": {
+      requireCurrent(envelope, transition.type, "prepared", "approved", "dispatch-intent", "unknown");
+      const ambiguous = envelope.lifecycle.status === "unknown";
       next = withLifecycle(envelope, transition, actionSha256, {
         status: "abandoned",
-        executionCertainty: "known-not-dispatched",
+        executionCertainty: ambiguous ? "may-have-dispatched" : "known-not-dispatched",
         retryPolicy: "not-eligible",
       });
       break;
+    }
     case "record-artifact-applied":
       requireCurrent(envelope, transition.type, "accepted");
       if (!envelope.artifactIntent) fail("artifact receipt has no accepted intent");
@@ -316,6 +342,7 @@ export interface DesktopOperationRecoveryProjectionV1 {
     | "approve-or-abandon"
     | "dispatch-or-abandon"
     | "review-result"
+    | "review-stale-result"
     | "confirm-possible-duplicate-or-stop"
     | "none";
   mayAutomaticallyDispatch: boolean;
@@ -332,6 +359,25 @@ export function projectDesktopOperationRecoveryV1(
   nowMs: number,
 ): DesktopOperationRecoveryProjectionV1 {
   if (!Number.isSafeInteger(nowMs) || nowMs < 0) fail("recovery time must be a non-negative safe integer");
+  const privateEnvelopeDeletionDue = nowMs >= envelope.retention.deleteByMs;
+  if (privateEnvelopeDeletionDue) {
+    return Object.freeze({
+      version: 1,
+      operationId: envelope.operationId,
+      attemptId: envelope.attempt.attemptId,
+      status: envelope.lifecycle.status,
+      retryPolicy: envelope.lifecycle.retryPolicy,
+      automaticEffects: freezeEffects([{
+        version: 1,
+        kind: "delete-expired-private-envelope",
+        operationId: envelope.operationId,
+        attemptId: envelope.attempt.attemptId,
+      }]),
+      operatorAction: "none",
+      mayAutomaticallyDispatch: false,
+      privateEnvelopeDeletionDue: true,
+    });
+  }
   const automaticEffects: DesktopOperationEffectV1[] = [];
   let operatorAction: DesktopOperationRecoveryProjectionV1["operatorAction"] = "none";
   switch (envelope.lifecycle.status) {
@@ -378,6 +424,9 @@ export function projectDesktopOperationRecoveryV1(
         });
       }
       break;
+    case "stale":
+      operatorAction = "review-stale-result";
+      break;
     case "unknown":
       operatorAction = "confirm-possible-duplicate-or-stop";
       break;
@@ -390,15 +439,6 @@ export function projectDesktopOperationRecoveryV1(
     case "rejected":
     case "abandoned":
       break;
-  }
-  const privateEnvelopeDeletionDue = nowMs >= envelope.retention.deleteByMs;
-  if (privateEnvelopeDeletionDue) {
-    automaticEffects.push({
-      version: 1,
-      kind: "delete-expired-private-envelope",
-      operationId: envelope.operationId,
-      attemptId: envelope.attempt.attemptId,
-    });
   }
   return Object.freeze({
     version: 1,
@@ -432,6 +472,12 @@ export function createDesktopOperationRetryV1(
     && input.possibleDuplicateAcknowledged !== true
   ) {
     fail("possible provider dispatch requires explicit operator confirmation before retry");
+  }
+  if (
+    prior.lifecycle.retryPolicy === "safe-new-attempt"
+    && input.possibleDuplicateAcknowledged === true
+  ) {
+    fail("safe retry must not acknowledge a possible duplicate");
   }
   if (!Number.isSafeInteger(input.createdAtMs) || input.createdAtMs < prior.updatedAtMs) {
     fail("retry time must be monotonic");

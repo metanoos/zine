@@ -1,10 +1,14 @@
-import type { SelectedTraceContextManifestV1 } from "@zine/trace-context";
+import {
+  validateSelectedTraceContextManifestV1,
+  type SelectedTraceContextManifestV1,
+} from "@zine/trace-context";
 
 import { contentFingerprint } from "./context-snapshot.js";
 import type { ChatMessage } from "./llm.js";
 import type { ProviderProtocol } from "./models-store.js";
 import type { OpInputs } from "./op-prompts.js";
 import type { PreparedOperation, PreparedTargetRevision } from "./prepared-operation.js";
+import { traceSourceRangeForOperationV1 } from "./trace-authoring-adapter.js";
 
 const encoder = new TextEncoder();
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -28,6 +32,7 @@ export type DesktopOperationStatusV1 =
   | "cancelled"
   | "unknown"
   | "accepted"
+  | "stale"
   | "rejected"
   | "abandoned";
 
@@ -171,6 +176,7 @@ export type DesktopOperationTransitionTypeV1 =
   | "cancel"
   | "mark-dispatch-unknown"
   | "accept-result"
+  | "mark-target-stale"
   | "reject-result"
   | "abandon"
   | "record-artifact-applied";
@@ -434,6 +440,7 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
     "version", "manifest", "manifestSha256", "renderedContext", "renderedContextSha256", "placement",
   ], "selectedContext");
   if (selected.version !== 1) fail("selectedContext version is unsupported");
+  validatePackageManifest(selected.manifest);
   requireHash(selected.manifestSha256, "selectedContext.manifestSha256");
   requireText(selected.renderedContext, "selectedContext.renderedContext");
   requireHash(selected.renderedContextSha256, "selectedContext.renderedContextSha256");
@@ -449,14 +456,12 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   ) {
     fail("selected manifest hash does not match its exact bytes");
   }
-  const manifest = requireRecord(selected.manifest, "selectedContext.manifest");
-  if (manifest.version !== 1 || manifest.contract !== "package-local-non-normative-v1") {
-    fail("selected context manifest is unsupported");
-  }
+  const manifest = selected.manifest as unknown as Record<string, unknown>;
   const manifestOperation = requireRecord(manifest.operation, "selectedContext.manifest.operation");
   if (manifestOperation.operation !== "extend") fail("selected context is not for Extend");
-  validateSelectedOperationRange(manifestOperation.range, operationInputs);
   const manifestTarget = requireRecord(manifestOperation.target, "selectedContext.manifest.operation.target");
+  const manifestCurrentText = requireText(manifestTarget.currentText, "manifest target currentText");
+  validateSelectedOperationRange(manifestOperation.range, operationInputs, manifestCurrentText);
   const manifestHashes = requireRecord(manifest.hashes, "selectedContext.manifest.hashes");
   requireHash(manifestHashes.frozenInputsSha256, "selectedContext.manifest.hashes.frozenInputsSha256");
   if (manifestHashes.renderedContextSha256 !== selected.renderedContextSha256) {
@@ -479,7 +484,6 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
     selected.renderedContext as string,
     selected.placement,
   );
-  const manifestCurrentText = requireText(manifestTarget.currentText, "manifest target currentText");
   if (contentFingerprint(manifestCurrentText) !== target.contentHash) {
     fail("selected current text does not match the prepared target content hash");
   }
@@ -533,6 +537,8 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   const transitionIds = new Set<string>();
   let receiptStatus: DesktopOperationStatusV1 = "prepared";
   let receiptTime = attempt.createdAtMs as number;
+  let finalTransitionFromStatus: DesktopOperationStatusV1 | null = null;
+  let artifactApplicationRecorded = false;
   for (const [index, raw] of envelope.appliedTransitions.entries()) {
     const transition = requireRecord(raw, `appliedTransitions[${index}]`);
     requireExactKeys(
@@ -551,10 +557,15 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
     if (fromStatus !== receiptStatus) {
       fail(`appliedTransitions[${index}] does not continue from ${receiptStatus}`);
     }
-    const expectedToStatus = transitionTargetStatus(
-      transition.transitionType as DesktopOperationTransitionTypeV1,
-      fromStatus,
-    );
+    const transitionType = transition.transitionType as DesktopOperationTransitionTypeV1;
+    if (transitionType === "record-artifact-applied") {
+      if (artifactApplicationRecorded) fail("artifact application may be recorded only once");
+      artifactApplicationRecorded = true;
+    }
+    if (transitionType === "mark-target-stale" && fromStatus === "accepted" && artifactApplicationRecorded) {
+      fail("an applied artifact cannot later be marked target-stale");
+    }
+    const expectedToStatus = transitionTargetStatus(transitionType, fromStatus);
     if (toStatus !== expectedToStatus) {
       fail(`appliedTransitions[${index}] must transition to ${expectedToStatus}`);
     }
@@ -564,12 +575,31 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
       `appliedTransitions[${index}].appliedAtMs`,
     );
     if (appliedAtMs < receiptTime) fail("applied transition times must be monotonic");
+    finalTransitionFromStatus = fromStatus;
     receiptStatus = toStatus;
     receiptTime = appliedAtMs;
   }
   const updatedAtMs = requireTimestamp(envelope.updatedAtMs, "updatedAtMs");
   if (receiptStatus !== status) fail("applied transition chain does not reach the lifecycle status");
   if (updatedAtMs !== receiptTime) fail("updatedAtMs does not match the applied transition chain");
+  if (artifactApplicationRecorded !== (envelope.artifactReceipt !== null)) {
+    fail("artifact application receipt does not match the applied transition chain");
+  }
+  if (status === "stale") {
+    const staleFault = requireRecord(envelope.fault, "fault");
+    const expectedStage = finalTransitionFromStatus === "accepted" ? "apply" : "review";
+    if (staleFault.stage !== expectedStage) {
+      fail(`TARGET_STALE stage must be ${expectedStage} for its transition chain`);
+    }
+  }
+  if (status === "abandoned") {
+    const expectedCertainty = finalTransitionFromStatus === "unknown"
+      ? "may-have-dispatched"
+      : "known-not-dispatched";
+    if (certainty !== expectedCertainty) {
+      fail(`abandoned certainty must be ${expectedCertainty} for its transition chain`);
+    }
+  }
   canonicalJsonV1(envelope);
   const size = encoder.encode(canonicalJsonV1(envelope)).length;
   if (size > DESKTOP_OPERATION_MAX_ENVELOPE_BYTES) fail("envelope exceeds its byte limit");
@@ -616,6 +646,7 @@ function validateSelectedContext(
   prepared: PreparedOperation,
   selected: CreateDesktopOperationEnvelopeV1Input["selectedContext"],
 ): void {
+  validatePackageManifest(selected.manifest);
   requireHash(selected.manifestSha256, "selectedContext manifestSha256");
   requireText(selected.renderedContext, "selectedContext renderedContext");
   if (
@@ -645,21 +676,28 @@ function validateSelectedContext(
   if (contentFingerprint(target.currentText) !== prepared.targetRevision.contentHash) {
     fail("selected current text does not match the prepared target content hash");
   }
-  validateSelectedOperationRange(selected.manifest.operation.range, prepared.operationInputs);
+  validateSelectedOperationRange(
+    selected.manifest.operation.range,
+    prepared.operationInputs,
+    target.currentText,
+  );
 }
 
 function validateSelectedOperationRange(
   value: unknown,
   operationInputs: Record<string, unknown>,
+  currentText: string,
 ): void {
   const range = requireRecord(value, "selectedContext.manifest.operation.range");
   requireExactKeys(range, ["fromUtf16", "toUtf16"], "selectedContext.manifest.operation.range");
   requireRange(range.fromUtf16, range.toUtf16, "selectedContext.manifest.operation.range");
-  if (
-    range.fromUtf16 !== operationInputs.rangeFrom
-    || range.toUtf16 !== operationInputs.rangeTo
-  ) {
-    fail("selected operation range does not match the prepared Extend apply range");
+  const expected = traceSourceRangeForOperationV1(
+    "extend",
+    operationInputs,
+    currentText,
+  );
+  if (range.fromUtf16 !== expected.fromUtf16 || range.toUtf16 !== expected.toUtf16) {
+    fail("selected operation range does not match the prepared Extend source range");
   }
 }
 
@@ -675,6 +713,7 @@ function validateSelectedContextPlacement(
   }
   const message = messages[placement.messageIndex as number];
   if (!message) fail("selectedContext.placement.messageIndex is outside the prepared messages");
+  if (message.role !== "user") fail("selectedContext.placement must identify a user message");
   requireRange(placement.fromUtf16, placement.toUtf16, "selectedContext.placement range");
   const from = placement.fromUtf16 as number;
   const to = placement.toUtf16 as number;
@@ -684,6 +723,31 @@ function validateSelectedContextPlacement(
   }
   if (message.content.slice(from, to) !== renderedContext) {
     fail("selectedContext.placement does not identify the exact rendered context");
+  }
+  const occurrences: Array<{ messageIndex: number; fromUtf16: number }> = [];
+  for (const [messageIndex, candidate] of messages.entries()) {
+    let cursor = 0;
+    while (cursor <= candidate.content.length - renderedContext.length) {
+      const found = candidate.content.indexOf(renderedContext, cursor);
+      if (found < 0) break;
+      occurrences.push({ messageIndex, fromUtf16: found });
+      cursor = found + 1;
+    }
+  }
+  if (
+    occurrences.length !== 1
+    || occurrences[0]!.messageIndex !== placement.messageIndex
+    || occurrences[0]!.fromUtf16 !== from
+  ) {
+    fail("selected rendered context must occur exactly once in the prepared user messages");
+  }
+}
+
+function validatePackageManifest(value: unknown): asserts value is SelectedTraceContextManifestV1 {
+  try {
+    validateSelectedTraceContextManifestV1(value);
+  } catch (error) {
+    fail(`selected context manifest is invalid: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -697,8 +761,13 @@ function validateLifecycleInvariant(
   const artifactIntent = envelope.artifactIntent;
   const artifactReceipt = envelope.artifactReceipt;
   const fault = envelope.fault;
-  if (["prepared", "approved", "dispatch-intent", "cancelled", "abandoned"].includes(status)) {
+  const ambiguousAbandon = status === "abandoned" && certainty === "may-have-dispatched";
+  if (["prepared", "approved", "dispatch-intent", "cancelled"].includes(status)) {
     if (certainty !== "known-not-dispatched") fail(`${status} must remain known-not-dispatched`);
+  } else if (status === "abandoned") {
+    if (certainty !== "known-not-dispatched" && certainty !== "may-have-dispatched") {
+      fail("abandoned certainty is invalid");
+    }
   } else if (["provider-io", "unknown"].includes(status)) {
     if (certainty !== "may-have-dispatched") fail(`${status} must remain may-have-dispatched`);
   } else if (status === "failed") {
@@ -708,17 +777,33 @@ function validateLifecycleInvariant(
   } else if (certainty !== "response-recorded") {
     fail(`${status} requires a recorded response`);
   }
-  if (["response-completed", "accepted", "rejected"].includes(status) !== (response !== null)) {
+  if (["response-completed", "accepted", "stale", "rejected"].includes(status) !== (response !== null)) {
     fail(`${status} response presence is inconsistent`);
   }
   if (status === "accepted" !== (artifactIntent !== null)) fail("accepted status alone may carry artifact intent");
   if (artifactReceipt !== null && (status !== "accepted" || artifactIntent === null)) {
     fail("artifact receipt requires an accepted artifact intent");
   }
-  if (["failed", "cancelled", "unknown"].includes(status) !== (fault !== null)) {
+  if (["failed", "cancelled", "unknown", "stale"].includes(status) || ambiguousAbandon) {
+    if (fault === null) fail(`${status} fault presence is inconsistent`);
+  } else if (fault !== null) {
     fail(`${status} fault presence is inconsistent`);
   }
-  const expectedRetry = status === "cancelled" || (status === "failed" && certainty === "known-not-dispatched")
+  if (status === "stale") {
+    const staleFault = requireRecord(fault, "fault");
+    if (
+      staleFault.code !== "TARGET_STALE"
+      || (staleFault.stage !== "review" && staleFault.stage !== "apply")
+    ) fail("stale requires a TARGET_STALE fault at review or apply");
+  }
+  if (ambiguousAbandon) {
+    const abandonFault = requireRecord(fault, "fault");
+    if (abandonFault.code !== "DISPATCH_OUTCOME_UNKNOWN" || abandonFault.stage !== "dispatch") {
+      fail("ambiguous abandonment must retain its dispatch-unknown fault");
+    }
+  }
+  const expectedRetry = status === "cancelled" || status === "stale" || status === "rejected"
+    || (status === "failed" && certainty === "known-not-dispatched")
     ? "safe-new-attempt"
     : status === "unknown" || (status === "failed" && certainty === "provider-completed-without-result")
       ? "operator-confirmation-required"
@@ -998,11 +1083,14 @@ function transitionTargetStatus(
     case "accept-result":
       if (fromStatus === "response-completed") return "accepted";
       break;
+    case "mark-target-stale":
+      if (fromStatus === "response-completed" || fromStatus === "accepted") return "stale";
+      break;
     case "reject-result":
-      if (fromStatus === "response-completed") return "rejected";
+      if (fromStatus === "response-completed" || fromStatus === "stale") return "rejected";
       break;
     case "abandon":
-      if (["prepared", "approved", "dispatch-intent"].includes(fromStatus)) return "abandoned";
+      if (["prepared", "approved", "dispatch-intent", "unknown"].includes(fromStatus)) return "abandoned";
       break;
     case "record-artifact-applied":
       if (fromStatus === "accepted") return "accepted";
@@ -1025,7 +1113,7 @@ function deepFreeze<T>(value: T): T {
 
 const STATUSES = new Set<DesktopOperationStatusV1>([
   "prepared", "approved", "dispatch-intent", "provider-io", "response-completed",
-  "failed", "cancelled", "unknown", "accepted", "rejected", "abandoned",
+  "failed", "cancelled", "unknown", "accepted", "stale", "rejected", "abandoned",
 ]);
 const CERTAINTIES = new Set<OperationExecutionCertaintyV1>([
   "known-not-dispatched", "may-have-dispatched", "provider-completed-without-result", "response-recorded",
@@ -1043,6 +1131,7 @@ const FAULT_STAGES = new Set<OperationFaultStageV1>([
 ]);
 const TRANSITION_TYPES = new Set<DesktopOperationTransitionTypeV1>([
   "approve", "record-dispatch-intent", "record-provider-io-may-have-started", "record-response",
-  "record-failure", "cancel", "mark-dispatch-unknown", "accept-result", "reject-result", "abandon",
+  "record-failure", "cancel", "mark-dispatch-unknown", "accept-result", "mark-target-stale",
+  "reject-result", "abandon",
   "record-artifact-applied",
 ]);

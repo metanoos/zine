@@ -1,6 +1,7 @@
 export * from "./adapter-validation.js";
 export * from "./compiler.js";
 export * from "./errors.js";
+export * from "./manifest-validator.js";
 export * from "./protected-output.js";
 export * from "./process-projector.js";
 export * from "./ranges.js";

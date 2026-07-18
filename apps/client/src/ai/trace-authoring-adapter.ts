@@ -80,7 +80,7 @@ export function compileTraceAuthoringOperation(
     };
   }
 
-  const operationRange = sourceRangeForOperation(
+  const operationRange = traceSourceRangeForOperationV1(
     input.operation,
     input.operationInputs,
     input.targetText,
@@ -282,7 +282,8 @@ export function buildAcceptedExtendChanges(
     .sort((left, right) => left.from - right.from);
 }
 
-function sourceRangeForOperation(
+/** Canonical source bytes interpreted by Extend/Settle preparation and receipts. */
+export function traceSourceRangeForOperationV1(
   operation: "extend" | "settle",
   inputs: OpInputs,
   targetText: string,

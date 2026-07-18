@@ -6,7 +6,7 @@ import {
   type TraceContextSelectionSuccessV1,
 } from "@zine/trace-context";
 
-import { contentFingerprint } from "./context-snapshot.js";
+import { contentFingerprint, createContextSnapshot } from "./context-snapshot.js";
 import {
   DESKTOP_OPERATION_MAX_RESPONSE_BYTES,
   DesktopOperationEnvelopeError,
@@ -28,6 +28,8 @@ import {
   type DesktopOperationTransitionV1,
 } from "./desktop-operation-lifecycle.js";
 import type { PreparedOperation } from "./prepared-operation.js";
+import { prepareOperation } from "./prepared-operation.js";
+import type { ProviderConfig } from "./models-store.js";
 
 const TARGET_TEXT = "draft";
 const BASE_TIME = 1_000;
@@ -52,7 +54,7 @@ async function selection(): Promise<TraceContextSelectionSuccessV1> {
         currentText: TARGET_TEXT,
         chosenPath: "draft.md",
       },
-      range: { fromUtf16: TARGET_TEXT.length, toUtf16: TARGET_TEXT.length },
+      range: { fromUtf16: 0, toUtf16: TARGET_TEXT.length },
       maxContextBytes: 16_384,
       preparedRequestMaxBytes: 32_768,
       reservedPromptBytes: 1_024,
@@ -214,6 +216,10 @@ async function atStatus(
   }
   run(transition("record-response", at, { responseText: "continued prose" }));
   if (status === "response-completed") return current;
+  if (status === "stale") {
+    run(transition("mark-target-stale", at, {}));
+    return current;
+  }
   if (status === "rejected") {
     run(transition("reject-result", at, {}));
     return current;
@@ -302,6 +308,23 @@ test("canonical bytes are deterministic, I-JSON safe, and round-trip with integr
     () => parseDesktopOperationEnvelopeV1(JSON.stringify(splitPlacement)),
     /placement range splits a Unicode scalar value/,
   );
+
+  for (const [name, mutate] of [
+    ["missing field", (manifest: Record<string, any>) => { delete manifest.input; }],
+    ["unknown field", (manifest: Record<string, any>) => { manifest.unreviewed = true; }],
+  ] as const) {
+    const malformed = JSON.parse(serialized) as Record<string, any>;
+    mutate(malformed.selectedContext.manifest);
+    malformed.selectedContext.manifestSha256 = hashCanonicalV1(
+      "zine.trace-context.package-manifest.v1",
+      malformed.selectedContext.manifest,
+    );
+    assert.throws(
+      () => parseDesktopOperationEnvelopeV1(JSON.stringify(malformed)),
+      /selected context manifest is invalid/,
+      name,
+    );
+  }
 });
 
 test("creation rejects mismatched context identity, non-Extend operations, split Unicode, and unbounded retention", async () => {
@@ -330,6 +353,34 @@ test("creation rejects mismatched context identity, non-Extend operations, split
       placement: { messageIndex: 1, fromUtf16: 1, toUtf16: selected.renderedContext.length },
     },
   }), /does not identify the exact rendered context/);
+  const duplicatePrepared = {
+    ...base.prepared,
+    messages: [
+      base.prepared.messages[0]!,
+      { role: "user" as const, content: `${selected.renderedContext}\n${selected.renderedContext}` },
+    ],
+  };
+  assert.throws(() => createDesktopOperationEnvelopeV1({
+    ...base,
+    prepared: duplicatePrepared,
+    selectedContext: withPlacement(selected),
+  }), /must occur exactly once/);
+  for (const role of ["system", "assistant"] as const) {
+    assert.throws(() => createDesktopOperationEnvelopeV1({
+      ...base,
+      prepared: {
+        ...base.prepared,
+        messages: [
+          { role, content: selected.renderedContext },
+          { role: "user", content: "ordinary seed" },
+        ],
+      },
+      selectedContext: {
+        ...withPlacement(selected),
+        placement: { messageIndex: 0, fromUtf16: 0, toUtf16: selected.renderedContext.length },
+      },
+    }), /must identify a user message/);
+  }
   const wrongRangeManifest = JSON.parse(JSON.stringify(selected.manifest)) as typeof selected.manifest;
   (wrongRangeManifest.operation as { range: { fromUtf16: number; toUtf16: number } }).range = {
     fromUtf16: 0,
@@ -417,6 +468,111 @@ test("creation rejects mismatched context identity, non-Extend operations, split
   }), /splits a Unicode scalar/);
 });
 
+test("real preparation and selector bind an Extend source selection separately from its apply point", async () => {
+  const body = "Opening paragraph. Selected 🧠 seed";
+  const sourceFrom = body.indexOf("Selected");
+  const sourceTo = body.length;
+  const applyAt = body.length;
+  const selected = await selectTraceContextV1({
+    version: 1,
+    policy: "text-only-v1",
+    operation: {
+      version: 1,
+      operation: "extend",
+      target: {
+        traceId: TRACE_ID,
+        headId: HEAD_ID,
+        contentHash: HASH(body),
+        currentText: body,
+        chosenPath: "draft.md",
+      },
+      range: { fromUtf16: sourceFrom, toUtf16: sourceTo },
+      maxContextBytes: 16_384,
+      preparedRequestMaxBytes: 32_768,
+      reservedPromptBytes: 1_024,
+    },
+    candidates: [],
+  });
+  if (!selected.ok) assert.fail(selected.error.message);
+  assert.equal(selected.ok, true);
+  const contextSnapshot = createContextSnapshot({
+    target: {
+      kind: "file",
+      folderId: FOLDER_ID,
+      path: "draft.md",
+      traceId: TRACE_ID,
+      headId: HEAD_ID,
+      body,
+    },
+    mount: { kind: "file", path: "draft.md" },
+    shields: [],
+    inputs: [{
+      path: "draft.md", traceId: TRACE_ID, headId: HEAD_ID, body,
+      citations: [], deltaLog: [], unstepped: false,
+    }],
+    renderedBlock: selected.renderedContext,
+    createdAt: BASE_TIME,
+  });
+  const provider: ProviderConfig = {
+    id: "provider-real-prepare",
+    label: "Provider",
+    protocol: "openai",
+    baseUrl: "https://example.test/v1",
+    modelId: "model-1",
+    credentialRef: "model:provider:real:api-key",
+    credentialConfigured: true,
+  };
+  const prepared = prepareOperation({
+    operation: "extend",
+    operationInputs: {
+      seed: body.slice(sourceFrom, sourceTo),
+      hasSelection: true,
+      rangeFrom: applyAt,
+      rangeTo: applyAt,
+      sourceFrom,
+      sourceTo,
+    },
+    contextSnapshot,
+    provider,
+    modelVoicePubkey: "a".repeat(64),
+    lensId: "default",
+    dirtyTarget: false,
+    requestId: "request-cross-lane",
+    createdAt: BASE_TIME,
+  });
+  const messageIndex = prepared.messages.findIndex((message) => message.content.includes(selected.renderedContext));
+  const fromUtf16 = prepared.messages[messageIndex]!.content.indexOf(selected.renderedContext);
+  let subject = createDesktopOperationEnvelopeV1({
+    operationId: "operation-cross-lane",
+    attemptId: "attempt-cross-lane",
+    prepared,
+    provider: {
+      protocol: "openai",
+      modelId: "model-1",
+      transportConfigSha256: HASH("cross-lane-config"),
+    },
+    selectedContext: {
+      ...selected,
+      placement: {
+        messageIndex,
+        fromUtf16,
+        toUtf16: fromUtf16 + selected.renderedContext.length,
+      },
+    },
+    maxOutputTokens: 100,
+    createdAtMs: BASE_TIME,
+  });
+  assert.deepEqual(subject.selectedContext.manifest.operation.range, { fromUtf16: sourceFrom, toUtf16: sourceTo });
+  subject = apply(subject, transition("approve", BASE_TIME + 1, {}));
+  subject = apply(subject, transition("record-dispatch-intent", BASE_TIME + 2, {}));
+  subject = apply(subject, transition("record-provider-io-may-have-started", BASE_TIME + 3, {}));
+  subject = apply(subject, transition("record-response", BASE_TIME + 4, { responseText: "Continuation" }));
+  subject = apply(subject, transition("accept-result", BASE_TIME + 5, {
+    artifactIntentId: "artifact-cross-lane",
+  }));
+  assert.deepEqual(subject.artifactIntent?.applyRange, { fromUtf16: applyAt, toUtf16: applyAt });
+});
+
 test("the complete live path emits one dispatch, review, and accepted-only artifact intent", async () => {
   let current = await envelope();
   current = apply(current, transition("approve", 1_001, {}));
@@ -470,6 +626,68 @@ test("rejecting a response never creates an artifact intent", async () => {
   assert.equal(current.lifecycle.status, "rejected");
   assert.equal(current.artifactIntent, null);
   assert.equal(current.artifactReceipt, null);
+  assert.equal(current.lifecycle.retryPolicy, "safe-new-attempt");
+});
+
+test("target staleness is durable before review or after acceptance and never reapplies", async () => {
+  const completed = await atStatus("response-completed");
+  const reviewStaleReduction = reduceDesktopOperationV1(
+    completed,
+    transition("mark-target-stale", completed.updatedAtMs + 1, {}),
+  );
+  const reviewStale = reviewStaleReduction.envelope;
+  assert.deepEqual(reviewStaleReduction.effects, []);
+  assert.equal(reviewStale.lifecycle.status, "stale");
+  assert.equal(reviewStale.lifecycle.executionCertainty, "response-recorded");
+  assert.equal(reviewStale.lifecycle.retryPolicy, "safe-new-attempt");
+  assert.strictEqual(reviewStale.response?.text, completed.response?.text);
+  assert.equal(reviewStale.fault?.code, "TARGET_STALE");
+  assert.equal(reviewStale.fault?.stage, "review");
+  assert.equal(reviewStale.artifactIntent, null);
+  assert.equal(reviewStale.artifactReceipt, null);
+  const reviewRecovery = projectDesktopOperationRecoveryV1(reviewStale, reviewStale.updatedAtMs + 1);
+  assert.deepEqual(reviewRecovery.automaticEffects, []);
+  assert.equal(reviewRecovery.operatorAction, "review-stale-result");
+  const retry = createDesktopOperationRetryV1(reviewStale, {
+    attemptId: "attempt-stale-retry",
+    createdAtMs: reviewStale.updatedAtMs + 1,
+  });
+  assert.equal(retry.attempt.retryOfAttemptId, reviewStale.attempt.attemptId);
+  assert.equal(retry.attempt.possibleDuplicateAcknowledgedAtMs, null);
+
+  const accepted = await atStatus("accepted");
+  const applyStaleReduction = reduceDesktopOperationV1(
+    accepted,
+    transition("mark-target-stale", accepted.updatedAtMs + 1, {}),
+  );
+  const applyStale = applyStaleReduction.envelope;
+  assert.deepEqual(applyStaleReduction.effects, []);
+  assert.equal(applyStale.fault?.stage, "apply");
+  assert.equal(applyStale.artifactIntent, null);
+  assert.equal(applyStale.artifactReceipt, null);
+  assert.doesNotThrow(() => parseDesktopOperationEnvelopeV1(
+    serializeDesktopOperationEnvelopeV1(applyStale),
+  ));
+
+  const applied = apply(accepted, transition("record-artifact-applied", accepted.updatedAtMs + 1, {
+    receiptId: "artifact-receipt-stale",
+    resultingContentHash: HASH("already applied"),
+  }));
+  assert.throws(
+    () => reduceDesktopOperationV1(
+      applied,
+      transition("mark-target-stale", applied.updatedAtMs + 1, {}),
+    ),
+    /applied artifact cannot later be marked target-stale/,
+  );
+
+  const discarded = apply(
+    applyStale,
+    transition("reject-result", applyStale.updatedAtMs + 1, {}),
+  );
+  assert.equal(discarded.lifecycle.status, "rejected");
+  assert.equal(discarded.fault, null);
+  assert.strictEqual(discarded.response?.text, applyStale.response?.text);
 });
 
 test("legal transitions are idempotent and every omitted graph edge fails closed", async () => {
@@ -478,18 +696,19 @@ test("legal transitions are idempotent and every omitted graph edge fails closed
     approved: ["record-dispatch-intent", "record-failure", "cancel", "abandon"],
     "dispatch-intent": ["record-provider-io-may-have-started", "record-failure", "cancel", "abandon"],
     "provider-io": ["record-response", "record-failure", "mark-dispatch-unknown"],
-    "response-completed": ["accept-result", "reject-result"],
-    accepted: ["record-artifact-applied"],
+    "response-completed": ["accept-result", "mark-target-stale", "reject-result"],
+    accepted: ["mark-target-stale", "record-artifact-applied"],
+    stale: ["reject-result"],
     failed: [],
     cancelled: [],
-    unknown: [],
+    unknown: ["abandon"],
     rejected: [],
     abandoned: [],
   };
   const allTypes = [
     "approve", "record-dispatch-intent", "record-provider-io-may-have-started",
     "record-response", "record-failure", "cancel", "mark-dispatch-unknown",
-    "accept-result", "reject-result", "abandon", "record-artifact-applied",
+    "accept-result", "mark-target-stale", "reject-result", "abandon", "record-artifact-applied",
   ] as const;
 
   for (const status of Object.keys(legal) as Array<keyof typeof legal>) {
@@ -560,6 +779,57 @@ test("serialized receipts must form one legal monotonic chain to the recorded li
     () => parseDesktopOperationEnvelopeV1(JSON.stringify(wrongUpdatedAt)),
     /updatedAtMs does not match/,
   );
+
+  const applyStale = apply(
+    await atStatus("accepted"),
+    transition("mark-target-stale", BASE_TIME + 20, {}),
+  );
+  const wrongStaleStage = JSON.parse(
+    serializeDesktopOperationEnvelopeV1(applyStale),
+  ) as DesktopOperationEnvelopeV1;
+  (wrongStaleStage.fault as OperationFaultV1).stage = "review";
+  assert.throws(
+    () => parseDesktopOperationEnvelopeV1(JSON.stringify(wrongStaleStage)),
+    /TARGET_STALE stage must be apply/,
+  );
+
+  const applied = apply(
+    await atStatus("accepted"),
+    transition("record-artifact-applied", BASE_TIME + 20, {
+      receiptId: "artifact-receipt-forged-stale",
+      resultingContentHash: HASH("applied before forged stale"),
+    }),
+  );
+  const staleAfterApplied = JSON.parse(
+    serializeDesktopOperationEnvelopeV1(applied),
+  ) as DesktopOperationEnvelopeV1;
+  const staleAtMs = staleAfterApplied.updatedAtMs + 1;
+  (staleAfterApplied.appliedTransitions as Array<DesktopOperationEnvelopeV1["appliedTransitions"][number]>).push({
+    transitionId: "transition-forged-target-stale",
+    transitionType: "mark-target-stale",
+    fromStatus: "accepted",
+    toStatus: "stale",
+    actionSha256: HASH("forged stale transition"),
+    appliedAtMs: staleAtMs,
+  });
+  staleAfterApplied.lifecycle = {
+    status: "stale",
+    executionCertainty: "response-recorded",
+    retryPolicy: "safe-new-attempt",
+  };
+  staleAfterApplied.fault = {
+    version: 1,
+    code: "TARGET_STALE",
+    stage: "apply",
+    observedAtMs: staleAtMs,
+  };
+  staleAfterApplied.artifactIntent = null;
+  staleAfterApplied.artifactReceipt = null;
+  staleAfterApplied.updatedAtMs = staleAtMs;
+  assert.throws(
+    () => parseDesktopOperationEnvelopeV1(JSON.stringify(staleAfterApplied)),
+    /applied artifact cannot later be marked target-stale/,
+  );
 });
 
 test("post-marker ambiguity becomes unknown and recovery never automatically redispatches", async () => {
@@ -580,6 +850,28 @@ test("post-marker ambiguity becomes unknown and recovery never automatically red
     () => reduceDesktopOperationV1(io, transition("cancel", io.updatedAtMs + 1, {})),
     /cancel is illegal from provider-io/,
   );
+
+  const abandoned = apply(
+    unknown,
+    transition("abandon", unknown.updatedAtMs + 1, {}),
+  );
+  assert.equal(abandoned.lifecycle.status, "abandoned");
+  assert.equal(abandoned.lifecycle.executionCertainty, "may-have-dispatched");
+  assert.equal(abandoned.lifecycle.retryPolicy, "not-eligible");
+  assert.strictEqual(abandoned.fault?.code, "DISPATCH_OUTCOME_UNKNOWN");
+  const abandonedRecovery = projectDesktopOperationRecoveryV1(
+    abandoned,
+    abandoned.updatedAtMs + 1,
+  );
+  assert.deepEqual(abandonedRecovery.automaticEffects, []);
+  assert.equal(abandonedRecovery.operatorAction, "none");
+  assert.doesNotThrow(() => parseDesktopOperationEnvelopeV1(
+    serializeDesktopOperationEnvelopeV1(abandoned),
+  ));
+  assert.throws(() => createDesktopOperationRetryV1(abandoned, {
+    attemptId: "attempt-after-abandonment",
+    createdAtMs: abandoned.updatedAtMs + 1,
+  }), /not retryable/);
 });
 
 test("pre-I/O dispatch intent resumes the handshake without claiming a provider call", async () => {
@@ -626,6 +918,11 @@ test("retries keep operation identity, create a linked attempt, and require ambi
   assert.equal(safeRetry.prepared.requestSha256, cancelled.prepared.requestSha256);
   assert.equal(safeRetry.lifecycle.status, "prepared");
   assert.throws(() => createDesktopOperationRetryV1(cancelled, {
+    attemptId: "attempt-retry-safe-ack",
+    createdAtMs: cancelled.updatedAtMs + 1,
+    possibleDuplicateAcknowledged: true,
+  }), /must not acknowledge a possible duplicate/);
+  assert.throws(() => createDesktopOperationRetryV1(cancelled, {
     attemptId: cancelled.attempt.attemptId,
     createdAtMs: cancelled.updatedAtMs + 1,
   }), /new attempt id/);
@@ -641,6 +938,14 @@ test("retries keep operation identity, create a linked attempt, and require ambi
     possibleDuplicateAcknowledged: true,
   });
   assert.equal(confirmed.attempt.possibleDuplicateAcknowledgedAtMs, unknown.updatedAtMs + 1);
+  const rejected = await atStatus("rejected");
+  const rejectedRetry = createDesktopOperationRetryV1(rejected, {
+    attemptId: "attempt-retry-rejected",
+    createdAtMs: rejected.updatedAtMs + 1,
+  });
+  assert.equal(rejectedRetry.attempt.retryOfAttemptId, rejected.attempt.attemptId);
+  assert.equal(rejectedRetry.attempt.possibleDuplicateAcknowledgedAtMs, null);
+  assert.equal(rejectedRetry.response, null);
   const accepted = await atStatus("accepted");
   assert.throws(() => createDesktopOperationRetryV1(accepted, {
     attemptId: "attempt-retry-0003",
@@ -677,11 +982,15 @@ test("response and retention limits fail before persistence and signal bounded d
   assert.throws(() => reduceDesktopOperationV1(io, transition("record-response", io.updatedAtMs + 1, {
     responseText: "x".repeat(DESKTOP_OPERATION_MAX_RESPONSE_BYTES + 1),
   })), /response exceeds/);
-  const due = projectDesktopOperationRecoveryV1(io, io.retention.deleteByMs);
-  assert.equal(due.privateEnvelopeDeletionDue, true);
-  assert.equal(io.retention.deadlineBehavior, "delete-entire-private-envelope");
-  assert.equal(due.automaticEffects.at(-1)?.kind, "delete-expired-private-envelope");
-  assert.equal("keepHashes" in due.automaticEffects.at(-1)!, false);
+  for (const status of ["dispatch-intent", "provider-io", "response-completed", "accepted"] as const) {
+    const expiring = await atStatus(status);
+    const due = projectDesktopOperationRecoveryV1(expiring, expiring.retention.deleteByMs);
+    assert.equal(due.privateEnvelopeDeletionDue, true);
+    assert.equal(expiring.retention.deadlineBehavior, "delete-entire-private-envelope");
+    assert.deepEqual(due.automaticEffects.map((effect) => effect.kind), ["delete-expired-private-envelope"]);
+    assert.equal(due.operatorAction, "none");
+    assert.equal("keepHashes" in due.automaticEffects[0]!, false);
+  }
 });
 
 function actionFor(
@@ -703,6 +1012,7 @@ function actionFor(
     case "cancel": return transition(type, atMs, {});
     case "mark-dispatch-unknown": return transition(type, atMs, {});
     case "accept-result": return transition(type, atMs, { artifactIntentId: `artifact-intent-${atMs}` });
+    case "mark-target-stale": return transition(type, atMs, {});
     case "reject-result": return transition(type, atMs, {});
     case "abandon": return transition(type, atMs, {});
     case "record-artifact-applied": return transition(type, atMs, {
