@@ -20,6 +20,11 @@ demonstrated.
 | [Roadmap](ROADMAP.md) | How the trace-context runtime, evaluation, and later team layers are sequenced |
 | [Company](COMPANY.md) | How an open sovereign protocol can support an optional paid layer |
 
+Implementation architecture: [Desktop operation lifecycle](DESKTOP_OPERATION_LIFECYCLE.md)
+defines the private/local Phase 2 envelope, crash semantics, and integration
+boundary for the first recoverable Extend operation. It is not a protocol
+specification or an implemented-storage claim.
+
 ## Accepted migration direction
 
 [Trace-Native Zines](TRACE_NATIVE_ZINES.md) records the complete accepted
