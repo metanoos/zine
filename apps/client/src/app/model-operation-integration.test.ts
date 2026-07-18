@@ -118,6 +118,14 @@ test("desktop recovery constructs the native frozen-session store only after App
   assert.doesNotMatch(app, /DesktopOperationStoreV1\([^)]*localStorage/);
 });
 
+test("desktop review refresh traverses the complete opaque journal", () => {
+  const refresh = functionBody("refreshDesktopOperationEnvelopes", "async function dispatchDesktopOperationAttempt");
+  assert.match(refresh, /while \(true\)/);
+  assert.match(refresh, /repository\.listPage\(cursor, 16\)/);
+  assert.match(refresh, /nextCursor === cursor \|\| seenCursors\.has\(nextCursor\)/);
+  assert.doesNotMatch(refresh, /pageIndex|< 4/);
+});
+
 test("Inspector prepares local operations without waiting on ancillary relay reads", () => {
   const source = functionBody("openInspector", "/** Begin an in-place op");
   const hydrate = functionBody("hydrateInspectorInputs", "async function prepareInspectorSelection");

@@ -10348,11 +10348,17 @@ function App() {
     if (!repository) return;
     const records: DesktopOperationEnvelopeV1[] = [];
     let cursor: string | null = null;
-    for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
+    const seenCursors = new Set<string>();
+    while (true) {
       const page = await repository.listPage(cursor, 16);
       records.push(...page.records);
-      cursor = page.nextCursor;
-      if (!cursor) break;
+      const nextCursor = page.nextCursor;
+      if (!nextCursor) break;
+      if (page.records.length === 0 || nextCursor === cursor || seenCursors.has(nextCursor)) {
+        throw new Error("The desktop operation journal returned a non-advancing page");
+      }
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
     }
     setDesktopOperationEnvelopes(records);
   }
