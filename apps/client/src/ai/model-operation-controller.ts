@@ -15,10 +15,16 @@ import {
   PreparedOperationApproval,
   prepareOperation,
   type PreparedOperation,
+  type PrepareOperationInput,
 } from "./prepared-operation.js";
 import { providerProfileFingerprint } from "./provider-fingerprint.js";
 import { SnapshotCoordinator, type SnapshotDependencies } from "./snapshot-coordinator.js";
 import type { AuthoritySpanV1 } from "@zine/trace-context";
+import {
+  desktopTraceContextBoundaryFingerprintV1,
+  prepareDesktopTraceContextOperationV1,
+  type DesktopTraceContextPreparationBoundaryV1,
+} from "./desktop-trace-context-preparation.js";
 
 export interface ModelOperationFocusSnapshot {
   kind: string;
@@ -63,6 +69,8 @@ export interface PrepareModelOperationInput {
   modelVoicePubkey: string;
   lensId: OpLensId;
   signal?: AbortSignal;
+  /** Optional exact signed-chain selector boundary for Extend/Settle dogfood. */
+  traceContext?: DesktopTraceContextPreparationBoundaryV1;
 }
 
 export interface ExecuteApprovedModelOperationInput extends PrepareModelOperationInput {
@@ -137,6 +145,7 @@ export class ModelOperationController {
         actingAuthorId: capture.actingAuthorId,
         spans: target.authoritySpans,
       })),
+      traceContextBoundaryHash: desktopTraceContextBoundaryFingerprintV1(input.traceContext),
       promptLayerVersions: [
         ...PROMPT_LAYER_VERSIONS,
         `prepared-operation:v${PREPARED_OPERATION_VERSION}`,
@@ -155,7 +164,7 @@ export class ModelOperationController {
     ) {
       throw new Error("The gathered context no longer matches the captured target revision");
     }
-    return prepareOperation({
+    const preparationInput: PrepareOperationInput = {
       operation: input.operation,
       operationInputs: input.operationInputs,
       contextSnapshot: snapshot,
@@ -166,7 +175,14 @@ export class ModelOperationController {
       dirtyTarget: capture.dirtyTarget,
       actingAuthorId: capture.actingAuthorId,
       authoritySpans: target.authoritySpans,
-    });
+    };
+    return input.traceContext
+      ? prepareDesktopTraceContextOperationV1(
+          preparationInput,
+          input.traceContext,
+          input.signal,
+        )
+      : prepareOperation(preparationInput);
   }
 
   approve(prepared: PreparedOperation): void {

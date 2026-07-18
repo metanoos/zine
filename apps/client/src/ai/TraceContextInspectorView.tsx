@@ -513,6 +513,18 @@ export function TraceContextInspectorView({
             <dt>Frozen-input fingerprint</dt>
             <dd><code>{metadata.fingerprint}</code></dd>
           </div>
+          {metadata.selectionIdentities ? (
+            <>
+              <div>
+                <dt>Rendered-context identity</dt>
+                <dd><code>{metadata.selectionIdentities.renderedContextSha256}</code></dd>
+              </div>
+              <div>
+                <dt>Package manifest identity</dt>
+                <dd><code>{metadata.selectionIdentities.manifestSha256}</code></dd>
+              </div>
+            </>
+          ) : null}
         </dl>
       </section>
     </article>

@@ -103,6 +103,7 @@ test("prepared operation freezes the exact provider-adjusted messages and metada
   assert.match(prepared.messages.at(-1)?.content ?? "", /=== CONTEXT ===/);
   assert.equal(Object.isFrozen(prepared), true);
   assert.equal(Object.isFrozen(prepared.messages), true);
+  assert.equal("traceContextSelection" in prepared, false, "legacy preparation shape stays unchanged");
   assert.equal(prepared.targetRevision.headId, "head");
   assert.equal(prepared.contextFingerprint, prepared.contextSnapshot.fingerprint);
 });
