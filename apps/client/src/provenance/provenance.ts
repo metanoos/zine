@@ -3187,6 +3187,19 @@ export async function stepFolderManifest(
 ): Promise<Event> {
   const previous = await fetchLatestFolderNode(folderId);
   if (!previous) throw new Error(`cannot Step unavailable folder ${folderId}`);
+  // A recursive folder Step persists its operation id before the first relay
+  // write. If the selected explicit checkpoint landed but an ancestor roll-up
+  // did not, retry must resume from that exact signed node rather than append a
+  // second author gesture. Only reuse the current head: a later folder advance
+  // means this old recovery transaction can no longer safely move ancestors.
+  const previousMeta = eventMeta(previous);
+  if (
+    opts?.operationId &&
+    previousMeta.operationId === opts.operationId &&
+    previousMeta.folderCheckpoint?.cause === "explicit-step"
+  ) {
+    return previous;
+  }
   return publishFolderNode(folderId, membersFromNode(previous), {
     prevEventId: previous.id,
     action: "edit",
