@@ -38,6 +38,7 @@ import {
   headCitationIds,
   operationIdFromNode,
   publishEdit,
+  requireAcceptedCurrentFolderCheckpoint,
   resolveTraceChain,
   resolveTraceIdentity,
   reconstructFromChain,
@@ -401,6 +402,7 @@ export async function propagateLocalTreeFolderHead(
   changedHead: import("nostr-tools").Event,
   signer: Uint8Array,
   localOnly?: boolean,
+  verifyAcceptedOperation?: boolean,
 ): Promise<void> {
   if (!isPathInsideTree(tree, changedFolderPath)) {
     throw new Error(
@@ -435,6 +437,13 @@ export async function propagateLocalTreeFolderHead(
       parentSigner,
       { localOnly, operationId },
     );
+    if (verifyAcceptedOperation) {
+      head = await requireAcceptedCurrentFolderCheckpoint(
+        parentId,
+        head,
+        getPublicKey(parentSigner),
+      );
+    }
     folderPath = parentPath;
     folderId = parentId;
     rememberLocalTreeFolderHead(tree, folderPath, folderId, head);
@@ -676,6 +685,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     changedHead: import("nostr-tools").Event,
     signer: Uint8Array,
     localOnly?: boolean,
+    verifyAcceptedOperation?: boolean,
   ): Promise<void> {
     await propagateLocalTreeFolderHead(
       { storageRootId: rootId, folderId: rootId, storagePath: "" },
@@ -684,6 +694,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       changedHead,
       signer,
       localOnly,
+      verifyAcceptedOperation,
     );
   }
 
@@ -1555,25 +1566,29 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       const operationId = requestedOperationId ?? createTraceOperationId();
       const signer = requestedSigner ?? resolveFileSigner(authorVoice());
       if (!signer) throw new Error(`cannot resolve a local signer for ${relativePath || "Root"}`);
-      const flightKey = `${getPublicKey(signer)}:${rootId}:${relativePath}:${operationId}`;
+      const folderId = relativePath === ""
+        ? rootId
+        : (() => {
+            const folder = loadLocalFolder(rootId)?.files[relativePath];
+            const id = folder?.traceId ?? folder?.nodeId;
+            if (folder?.kind !== "folder" || !id) {
+              throw new Error(`cannot resolve folder trace for ${relativePath}`);
+            }
+            return id;
+          })();
+      const folderSigner = folderWriteSigner(await fetchFolderOwner(folderId), signer);
+      if (!folderSigner) {
+        throw new Error(`cannot Step foreign folder ${relativePath || "Root"}`);
+      }
+      // The caller's requested signer is not the folder-chain identity: two
+      // callers can both resolve to the same held owner key. Key the entire
+      // selected-folder + ancestor cascade by its stable persisted identity so
+      // those callers share one flight instead of racing only the ancestors.
+      const flightKey = JSON.stringify([rootId, relativePath, folderId, operationId]);
       const existing = recursiveFolderStepFlights.get(flightKey);
       if (existing) return existing;
 
       const pending = (async () => {
-        const folderId = relativePath === ""
-          ? rootId
-          : (() => {
-              const folder = loadLocalFolder(rootId)?.files[relativePath];
-              const id = folder?.traceId ?? folder?.nodeId;
-              if (folder?.kind !== "folder" || !id) {
-                throw new Error(`cannot resolve folder trace for ${relativePath}`);
-              }
-              return id;
-            })();
-        const folderSigner = folderWriteSigner(await fetchFolderOwner(folderId), signer);
-        if (!folderSigner) {
-          throw new Error(`cannot Step foreign folder ${relativePath || "Root"}`);
-        }
         const head = await stepFolderManifest(folderId, folderSigner, {
           localOnly: true,
           operationId,
@@ -1591,6 +1606,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
             folderId,
             head,
             folderSigner,
+            true,
             true,
           );
         }

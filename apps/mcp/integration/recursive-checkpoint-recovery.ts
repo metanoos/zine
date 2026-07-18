@@ -70,12 +70,14 @@ async function main(): Promise<void> {
   const { createMcpWorkspace, initializeMcpKeySession } = await import("../src/tools.js");
   const { resolveWorkspaceBinding } = await import("../src/folder-binding.js");
   const {
+    createFolderGenesis,
     diffToDeltas,
     fetchEventById,
     fetchFolderNodes,
     fetchManifest,
     operationIdFromNode,
     publishEdit,
+    requireAcceptedCurrentFolderCheckpoint,
     sha256HexLocal,
     stepFolderManifest,
     upsertManifestEntry,
@@ -415,6 +417,32 @@ async function main(): Promise<void> {
   );
   assertOperationShape(afterConcurrent, concurrentOperationId);
 
+  // The requested signer is only a caller capability. Both requests below
+  // resolve to the held folder-owner key, so they must share the full cascade
+  // even though their requested pubkeys differ. The old Workspace flight key
+  // split here after the selected-folder flight and raced every ancestor.
+  const distinctSignerOperationId = createTraceOperationId();
+  const beforeDistinctSignerConcurrent = await folderChains();
+  const distinctSignerIds = await Promise.all([
+    workspace.stepFolder(selectedFolderPath, signer, distinctSignerOperationId),
+    concurrentWorkspace.stepFolder(
+      selectedFolderPath,
+      ownerSigner,
+      distinctSignerOperationId,
+    ),
+  ]);
+  assert.equal(distinctSignerIds[0], distinctSignerIds[1]);
+  const afterDistinctSignerConcurrent = await folderChains();
+  assert.deepEqual(
+    folderIds.map((id) =>
+      afterDistinctSignerConcurrent.get(id)!.length -
+      beforeDistinctSignerConcurrent.get(id)!.length
+    ),
+    [1, 1, 1, 1],
+    "distinct requested signers raced one resolved-owner recursive cascade",
+  );
+  assertOperationShape(afterDistinctSignerConcurrent, distinctSignerOperationId);
+
   const scenesManifest = await fetchManifest(scenesId);
   assert.deepEqual(scenesManifest, [{
     kind: "file",
@@ -510,6 +538,42 @@ async function main(): Promise<void> {
   );
   assert.equal(pendingLocalEventCount(), 0, "recovery fixture left a signed event pending");
 
+  // A home relay can still accept siblings from separate OS processes because
+  // ordinary Nostr publish has no CAS. The client-side assertion must detect
+  // that condition and fail closed instead of claiming the Step completed.
+  const siblingFolderId = await createFolderGenesis({
+    signer,
+    localOnly: true,
+    operationId: createTraceOperationId(),
+  });
+  const siblingBase = await stepFolderManifest(siblingFolderId, signer, {
+    localOnly: true,
+    operationId: createTraceOperationId(),
+  });
+  const siblingOperationId = createTraceOperationId();
+  const siblingA = explicitCopy(siblingBase, siblingOperationId, signer);
+  const siblingB = explicitCopy(
+    siblingBase,
+    siblingOperationId,
+    signer,
+    (content) => {
+      content.steppedAt = Number(content.steppedAt) + 1;
+    },
+  );
+  assert.notEqual(siblingA.id, siblingB.id, "sibling fixture collapsed to one event id");
+  await Promise.all([
+    publishDirect(siblingA, signer),
+    publishDirect(siblingB, signer),
+  ]);
+  await assert.rejects(
+    requireAcceptedCurrentFolderCheckpoint(
+      siblingFolderId,
+      siblingA,
+      agentPubkey,
+    ),
+    /accepted owner heads/,
+  );
+
   process.stdout.write(`${JSON.stringify({
     ok: true,
     recursiveRecoveryRootId: rootId,
@@ -519,6 +583,7 @@ async function main(): Promise<void> {
     leafNodeId: leaf.id,
     explicitFolderNodeId: explicitScenesHead.id,
     concurrentFolderNodeId: concurrentIds[0],
+    distinctSignerFolderNodeId: distinctSignerIds[0],
     retainedUnsafeOperationId: explicitOperationId,
   })}\n`);
 }

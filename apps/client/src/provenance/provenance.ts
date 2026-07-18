@@ -2567,6 +2567,45 @@ async function requireCurrentFolderChain(
   };
 }
 
+/** Re-read the home relay after a recursive folder checkpoint and prove that
+ * the exact signed node is the one current, fixed-owner checkpoint for its
+ * operation on a Full Trace chain. This detects an interprocess sibling race
+ * after publication; it does not prevent another process from racing after
+ * this read completes. */
+export async function requireAcceptedCurrentFolderCheckpoint(
+  folderId: string,
+  checkpoint: Event,
+  expectedOwnerPubkey: string,
+): Promise<Event> {
+  const operationId = eventMeta(checkpoint).operationId;
+  if (!operationId) {
+    throw new Error(`folder checkpoint ${checkpoint.id} is missing its operation id`);
+  }
+  const acceptedNodes = await fetchHomeFolderNodes(folderId);
+  const current = await requireCurrentFolderChain(
+    folderId,
+    acceptedNodes,
+    expectedOwnerPubkey,
+  );
+  const operationCheckpoints = current.chain.filter(
+    (event) => eventMeta(event).operationId === operationId,
+  );
+  if (operationCheckpoints.length !== 1) {
+    throw new Error(
+      `folder ${folderId} operation ${operationId} has ${operationCheckpoints.length} ` +
+        "accepted checkpoints on its current owner chain",
+    );
+  }
+  const accepted = operationCheckpoints[0]!;
+  if (accepted.id !== checkpoint.id || current.head.id !== checkpoint.id) {
+    throw new Error(
+      `folder checkpoint ${checkpoint.id} for operation ${operationId} is not the ` +
+        "unique current checkpoint accepted by the home relay",
+    );
+  }
+  return accepted;
+}
+
 /** Resolves the latest (uncited-as-prev) folder-trace node for `folderId`, or
  *  null if the folder has no folder chain yet. Same head-finding rule as file
  *  chains (`resolveHead`): a node nobody else cites as `prev` is the head. */
@@ -3316,7 +3355,7 @@ async function stepFolderManifestOnce(
     return current.head;
   }
 
-  return publishFolderNode(folderId, membersFromNode(current.head), {
+  const published = await publishFolderNode(folderId, membersFromNode(current.head), {
     prevEventId: current.head.id,
     action: "edit",
     signer,
@@ -3324,6 +3363,11 @@ async function stepFolderManifestOnce(
     operationId: opts.operationId,
     folderCheckpoint: { version: 1, cause: "explicit-step" },
   });
+  return requireAcceptedCurrentFolderCheckpoint(
+    folderId,
+    published,
+    expectedOwnerPubkey,
+  );
 }
 
 /** Append the deliberate landmark for an already-materialized folder frontier.
