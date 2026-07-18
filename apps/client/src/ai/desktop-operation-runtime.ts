@@ -748,8 +748,6 @@ export class DesktopOperationRuntimeV1 {
   private async recoverEnvelope(current: DesktopOperationEnvelopeV1): Promise<void> {
     switch (current.lifecycle.status) {
       case "dispatch-intent":
-        await this.resumeDispatchHandshake(current);
-        return;
       case "provider-io":
         await this.commit(current, this.transition("mark-dispatch-unknown", current, {}, {
           diagnosticRef: this.diagnosticRef(),

@@ -1133,7 +1133,7 @@ function transitionTargetStatus(
       if (["prepared", "approved", "dispatch-intent"].includes(fromStatus)) return "cancelled";
       break;
     case "mark-dispatch-unknown":
-      if (fromStatus === "provider-io") return "unknown";
+      if (fromStatus === "dispatch-intent" || fromStatus === "provider-io") return "unknown";
       break;
     case "accept-result":
       if (fromStatus === "response-completed") return "accepted";

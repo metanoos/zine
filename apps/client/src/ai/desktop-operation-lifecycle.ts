@@ -69,12 +69,6 @@ export type DesktopOperationEffectV1 =
     }
   | {
       version: 1;
-      kind: "resume-dispatch-handshake";
-      operationId: string;
-      attemptId: string;
-    }
-  | {
-      version: 1;
       kind: "record-attempt-unknown";
       operationId: string;
       attemptId: string;
@@ -226,7 +220,7 @@ export function reduceDesktopOperationV1(
       break;
     }
     case "mark-dispatch-unknown": {
-      requireCurrent(envelope, transition.type, "provider-io");
+      requireCurrent(envelope, transition.type, "dispatch-intent", "provider-io");
       const fault: OperationFaultV1 = {
         version: 1,
         code: "DISPATCH_OUTCOME_UNKNOWN",
@@ -352,9 +346,10 @@ export interface DesktopOperationRecoveryProjectionV1 {
 }
 
 /**
- * Recovery never returns `dispatch-provider-request` for a provider-io state.
- * The durable may-have-started marker therefore fails closed to `unknown`
- * rather than duplicating a call after process death.
+ * Recovery never returns `dispatch-provider-request` for a dispatch-intent or
+ * provider-io state. A process/activation boundary can roll back the later
+ * marker after I/O began, so both fail closed to `unknown` rather than risk a
+ * duplicate provider call.
  */
 export function projectDesktopOperationRecoveryV1(
   envelope: DesktopOperationEnvelopeV1,
@@ -390,13 +385,6 @@ export function projectDesktopOperationRecoveryV1(
       operatorAction = "dispatch-or-abandon";
       break;
     case "dispatch-intent":
-      automaticEffects.push({
-        version: 1,
-        kind: "resume-dispatch-handshake",
-        operationId: envelope.operationId,
-        attemptId: envelope.attempt.attemptId,
-      });
-      break;
     case "provider-io":
       automaticEffects.push({
         version: 1,
