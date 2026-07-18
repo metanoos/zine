@@ -16,7 +16,8 @@
     "benchmark": "tsx benchmark/run.ts",
     "benchmark:selector": "tsx benchmark/selection.ts",
     "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck && tsx --test src/*.test.ts benchmark/*.test.ts"
+    "test": "npm run typecheck && tsx --test src/*.test.ts benchmark/*.test.ts",
+    "test:coverage": "npm run typecheck && node --import=tsx --test --experimental-test-coverage --test-coverage-lines=92 --test-coverage-branches=75 --test-coverage-functions=95 --test-coverage-include=src/**/*.ts --test-coverage-exclude=src/**/*.test.ts src/*.test.ts benchmark/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

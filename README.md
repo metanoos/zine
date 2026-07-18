@@ -291,10 +291,17 @@ enough for provenance, storage, or networking changes.
 
 ```sh
 npm run doctor         # prerequisites and local artifact diagnostics
-npm run check          # dev scripts, client types/tests, MCP, relay, and Rust
+npm run check          # dev scripts, types, tests, and Node/Go coverage floors
 npm run verify         # check + client build + isolated real-relay smoke
 npm run verify:relay   # Step/Send/Attest/Mint/Cite against temporary relays
 ```
+
+`check` enforces conservative coverage floors for the TypeScript modules loaded
+by each suite and for both Go relay packages. These floors prevent silent
+regression from the current baseline; they are not a claim that every source
+file is loaded or that browser interactions have end-to-end coverage. Package
+directories retain plain `npm test` commands for a quieter local loop and expose
+the enforced run as `npm run test:coverage`.
 
 `verify:relay` uses temporary ACL-protected relay databases and random ports.
 It does not touch `~/.tracer`, checked-in `data/`, or a running desktop
