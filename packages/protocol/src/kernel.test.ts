@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Event } from "nostr-tools";
-import { finalizeEvent, verifyEvent } from "nostr-tools/pure";
+import { verifyEvent } from "nostr-tools/pure";
 
 import corpus from "../corpus/conformance-v1.json" with { type: "json" };
+import folderCorpus from "../corpus/folder-conformance-v1.json" with { type: "json" };
 import {
   canonicalBytes,
   canonicalJson,
@@ -13,46 +14,57 @@ import {
   validateTraceLocator,
   verifyFileTraceChain,
   verifyFolderTraceChain,
+  traceOperationIdFromEvent,
   type CanonicalJsonValue,
   type KEdit,
   type TraceConformanceStatus,
 } from "./index.js";
 
-const TEST_SECRET = Uint8Array.from([...new Uint8Array(31), 1]);
+type ChainVector = {
+  name: string;
+  traceId: string;
+  nodeIds: string[];
+  status: TraceConformanceStatus;
+  stepStatuses: TraceConformanceStatus[];
+  issueCodes: string[];
+};
 
-async function sha256Hex(value: string): Promise<string> {
-  return Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))).toString("hex");
+const folderEvents = folderCorpus.events as Record<string, Event>;
+
+function eventsFor(nodeIds: readonly string[]): Event[] {
+  return nodeIds.map((nodeId) => {
+    const event = folderEvents[nodeId];
+    assert.ok(event, `folder corpus is missing ${nodeId}`);
+    return event;
+  });
 }
 
-async function folderNode(
-  members: Array<{ kind: "file" | "folder"; relativePath: string; latestNodeId: string; contentHash: string }>,
-  checkpoint: { version: 1; cause: string; sourceNodeId?: string },
-  operationId: string,
-  prev?: Event,
-  deltas: unknown[] = [],
-): Promise<Event> {
-  const contentHash = await sha256Hex(JSON.stringify(
-    members.map((member) => [member.relativePath, member.kind, member.contentHash]),
-  ));
-  return finalizeEvent({
-    kind: 4290,
-    created_at: 1_800_000_000 + (prev ? 1 : 0),
-    tags: [
-      ["z", "folder"],
-      ...(prev ? [["f", prev.tags.find((tag) => tag[0] === "f")?.[1] ?? prev.id]] : []),
-      ...members.map((member) => ["q", member.latestNodeId]),
-      ["action", prev ? "edit" : "import"],
-      ...(prev ? [["e", prev.id, "", "prev"]] : []),
-      ["x", contentHash],
-    ],
-    content: JSON.stringify({
-      snapshot: { members },
-      ...(deltas.length > 0 ? { deltas } : {}),
-      contentHash,
-      operationId,
-      folderCheckpoint: checkpoint,
-    }),
-  }, TEST_SECRET);
+function operationVectorValid(vector: (typeof folderCorpus.operations)[number]): boolean {
+  const events = eventsFor(vector.nodeIds);
+  if (new Set(vector.nodeIds).size !== vector.nodeIds.length) return false;
+  if (events.some((event) => !verifyEvent(event))) return false;
+  if (events.some((event) => traceOperationIdFromEvent(event) !== vector.operationId)) return false;
+  for (const expected of vector.propagation) {
+    const event = folderEvents[expected.nodeId];
+    if (!event) return false;
+    const payload = JSON.parse(event.content) as {
+      folderCheckpoint?: { cause?: string; sourceNodeId?: string };
+    };
+    if (payload.folderCheckpoint?.cause !== expected.cause) return false;
+    if (payload.folderCheckpoint?.sourceNodeId !== expected.sourceNodeId) return false;
+  }
+  return vector.requiredNodeIds.every((nodeId) => vector.nodeIds.includes(nodeId));
+}
+
+function recoveryState(nodeIds: readonly string[]): "complete" | "incomplete" | "invalid" {
+  const expected = folderCorpus.recovery;
+  const required = new Set(expected.requiredNodeIds);
+  if (
+    new Set(nodeIds).size !== nodeIds.length ||
+    nodeIds.some((nodeId) => !required.has(nodeId)) ||
+    eventsFor(nodeIds).some((event) => traceOperationIdFromEvent(event) !== expected.operationId)
+  ) return "invalid";
+  return nodeIds.length === required.size ? "complete" : "incomplete";
 }
 
 test("the fixed corpus identifies this kernel version", () => {
@@ -113,84 +125,125 @@ test("trace conformance matches the fixed signed-event corpus", async () => {
   }
 });
 
-test("folder conformance verifies add, advance, and explicit checkpoints", async () => {
-  const genesis = await folderNode([], { version: 1, cause: "genesis" }, "11".repeat(32));
-  const firstMember = {
-    kind: "file" as const,
-    relativePath: "essay.md",
-    latestNodeId: "aa".repeat(32),
-    contentHash: "cc".repeat(32),
-  };
-  const added = await folderNode(
-    [firstMember],
-    { version: 1, cause: "structure-change" },
-    "22".repeat(32),
-    genesis,
-    [{
-      type: "add",
-      kind: "file",
-      relativePath: "essay.md",
-      nodeId: firstMember.latestNodeId,
-      timestamp: 1,
-    }],
-  );
-  const advancedMember = {
-    ...firstMember,
-    latestNodeId: "bb".repeat(32),
-    contentHash: "dd".repeat(32),
-  };
-  const advanced = await folderNode(
-    [advancedMember],
-    { version: 1, cause: "child-advance", sourceNodeId: advancedMember.latestNodeId },
-    "33".repeat(32),
-    added,
-    [{
-      type: "advance",
-      kind: "file",
-      relativePath: "essay.md",
-      previousNodeId: firstMember.latestNodeId,
-      nodeId: advancedMember.latestNodeId,
-      timestamp: 2,
-    }],
-  );
-  const explicit = await folderNode(
-    [advancedMember],
-    { version: 1, cause: "explicit-step" },
-    "44".repeat(32),
-    advanced,
-  );
-
-  const verdict = await verifyFolderTraceChain(
-    [genesis, added, advanced, explicit],
-    verifyEvent,
-  );
-  assert.equal(verdict.status, "full");
-  assert.deepEqual(verdict.steps.map((step) => step.status), ["full", "full", "full", "full"]);
+test("the fixed folder corpus identifies its runtime boundary", () => {
+  assert.equal(folderCorpus.format, "zine-folder-conformance");
+  assert.equal(folderCorpus.version, 1);
+  assert.match(folderCorpus.runtimeBoundary, /no independent non-JavaScript folder-chain reader/);
 });
 
-test("folder conformance rejects an existing child encoded as add", async () => {
-  const member = {
-    kind: "file" as const,
-    relativePath: "essay.md",
-    latestNodeId: "aa".repeat(32),
-    contentHash: "cc".repeat(32),
+test("fixed nested file, folder, and Root chains conform", async () => {
+  for (const vector of folderCorpus.fileChains as ChainVector[]) {
+    const verdict = await verifyFileTraceChain(eventsFor(vector.nodeIds), verifyEvent);
+    assert.equal(verdict.status, vector.status, vector.name);
+    assert.deepEqual(verdict.steps.map((step) => step.status), vector.stepStatuses, vector.name);
+  }
+  for (const vector of folderCorpus.folderChains as ChainVector[]) {
+    const verdict = await verifyFolderTraceChain(eventsFor(vector.nodeIds), verifyEvent, {
+      expectedTraceId: vector.traceId,
+    });
+    assert.equal(verdict.status, vector.status, vector.name);
+    assert.deepEqual(verdict.steps.map((step) => step.status), vector.stepStatuses, vector.name);
+  }
+});
+
+test("every fixed recursive frontier resolves to the exact signed immediate child", () => {
+  for (const vector of folderCorpus.folderChains as ChainVector[]) {
+    for (const event of eventsFor(vector.nodeIds)) {
+      const payload = JSON.parse(event.content) as {
+        snapshot: {
+          members: Array<{
+            kind: "file" | "folder";
+            latestNodeId: string;
+            contentHash: string;
+          }>;
+        };
+      };
+      for (const member of payload.snapshot.members) {
+        const child = folderEvents[member.latestNodeId];
+        assert.ok(child, `${vector.name}: missing immediate child ${member.latestNodeId}`);
+        assert.equal(verifyEvent(child), true, `${vector.name}: invalid child signature`);
+        assert.ok(child.tags.some((tag) => tag[0] === "z" && tag[1] === member.kind));
+        const childPayload = JSON.parse(child.content) as { contentHash?: string };
+        assert.equal(childPayload.contentHash, member.contentHash);
+      }
+    }
+  }
+});
+
+test("fixed folder history distinguishes structure changes, child advance, and explicit Step", () => {
+  const nested = folderCorpus.folderChains[0] as ChainVector;
+  const checkpoints = eventsFor(nested.nodeIds).map((event) => {
+    const payload = JSON.parse(event.content) as {
+      deltas?: Array<{ type?: string }>;
+      folderCheckpoint: { cause: string };
+    };
+    return {
+      cause: payload.folderCheckpoint.cause,
+      membership: (payload.deltas ?? [])
+        .map((delta) => delta.type)
+        .filter((type) => type === "add" || type === "remove" || type === "rename" || type === "advance"),
+    };
+  });
+  assert.deepEqual(checkpoints, [
+    { cause: "genesis", membership: [] },
+    { cause: "structure-change", membership: ["add"] },
+    { cause: "structure-change", membership: ["rename"] },
+    { cause: "structure-change", membership: ["remove"] },
+    { cause: "structure-change", membership: ["add"] },
+    { cause: "structure-change", membership: ["add"] },
+    { cause: "child-advance", membership: ["advance"] },
+    { cause: "explicit-step", membership: [] },
+  ]);
+});
+
+test("fixed folder hashes preserve member order and permitted Unicode path bytes", async () => {
+  const body = folderCorpus.canonical.folderBody;
+  const digest = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body))).toString("hex");
+  assert.equal(digest, folderCorpus.canonical.folderHash);
+  assert.deepEqual(JSON.parse(body).map((entry: unknown[]) => entry[0]), folderCorpus.canonical.memberOrder);
+  assert.ok(folderCorpus.canonical.unicodePaths.includes("草稿 e\u0301.md"));
+  assert.ok(folderCorpus.canonical.unicodePaths.includes("résumé 📝.md"));
+  assert.ok(folderCorpus.canonical.unicodePaths.includes("back\\slash.md"));
+
+  const carryingEvent = Object.values(folderEvents).find((event) => {
+    const payload = JSON.parse(event.content) as { contentHash?: string };
+    return payload.contentHash === folderCorpus.canonical.folderHash;
+  });
+  assert.ok(carryingEvent);
+  const payload = JSON.parse(carryingEvent.content) as {
+    snapshot: { members: Array<{ relativePath: string; latestNodeId: string }> };
   };
-  const genesis = await folderNode([member], { version: 1, cause: "genesis" }, "55".repeat(32));
-  const replacement = { ...member, latestNodeId: "bb".repeat(32) };
-  const invalid = await folderNode(
-    [replacement],
-    { version: 1, cause: "structure-change" },
-    "66".repeat(32),
-    genesis,
-    [{
-      type: "add",
-      kind: "file",
-      relativePath: "essay.md",
-      nodeId: replacement.latestNodeId,
-      timestamp: 2,
-    }],
+  assert.deepEqual(payload.snapshot.members.map((member) => member.relativePath), folderCorpus.canonical.memberOrder);
+  assert.deepEqual(
+    carryingEvent.tags.filter((tag) => tag[0] === "q").map((tag) => tag[1]),
+    payload.snapshot.members.map((member) => member.latestNodeId),
   );
-  const verdict = await verifyFolderTraceChain([genesis, invalid], verifyEvent);
-  assert.equal(verdict.status, "invalid");
-  assert.ok(verdict.issues.some((issue) => issue.code === "nonconforming-deltas"));
+});
+
+test("recursive gesture vectors share one operation id and name every immediate advance", () => {
+  for (const vector of folderCorpus.operations) {
+    assert.equal(operationVectorValid(vector), vector.valid, vector.name);
+  }
+});
+
+test("recovery prefixes remain incomplete until every required ancestor checkpoint exists", () => {
+  assert.deepEqual(
+    folderCorpus.recovery.prefixes.map((prefix) => recoveryState(prefix)),
+    folderCorpus.recovery.states,
+  );
+});
+
+test("malformed fixed folder chains fail closed", async () => {
+  for (const vector of folderCorpus.malformedFolderChains as ChainVector[]) {
+    const events = eventsFor(vector.nodeIds);
+    for (const event of events) {
+      assert.equal(verifyEvent(event), true, `${vector.name}: fixture must be signed but semantically malformed`);
+    }
+    const verdict = await verifyFolderTraceChain(events, verifyEvent);
+    assert.equal(verdict.status, vector.status, vector.name);
+    assert.deepEqual(verdict.steps.map((step) => step.status), vector.stepStatuses, vector.name);
+    for (const code of vector.issueCodes) {
+      assert.ok(verdict.issues.some((issue) => issue.code === code), `${vector.name}: missing ${code}`);
+    }
+  }
 });
