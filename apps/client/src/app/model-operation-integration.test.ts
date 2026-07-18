@@ -13,22 +13,31 @@ function functionBody(name: string, next: string): string {
   return app.slice(start, end);
 }
 
-const operations = [
-  ["extendLLM", "function settleDeDupeLLM"],
+const legacyOperations = [
   ["settleLLM", "function stirLLM"],
   ["stirLLM", "function replyLLM"],
   ["replyLLM", "function analyzeLLM"],
   ["analyzeLLM", "function awaitViewMount"],
 ] as const;
 
-test("all five MODEL actions delegate approved preparation and stale-safe execution", () => {
-  for (const [name, next] of operations) {
+test("non-Extend MODEL actions retain approved preparation and stale-safe execution", () => {
+  for (const [name, next] of legacyOperations) {
     const source = functionBody(name, next);
     assert.match(source, /modelOperationControllerRef\.current!\.executeApproved\(/, name);
     assert.match(source, /onStale: \(recovery\) => setStaleModelResult\(recovery\)/, name);
     assert.doesNotMatch(source, /approvedModelOperation|executePreparedOperation|readCurrentModelTarget/, name);
     assert.doesNotMatch(source, /\bcomplete\(|backendRef\.current\.writeFile|stepFile\(/, name);
   }
+});
+
+test("Extend persists and dispatches the exact Inspector-approved desktop request without auto-apply", () => {
+  const extend = functionBody("extendLLM", "function settleDeDupeLLM");
+  assert.match(extend, /approvedRequest\.traceContextSelection/);
+  assert.match(extend, /runtime\.persistApprovedExtend\(\{[\s\S]*prepared: approvedRequest/);
+  assert.match(extend, /runtime\.approve\(/);
+  assert.match(extend, /runtime\.dispatch\(/);
+  assert.doesNotMatch(extend, /executeApproved|view\.dispatch|buildAcceptedExtendChanges/);
+  assert.doesNotMatch(extend, /stepFile\(|publish|mint/i);
 });
 
 test("Inspector dispatches the frozen PreparedOperation through App's explicit approval boundary", () => {
@@ -69,7 +78,7 @@ test("Analyze produces an ordinary review with citations to every analyzed sourc
   assert.match(source, /openInPanel\(newPath, destIdx\)/);
 });
 
-test("Extend and Settle alone use the current-session trace-authoring adapter", () => {
+test("Settle retains current-session authoring while durable Extend accepts through its local receipt", () => {
   const extend = functionBody("extendLLM", "function settleDeDupeLLM");
   const settle = functionBody("settleLLM", "function stirLLM");
   const stir = functionBody("stirLLM", "function replyLLM");
@@ -78,11 +87,35 @@ test("Extend and Settle alone use the current-session trace-authoring adapter", 
   assert.match(app, /paste: tr\.isUserEvent\("input\.paste"\)/);
   assert.match(app, /undoRedo: tr\.isUserEvent\("undo"\) \|\| tr\.isUserEvent\("redo"\)/);
   assert.match(app, /actingAuthorId: authorPubkeyRef\.current/);
-  assert.match(extend, /sourceFrom/);
-  assert.match(extend, /buildAcceptedExtendChanges/);
+  assert.match(extend, /persistApprovedExtend/);
   assert.match(settle, /sourceFrom/);
   assert.match(settle, /validateTraceAuthoringResult/);
   assert.doesNotMatch(stir, /traceAuthoring|buildAcceptedExtendChanges|validateTraceAuthoringResult/);
+});
+
+test("Inspector binds Extend to the fetched signed-chain selector boundary", () => {
+  const prepare = functionBody("prepareInspectorOperation", "/** Read the authoritative local Mint inventory");
+  assert.match(prepare, /operation === "extend"[\s\S]*fetchChain\(liveFolder\.id, activePath\)/);
+  assert.match(prepare, /policy: "selected-trace-v1"/);
+  assert.match(prepare, /verifyEvent/);
+  assert.match(prepare, /\.prepare\(\{[\s\S]*traceContext/);
+});
+
+test("desktop Accept writes one exact crash-pad receipt before dispatching CodeMirror", () => {
+  const apply = functionBody("applyDesktopArtifact", "function editFile");
+  assert.match(apply, /prepareDesktopExtendApplyV1/);
+  assert.match(apply, /transaction\.state\.field\(voiceField\)/);
+  assert.match(apply, /transaction\.state\.field\(keditField\)/);
+  assert.ok(apply.indexOf("mirrorPad(") < apply.indexOf("view.dispatch(transaction)"));
+  assert.match(apply, /desktopOperationReceipt/);
+  assert.doesNotMatch(apply, /stepFile\(|sendStep\(|publish|mint/i);
+});
+
+test("desktop recovery constructs the native frozen-session store only after App mounts", () => {
+  assert.match(app, /createNativeDesktopOperationStoreV1\(\)/);
+  assert.match(app, /desktopOperationRuntimeRef\.current = runtime/);
+  assert.match(app, /bootState !== "ready"[\s\S]*desktopOperationRuntimeRef\.current!\.recover\(\)/);
+  assert.doesNotMatch(app, /DesktopOperationStoreV1\([^)]*localStorage/);
 });
 
 test("Inspector prepares local operations without waiting on ancillary relay reads", () => {
