@@ -59,7 +59,7 @@ export function compileAuthoringSyntax(
     toUtf16: input.text.length,
   };
   const authoritySpans = input.authoritySpans ?? [];
-  const errors: TraceContextErrorV1[] = [...scan.errors];
+  const errors: TraceContextErrorV1[] = [];
 
   const operationError = validateRange(
     input.text,
@@ -68,6 +68,9 @@ export function compileAuthoringSyntax(
     "Operation range",
   );
   if (operationError) errors.push(operationError);
+  if (!operationError) {
+    errors.push(...scan.errors.filter((error) => syntaxErrorAffectsRange(error, operationRange)));
+  }
   errors.push(...validateAuthoritySpans(input.text, authoritySpans));
 
   const blocked = errors.length > 0;
@@ -228,6 +231,15 @@ export function compileAuthoringSyntax(
     renderedText,
     errors,
   });
+}
+
+function syntaxErrorAffectsRange(error: TraceContextErrorV1, operationRange: Utf16Range): boolean {
+  if (!error.relatedRange) return rangesOverlap(error.range, operationRange);
+  const constructRange = {
+    fromUtf16: Math.min(error.range.fromUtf16, error.relatedRange.fromUtf16),
+    toUtf16: Math.max(error.range.toUtf16, error.relatedRange.toUtf16),
+  };
+  return rangesOverlap(constructRange, operationRange);
 }
 
 function validateAuthoritySpans(

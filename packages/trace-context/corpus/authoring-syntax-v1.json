@@ -363,6 +363,57 @@
       }
     },
     {
+      "name": "malformed syntax wholly after operation range is ordinary data",
+      "input": {
+        "text": "Target ((inside))\n\nElsewhere ((broken",
+        "operation": "settle",
+        "actingAuthorId": "author-a",
+        "operationRange": { "fromUtf16": 0, "toUtf16": 17 },
+        "authoritySpans": [
+          {
+            "id": "manual-1",
+            "actorId": "author-a",
+            "origin": "manual",
+            "instructionEligible": true,
+            "fromUtf16": 0,
+            "toUtf16": 17
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "errors": [],
+        "protectedRanges": [],
+        "candidates": [
+          {
+            "id": "directive-v1:0001:7:17",
+            "range": [7, 17],
+            "instructionRange": [9, 15],
+            "instruction": "inside"
+          }
+        ],
+        "decisions": ["authorized"],
+        "directives": [
+          {
+            "id": "directive-v1:0001:7:17",
+            "marker": "⟪ZINE_DIRECTIVE_V1_0001_7_17⟫",
+            "range": [7, 17],
+            "excerptId": "excerpt-v1:0001"
+          }
+        ],
+        "excerpts": [
+          {
+            "id": "excerpt-v1:0001",
+            "sourceRange": [0, 17],
+            "text": "Target ⟪ZINE_DIRECTIVE_V1_0001_7_17⟫",
+            "byteLength": 40,
+            "mode": "complete-block"
+          }
+        ],
+        "renderedText": "Target ⟪ZINE_DIRECTIVE_V1_0001_7_17⟫\n\nElsewhere ((broken"
+      }
+    },
+    {
       "name": "unterminated directive is a typed syntax error",
       "input": {
         "text": "Start ((broken",

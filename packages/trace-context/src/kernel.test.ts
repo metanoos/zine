@@ -173,6 +173,28 @@ test("invalid authority ranges fail closed, including surrogate boundaries", () 
   assert.equal(result.renderedText, "😀 ((go))");
 });
 
+test("out-of-range syntax errors remain inspectable without blocking selection", () => {
+  const text = "Target ((inside))\n\nElsewhere ))";
+  const result = compileAuthoringSyntax({
+    text,
+    operation: "settle",
+    actingAuthorId: "author-a",
+    operationRange: { fromUtf16: 0, toUtf16: 17 },
+    authoritySpans: [{
+      id: "manual",
+      actorId: "author-a",
+      origin: "manual",
+      instructionEligible: true,
+      fromUtf16: 0,
+      toUtf16: 17,
+    }],
+  });
+  assert.deepEqual(result.scan.errors.map((error) => error.code), ["UNEXPECTED_DIRECTIVE_CLOSE"]);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.ok, true);
+  assert.equal(result.directives.length, 1);
+});
+
 test("standalone directive anchors prefer preceding non-empty block", () => {
   const text = "Prior paragraph.\n\n((use above))\n\nFollowing paragraph.";
   const result = compileAuthoringSyntax({

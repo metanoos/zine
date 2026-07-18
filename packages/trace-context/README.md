@@ -13,6 +13,10 @@ candidates. Delimiter-looking text inside a complete protected span is inert.
 Nested directives, active cross-nesting, stray closers, empty directives, and
 unterminated active syntax produce typed errors.
 
+Syntax errors block preparation only when their malformed construct intersects
+or crosses the prepared operation range. Errors wholly outside that range stay
+visible in the lexical scan but are ordinary document data for that operation.
+
 `compileAuthoringSyntax(input)` then applies an exact operation range and an
 ordered, non-overlapping authority-span map supplied by an adapter. The whole
 directive run—including delimiters—must have contiguous, uniform, eligible
