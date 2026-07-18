@@ -48,6 +48,12 @@ export interface CompleteOptions {
   signal?: AbortSignal;
 }
 
+/** Exact approved fields the transport reads and the private journal can replay. */
+export type CompletePreparedRequest = Pick<
+  PreparedOperation,
+  "messages" | "providerId" | "providerFingerprint"
+>;
+
 /**
  * Apply provider-card system text exactly once. Exported so the Prompt
  * Inspector can render the same final message stack that the transport sends.
@@ -81,7 +87,7 @@ export async function complete(
 /** Execute already-approved bytes. This boundary resolves the credential and
  * selects a protocol, but it never gathers context or rebuilds messages. */
 export async function completePrepared(
-  prepared: PreparedOperation,
+  prepared: CompletePreparedRequest,
   cfg: ProviderConfig,
   opts: CompleteOptions = {},
 ): Promise<string> {

@@ -25,7 +25,9 @@ import {
   type DesktopOperationRepositoryV1,
   type DesktopOperationRuntimeDependenciesV1,
   type DesktopOperationRuntimeIdsV1,
+  type DesktopOperationTransportV1,
 } from "./desktop-operation-runtime.js";
+import { completePrepared } from "./llm.js";
 import type { ProviderConfig } from "./models-store.js";
 import type { PreparedOperation } from "./prepared-operation.js";
 import { providerProfileFingerprint } from "./provider-fingerprint.js";
@@ -189,9 +191,17 @@ class MemoryRepository implements DesktopOperationRepositoryV1 {
     return [...this.records.values()];
   }
 
-  async delete(key: DesktopOperationKeyV1): Promise<void> {
-    this.records.delete(mapKey(key));
+  async delete(
+    key: DesktopOperationKeyV1,
+    expectedEnvelopeSha256: string,
+  ): Promise<"deleted" | "conflict" | "missing"> {
+    const id = mapKey(key);
+    const current = this.records.get(id);
+    if (!current) return "missing";
+    if (hashDesktopOperationEnvelopeV1(current) !== expectedEnvelopeSha256) return "conflict";
+    this.records.delete(id);
     this.events.push(`delete:${key.attemptId}`);
+    return "deleted";
   }
 }
 
@@ -201,6 +211,17 @@ class SequenceIds implements DesktopOperationRuntimeIdsV1 {
   next(kind: Parameters<DesktopOperationRuntimeIdsV1["next"]>[0]): string {
     this.sequence += 1;
     return `${kind}-${String(this.sequence).padStart(8, "0")}`;
+  }
+}
+
+class PrefixedIds implements DesktopOperationRuntimeIdsV1 {
+  private sequence = 0;
+
+  constructor(private readonly prefix: string) {}
+
+  next(kind: Parameters<DesktopOperationRuntimeIdsV1["next"]>[0]): string {
+    this.sequence += 1;
+    return `${this.prefix}-${kind}-${String(this.sequence).padStart(8, "0")}`;
   }
 }
 
@@ -216,6 +237,7 @@ function runtimeDependencies(input: {
   repository?: MemoryRepository;
   clock?: MutableClock;
   provider?: ProviderConfig;
+  readCurrentTarget?: DesktopOperationRuntimeDependenciesV1["readCurrentTarget"];
   completePrepared?: DesktopOperationRuntimeDependenciesV1["completePrepared"];
   applyArtifact?: DesktopArtifactApplierV1;
   presentResult?: DesktopOperationRuntimeDependenciesV1["presentResult"];
@@ -232,6 +254,8 @@ function runtimeDependencies(input: {
     clock,
     ids: input.ids ?? new SequenceIds(),
     resolveProvider: (providerId) => providerId === providerFixture.id ? providerFixture : null,
+    readCurrentTarget: input.readCurrentTarget
+      ?? ((captured) => ({ ...captured, focused: true })),
     completePrepared: input.completePrepared ?? (async () => "continued prose"),
     applyArtifact: input.applyArtifact ?? (async ({ responseText }) => ({
       status: "applied",
@@ -296,6 +320,11 @@ function transition<T extends DesktopOperationTransitionV1["type"]>(
     ...extras,
   } as Extract<DesktopOperationTransitionV1, { type: T }>;
 }
+
+test("the real approved-request transport satisfies the reconstructible runtime boundary", () => {
+  const transport: DesktopOperationTransportV1 = completePrepared;
+  assert.equal(transport, completePrepared);
+});
 
 test("factory binds the approved selector, unique user-message placement, and credential-free provider config", async () => {
   const providerFixture = provider();
@@ -681,6 +710,136 @@ test("apply-before-receipt crash is recovered through an idempotent artifact app
   assert.equal(calls, 2);
 });
 
+test("two runtimes converge on one idempotent application and one durable receipt", async () => {
+  const repository = new MemoryRepository();
+  const setup = new DesktopOperationRuntimeV1(runtimeDependencies({ repository }));
+  const ready = await responseReady(setup, target("cross-runtime-receipt"));
+  const accepted = await replaceWithTransition(
+    repository,
+    ready,
+    transition("accept-result", ready, { artifactIntentId: "intent-cross-runtime-receipt" }),
+  );
+  let calls = 0;
+  let mutations = 0;
+  let bothEntered!: () => void;
+  const didBothEnter = new Promise<void>((resolve) => { bothEntered = resolve; });
+  let releaseBoth!: () => void;
+  const holdBoth = new Promise<void>((resolve) => { releaseBoth = resolve; });
+  const appliedIntents = new Map<string, string>();
+  const applyArtifact: DesktopArtifactApplierV1 = async ({ intent, responseText }) => {
+    calls += 1;
+    const priorHash = appliedIntents.get(intent.intentId);
+    const resultingContentHash = priorHash ?? HASH(responseText);
+    if (!priorHash) {
+      mutations += 1;
+      appliedIntents.set(intent.intentId, resultingContentHash);
+    }
+    if (calls === 2) bothEntered();
+    await holdBoth;
+    return {
+      status: priorHash ? "already-applied" : "applied",
+      resultingContentHash,
+    };
+  };
+  const first = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    applyArtifact,
+    ids: new PrefixedIds("runtime-a"),
+  }));
+  const second = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    applyArtifact,
+    ids: new PrefixedIds("runtime-b"),
+  }));
+
+  const applying = Promise.all([
+    first.accept(keyFor(accepted)),
+    second.accept(keyFor(accepted)),
+  ]);
+  await didBothEnter;
+  releaseBoth();
+  const results = await applying;
+
+  assert.equal(calls, 2, "both runtime processes may enter the idempotent adapter");
+  assert.equal(mutations, 1, "the durable intent marker permits only one target mutation");
+  assert.ok(results.every(({ envelope }) => envelope.artifactReceipt));
+  assert.ok(results.some(({ status }) => status === "already-applied"));
+  const stored = await first.load(keyFor(accepted));
+  assert.ok(stored!.artifactReceipt);
+  assert.equal(stored!.artifactReceipt!.resultingContentHash, HASH(accepted.response!.text));
+});
+
+test("accept rechecks the target before persisting intent and records review-stage staleness", async () => {
+  const repository = new MemoryRepository();
+  let applyCalls = 0;
+  const presentations: Array<{ status: string; reason: string }> = [];
+  const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    readCurrentTarget: (captured) => ({
+      ...captured,
+      contentHash: HASH("changed-before-accept"),
+      focused: true,
+    }),
+    applyArtifact: async () => {
+      applyCalls += 1;
+      return { status: "applied", resultingContentHash: HASH("must-not-apply") };
+    },
+    presentResult: (envelope, reason) => {
+      presentations.push({ status: envelope.lifecycle.status, reason });
+    },
+  }));
+  const ready = await responseReady(runtime, target("stale-before-accept"));
+
+  const result = await runtime.accept(keyFor(ready));
+
+  assert.equal(result.status, "stale");
+  assert.equal(result.envelope.lifecycle.status, "stale");
+  assert.equal(result.envelope.fault!.code, "TARGET_STALE");
+  assert.equal(result.envelope.fault!.stage, "review");
+  assert.equal(result.envelope.artifactIntent, null);
+  assert.equal(applyCalls, 0);
+  assert.deepEqual(presentations.at(-1), { status: "stale", reason: "stale-target" });
+});
+
+test("same-target acceptance serializes recheck through apply so the loser is review-stale", async () => {
+  const repository = new MemoryRepository();
+  const sharedTarget = target("serialized-accept-window");
+  let liveContentHash = sharedTarget.contentHash;
+  let applyCalls = 0;
+  const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    readCurrentTarget: (captured) => ({
+      ...captured,
+      contentHash: liveContentHash,
+      focused: true,
+    }),
+    applyArtifact: async ({ responseText }) => {
+      applyCalls += 1;
+      liveContentHash = HASH(responseText);
+      return { status: "applied", resultingContentHash: liveContentHash };
+    },
+  }));
+  const first = await responseReady(runtime, sharedTarget, provider(), {
+    operationId: "operation-serialized-accept-a",
+    attemptId: "attempt-serialized-accept-a",
+  });
+  const second = await responseReady(runtime, sharedTarget, provider(), {
+    operationId: "operation-serialized-accept-b",
+    attemptId: "attempt-serialized-accept-b",
+  });
+
+  const results = await Promise.all([
+    runtime.accept(keyFor(first)),
+    runtime.accept(keyFor(second)),
+  ]);
+
+  assert.deepEqual(results.map(({ status }) => status).sort(), ["applied", "stale"]);
+  const stale = results.find(({ status }) => status === "stale")!.envelope;
+  assert.equal(stale.fault!.stage, "review");
+  assert.equal(stale.artifactIntent, null);
+  assert.equal(applyCalls, 1);
+});
+
 test("a stale compare-and-set becomes a durable reviewable state and never reapplies on recovery", async () => {
   const repository = new MemoryRepository();
   let applyCalls = 0;
@@ -826,6 +985,135 @@ test("recovery deletes every expired envelope before any surviving side effect",
   assert.deepEqual(result.deleted, [keyFor(expired)]);
   assert.equal(events[0], `delete:${expired.attempt.attemptId}`);
   assert.ok(events.indexOf("present") > events.indexOf(`delete:${expired.attempt.attemptId}`));
+});
+
+test("privacy deadlines delete and block direct dispatch and acceptance", async () => {
+  const dispatchRepository = new MemoryRepository();
+  const dispatchClock = new MutableClock();
+  let transportCalls = 0;
+  const dispatchRuntime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository: dispatchRepository,
+    clock: dispatchClock,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not dispatch";
+    },
+  }));
+  let approved = await persist(dispatchRuntime, target("expired-direct-dispatch"), provider(), {
+    operationId: "operation-expired-direct-dispatch",
+    attemptId: "attempt-expired-direct-dispatch",
+    retainForMs: 5,
+  });
+  approved = await dispatchRuntime.approve(keyFor(approved));
+  dispatchClock.value = BASE_TIME + 5;
+  await assert.rejects(
+    () => dispatchRuntime.dispatch(keyFor(approved)),
+    /privacy deadline.*deleted/,
+  );
+  assert.equal(transportCalls, 0);
+  assert.equal(await dispatchRuntime.load(keyFor(approved)), null);
+
+  const acceptRepository = new MemoryRepository();
+  const acceptClock = new MutableClock();
+  let applyCalls = 0;
+  const acceptRuntime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository: acceptRepository,
+    clock: acceptClock,
+    applyArtifact: async () => {
+      applyCalls += 1;
+      return { status: "applied", resultingContentHash: HASH("must-not-apply") };
+    },
+  }));
+  const ready = await responseReady(acceptRuntime, target("expired-direct-accept"), provider(), {
+    operationId: "operation-expired-direct-accept",
+    attemptId: "attempt-expired-direct-accept",
+    retainForMs: 5,
+  });
+  acceptClock.value = BASE_TIME + 5;
+  await assert.rejects(
+    () => acceptRuntime.accept(keyFor(ready)),
+    /privacy deadline.*deleted/,
+  );
+  assert.equal(applyCalls, 0);
+  assert.equal(await acceptRuntime.load(keyFor(ready)), null);
+});
+
+test("recovery refreshes the deadline immediately before a resumed side effect", async () => {
+  const repository = new MemoryRepository();
+  const setup = new DesktopOperationRuntimeV1(runtimeDependencies({ repository }));
+  let pending = await persist(setup, target("expires-during-recovery"), provider(), {
+    operationId: "operation-expires-during-recovery",
+    attemptId: "attempt-expires-during-recovery",
+    retainForMs: 5,
+  });
+  pending = await setup.approve(keyFor(pending));
+  pending = await replaceWithTransition(
+    repository,
+    pending,
+    transition("record-dispatch-intent", pending),
+  );
+  let clockReads = 0;
+  const advancingClock = {
+    nowMs: () => {
+      clockReads += 1;
+      return clockReads === 1 ? BASE_TIME + 4 : BASE_TIME + 5;
+    },
+  };
+  let transportCalls = 0;
+  const recovering = new DesktopOperationRuntimeV1({
+    ...runtimeDependencies({ repository }),
+    clock: advancingClock,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not resume";
+    },
+  });
+
+  const result = await recovering.recover();
+
+  assert.equal(transportCalls, 0);
+  assert.equal(await recovering.load(keyFor(pending)), null);
+  assert.deepEqual(result.deleted, [keyFor(pending)]);
+});
+
+test("expiry deletion uses envelope CAS and never deletes a newer record at the same key", async () => {
+  const repository = new MemoryRepository();
+  const clock = new MutableClock();
+  const setup = new DesktopOperationRuntimeV1(runtimeDependencies({ repository, clock }));
+  const expired = await persist(setup, target("expiry-delete-cas"), provider(), {
+    operationId: "operation-expiry-delete-cas",
+    attemptId: "attempt-expiry-delete-cas",
+    retainForMs: 5,
+  });
+  const providerFixture = provider();
+  const replacement = createApprovedDesktopExtendEnvelopeV1({
+    prepared: await preparedFor(target("expiry-delete-cas"), providerFixture),
+    provider: providerFixture,
+    maxOutputTokens: 1_024,
+    operationId: expired.operationId,
+    attemptId: expired.attempt.attemptId,
+    createdAtMs: BASE_TIME + 4,
+    retainForMs: 100,
+  });
+  const originalDelete = repository.delete.bind(repository);
+  let injected = false;
+  repository.delete = async (key, expectedHash) => {
+    if (!injected) {
+      injected = true;
+      repository.records.set(mapKey(key), replacement);
+    }
+    return originalDelete(key, expectedHash);
+  };
+  clock.value = BASE_TIME + 5;
+  const recovering = new DesktopOperationRuntimeV1(runtimeDependencies({ repository, clock }));
+
+  const result = await recovering.recover();
+
+  assert.deepEqual(result.deleted, []);
+  assert.equal(
+    hashDesktopOperationEnvelopeV1((await recovering.load(keyFor(expired)))!),
+    hashDesktopOperationEnvelopeV1(replacement),
+  );
 });
 
 test("stable transition ids replay idempotently and reject different bytes", async () => {

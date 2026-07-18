@@ -12,7 +12,7 @@ import {
   reduceDesktopOperationV1,
   type DesktopOperationTransitionV1,
 } from "./desktop-operation-lifecycle.js";
-import type { CompleteOptions } from "./llm.js";
+import type { CompleteOptions, CompletePreparedRequest } from "./llm.js";
 import type { ProviderConfig } from "./models-store.js";
 import type { PreparedOperation } from "./prepared-operation.js";
 import { providerProfileFingerprint } from "./provider-fingerprint.js";
@@ -36,7 +36,10 @@ export interface DesktopOperationRepositoryV1 {
   ): Promise<"replaced" | "conflict" | "missing">;
   load(key: DesktopOperationKeyV1): Promise<DesktopOperationEnvelopeV1 | null>;
   list(): Promise<readonly DesktopOperationEnvelopeV1[]>;
-  delete(key: DesktopOperationKeyV1): Promise<void>;
+  delete(
+    key: DesktopOperationKeyV1,
+    expectedEnvelopeSha256: string,
+  ): Promise<"deleted" | "conflict" | "missing">;
 }
 
 export type DesktopOperationIdKindV1 =
@@ -55,12 +58,8 @@ export interface DesktopOperationRuntimeClockV1 {
   nowMs(): number;
 }
 
-/** The subset read by `completePrepared`; it is fully reconstructible after a crash. */
-export interface CompletePreparedCompatibleRequestV1 {
-  messages: PreparedOperation["messages"];
-  providerId: PreparedOperation["providerId"];
-  providerFingerprint: PreparedOperation["providerFingerprint"];
-}
+/** The exact transport input is fully reconstructible after a crash. */
+export type CompletePreparedCompatibleRequestV1 = CompletePreparedRequest;
 
 export type DesktopOperationTransportV1 = (
   prepared: CompletePreparedCompatibleRequestV1,
@@ -78,9 +77,25 @@ export interface DesktopArtifactApplyInputV1 {
   responseText: string;
 }
 
+/**
+ * Implementations MUST atomically bind `intent.intentId` to the durable target
+ * mutation. Replaying the same intent after a crash or from another runtime
+ * must return `already-applied`, never apply the response twice or misclassify
+ * that exact prior application as a stale unrelated edit.
+ */
 export type DesktopArtifactApplierV1 = (
   input: DesktopArtifactApplyInputV1,
 ) => Promise<DesktopArtifactApplyResultV1>;
+
+export interface DesktopCurrentTargetRevisionV1 {
+  folderId: string;
+  path: string;
+  traceId: string;
+  headId: string;
+  contentHash: string;
+  /** False when the editor no longer points at this exact live file locus. */
+  focused: boolean;
+}
 
 export type DesktopOperationPresenterV1 = (
   envelope: DesktopOperationEnvelopeV1,
@@ -92,6 +107,9 @@ export interface DesktopOperationRuntimeDependenciesV1 {
   clock: DesktopOperationRuntimeClockV1;
   ids: DesktopOperationRuntimeIdsV1;
   resolveProvider(providerId: string): ProviderConfig | null | Promise<ProviderConfig | null>;
+  readCurrentTarget(
+    captured: DesktopPreparedRequestV1["targetRevision"],
+  ): DesktopCurrentTargetRevisionV1 | null | Promise<DesktopCurrentTargetRevisionV1 | null>;
   completePrepared: DesktopOperationTransportV1;
   applyArtifact: DesktopArtifactApplierV1;
   presentResult?: DesktopOperationPresenterV1;
@@ -240,15 +258,24 @@ export class DesktopOperationRuntimeV1 {
       attemptId: input.attemptId ?? this.dependencies.ids.next("attempt"),
       createdAtMs: input.createdAtMs ?? this.now(),
     });
+    if (this.now() >= envelope.retention.deleteByMs) {
+      fail("cannot persist an operation envelope after its privacy deadline");
+    }
     const key = keyFor(envelope);
     return this.operationQueue.run(operationQueueKey(key), async () => {
       const result = await this.dependencies.repository.create(envelope);
-      if (result === "created") return envelope;
+      if (result === "created") {
+        await this.assertLive(envelope);
+        return envelope;
+      }
       const existing = await this.dependencies.repository.load(key);
       if (
         existing
         && hashDesktopOperationEnvelopeV1(existing) === hashDesktopOperationEnvelopeV1(envelope)
-      ) return existing;
+      ) {
+        await this.assertLive(existing);
+        return existing;
+      }
       fail(`operation attempt ${key.operationId}/${key.attemptId} already exists with different bytes`);
     });
   }
@@ -291,20 +318,10 @@ export class DesktopOperationRuntimeV1 {
     command: DesktopOperationCommandV1 = {},
   ): Promise<DesktopOperationAcceptResultV1> {
     return this.withOperation(key, async () => {
-      let current = await this.requireEnvelope(key);
-      if (current.lifecycle.status === "response-completed") {
-        const transition = this.transition("accept-result", current, command, {
-          artifactIntentId: this.dependencies.ids.next("artifact-intent"),
-        });
-        current = (await this.commit(current, transition)).envelope;
-      }
-      if (current.lifecycle.status !== "accepted" || !current.artifactIntent) {
-        fail(`accept is illegal from ${current.lifecycle.status}`);
-      }
-      if (current.artifactReceipt) {
-        return { status: "already-applied", envelope: current };
-      }
-      return this.applyAcceptedIntent(current);
+      const current = await this.requireEnvelope(key);
+      return this.targetQueue.run(targetQueueKey(current), () => (
+        this.acceptWithTargetLock(key, command)
+      ));
     });
   }
 
@@ -370,33 +387,29 @@ export class DesktopOperationRuntimeV1 {
    */
   async recover(): Promise<DesktopOperationRecoveryResultV1> {
     const snapshot = [...await this.dependencies.repository.list()];
-    const nowMs = this.now();
-    const expired = snapshot.filter((envelope) => nowMs >= envelope.retention.deleteByMs);
     const deleted: DesktopOperationKeyV1[] = [];
-    for (const envelope of expired) {
+    const deletedKeys = new Set<string>();
+    for (const envelope of snapshot) {
       const key = keyFor(envelope);
       await this.withOperation(key, async () => {
         const current = await this.dependencies.repository.load(key);
-        if (current && nowMs >= current.retention.deleteByMs) {
-          await this.dependencies.repository.delete(key);
-          deleted.push(key);
+        if (current && await this.deleteIfExpired(current)) {
+          recordDeletedKey(key, deleted, deletedKeys);
         }
       });
     }
 
-    const expiredKeys = new Set(expired.map((envelope) => operationQueueKey(keyFor(envelope))));
     const recovered: DesktopOperationKeyV1[] = [];
     const failures: Array<{ key: DesktopOperationKeyV1; error: unknown }> = [];
     for (const candidate of snapshot) {
       const key = keyFor(candidate);
-      if (expiredKeys.has(operationQueueKey(key))) continue;
+      if (deletedKeys.has(operationQueueKey(key))) continue;
       try {
         await this.withOperation(key, async () => {
           const current = await this.dependencies.repository.load(key);
           if (!current) return;
-          if (nowMs >= current.retention.deleteByMs) {
-            await this.dependencies.repository.delete(key);
-            deleted.push(key);
+          if (await this.deleteIfExpired(current)) {
+            recordDeletedKey(key, deleted, deletedKeys);
             return;
           }
           await this.recoverEnvelope(current);
@@ -443,6 +456,7 @@ export class DesktopOperationRuntimeV1 {
       this.transition("record-provider-io-may-have-started", current),
     );
     if (marked.replayed) return marked.envelope;
+    await this.assertLive(marked.envelope);
     return this.invokeTransport(marked.envelope, provider, signal);
   }
 
@@ -516,37 +530,132 @@ export class DesktopOperationRuntimeV1 {
     }))).envelope;
   }
 
-  private async applyAcceptedIntent(
-    current: DesktopOperationEnvelopeV1,
+  /** Caller holds the target queue from recheck through the apply boundary. */
+  private async acceptWithTargetLock(
+    key: DesktopOperationKeyV1,
+    command: DesktopOperationCommandV1,
   ): Promise<DesktopOperationAcceptResultV1> {
-    const intent = current.artifactIntent;
-    const response = current.response;
-    if (!intent || !response) fail("accepted operation is missing its exact apply input");
-    return this.targetQueue.run(targetQueueKey(current), async () => {
-      const result = await this.dependencies.applyArtifact({
-        envelope: current,
-        intent,
-        responseText: response.text,
-      });
-      if (result.status === "stale") {
+    let current = await this.requireEnvelope(key);
+    if (current.lifecycle.status === "response-completed") {
+      const observed = await this.dependencies.readCurrentTarget(current.prepared.targetRevision);
+      await this.assertLive(current);
+      if (!sameTargetRevision(current.prepared.targetRevision, observed)) {
         const stale = await this.commit(
           current,
-          this.transition("mark-target-stale", current, {}, {
+          this.transition("mark-target-stale", current, command, {
             diagnosticRef: this.diagnosticRef(),
           }),
         );
         await this.present(stale.envelope, "stale-target");
         return { status: "stale", envelope: stale.envelope };
       }
-      const receipt = await this.commit(
-        current,
-        this.transition("record-artifact-applied", current, {}, {
-          receiptId: this.dependencies.ids.next("artifact-receipt"),
-          resultingContentHash: result.resultingContentHash,
+      const transition = this.transition("accept-result", current, command, {
+        artifactIntentId: this.dependencies.ids.next("artifact-intent"),
+      });
+      current = (await this.commit(current, transition)).envelope;
+    }
+    if (current.lifecycle.status !== "accepted" || !current.artifactIntent) {
+      fail(`accept is illegal from ${current.lifecycle.status}`);
+    }
+    if (current.artifactReceipt) {
+      return { status: "already-applied", envelope: current };
+    }
+    return this.applyAcceptedIntentWithTargetLock(current);
+  }
+
+  private async applyAcceptedIntent(
+    current: DesktopOperationEnvelopeV1,
+  ): Promise<DesktopOperationAcceptResultV1> {
+    return this.targetQueue.run(targetQueueKey(current), () => (
+      this.applyAcceptedIntentWithTargetLock(current)
+    ));
+  }
+
+  private async applyAcceptedIntentWithTargetLock(
+    observed: DesktopOperationEnvelopeV1,
+  ): Promise<DesktopOperationAcceptResultV1> {
+    const current = await this.requireEnvelope(keyFor(observed));
+    if (current.lifecycle.status === "stale") {
+      return { status: "stale", envelope: current };
+    }
+    if (current.lifecycle.status !== "accepted" || !current.artifactIntent || !current.response) {
+      fail(`artifact application is illegal from ${current.lifecycle.status}`);
+    }
+    if (current.artifactReceipt) {
+      return { status: "already-applied", envelope: current };
+    }
+    const intent = current.artifactIntent;
+    const response = current.response;
+    await this.assertLive(current);
+    const result = await this.dependencies.applyArtifact({
+      envelope: current,
+      intent,
+      responseText: response.text,
+    });
+    if (result.status === "stale") {
+      const latest = await this.requireEnvelope(keyFor(current));
+      if (latest.artifactReceipt) {
+        return { status: "already-applied", envelope: latest };
+      }
+      if (latest.lifecycle.status === "stale") {
+        return { status: "stale", envelope: latest };
+      }
+      const stale = await this.commit(
+        latest,
+        this.transition("mark-target-stale", latest, {}, {
+          diagnosticRef: this.diagnosticRef(),
         }),
       );
-      return { status: result.status, envelope: receipt.envelope };
+      await this.present(stale.envelope, "stale-target");
+      return { status: "stale", envelope: stale.envelope };
+    }
+    const receipt = await this.recordArtifactReceiptConvergently(
+      current,
+      result.resultingContentHash,
+    );
+    return {
+      status: receipt.converged ? "already-applied" : result.status,
+      envelope: receipt.envelope,
+    };
+  }
+
+  private async recordArtifactReceiptConvergently(
+    observed: DesktopOperationEnvelopeV1,
+    resultingContentHash: string,
+  ): Promise<{ envelope: DesktopOperationEnvelopeV1; converged: boolean }> {
+    let current = observed;
+    const transition = this.transition("record-artifact-applied", current, {}, {
+      receiptId: this.dependencies.ids.next("artifact-receipt"),
+      resultingContentHash,
     });
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await this.assertLive(current);
+      if (current.artifactReceipt) {
+        if (current.artifactReceipt.resultingContentHash !== resultingContentHash) {
+          fail("concurrent artifact receipt recorded a different resulting content hash");
+        }
+        return { envelope: current, converged: true };
+      }
+      if (current.lifecycle.status !== "accepted" || !current.artifactIntent) {
+        fail(`artifact receipt is illegal from ${current.lifecycle.status}`);
+      }
+      const reduction = reduceDesktopOperationV1(current, transition);
+      await this.assertLive(current);
+      const result = await this.dependencies.repository.replace(
+        keyFor(current),
+        hashDesktopOperationEnvelopeV1(current),
+        reduction.envelope,
+      );
+      if (result === "replaced") {
+        await this.assertLive(reduction.envelope);
+        return { envelope: reduction.envelope, converged: false };
+      }
+      if (result === "missing") fail("operation envelope disappeared while recording artifact receipt");
+      const reloaded = await this.dependencies.repository.load(keyFor(current));
+      if (!reloaded) fail("operation envelope disappeared after an artifact receipt conflict");
+      current = reloaded;
+    }
+    fail("artifact receipt exceeded the optimistic-CAS retry limit");
   }
 
   private async recoverEnvelope(current: DesktopOperationEnvelopeV1): Promise<void> {
@@ -585,14 +694,17 @@ export class DesktopOperationRuntimeV1 {
   ): Promise<{ envelope: DesktopOperationEnvelopeV1; replayed: boolean }> {
     let current = observed;
     for (let attempt = 0; attempt < 8; attempt += 1) {
+      await this.assertLive(current);
       const reduction = reduceDesktopOperationV1(current, transition);
       if (reduction.replayed) return { envelope: current, replayed: true };
+      await this.assertLive(current);
       const result = await this.dependencies.repository.replace(
         keyFor(current),
         hashDesktopOperationEnvelopeV1(current),
         reduction.envelope,
       );
       if (result === "replaced") {
+        await this.assertLive(reduction.envelope);
         return { envelope: reduction.envelope, replayed: false };
       }
       if (result === "missing") fail("operation envelope disappeared during transition");
@@ -624,6 +736,7 @@ export class DesktopOperationRuntimeV1 {
   private async requireEnvelope(key: DesktopOperationKeyV1): Promise<DesktopOperationEnvelopeV1> {
     const envelope = await this.dependencies.repository.load(key);
     if (!envelope) fail(`operation attempt ${key.operationId}/${key.attemptId} does not exist`);
+    await this.assertLive(envelope);
     return envelope;
   }
 
@@ -631,7 +744,30 @@ export class DesktopOperationRuntimeV1 {
     envelope: DesktopOperationEnvelopeV1,
     reason: Parameters<DesktopOperationPresenterV1>[1],
   ): Promise<void> {
+    await this.assertLive(envelope);
     await this.dependencies.presentResult?.(envelope, reason);
+  }
+
+  private async assertLive(envelope: DesktopOperationEnvelopeV1): Promise<void> {
+    if (await this.deleteIfExpired(envelope)) {
+      fail("operation envelope reached its privacy deadline and was deleted");
+    }
+  }
+
+  private async deleteIfExpired(envelope: DesktopOperationEnvelopeV1): Promise<boolean> {
+    let current = envelope;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      if (this.now() < current.retention.deleteByMs) return false;
+      const result = await this.dependencies.repository.delete(
+        keyFor(current),
+        hashDesktopOperationEnvelopeV1(current),
+      );
+      if (result === "deleted" || result === "missing") return true;
+      const reloaded = await this.dependencies.repository.load(keyFor(current));
+      if (!reloaded) return true;
+      current = reloaded;
+    }
+    fail("expired envelope deletion exceeded the optimistic-CAS retry limit");
   }
 
   private withOperation<T>(key: DesktopOperationKeyV1, task: () => Promise<T>): Promise<T> {
@@ -734,6 +870,31 @@ function targetQueueKey(envelope: DesktopOperationEnvelopeV1): string {
   // identity without changing that locus, so trace/head ids must not split the
   // serialization queue.
   return `${target.folderId}\0${target.path}`;
+}
+
+function sameTargetRevision(
+  captured: DesktopPreparedRequestV1["targetRevision"],
+  current: DesktopCurrentTargetRevisionV1 | null,
+): boolean {
+  return Boolean(
+    current?.focused
+    && current.folderId === captured.folderId
+    && current.path === captured.path
+    && current.traceId === captured.traceId
+    && current.headId === captured.headId
+    && current.contentHash === captured.contentHash,
+  );
+}
+
+function recordDeletedKey(
+  key: DesktopOperationKeyV1,
+  deleted: DesktopOperationKeyV1[],
+  deletedKeys: Set<string>,
+): void {
+  const id = operationQueueKey(key);
+  if (deletedKeys.has(id)) return;
+  deletedKeys.add(id);
+  deleted.push(key);
 }
 
 function freezeKeys(keys: readonly DesktopOperationKeyV1[]): readonly DesktopOperationKeyV1[] {
