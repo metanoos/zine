@@ -35,6 +35,7 @@ test("concurrent first-Root callers share one genesis publication", async () => 
   let resolveGenesis!: (id: string) => void;
   const genesis = new Promise<string>((resolve) => { resolveGenesis = resolve; });
   const mint = createRootMinter({
+    scope: () => "vault-a",
     existing: () => stored,
     async create() {
       creates += 1;
@@ -57,6 +58,7 @@ test("concurrent first-Root callers share one genesis publication", async () => 
 test("failed Root creation clears the pending attempt for retry", async () => {
   let attempts = 0;
   const mint = createRootMinter({
+    scope: () => "vault-a",
     existing: () => null,
     async create() {
       attempts += 1;
@@ -69,6 +71,33 @@ test("failed Root creation clears the pending attempt for retry", async () => {
   await assert.rejects(mint(), /relay unavailable/);
   assert.equal(await mint(), "root-after-retry");
   assert.equal(attempts, 2);
+});
+
+test("a pending Root publication cannot cross a vault switch", async () => {
+  let activeScope = "vault-a";
+  const stored = new Map<string, string>();
+  let resolveFirst!: (id: string) => void;
+  const firstGenesis = new Promise<string>((resolve) => { resolveFirst = resolve; });
+  const creates: string[] = [];
+  const mint = createRootMinter({
+    scope: () => activeScope,
+    existing: () => stored.get(activeScope) ?? null,
+    create: async () => {
+      creates.push(activeScope);
+      return activeScope === "vault-a" ? firstGenesis : "root-b";
+    },
+    persist(id) { stored.set(activeScope, id); },
+  });
+
+  const first = mint();
+  activeScope = "vault-b";
+  assert.equal(await mint(), "root-b");
+  resolveFirst("root-a");
+  await assert.rejects(first, /active vault changed/);
+
+  assert.deepEqual(creates, ["vault-a", "vault-b"]);
+  assert.equal(stored.get("vault-a"), undefined);
+  assert.equal(stored.get("vault-b"), "root-b");
 });
 
 test("a fresh Root genesis uses the AUTHOR signing key", () => {

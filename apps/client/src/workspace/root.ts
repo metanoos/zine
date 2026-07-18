@@ -1,4 +1,7 @@
-import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+import {
+  activeVaultStorageId,
+  vaultStorage as localStorage,
+} from "../storage/vault-storage.js";
 
 /**
  * The active vault's Root — the single home for everything that vault writes.
@@ -84,6 +87,7 @@ export function rootAuthorSigner(): Uint8Array {
 }
 
 export interface RootMintOperations {
+  scope(): string;
   existing(): string | null;
   create(): Promise<string>;
   persist(id: string): void;
@@ -91,27 +95,44 @@ export interface RootMintOperations {
 
 /** Coalesce every first-Root caller onto one genesis publication. React
  * StrictMode intentionally replays mount effects in development, and both
- * calls can observe empty storage before the first network await completes. */
+ * calls can observe empty storage before the first network await completes.
+ * Pending work is scoped to the active vault so a fast switch cannot reuse or
+ * persist another vault's Root publication. */
 export function createRootMinter(operations: RootMintOperations): () => Promise<string> {
-  let pending: Promise<string> | null = null;
+  const pendingByScope = new Map<string, Promise<string>>();
   return async () => {
+    const scope = operations.scope();
     const existing = operations.existing();
     if (existing) return existing;
+    const pending = pendingByScope.get(scope);
     if (pending) return pending;
 
-    pending = operations.create()
+    let tracked: Promise<string>;
+    tracked = operations.create()
       .then((id) => {
+        if (operations.scope() !== scope) {
+          throw new Error("The active vault changed while Root was being created");
+        }
         operations.persist(id);
         return id;
       })
-      .finally(() => {
-        pending = null;
-      });
-    return pending;
+      .then(
+        (id) => {
+          if (pendingByScope.get(scope) === tracked) pendingByScope.delete(scope);
+          return id;
+        },
+        (error: unknown) => {
+          if (pendingByScope.get(scope) === tracked) pendingByScope.delete(scope);
+          throw error;
+        },
+      );
+    pendingByScope.set(scope, tracked);
+    return tracked;
   };
 }
 
 const mintActiveVaultRoot = createRootMinter({
+  scope: () => activeVaultStorageId() ?? "browser",
   existing: getRootId,
   create: () => createFolderGenesis({ signer: rootAuthorSigner() }),
   persist: (id) => localStorage.setItem(ROOT_KEY, JSON.stringify({ id })),
