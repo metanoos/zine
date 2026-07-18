@@ -751,6 +751,37 @@ test("success output is deeply frozen and exact UTF-16 ranges survive selection"
   });
 });
 
+test("operation ranges stay within current text on exact Unicode boundaries", async () => {
+  const currentText = "a😀雪b";
+  for (const [name, range] of [
+    ["past target end", { fromUtf16: 0, toUtf16: currentText.length + 1 }],
+    ["splits surrogate at end", { fromUtf16: 0, toUtf16: 2 }],
+    ["splits surrogate at start", { fromUtf16: 2, toUtf16: 4 }],
+  ] as const) {
+    const result = await selectTraceContextV1(selectionInput([], {
+      operation: "settle",
+      currentText,
+      range,
+    }));
+    assert.equal(result.ok, false, name);
+    if (!result.ok) {
+      assert.equal(result.error.code, "MALFORMED_INPUT", name);
+      assert.equal(result.error.stage, "validate", name);
+      if (result.error.code === "MALFORMED_INPUT") {
+        assert.equal(result.error.path, "$.operation.range", name);
+      }
+    }
+  }
+
+  const valid = await selectTraceContextV1(selectionInput([], {
+    operation: "settle",
+    currentText,
+    range: { fromUtf16: 1, toUtf16: 4 },
+  }));
+  assertSuccess(valid);
+  assert.deepEqual(valid.manifest.operation.range, { fromUtf16: 1, toUtf16: 4 });
+});
+
 test("protected evidence binds to the exact scanner range, target identity, and operation range", async () => {
   const base: Extract<EvidenceCandidateV1, { kind: "protected-range" }> = {
     version: 1,
