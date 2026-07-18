@@ -1,3 +1,5 @@
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+
 /**
  * Extra onion "doors" — additional `.onion` addresses that forward to the local
  * relay, each derived from a different keychain key.

@@ -722,7 +722,7 @@ hypotheses. Last updated 2026-07-17.
 | Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
 | Step, Publish (wire name Send), Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
-| Desktop Stronghold storage for signing and provider secrets | Implemented on desktop; browser remains read-only | `secret-store.test.ts`, `secret-migration.test.ts`, key/model store tests, and the Tauri Stronghold shell |
+| Passphrase-gated desktop vault sessions with independent Roots, encrypted webview workspaces, relay databases, ACLs, signing keys, and provider secrets | Implemented on desktop; browser remains read-only | Vault lifecycle and encrypted-storage tests, registry recovery tests, key/model store tests, and the Tauri Stronghold shell |
 | Headless MCP press with its own voice key and permanent profile Root | Implemented | Offline stdio smoke proves zero-folder cold start, exact signed-event outbox, raw node reads, and Root/key reuse; isolated real-relay integration flushes a queued event unchanged, preserves optional source forks, and exercises external Send |
 | Prepared desktop MODEL operations and approval gating | Implemented for direct single-shot gestures; not yet enforced on every live model call | `prepared-operation.test.ts`, `context-snapshot.test.ts`, `model-operation-executor.test.ts`, and `llm-prepared.test.ts`; the separate agent loop still uses its own transport, and `preparedRequestHash` is not yet stored in Step metadata |
 | Current text plus structured trace context in desktop prompts | Implemented as a client-local compatibility baseline | Direct operations gather current file/folder text and a chronological process log through `context-block.ts`, `context-snapshot.ts`, and `prepared-operation.ts`; there is no shared task-specific selector, scoped memory, cross-press fixture contract, or durable context binding yet |
@@ -740,7 +740,12 @@ Desktop vault caveat: Stronghold's password and snapshot KDFs are
 intentionally expensive. A fully unoptimized development build can appear to
 stall for minutes; the current development profile optimizes only the
 cryptographic hot paths. Release KDF parameters and the application security
-contract are unchanged.
+contract are unchanged. New vaults use independent KDF salts, authenticated
+encrypted webview state, relay databases, and ACLs. Relay databases are
+physically partitioned and bound only after unlock, but canonical signed
+protocol events are not additionally encrypted by the vault passphrase at
+rest. The adopted legacy vault keeps its existing Stronghold and `~/.tracer`
+paths so its passphrase and relay history continue to work.
 
 Reify writes each chosen Step's authoritative `snapshot` to its ordinary file
 path. It never substitutes the live unstepped editor buffer and never embeds
@@ -910,7 +915,8 @@ Already built:
 - distinct human, model, and agent voice keys with per-delta attribution;
 - local and hosted relay implementations, with a remaining hosted ACL gap;
 - raw-file Reify with an optional signed-event bundle and report;
-- Stronghold-backed desktop signing and provider secrets;
+- passphrase-gated desktop vault sessions with independent Roots, encrypted
+  webview state, relay databases, ACLs, signing keys, and provider secrets;
 - verified recursive folder/Root checkpoint causes, distinct child `advance`,
   durable operation grouping, explicit folder/Root Step, and derived Replay
   collapse;

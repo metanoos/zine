@@ -1,9 +1,12 @@
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+
 /**
- * The install root — the single home for everything this install writes. One
- * root per browser/machine profile, minted on first boot and reopened on every
- * ordinary boot thereafter. It is never unmounted or switched away from. An
- * explicit factory reset is the one lifecycle boundary: it clears the whole
- * profile and the local relay, then the next boot mints a different root.
+ * The active vault's Root — the single home for everything that vault writes.
+ * One Root is minted on the vault's first unlock and reopened whenever that
+ * vault is activated. The same desktop install may hold several parallel
+ * vaults; vaultStorage scopes this pointer and its local workspace state so
+ * switching vaults cannot reopen another vault's Root. An explicit factory
+ * reset clears every vault and the local relay.
  *
  * Identity is the genesis node's event id (protocol §3.1: trace identity IS
  * the genesis node id), minted via `createFolderGenesis`. That id is stored
@@ -12,7 +15,7 @@
  *   - this localStorage slot, the local pointer that lets every boot reopen
  *     the exact same root without re-minting.
  *
- * WRITE-ONCE within one install lifecycle. `mintRoot` guards against a
+ * WRITE-ONCE within one vault lifecycle. `mintRoot` guards against a
  * double-mint by refusing to overwrite an existing id. Factory reset is not a
  * mutation of that root: App.tsx erases the entire local profile and sidecar
  * history, so the following first-run boot creates a new lifecycle and a new

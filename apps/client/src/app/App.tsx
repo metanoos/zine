@@ -2,6 +2,7 @@ import { Component, Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef
 import type { CSSProperties, MutableRefObject, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { createTraceOperationId, isTraceOperationId } from "@zine/protocol";
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
 import {
   Compartment,
   EditorState,
@@ -163,6 +164,7 @@ import {
 
 import { DownloadView } from "../networking/Download.js";
 import { AboutView } from "./About.js";
+import { VaultsView } from "./VaultsView.js";
 import { OnboardingGuide, OnboardingWelcome } from "./Onboarding.js";
 import {
   completedLessonsForStage,
@@ -436,6 +438,7 @@ import {
   ScanLine,
   Sun,
   Trash2,
+  Vault,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -589,7 +592,7 @@ function replayStepIndexForPath(
 // Views reachable from the nav rail. `editor` is the existing two-panel
 // workspace; the rest are placeholders awaiting real implementations
 // (globe → maplibre, keys/relays → nostr, models → LLM keys).
-type View = "about" | "listings" | "editor" | "stats" | "globe" | "keys" | "networking" | "models" | "download" | "operator";
+type View = "about" | "listings" | "editor" | "stats" | "globe" | "vaults" | "keys" | "networking" | "models" | "download" | "operator";
 
 // Theme: "auto" follows prefers-color-scheme; "light"/"dark" are explicit
 // overrides applied via <html data-theme>. main.tsx sets the attribute before
@@ -7238,6 +7241,7 @@ const RAIL_BOTTOM_TOP: RailItem[] = [
   { view: "download", Icon: Download, label: "Download" },
 ];
 const RAIL_BOTTOM: RailItem[] = [
+  { view: "vaults", Icon: Vault, label: "Vaults" },
   { view: "keys", Icon: KeyRound, label: "Keys" },
   { view: "models", Icon: Cpu, label: "Models" },
   { view: "networking", Icon: Radio, label: "Networks" },
@@ -7329,7 +7333,7 @@ function NavRail({
       </div>
       <div className="rail-divider" aria-hidden="true" />
       <div className="nav-rail-bottom">
-        {RAIL_BOTTOM.map((item) => (
+        {RAIL_BOTTOM.filter((item) => item.view !== "vaults" || isTauri()).map((item) => (
           <RailButton
             key={item.view}
             item={item}
@@ -7410,6 +7414,7 @@ const VIEW_META: Record<Exclude<View, "editor">, { title: string; blurb: string 
   listings: { title: "Stacks", blurb: "An editorial selection of zines, arranged into named sections." },
   stats: { title: "Times", blurb: "Zines on this relay, ranked by metric per unit time." },
   globe: { title: "Spaces", blurb: "Zines pinned to geohashes, rendered at their level." },
+  vaults: { title: "Vaults", blurb: "Parallel Roots, each protected by its own passphrase." },
   keys: { title: "Keys", blurb: "Nostr keypairs (voices) you sign and attribute text with." },
   networking: { title: "Networks", blurb: "Your node, your seeds, your peers — where your writing lives, where it's backed up, and who can reach you." },
   models: { title: "Models", blurb: "LLM providers for prompt injection." },
@@ -7426,6 +7431,7 @@ const VIEW_TITLES: Record<View, string> = {
   listings: VIEW_META.listings.title,
   stats: VIEW_META.stats.title,
   globe: VIEW_META.globe.title,
+  vaults: VIEW_META.vaults.title,
   keys: VIEW_META.keys.title,
   networking: VIEW_META.networking.title,
   models: VIEW_META.models.title,
@@ -11708,7 +11714,7 @@ function App() {
   }
 
   /** Factory reset is a first-run boundary, not a workspace preference reset.
-   *  Desktop purges the local sidecar, releases and deletes the secure vault,
+   *  Desktop purges the local sidecar, releases and deletes every secure vault,
    *  clears the webview's entire localStorage, and reloads into vault creation.
    *  Clearing `zine.root` makes boot mint a new root genesis, and its virtual
    *  oblivion region therefore starts empty too. Remote relay copies are
@@ -16323,6 +16329,10 @@ function App() {
           <ViewErrorBoundary view="networking">
             <NetworkingView />
           </ViewErrorBoundary>
+        ) : activeView === "vaults" ? (
+          <ViewErrorBoundary view="vaults">
+            <VaultsView />
+          </ViewErrorBoundary>
         ) : activeView === "keys" ? (
           <ViewErrorBoundary view="keys">
             <KeysView onKeysChange={setKeys} />
@@ -16410,9 +16420,9 @@ function App() {
             </h2>
             <p id="factory-reset-description" className="confirm-message factory-reset-message">
               Erases all local app state, including the root binding, crash pads, secure key
-              vault, AI credentials, relay config, voices, models, and layout. On desktop it
+              vaults, AI credentials, relay config, voices, models, and layouts. On desktop it
               also deletes every event from the local sidecar and resets peer access. The app
-              reloads into vault creation, then mints a new root with an empty oblivion. Events
+              reloads into vault creation; the next vault then mints a new root with an empty oblivion. Events
               already sent to remote relays cannot be erased from those relays. There is no undo.
             </p>
             {resetError && <p className="create-error" role="alert">{resetError}</p>}

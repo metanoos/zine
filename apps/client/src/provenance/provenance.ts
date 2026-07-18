@@ -1,6 +1,7 @@
 import { finalizeEvent, getPublicKey, verifyEvent } from "nostr-tools/pure";
 import type { Event, EventTemplate } from "nostr-tools";
 import type { Filter } from "nostr-tools";
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
 import { Relay } from "nostr-tools/relay";
 import {
   createTraceOperationId,

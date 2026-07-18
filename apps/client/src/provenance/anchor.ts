@@ -1,3 +1,5 @@
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+
 /**
  * NIP-03 (OpenTimestamps) anchors for Step — optional anteriority evidence.
  * A completed proof establishes that a Step event id existed no later than a

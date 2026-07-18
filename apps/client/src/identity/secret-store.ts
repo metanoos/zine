@@ -91,6 +91,7 @@ let activeStore: SecretStore = new MemorySecretStore({
 });
 let activeCapabilities = activeStore.capabilities();
 let unlocked = nodeTestRuntime;
+let pendingCloseStore: SecretStore | null = null;
 const sessionSecrets = new Map<string, Uint8Array>();
 
 function clearCache(): void {
@@ -100,11 +101,19 @@ function clearCache(): void {
 
 /** Install and fully preload an unlocked store before rendering authoring UI. */
 export async function unlockSecretSession(store: SecretStore): Promise<void> {
+  if (pendingCloseStore) {
+    throw new Error("Finish locking the current vault before unlocking another one");
+  }
   const refs = await store.listRefs();
   const loaded = new Map<string, Uint8Array>();
-  for (const ref of refs) {
-    const value = await store.get(ref);
-    if (value) loaded.set(ref, copy(value));
+  try {
+    for (const ref of refs) {
+      const value = await store.get(ref);
+      if (value) loaded.set(ref, copy(value));
+    }
+  } catch (error) {
+    for (const value of loaded.values()) value.fill(0);
+    throw error;
   }
   clearCache();
   activeStore = store;
@@ -131,7 +140,8 @@ export function lockSecretSession(): void {
  * Factory reset must do this before deleting a Stronghold snapshot; otherwise
  * Stronghold's unload save can recreate the vault after native deletion. */
 export async function closeSecretSession(): Promise<void> {
-  await activeStore.close?.();
+  const store = pendingCloseStore ?? activeStore;
+  pendingCloseStore = store;
   clearCache();
   activeStore = new MemorySecretStore({
     persistent: false,
@@ -140,6 +150,14 @@ export async function closeSecretSession(): Promise<void> {
   });
   activeCapabilities = activeStore.capabilities();
   unlocked = false;
+  try {
+    await store.close?.();
+    pendingCloseStore = null;
+  } catch (error) {
+    // Keep the backend reference solely so the fail-closed lock screen can
+    // retry Stronghold unload. No signing/model capability remains available.
+    throw error;
+  }
 }
 
 export function secretSessionCapabilities(): SecretStoreCapabilities {

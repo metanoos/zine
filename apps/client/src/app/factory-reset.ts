@@ -1,5 +1,6 @@
 import { isTauri } from "../identity/identity.js";
 import { closeSecretSession } from "../identity/secret-store.js";
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
 
 export interface FactoryResetActions {
   resetDesktopState?: () => Promise<void>;
@@ -24,7 +25,12 @@ export async function runFactoryReset(actions: FactoryResetActions): Promise<voi
   }
 
   await actions.resetDesktopState();
-  await actions.closeSecrets();
+  try {
+    await actions.closeSecrets();
+  } catch (error) {
+    actions.reload();
+    throw error;
+  }
   try {
     actions.clearBrowserState();
     await actions.deleteDesktopVault();

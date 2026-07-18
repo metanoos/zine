@@ -10,11 +10,21 @@ import type {
   SecretStoreCapabilities,
 } from "./secret-store.js";
 
-const VAULT_FILENAME = "zine-secrets.hold";
+const LEGACY_VAULT_FILENAME = "zine-secrets.hold";
+const VAULTS_DIRNAME = "vaults";
+const VAULT_SNAPSHOT_FILENAME = "secrets.hold";
 const CLIENT_NAME = "zine";
 const REFS_INDEX = "__zine_secret_refs_v1";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+function kdfEnvelope(vault: { id: string; legacy: boolean }, passphrase: string): string {
+  return JSON.stringify({
+    version: 1,
+    vaultId: vault.legacy ? null : vault.id,
+    passphrase,
+  });
+}
 
 /**
  * Desktop SecretStore backed by one Stronghold snapshot.
@@ -30,10 +40,23 @@ export class StrongholdSecretStore implements SecretStore {
     private readonly store: Store,
   ) {}
 
-  static async open(passphrase: string): Promise<StrongholdSecretStore> {
+  static async open(
+    vault: { id: string; legacy: boolean },
+    passphrase: string,
+  ): Promise<StrongholdSecretStore> {
     if (!passphrase) throw new Error("Enter a vault passphrase");
-    const path = await join(await appLocalDataDir(), VAULT_FILENAME);
-    const stronghold = await Stronghold.load(path, passphrase);
+    if (!/^[a-zA-Z0-9-]{1,96}$/.test(vault.id)) {
+      throw new Error("The selected vault id is invalid");
+    }
+    const path = vault.legacy
+      ? await join(await appLocalDataDir(), LEGACY_VAULT_FILENAME)
+      : await join(
+          await appLocalDataDir(),
+          VAULTS_DIRNAME,
+          vault.id,
+          VAULT_SNAPSHOT_FILENAME,
+        );
+    const stronghold = await Stronghold.load(path, kdfEnvelope(vault, passphrase));
     let client: Client;
     try {
       client = await stronghold.loadClient(CLIENT_NAME);
@@ -101,4 +124,4 @@ export class StrongholdSecretStore implements SecretStore {
   }
 }
 
-export { VAULT_FILENAME };
+export { kdfEnvelope, LEGACY_VAULT_FILENAME, VAULTS_DIRNAME, VAULT_SNAPSHOT_FILENAME };

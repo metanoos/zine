@@ -1,3 +1,5 @@
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+
 /**
  * Provider configuration for the LLM client. A localStorage-backed list of
  * the providers the user has actually added, plus a fixed menu of presets

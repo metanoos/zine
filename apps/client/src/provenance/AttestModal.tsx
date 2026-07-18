@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import { createPortal } from "react-dom";
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
 import { decodeGeohash, encodeGeohash, geohashLengthForZoom } from "../networking/geohash.js";
 
 /**

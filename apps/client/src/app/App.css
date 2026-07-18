@@ -749,6 +749,7 @@ html[data-theme="light"] .rail-brand-wordmark {
    overflows into document-level scroll, which carries the nav rail (and the
    rest of normal flow) out of view. */
 .keys-view,
+.vaults-view,
 .models-view,
 .relays-view,
 .networking-view,
@@ -780,6 +781,7 @@ html[data-theme="light"] .rail-brand-wordmark {
    active page (gold icon + inset accent bar on .rail-item.active), so these
    views carry no <h1> of their own — the blurb leads directly. */
 .keys-view,
+.vaults-view,
 .models-view,
 .relays-view,
 .networking-view,
@@ -793,6 +795,7 @@ html[data-theme="light"] .rail-brand-wordmark {
 }
 
 .keys-view .view-placeholder-blurb,
+.vaults-view .view-placeholder-blurb,
 .models-view .view-placeholder-blurb,
 .relays-view .view-placeholder-blurb,
 .networking-view .view-placeholder-blurb,
@@ -2149,6 +2152,124 @@ html[data-theme="light"] .rail-brand-wordmark {
   background: var(--accent-soft);
 }
 .settings-add-btn:disabled { opacity: 0.45; cursor: default; }
+
+/* Vaults view — the active security/profile boundary comes first in the
+   management group, ahead of Keys. */
+.vaults-intro,
+.vault-card,
+.vault-list,
+.vault-error,
+.vault-add {
+  width: 100%;
+  max-width: var(--settings-col);
+  box-sizing: border-box;
+}
+
+.vaults-intro {
+  margin: 0;
+  color: var(--ink-dim);
+  line-height: 1.55;
+}
+
+.vault-card-active {
+  border-color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.vault-card-main,
+.vault-card-heading,
+.vault-row,
+.vault-row-action,
+.vault-secondary-action {
+  display: flex;
+  align-items: center;
+}
+
+.vault-card-main {
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.vault-card-heading {
+  gap: 0.55rem;
+}
+
+.vault-card h2,
+.vault-card p,
+.vault-section-title {
+  margin: 0;
+}
+
+.vault-card h2,
+.vault-section-title {
+  font-family: var(--font-display);
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.vault-card h2 { font-size: 1.2rem; }
+.vault-card p { margin-top: 0.2rem; color: var(--ink-dim); }
+
+.vault-active-badge {
+  padding: 0.1rem 0.35rem;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.vault-secondary-action,
+.vault-row-action {
+  flex: 0 0 auto;
+  gap: 0.35rem;
+  padding: 0.38rem 0.6rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+
+.vault-secondary-action:hover,
+.vault-row-action:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.vault-secondary-action:disabled,
+.vault-row-action:disabled { cursor: default; opacity: 0.45; }
+
+.vault-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.vault-section-title {
+  padding: 0 0.55rem 0.3rem;
+  font-size: 1rem;
+}
+
+.vault-row {
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.vault-row > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.vault-row strong { color: var(--ink); font-weight: 500; }
+.vault-row span { color: var(--ink-dim); font-size: 0.75rem; }
+.vault-error { margin: 0; color: var(--reject-fg); }
+.vault-add { align-self: center; justify-content: center; }
 
 /* Network and About share a workspace shell. The global rail answers "where am
    I in zine?"; the quieter local pane selects the category or chapter. Keeping
@@ -10002,6 +10123,41 @@ html[data-theme="light"] .editor-host {
 }
 .security-bootstrap-kicker { color: var(--accent); letter-spacing: .16em; }
 .security-bootstrap-error { color: var(--reject-fg); }
+
+.security-vault-picker { width: min(500px, 100%); }
+.security-vault-list {
+  display: grid;
+  gap: 8px;
+}
+.security-bootstrap-card .security-vault-choice {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0.85rem;
+  border-color: var(--rule-strong);
+  color: var(--ink);
+  text-align: left;
+}
+.security-vault-choice small {
+  color: var(--ink-dim);
+  font-size: 0.72rem;
+}
+.security-bootstrap-card .security-vault-create {
+  justify-self: stretch;
+  text-align: center;
+}
+.security-bootstrap-card .security-vault-back {
+  padding: 0;
+  border: 0;
+  color: var(--ink-dim);
+  font-size: 0.78rem;
+}
+.security-bootstrap-card .security-vault-back:hover:not(:disabled) {
+  color: var(--accent);
+  background: transparent;
+}
 
 @media (prefers-color-scheme: dark) {
   .security-bootstrap { color-scheme: dark; }
