@@ -80,6 +80,7 @@ struct ActiveVaultRuntime {
     generation: u64,
     closing: bool,
     journal_key: desktop_operation_journal::JournalKey,
+    journal_directory: desktop_operation_journal::PinnedVaultDirectory,
     journal_session_id: String,
 }
 
@@ -92,6 +93,7 @@ impl std::fmt::Debug for ActiveVaultRuntime {
             .field("generation", &self.generation)
             .field("closing", &self.closing)
             .field("journal_key", &"[REDACTED]")
+            .field("journal_directory", &"[PINNED]")
             .field("journal_session_id", &"[REDACTED]")
             .finish()
     }
@@ -736,8 +738,21 @@ fn verify_vault_runtime_key(directory: &Path, key: &[u8]) -> Result<(), String> 
     }
 }
 
+async fn acquire_vault_transition_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    VAULT_TRANSITION_GATE.lock().await
+}
+
 #[tauri::command]
-fn activate_vault_runtime(
+async fn activate_vault_runtime(
+    app: tauri::AppHandle,
+    id: String,
+    workspace_key: Vec<u8>,
+) -> Result<VaultRuntimeActivation, String> {
+    let _transition = acquire_vault_transition_guard().await;
+    activate_vault_runtime_under_transition(app, id, workspace_key)
+}
+
+fn activate_vault_runtime_under_transition(
     app: tauri::AppHandle,
     id: String,
     workspace_key: Vec<u8>,
@@ -756,6 +771,7 @@ fn activate_vault_runtime(
         return Err("Finish creating the encrypted vault before activating it".into());
     }
     let directory = prepare_vault_runtime_directory(&vault_runtime_directory(&data_dir, vault)?)?;
+    let journal_directory = desktop_operation_journal::PinnedVaultDirectory::open(&directory)?;
     let verified = verify_vault_runtime_key(&directory, &workspace_key);
     verified?;
     let journal_key = desktop_operation_journal::JournalKey::derive(&workspace_key, &id)?;
@@ -786,6 +802,7 @@ fn activate_vault_runtime(
         generation,
         closing: false,
         journal_key,
+        journal_directory,
         journal_session_id: journal_session_id.clone(),
     });
     Ok(VaultRuntimeActivation {
@@ -1103,13 +1120,17 @@ async fn factory_reset(
     app: tauri::AppHandle,
     kademlia_runtime: tauri::State<'_, kademlia::KademliaRuntime>,
 ) -> Result<(), String> {
+    let _transition = acquire_vault_transition_guard().await;
     // Revoke app-owned Tor reachability before deleting the ACL. Otherwise the
     // relay's deliberate local-mode reset window would be reachable through a
     // still-running onion while the new vault screen waits for user input.
-    let active_kademlia_directory = active_vault_binding()?.directory;
-    lock_vault_runtime(app.clone()).await?;
+    let active_runtime = active_vault_runtime()?;
+    let active_kademlia_directory = active_runtime.directory.clone();
+    let active_journal_directory = active_runtime.journal_directory.clone();
+    let rendezvous_runtime = app.state::<rendezvous_relay::RendezvousRelayRuntime>();
+    lock_vault_runtime_under_transition(&app, &kademlia_runtime, &rendezvous_runtime).await?;
     kademlia::reset_runtime(&active_kademlia_directory, &kademlia_runtime).await?;
-    desktop_operation_journal::remove_database_files(&active_kademlia_directory)?;
+    desktop_operation_journal::remove_database_files(&active_journal_directory)?;
     let bin = resolve_relay_binary(&app)?;
     run_relay_factory_reset(&bin)?;
     std::thread::sleep(Duration::from_millis(5_250));
@@ -2148,7 +2169,15 @@ async fn lock_vault_runtime_inner(
     kademlia_runtime: &kademlia::KademliaRuntime,
     rendezvous_runtime: &rendezvous_relay::RendezvousRelayRuntime,
 ) -> Result<(), String> {
-    let _transition = VAULT_TRANSITION_GATE.lock().await;
+    let _transition = acquire_vault_transition_guard().await;
+    lock_vault_runtime_under_transition(app, kademlia_runtime, rendezvous_runtime).await
+}
+
+async fn lock_vault_runtime_under_transition(
+    app: &tauri::AppHandle,
+    kademlia_runtime: &kademlia::KademliaRuntime,
+    rendezvous_runtime: &rendezvous_relay::RendezvousRelayRuntime,
+) -> Result<(), String> {
     let binding = {
         let _gate = VAULT_RUNTIME_GATE
             .lock()
@@ -2545,6 +2574,23 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn test_pinned_journal_directory(
+        label: &str,
+    ) -> (PathBuf, desktop_operation_journal::PinnedVaultDirectory) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "zine-pinned-journal-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        let path = prepare_vault_runtime_directory(&path).expect("prepare test journal directory");
+        let pinned = desktop_operation_journal::PinnedVaultDirectory::open(&path)
+            .expect("pin test journal directory");
+        (path, pinned)
+    }
+
     #[test]
     fn scanned_files_serialize_for_the_typescript_boundary() {
         let value = serde_json::to_value(ScannedFile {
@@ -2877,6 +2923,7 @@ mod tests {
             .expect_err("locked vault must reject native commands")
             .contains("Unlock a vault"));
 
+        let (directory, journal_directory) = test_pinned_journal_directory("native-command");
         let closing = ActiveVaultRuntime {
             id: "vault-a".into(),
             directory: PathBuf::from("vault-a"),
@@ -2884,6 +2931,7 @@ mod tests {
             closing: true,
             journal_key: desktop_operation_journal::JournalKey::derive(&[0x41; 32], "vault-a")
                 .expect("derive closing test journal key"),
+            journal_directory: journal_directory.clone(),
             journal_session_id: "a".repeat(64),
         };
         assert!(usable_vault_runtime(Some(closing))
@@ -2897,6 +2945,7 @@ mod tests {
             closing: false,
             journal_key: desktop_operation_journal::JournalKey::derive(&[0x42; 32], "vault-a")
                 .expect("derive open test journal key"),
+            journal_directory,
             journal_session_id: "b".repeat(64),
         };
         assert_eq!(
@@ -2905,6 +2954,31 @@ mod tests {
                 .binding(),
             open.binding()
         );
+        fs::remove_dir_all(directory).expect("remove test journal directory");
+    }
+
+    #[tokio::test]
+    async fn activation_waits_for_the_reset_wide_transition_guard() {
+        use std::sync::Arc;
+
+        let reset_guard = acquire_vault_transition_guard().await;
+        let activated = Arc::new(AtomicBool::new(false));
+        let activated_after_wait = activated.clone();
+        let waiter = tokio::spawn(async move {
+            let _activation_guard = acquire_vault_transition_guard().await;
+            activated_after_wait.store(true, Ordering::SeqCst);
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !activated.load(Ordering::SeqCst),
+            "activation must remain queued for the entire reset guard"
+        );
+        drop(reset_guard);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("queued activation should resume after reset")
+            .expect("activation waiter should finish");
+        assert!(activated.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -2985,6 +3059,10 @@ mod tests {
             "zine-peers-captured-path-{}-{nonce}",
             std::process::id()
         ));
+        let directory_a = prepare_vault_runtime_directory(&dir.join("vault-a"))
+            .expect("prepare vault A test journal directory");
+        let directory_b = prepare_vault_runtime_directory(&dir.join("vault-b"))
+            .expect("prepare vault B test journal directory");
         let vault_a = ActiveVaultRuntime {
             id: "vault-a".into(),
             directory: dir.join("vault-a"),
@@ -2992,6 +3070,8 @@ mod tests {
             closing: false,
             journal_key: desktop_operation_journal::JournalKey::derive(&[0xa1; 32], "vault-a")
                 .expect("derive vault A test journal key"),
+            journal_directory: desktop_operation_journal::PinnedVaultDirectory::open(&directory_a)
+                .expect("pin vault A test journal directory"),
             journal_session_id: "a".repeat(64),
         };
         let vault_b = ActiveVaultRuntime {
@@ -3001,6 +3081,8 @@ mod tests {
             closing: false,
             journal_key: desktop_operation_journal::JournalKey::derive(&[0xb2; 32], "vault-b")
                 .expect("derive vault B test journal key"),
+            journal_directory: desktop_operation_journal::PinnedVaultDirectory::open(&directory_b)
+                .expect("pin vault B test journal directory"),
             journal_session_id: "b".repeat(64),
         };
         let path_a = peers_json_path(&vault_a);

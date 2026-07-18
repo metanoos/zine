@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -13,16 +14,19 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::{
-    active_vault_runtime, revalidate_pinned_vault_runtime_directory, sync_directory,
-    VAULT_RUNTIME_GATE,
-};
+use crate::{active_vault_runtime, VAULT_RUNTIME_GATE};
 
 const JOURNAL_FILENAME: &str = "press.sqlite3";
+const JOURNAL_WAL_FILENAME: &str = "press.sqlite3-wal";
+const JOURNAL_SHM_FILENAME: &str = "press.sqlite3-shm";
 const JOURNAL_SCHEMA_VERSION: i64 = 2;
 const MAX_ENVELOPE_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_CIPHERTEXT_BYTES: usize = MAX_ENVELOPE_BYTES + 16;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+// Mirrors DESKTOP_OPERATION_MAX_RETENTION_MS in the owning TypeScript
+// contract. Keep the expression visible so both trust boundaries derive the
+// same exact 30-day interval.
+const DESKTOP_OPERATION_MAX_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const DEFAULT_PAGE_LIMIT: usize = 8;
 const MAX_PAGE_LIMIT: usize = 16;
 const NONCE_BYTES: usize = 24;
@@ -35,6 +39,213 @@ const AEAD_DOMAIN: &[u8] = b"zine.desktop-operation-journal.envelope.v1\0";
 const ENVELOPE_HASH_DOMAIN: &[u8] = b"zine.desktop-operation.envelope.v1\0";
 
 type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Clone)]
+pub(crate) struct PinnedVaultDirectory {
+    #[cfg(test)]
+    path: PathBuf,
+    handle: Arc<fs::File>,
+}
+
+impl PinnedVaultDirectory {
+    pub(crate) fn open(path: &Path) -> Result<Self, String> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+            let handle = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(path)
+                .map_err(|_| storage_unavailable())?;
+            let descriptor_metadata = handle.metadata().map_err(|_| storage_unavailable())?;
+            let path_metadata = fs::symlink_metadata(path).map_err(|_| storage_unavailable())?;
+            if !descriptor_metadata.is_dir()
+                || path_metadata.file_type().is_symlink()
+                || !path_metadata.is_dir()
+                || descriptor_metadata.dev() != path_metadata.dev()
+                || descriptor_metadata.ino() != path_metadata.ino()
+            {
+                return Err(storage_unavailable());
+            }
+            let canonical = fs::canonicalize(path).map_err(|_| storage_unavailable())?;
+            if canonical != path {
+                return Err(storage_unavailable());
+            }
+            Ok(Self {
+                #[cfg(test)]
+                path: path.to_path_buf(),
+                handle: Arc::new(handle),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            Err("The operation journal requires descriptor-relative filesystem support".into())
+        }
+    }
+
+    fn sqlite_path(&self) -> Result<PathBuf, String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+
+            let root = PathBuf::from(format!("/proc/self/fd/{}", self.handle.as_raw_fd()));
+            Ok(root.join(JOURNAL_FILENAME))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::ffi::{CStr, OsStr};
+            use std::os::fd::AsRawFd;
+            use std::os::unix::ffi::OsStrExt;
+
+            // rusqlite's default macOS VFS cannot open a database or its WAL
+            // relative to a directory descriptor. F_GETPATH instead resolves
+            // the *current* path of the already-pinned directory. The
+            // pre/post dev+inode checks in `open_checked` detect a completed
+            // rename or symlink substitution and fail closed. They do not
+            // claim protection from a malicious same-UID ABA swap between
+            // both checks; eliminating that residual race requires a custom
+            // SQLite VFS whose main/WAL/SHM opens are all based on openat(2).
+            let mut buffer = [0i8; libc::PATH_MAX as usize];
+            if unsafe {
+                libc::fcntl(
+                    self.handle.as_raw_fd(),
+                    libc::F_GETPATH,
+                    buffer.as_mut_ptr(),
+                )
+            } < 0
+            {
+                return Err(storage_unavailable());
+            }
+            let directory = unsafe { CStr::from_ptr(buffer.as_ptr()) };
+            Ok(PathBuf::from(OsStr::from_bytes(directory.to_bytes())).join(JOURNAL_FILENAME))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            Err("The operation journal requires descriptor-relative filesystem support".into())
+        }
+    }
+
+    #[cfg(unix)]
+    fn verify_sqlite_path(&self, path: &Path) -> Result<(), String> {
+        use std::os::unix::fs::MetadataExt;
+
+        let descriptor_metadata = self.handle.metadata().map_err(|_| storage_unavailable())?;
+        let parent = path.parent().ok_or_else(storage_unavailable)?;
+        let parent_metadata = fs::metadata(parent).map_err(|_| storage_unavailable())?;
+        if !parent_metadata.is_dir()
+            || descriptor_metadata.dev() != parent_metadata.dev()
+            || descriptor_metadata.ino() != parent_metadata.ino()
+        {
+            return Err(storage_unavailable());
+        }
+
+        let relative = self
+            .open_relative(JOURNAL_FILENAME, false)?
+            .ok_or_else(storage_unavailable)?;
+        let relative_metadata = relative.metadata().map_err(|_| storage_unavailable())?;
+        let path_metadata = fs::symlink_metadata(path).map_err(|_| storage_unavailable())?;
+        if path_metadata.file_type().is_symlink()
+            || !path_metadata.is_file()
+            || relative_metadata.dev() != path_metadata.dev()
+            || relative_metadata.ino() != path_metadata.ino()
+        {
+            return Err(storage_unavailable());
+        }
+        Ok(())
+    }
+
+    fn open_relative(&self, name: &str, create: bool) -> Result<Option<fs::File>, String> {
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::{AsRawFd, FromRawFd};
+
+            let name = CString::new(name).map_err(|_| storage_unavailable())?;
+            let mut flags = libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+            if create {
+                flags |= libc::O_CREAT;
+            }
+            let descriptor =
+                unsafe { libc::openat(self.handle.as_raw_fd(), name.as_ptr(), flags, 0o600) };
+            if descriptor < 0 {
+                let error = std::io::Error::last_os_error();
+                if !create && error.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                return Err(storage_unavailable());
+            }
+            let file = unsafe { fs::File::from_raw_fd(descriptor) };
+            if !file
+                .metadata()
+                .map_err(|_| storage_unavailable())?
+                .is_file()
+            {
+                return Err(storage_unavailable());
+            }
+            if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
+                return Err(storage_unavailable());
+            }
+            Ok(Some(file))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (name, create);
+            Err("The operation journal requires descriptor-relative filesystem support".into())
+        }
+    }
+
+    fn unlink_relative(&self, name: &str) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::AsRawFd;
+
+            let name = CString::new(name).map_err(|_| storage_unavailable())?;
+            if unsafe { libc::unlinkat(self.handle.as_raw_fd(), name.as_ptr(), 0) } == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(storage_unavailable())
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            Err("The operation journal requires descriptor-relative filesystem support".into())
+        }
+    }
+
+    fn sync(&self) -> Result<(), String> {
+        self.handle.sync_all().map_err(|_| storage_unavailable())
+    }
+}
+
+pub(crate) trait JournalDirectorySource {
+    fn pinned_directory(&self) -> Result<PinnedVaultDirectory, String>;
+}
+
+impl JournalDirectorySource for PinnedVaultDirectory {
+    fn pinned_directory(&self) -> Result<PinnedVaultDirectory, String> {
+        Ok(self.clone())
+    }
+}
+
+impl JournalDirectorySource for PathBuf {
+    fn pinned_directory(&self) -> Result<PinnedVaultDirectory, String> {
+        PinnedVaultDirectory::open(self)
+    }
+}
+
+impl JournalDirectorySource for Path {
+    fn pinned_directory(&self) -> Result<PinnedVaultDirectory, String> {
+        PinnedVaultDirectory::open(self)
+    }
+}
 
 pub(crate) struct JournalKey {
     material: Zeroizing<Vec<u8>>,
@@ -131,32 +342,56 @@ struct StoredRecord {
 }
 
 struct JournalStore {
+    directory: PinnedVaultDirectory,
+    #[cfg(test)]
     path: PathBuf,
     key: JournalKey,
 }
 
 impl JournalStore {
-    fn new(directory: &Path, key: JournalKey) -> Result<Self, String> {
-        revalidate_pinned_vault_runtime_directory(directory).map_err(|_| storage_unavailable())?;
-        let path = directory.join(JOURNAL_FILENAME);
-        prepare_private_database_file(&path)?;
-        let store = Self { path, key };
+    fn new<D: JournalDirectorySource + ?Sized>(
+        directory: &D,
+        key: JournalKey,
+    ) -> Result<Self, String> {
+        let directory = directory.pinned_directory()?;
+        #[cfg(test)]
+        let path = directory.path.join(JOURNAL_FILENAME);
+        prepare_private_database_file(&directory)?;
+        let store = Self {
+            directory,
+            #[cfg(test)]
+            path,
+            key,
+        };
         let connection = store.open()?;
         drop(connection);
-        sync_directory(directory).map_err(|_| storage_unavailable())?;
-        protect_database_files(&store.path)?;
+        store.directory.sync()?;
+        protect_database_files(&store.directory)?;
         Ok(store)
     }
 
     fn open(&self) -> Result<Connection, String> {
+        self.open_checked(|| Ok(()))
+    }
+
+    fn open_checked<F>(&self, after_connection_open: F) -> Result<Connection, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let path = self.directory.sqlite_path()?;
+        #[cfg(unix)]
+        self.directory.verify_sqlite_path(&path)?;
         let connection = Connection::open_with_flags(
-            &self.path,
+            &path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_FULL_MUTEX
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(|_| storage_unavailable())?;
+        after_connection_open()?;
+        #[cfg(unix)]
+        self.directory.verify_sqlite_path(&path)?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| storage_unavailable())?;
@@ -184,12 +419,17 @@ impl JournalStore {
         connection
             .set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)
             .map_err(|_| storage_unavailable())?;
-        protect_database_files(&self.path)?;
+        protect_database_files(&self.directory)?;
         Ok(connection)
     }
 
     fn create(&self, envelope: &str) -> Result<NativeJournalCreateResult, String> {
+        self.create_at(envelope, native_unix_time_ms()?)
+    }
+
+    fn create_at(&self, envelope: &str, now_ms: u64) -> Result<NativeJournalCreateResult, String> {
         let metadata = validate_envelope(envelope)?;
+        require_live_deadline(&metadata, now_ms)?;
         let record_id = self.record_id(&metadata.operation_id, &metadata.attempt_id)?;
         let mut connection = self.open()?;
         let transaction = connection
@@ -198,7 +438,7 @@ impl JournalStore {
         if let Some(existing) = load_stored(&transaction, &record_id)? {
             self.decrypt_and_validate(&existing)?;
             transaction.commit().map_err(|_| storage_unavailable())?;
-            protect_database_files(&self.path)?;
+            protect_database_files(&self.directory)?;
             return Ok(NativeJournalCreateResult::Exists);
         }
         let revision = 1;
@@ -222,7 +462,7 @@ impl JournalStore {
             )
             .map_err(|_| storage_unavailable())?;
         transaction.commit().map_err(|_| storage_unavailable())?;
-        protect_database_files(&self.path)?;
+        protect_database_files(&self.directory)?;
         Ok(NativeJournalCreateResult::Created)
     }
 
@@ -233,10 +473,28 @@ impl JournalStore {
         expected_envelope_sha256: &str,
         envelope: &str,
     ) -> Result<NativeJournalReplaceResult, String> {
+        self.replace_at(
+            operation_id,
+            attempt_id,
+            expected_envelope_sha256,
+            envelope,
+            native_unix_time_ms()?,
+        )
+    }
+
+    fn replace_at(
+        &self,
+        operation_id: &str,
+        attempt_id: &str,
+        expected_envelope_sha256: &str,
+        envelope: &str,
+        now_ms: u64,
+    ) -> Result<NativeJournalReplaceResult, String> {
         validate_portable_id(operation_id)?;
         validate_portable_id(attempt_id)?;
         validate_sha256(expected_envelope_sha256)?;
         let metadata = validate_envelope(envelope)?;
+        require_live_deadline(&metadata, now_ms)?;
         if metadata.operation_id != operation_id || metadata.attempt_id != attempt_id {
             return Err("The replacement envelope belongs to a different operation attempt".into());
         }
@@ -257,7 +515,7 @@ impl JournalStore {
         }
         if plaintext == envelope {
             transaction.commit().map_err(|_| storage_unavailable())?;
-            protect_database_files(&self.path)?;
+            protect_database_files(&self.directory)?;
             return Ok(NativeJournalReplaceResult::Replaced);
         }
         if envelope_sha256(&plaintext) != expected_envelope_sha256 {
@@ -292,7 +550,7 @@ impl JournalStore {
             return Err(conflict());
         }
         transaction.commit().map_err(|_| storage_unavailable())?;
-        protect_database_files(&self.path)?;
+        protect_database_files(&self.directory)?;
         Ok(NativeJournalReplaceResult::Replaced)
     }
 
@@ -301,14 +559,35 @@ impl JournalStore {
         operation_id: &str,
         attempt_id: &str,
     ) -> Result<Option<NativeJournalRecord>, String> {
+        self.load_at(operation_id, attempt_id, native_unix_time_ms()?)
+    }
+
+    fn load_at(
+        &self,
+        operation_id: &str,
+        attempt_id: &str,
+        now_ms: u64,
+    ) -> Result<Option<NativeJournalRecord>, String> {
+        validate_native_time(now_ms)?;
         validate_portable_id(operation_id)?;
         validate_portable_id(attempt_id)?;
         let record_id = self.record_id(operation_id, attempt_id)?;
-        let connection = self.open()?;
-        let Some(stored) = load_stored(&connection, &record_id)? else {
+        let mut connection = self.open()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| storage_unavailable())?;
+        let Some(stored) = load_stored(&transaction, &record_id)? else {
+            transaction.commit().map_err(|_| storage_unavailable())?;
             return Ok(None);
         };
         let envelope = self.decrypt_and_validate(&stored)?;
+        if stored.delete_by_ms <= now_ms {
+            delete_stored(&transaction, &stored)?;
+            transaction.commit().map_err(|_| storage_unavailable())?;
+            protect_database_files(&self.directory)?;
+            return Ok(None);
+        }
+        transaction.commit().map_err(|_| storage_unavailable())?;
         Ok(Some(NativeJournalRecord {
             revision: stored.revision,
             envelope,
@@ -320,13 +599,26 @@ impl JournalStore {
         cursor: Option<&str>,
         requested_limit: Option<u32>,
     ) -> Result<NativeJournalPage, String> {
+        self.list_page_at(cursor, requested_limit, native_unix_time_ms()?)
+    }
+
+    fn list_page_at(
+        &self,
+        cursor: Option<&str>,
+        requested_limit: Option<u32>,
+        now_ms: u64,
+    ) -> Result<NativeJournalPage, String> {
+        validate_native_time(now_ms)?;
         let limit = page_limit(requested_limit)?;
         let cursor = decode_cursor(cursor)?;
-        let connection = self.open()?;
+        let mut connection = self.open()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| storage_unavailable())?;
         let fetch_limit = limit + 1;
         let mut stored_records = if let Some(cursor) = cursor.as_deref() {
             collect_stored(
-                &connection,
+                &transaction,
                 "SELECT record_id, revision, delete_by_ms, nonce, length(ciphertext), ciphertext \
                  FROM desktop_operation_envelopes WHERE record_id > ?1 \
                  ORDER BY record_id LIMIT ?2",
@@ -334,7 +626,7 @@ impl JournalStore {
             )?
         } else {
             collect_stored(
-                &connection,
+                &transaction,
                 "SELECT record_id, revision, delete_by_ms, nonce, length(ciphertext), ciphertext \
                  FROM desktop_operation_envelopes ORDER BY record_id LIMIT ?1",
                 params![fetch_limit as i64],
@@ -354,11 +646,17 @@ impl JournalStore {
         let mut records = Vec::with_capacity(stored_records.len());
         for stored in stored_records {
             let envelope = self.decrypt_and_validate(&stored)?;
+            if stored.delete_by_ms <= now_ms {
+                delete_stored(&transaction, &stored)?;
+                continue;
+            }
             records.push(NativeJournalRecord {
                 revision: stored.revision,
                 envelope,
             });
         }
+        transaction.commit().map_err(|_| storage_unavailable())?;
+        protect_database_files(&self.directory)?;
         Ok(NativeJournalPage {
             records,
             next_cursor,
@@ -398,7 +696,7 @@ impl JournalStore {
             return Err(conflict());
         }
         transaction.commit().map_err(|_| storage_unavailable())?;
-        protect_database_files(&self.path)?;
+        protect_database_files(&self.directory)?;
         Ok(NativeJournalDeleteResult::Deleted)
     }
 
@@ -426,15 +724,7 @@ impl JournalStore {
             // The deadline is plaintext only so SQLite can select candidates.
             // Authenticate its AEAD binding before allowing it to delete data.
             self.decrypt_and_validate(stored)?;
-            let changed = transaction
-                .execute(
-                    "DELETE FROM desktop_operation_envelopes WHERE record_id = ?1 AND revision = ?2",
-                    params![&stored.record_id, stored.revision as i64],
-                )
-                .map_err(|_| storage_unavailable())?;
-            if changed != 1 {
-                return Err(conflict());
-            }
+            delete_stored(&transaction, stored)?;
         }
         let has_more: bool = transaction
             .query_row(
@@ -444,7 +734,7 @@ impl JournalStore {
             )
             .map_err(|_| storage_unavailable())?;
         transaction.commit().map_err(|_| storage_unavailable())?;
-        protect_database_files(&self.path)?;
+        protect_database_files(&self.directory)?;
         Ok(NativeExpiryBatch {
             deleted: u64::try_from(due.len()).map_err(|_| storage_unavailable())?,
             has_more,
@@ -515,6 +805,23 @@ impl JournalStore {
             return Err(authentication_failed());
         }
         Ok(serialized.to_owned())
+    }
+}
+
+fn delete_stored(
+    transaction: &rusqlite::Transaction<'_>,
+    stored: &StoredRecord,
+) -> Result<(), String> {
+    let changed = transaction
+        .execute(
+            "DELETE FROM desktop_operation_envelopes WHERE record_id = ?1 AND revision = ?2",
+            params![&stored.record_id, stored.revision as i64],
+        )
+        .map_err(|_| storage_unavailable())?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(conflict())
     }
 }
 
@@ -591,25 +898,21 @@ pub(crate) fn desktop_operation_journal_delete_expired(
     journal_generation: u64,
     limit: Option<u32>,
 ) -> Result<NativeExpiryBatch, String> {
-    let now_ms = native_unix_time_ms()?;
     with_active_store(&journal_session_id, journal_generation, |store| {
-        store.delete_expired_at(now_ms, limit)
+        store.delete_expired_at(native_unix_time_ms()?, limit)
     })
 }
 
-pub(crate) fn remove_database_files(directory: &Path) -> Result<(), String> {
-    revalidate_pinned_vault_runtime_directory(directory).map_err(|_| storage_unavailable())?;
-    let database = directory.join(JOURNAL_FILENAME);
+pub(crate) fn remove_database_files<D: JournalDirectorySource + ?Sized>(
+    directory: &D,
+) -> Result<(), String> {
+    let directory = directory.pinned_directory()?;
     // Remove transient sidecars before the main file so a crash cannot leave
     // an old WAL beside a newly-created database on the next activation.
-    for path in database_files(&database).into_iter().rev() {
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(storage_unavailable()),
-        }
+    for name in [JOURNAL_SHM_FILENAME, JOURNAL_WAL_FILENAME, JOURNAL_FILENAME] {
+        directory.unlink_relative(name)?;
     }
-    sync_directory(directory).map_err(|_| storage_unavailable())
+    directory.sync()
 }
 
 fn with_active_store<T>(
@@ -617,13 +920,19 @@ fn with_active_store<T>(
     journal_generation: u64,
     operation: impl FnOnce(&JournalStore) -> Result<T, String>,
 ) -> Result<T, String> {
+    with_runtime_gate(|| {
+        let runtime = active_vault_runtime()?;
+        require_active_journal_session(&runtime, journal_session_id, journal_generation)?;
+        let store = JournalStore::new(&runtime.journal_directory, runtime.journal_key)?;
+        operation(&store)
+    })
+}
+
+fn with_runtime_gate<T>(operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let _gate = VAULT_RUNTIME_GATE
         .lock()
         .map_err(|_| "The operation journal is unavailable".to_string())?;
-    let runtime = active_vault_runtime()?;
-    require_active_journal_session(&runtime, journal_session_id, journal_generation)?;
-    let store = JournalStore::new(&runtime.directory, runtime.journal_key)?;
-    operation(&store)
+    operation()
 }
 
 fn require_active_journal_session(
@@ -846,19 +1155,52 @@ fn validate_envelope(serialized: &str) -> Result<EnvelopeMetadata, String> {
         || retention.get("classification").and_then(Value::as_str) != Some("vault-local-private")
         || retention.get("deadlineBehavior").and_then(Value::as_str)
             != Some("delete-entire-private-envelope")
+        || retention
+            .get("deleteAfterTerminal")
+            .and_then(Value::as_bool)
+            != Some(true)
     {
         return Err("The private operation retention policy is unsupported".into());
     }
+    let started_at_ms = retention
+        .get("startedAtMs")
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= MAX_SAFE_INTEGER)
+        .ok_or_else(|| "The private operation retention start is invalid".to_string())?;
     let delete_by_ms = retention
         .get("deleteByMs")
         .and_then(Value::as_u64)
         .filter(|value| *value <= MAX_SAFE_INTEGER)
         .ok_or_else(|| "The private operation retention deadline is invalid".to_string())?;
+    let interval = delete_by_ms
+        .checked_sub(started_at_ms)
+        .filter(|interval| *interval > 0 && *interval <= DESKTOP_OPERATION_MAX_RETENTION_MS)
+        .ok_or_else(|| {
+            "The private operation retention deadline is not positively bounded".to_string()
+        })?;
+    debug_assert!(interval > 0);
     Ok(EnvelopeMetadata {
         operation_id: operation_id.to_owned(),
         attempt_id: attempt_id.to_owned(),
         delete_by_ms,
     })
+}
+
+fn validate_native_time(now_ms: u64) -> Result<(), String> {
+    if now_ms <= MAX_SAFE_INTEGER {
+        Ok(())
+    } else {
+        Err("The operation journal native clock is unavailable".into())
+    }
+}
+
+fn require_live_deadline(metadata: &EnvelopeMetadata, now_ms: u64) -> Result<(), String> {
+    validate_native_time(now_ms)?;
+    if metadata.delete_by_ms <= now_ms {
+        Err("The private operation envelope has reached its deletion deadline".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_safe_json_numbers(value: &Value) -> Result<(), String> {
@@ -932,54 +1274,30 @@ fn associated_data(record_id: &[u8], revision: u64, delete_by_ms: u64) -> Vec<u8
     data
 }
 
-fn prepare_private_database_file(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        match options.open(path) {
-            Ok(file) => file.sync_all().map_err(|_| storage_unavailable())?,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(storage_unavailable()),
-        }
-    }
-    let metadata = fs::symlink_metadata(path).map_err(|_| storage_unavailable())?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        return Err(storage_unavailable());
-    }
-    protect_private_file(path)
+fn prepare_private_database_file(directory: &PinnedVaultDirectory) -> Result<(), String> {
+    let file = directory
+        .open_relative(JOURNAL_FILENAME, true)?
+        .ok_or_else(storage_unavailable)?;
+    file.sync_all().map_err(|_| storage_unavailable())
 }
 
-fn protect_database_files(path: &Path) -> Result<(), String> {
-    protect_private_file(path)?;
-    for sidecar in database_files(path).into_iter().skip(1) {
-        if sidecar.exists() {
-            protect_private_file(&sidecar)?;
-        }
+fn protect_database_files(directory: &PinnedVaultDirectory) -> Result<(), String> {
+    if directory.open_relative(JOURNAL_FILENAME, false)?.is_none() {
+        return Err(storage_unavailable());
+    }
+    for sidecar in [JOURNAL_WAL_FILENAME, JOURNAL_SHM_FILENAME] {
+        let _ = directory.open_relative(sidecar, false)?;
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn database_files(path: &Path) -> [PathBuf; 3] {
     let mut wal = path.as_os_str().to_os_string();
     wal.push("-wal");
     let mut shm = path.as_os_str().to_os_string();
     shm.push("-shm");
     [path.to_path_buf(), PathBuf::from(wal), PathBuf::from(shm)]
-}
-
-fn protect_private_file(path: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|_| storage_unavailable())?;
-    }
-    Ok(())
 }
 
 fn storage_unavailable() -> String {
@@ -998,6 +1316,8 @@ fn conflict() -> String {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    const TEST_STARTED_AT_MS: u64 = MAX_SAFE_INTEGER - DESKTOP_OPERATION_MAX_RETENTION_MS - 100_000;
 
     fn temp_directory(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -1022,6 +1342,24 @@ mod tests {
         prompt: &str,
         response: &str,
     ) -> String {
+        envelope_with_retention(
+            operation_id,
+            attempt_id,
+            TEST_STARTED_AT_MS,
+            TEST_STARTED_AT_MS + delete_by_ms,
+            prompt,
+            response,
+        )
+    }
+
+    fn envelope_with_retention(
+        operation_id: &str,
+        attempt_id: &str,
+        started_at_ms: u64,
+        delete_by_ms: u64,
+        prompt: &str,
+        response: &str,
+    ) -> String {
         serde_json::to_string(&serde_json::json!({
             "attempt": { "attemptId": attempt_id },
             "contract": "desktop-operation-private-local-v1",
@@ -1031,7 +1369,9 @@ mod tests {
             "retention": {
                 "classification": "vault-local-private",
                 "deadlineBehavior": "delete-entire-private-envelope",
+                "deleteAfterTerminal": true,
                 "deleteByMs": delete_by_ms,
+                "startedAtMs": started_at_ms,
                 "version": 1
             },
             "version": 1
@@ -1291,22 +1631,16 @@ mod tests {
         let directory = temp_directory("expiry");
         let store = JournalStore::new(&directory, key(0x41, "vault-expiry")).expect("open store");
         store
-            .create(&envelope(
-                "operation-early",
-                "attempt-early",
-                1_000,
-                "early",
-                "",
-            ))
+            .create_at(
+                &envelope_with_retention("operation-early", "attempt-early", 0, 1_000, "early", ""),
+                0,
+            )
             .expect("create early");
         store
-            .create(&envelope(
-                "operation-late",
-                "attempt-late",
-                2_000,
-                "late",
-                "",
-            ))
+            .create_at(
+                &envelope_with_retention("operation-late", "attempt-late", 0, 2_000, "late", ""),
+                0,
+            )
             .expect("create late");
         let before = store.delete_expired_at(999, None).expect("before expiry");
         assert_eq!(before.deleted, 0);
@@ -1315,13 +1649,228 @@ mod tests {
         assert_eq!(at_expiry.deleted, 1);
         assert!(!at_expiry.has_more);
         assert!(store
-            .load("operation-early", "attempt-early")
+            .load_at("operation-early", "attempt-early", 1_000)
             .expect("load early")
             .is_none());
         assert!(store
-            .load("operation-late", "attempt-late")
+            .load_at("operation-late", "attempt-late", 1_000)
             .expect("load late")
             .is_some());
+        fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[test]
+    fn expired_load_deletes_the_row_and_returns_absent() {
+        let directory = temp_directory("expired-load");
+        let store =
+            JournalStore::new(&directory, key(0x42, "vault-expired-load")).expect("open store");
+        let expired = envelope_with_retention(
+            "operation-expired-load",
+            "attempt-expired-load",
+            0,
+            1_000,
+            "prompt",
+            "response",
+        );
+        store.create_at(&expired, 0).expect("create future record");
+
+        assert!(store
+            .load_at("operation-expired-load", "attempt-expired-load", 1_000)
+            .expect("load at deadline")
+            .is_none());
+        let count: i64 = Connection::open(directory.join(JOURNAL_FILENAME))
+            .expect("open raw database")
+            .query_row(
+                "SELECT count(*) FROM desktop_operation_envelopes",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count rows");
+        assert_eq!(count, 0, "expired load must durably remove the whole row");
+        fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[test]
+    fn expired_list_rows_are_deleted_and_never_returned() {
+        let directory = temp_directory("expired-list");
+        let store =
+            JournalStore::new(&directory, key(0x43, "vault-expired-list")).expect("open store");
+        store
+            .create_at(
+                &envelope_with_retention(
+                    "operation-expired-list",
+                    "attempt-expired-list",
+                    0,
+                    1_000,
+                    "expired",
+                    "response",
+                ),
+                0,
+            )
+            .expect("create expiring record");
+        let live = envelope(
+            "operation-live-list",
+            "attempt-live-list",
+            20_000,
+            "live",
+            "response",
+        );
+        store.create(&live).expect("create live record");
+
+        let page = store
+            .list_page_at(None, Some(16), 1_000)
+            .expect("list at deadline");
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].envelope, live);
+        let count: i64 = Connection::open(directory.join(JOURNAL_FILENAME))
+            .expect("open raw database")
+            .query_row(
+                "SELECT count(*) FROM desktop_operation_envelopes",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count rows");
+        assert_eq!(count, 1);
+        fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[test]
+    fn expired_create_and_replace_writes_are_rejected() {
+        let directory = temp_directory("expired-writes");
+        let store =
+            JournalStore::new(&directory, key(0x44, "vault-expired-writes")).expect("open store");
+        let current = envelope_with_retention(
+            "operation-expired-write",
+            "attempt-expired-write",
+            0,
+            1_000,
+            "current",
+            "response",
+        );
+        assert!(store
+            .create_at(&current, 1_000)
+            .unwrap_err()
+            .contains("deletion deadline"));
+        store
+            .create_at(&current, 999)
+            .expect("create before deadline");
+        let replacement = envelope_with_retention(
+            "operation-expired-write",
+            "attempt-expired-write",
+            0,
+            1_000,
+            "replacement",
+            "response",
+        );
+        assert!(store
+            .replace_at(
+                "operation-expired-write",
+                "attempt-expired-write",
+                &envelope_sha256(&current),
+                &replacement,
+                1_000,
+            )
+            .unwrap_err()
+            .contains("deletion deadline"));
+        assert_eq!(
+            store
+                .load_at("operation-expired-write", "attempt-expired-write", 999)
+                .expect("load unchanged record")
+                .expect("record remains")
+                .envelope,
+            current
+        );
+        fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[test]
+    fn native_retention_accepts_exact_contract_maximum_and_rejects_one_more() {
+        let directory = temp_directory("retention-limit");
+        let store =
+            JournalStore::new(&directory, key(0x45, "vault-retention-limit")).expect("open store");
+        let started_at_ms = 1_000;
+        let exact = envelope_with_retention(
+            "operation-retention-max",
+            "attempt-retention-max",
+            started_at_ms,
+            started_at_ms + DESKTOP_OPERATION_MAX_RETENTION_MS,
+            "prompt",
+            "response",
+        );
+        assert_eq!(
+            store
+                .create_at(&exact, started_at_ms)
+                .expect("exact maximum"),
+            NativeJournalCreateResult::Created
+        );
+        let over = envelope_with_retention(
+            "operation-retention-over",
+            "attempt-retention-over",
+            started_at_ms,
+            started_at_ms + DESKTOP_OPERATION_MAX_RETENTION_MS + 1,
+            "prompt",
+            "response",
+        );
+        assert!(store
+            .create_at(&over, started_at_ms)
+            .unwrap_err()
+            .contains("positively bounded"));
+        fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[test]
+    fn list_expiry_deletion_rolls_back_if_another_row_fails_authentication() {
+        let directory = temp_directory("expiry-transaction");
+        let store = JournalStore::new(&directory, key(0x46, "vault-expiry-transaction"))
+            .expect("open store");
+        store
+            .create_at(
+                &envelope_with_retention(
+                    "operation-expiry-transaction",
+                    "attempt-expiry-transaction",
+                    0,
+                    1_000,
+                    "expired",
+                    "response",
+                ),
+                0,
+            )
+            .expect("create expiring record");
+        let tampered = envelope(
+            "operation-tamper-transaction",
+            "attempt-tamper-transaction",
+            20_000,
+            "live",
+            "response",
+        );
+        store.create(&tampered).expect("create live record");
+        let tampered_id = store
+            .record_id("operation-tamper-transaction", "attempt-tamper-transaction")
+            .expect("derive tampered record id");
+        let connection =
+            Connection::open(directory.join(JOURNAL_FILENAME)).expect("open raw database");
+        connection
+            .execute(
+                "UPDATE desktop_operation_envelopes SET ciphertext = zeroblob(length(ciphertext)) \
+                 WHERE record_id = ?1",
+                params![tampered_id],
+            )
+            .expect("tamper live record");
+        drop(connection);
+
+        assert!(expect_error(store.list_page_at(None, Some(16), 1_000)).contains("authenticated"));
+        let count: i64 = Connection::open(directory.join(JOURNAL_FILENAME))
+            .expect("open raw database")
+            .query_row(
+                "SELECT count(*) FROM desktop_operation_envelopes",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count rows after rollback");
+        assert_eq!(
+            count, 2,
+            "failed list transaction must not partially delete"
+        );
         fs::remove_dir_all(directory).expect("remove fixture");
     }
 
@@ -1423,13 +1972,17 @@ mod tests {
             JournalStore::new(&directory, key(0x55, "vault-expiry-batches")).expect("open store");
         for suffix in 0..5 {
             store
-                .create(&envelope(
-                    &format!("operation-expiry-{suffix}"),
-                    &format!("attempt-expiry-{suffix}"),
-                    1_000,
-                    "prompt",
-                    "response",
-                ))
+                .create_at(
+                    &envelope_with_retention(
+                        &format!("operation-expiry-{suffix}"),
+                        &format!("attempt-expiry-{suffix}"),
+                        0,
+                        1_000,
+                        "prompt",
+                        "response",
+                    ),
+                    0,
+                )
                 .expect("create expiring record");
         }
 
@@ -1446,7 +1999,7 @@ mod tests {
         assert_eq!((second.deleted, second.has_more), (2, true));
         assert_eq!((third.deleted, third.has_more), (1, false));
         assert!(store
-            .list_page(None, Some(2))
+            .list_page_at(None, Some(2), 1_000)
             .expect("list after expiry")
             .records
             .is_empty());
@@ -1455,12 +2008,15 @@ mod tests {
 
     #[test]
     fn journal_commands_reject_stale_activation_bindings() {
+        let directory = temp_directory("stale-activation");
         let runtime = crate::ActiveVaultRuntime {
             id: "vault-session".into(),
-            directory: PathBuf::from("vault-session"),
+            directory: directory.clone(),
             generation: 7,
             closing: false,
             journal_key: key(0x56, "vault-session"),
+            journal_directory: PinnedVaultDirectory::open(&directory)
+                .expect("pin journal directory"),
             journal_session_id: "a".repeat(64),
         };
         assert!(require_active_journal_session(&runtime, &"a".repeat(64), 7).is_ok());
@@ -1474,6 +2030,38 @@ mod tests {
         };
         assert!(require_active_journal_session(&reopened, &"a".repeat(64), 7).is_err());
         assert!(require_active_journal_session(&reopened, &"b".repeat(64), 8).is_ok());
+        fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[test]
+    fn queued_journal_work_samples_time_only_after_acquiring_runtime_gate() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{mpsc, Arc, Barrier};
+
+        let gate = VAULT_RUNTIME_GATE.lock().expect("hold runtime gate");
+        let clock = Arc::new(AtomicU64::new(999));
+        let started = Arc::new(Barrier::new(2));
+        let (sender, receiver) = mpsc::channel();
+        let queued_clock = clock.clone();
+        let queued_started = started.clone();
+        let worker = std::thread::spawn(move || {
+            queued_started.wait();
+            let sampled = with_runtime_gate(|| Ok(queued_clock.load(Ordering::SeqCst)))
+                .expect("sample queued clock");
+            sender.send(sampled).expect("send sampled time");
+        });
+        started.wait();
+        assert!(receiver.try_recv().is_err(), "work must still be queued");
+        clock.store(1_000, Ordering::SeqCst);
+        drop(gate);
+
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("receive post-gate time"),
+            1_000
+        );
+        worker.join().expect("join queued clock worker");
     }
 
     #[test]
@@ -1558,6 +2146,87 @@ mod tests {
         fs::remove_dir_all(directory).expect("remove fixture");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn pinned_descriptor_survives_directory_rename_and_symlink_swap() {
+        use std::os::unix::fs::symlink;
+
+        let directory = temp_directory("descriptor-swap");
+        let pinned = PinnedVaultDirectory::open(&directory).expect("pin vault directory");
+        let store = JournalStore::new(&pinned, key(0x57, "vault-descriptor-swap"))
+            .expect("open pinned store");
+        let serialized = envelope(
+            "operation-descriptor-swap",
+            "attempt-descriptor-swap",
+            20_000,
+            "prompt",
+            "response",
+        );
+        store.create(&serialized).expect("create pinned record");
+
+        let displaced = directory.with_extension("displaced");
+        let sentinel = directory.with_extension("sentinel");
+        fs::rename(&directory, &displaced).expect("rename pinned directory");
+        fs::create_dir_all(&sentinel).expect("create sentinel directory");
+        fs::write(sentinel.join(JOURNAL_FILENAME), b"do not open or delete")
+            .expect("write sentinel database");
+        symlink(&sentinel, &directory).expect("swap logical path to sentinel symlink");
+
+        assert_eq!(
+            store
+                .load("operation-descriptor-swap", "attempt-descriptor-swap")
+                .expect("load through pinned descriptor")
+                .expect("pinned record remains")
+                .envelope,
+            serialized
+        );
+        remove_database_files(&pinned).expect("reset pinned descriptor");
+        assert_eq!(
+            fs::read(sentinel.join(JOURNAL_FILENAME)).expect("read sentinel database"),
+            b"do not open or delete"
+        );
+        assert!(database_files(&displaced.join(JOURNAL_FILENAME))
+            .into_iter()
+            .all(|path| !path.exists()));
+
+        fs::remove_file(&directory).expect("remove fixture symlink");
+        fs::remove_dir_all(displaced).expect("remove displaced fixture");
+        fs::remove_dir_all(sentinel).expect("remove sentinel fixture");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn post_open_directory_identity_change_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let directory = temp_directory("post-open-swap");
+        let store =
+            JournalStore::new(&directory, key(0x58, "vault-post-open-swap")).expect("open store");
+        let displaced = directory.with_extension("displaced");
+        let sentinel = directory.with_extension("sentinel");
+
+        let result = store.open_checked(|| {
+            fs::rename(&directory, &displaced).map_err(|_| storage_unavailable())?;
+            fs::create_dir_all(&sentinel).map_err(|_| storage_unavailable())?;
+            fs::write(sentinel.join(JOURNAL_FILENAME), b"do not configure")
+                .map_err(|_| storage_unavailable())?;
+            symlink(&sentinel, &directory).map_err(|_| storage_unavailable())?;
+            Ok(())
+        });
+
+        assert_eq!(
+            result.expect_err("post-open substitution must fail"),
+            storage_unavailable()
+        );
+        assert_eq!(
+            fs::read(sentinel.join(JOURNAL_FILENAME)).expect("read sentinel database"),
+            b"do not configure"
+        );
+        fs::remove_file(&directory).expect("remove fixture symlink");
+        fs::remove_dir_all(displaced).expect("remove displaced fixture");
+        fs::remove_dir_all(sentinel).expect("remove sentinel fixture");
+    }
+
     #[test]
     fn exact_private_bytes_never_appear_in_sqlite_files() {
         let directory = temp_directory("canary");
@@ -1616,7 +2285,7 @@ mod tests {
                 "response",
             ))
             .expect("create record");
-        protect_database_files(&store.path).expect("protect database files");
+        protect_database_files(&store.directory).expect("protect database files");
         for path in existing_database_files(&store.path) {
             let mode = fs::metadata(&path).expect("metadata").permissions().mode();
             assert_eq!(mode & 0o077, 0, "{} must be owner-only", path.display());
