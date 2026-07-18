@@ -304,6 +304,8 @@ import {
 import {
   clearFolderStepOperation,
   clearPadPath,
+  createDesktopOperationCrashPadReceiptV1,
+  isExactDesktopOperationCrashPadReceipt,
   loadLocalFolder,
   loadLocalShielded,
   loadPad,
@@ -312,7 +314,6 @@ import {
   saveLocalFile,
   saveLocalShielded,
   stageFolderStepOperation,
-  type DesktopOperationCrashPadReceiptV1,
 } from "../workspace/local-store.js";
 import { restoreCrashPadFile } from "../workspace/crash-pad-restore.js";
 import { resolvePostWriteTraceId } from "../workspace/stepped-file-identity.js";
@@ -322,6 +323,7 @@ import {
   dropKEditLogPrefix,
   ensureMdExt,
   fileHasUnsteppedChanges,
+  keditLogFromArray,
   keditLogToArray,
   minimalTextChange,
   nextKEditTx,
@@ -5950,17 +5952,23 @@ function DesktopExtendReviewStrip({
   items,
   busyKey,
   error,
+  hasMore,
+  loadingMore,
   onAction,
+  onMore,
 }: {
   items: readonly DesktopOperationReviewItemV1[];
   busyKey: string | null;
   error: string | null;
+  hasMore: boolean;
+  loadingMore: boolean;
   onAction: (
     item: DesktopOperationReviewItemV1,
     action: DesktopOperationReviewActionV1,
   ) => void;
+  onMore: () => void;
 }) {
-  if (items.length === 0 && !error) return null;
+  if (items.length === 0 && !error && !hasMore) return null;
   return (
     <section className="desktop-extend-review" aria-label="Local AI draft review">
       {error && <p className="desktop-extend-review-error">{error}</p>}
@@ -5997,6 +6005,11 @@ function DesktopExtendReviewStrip({
           </div>
         );
       })}
+      {hasMore && (
+        <button type="button" disabled={loadingMore} onClick={onMore}>
+          {loadingMore ? "Loading…" : "More saved Extend attempts"}
+        </button>
+      )}
     </section>
   );
 }
@@ -6011,6 +6024,10 @@ function desktopReviewActionLabel(action: DesktopOperationReviewActionV1): strin
     case "reprepare": return "Re-prepare";
     case "resume": return "Resume";
   }
+}
+
+function desktopAttemptKey(operationId: string, attemptId: string): string {
+  return `${operationId}\0${attemptId}`;
 }
 
 function ActionPalette({
@@ -10274,12 +10291,20 @@ function App() {
   const [desktopOperationEnvelopes, setDesktopOperationEnvelopes] = useState<
     DesktopOperationEnvelopeV1[]
   >([]);
+  const [desktopOperationCursor, setDesktopOperationCursor] = useState<string | null>(null);
+  const [desktopOperationHasMore, setDesktopOperationHasMore] = useState(false);
+  const [desktopOperationLoadingMore, setDesktopOperationLoadingMore] = useState(false);
   const [desktopOperationBusyKey, setDesktopOperationBusyKey] = useState<string | null>(null);
   const [desktopOperationError, setDesktopOperationError] = useState<string | null>(null);
   const desktopReprepareKeyRef = useRef<DesktopOperationKeyV1 | null>(null);
+  // Directive authority is deliberately non-durable. Only attempts created or
+  // linked from an authorized attempt during this App activation may consume
+  // prepared one-shot directives.
+  const desktopAuthorizedAttemptKeysRef = useRef(new Set<string>());
   const desktopOperationQueue = useMemo(
-    () => desktopOperationReviewQueueV1(desktopOperationEnvelopes),
-    [desktopOperationEnvelopes],
+    () => desktopOperationReviewQueueV1(desktopOperationEnvelopes.filter((envelope) =>
+      envelope.prepared.targetRevision.folderId === folder?.id)),
+    [desktopOperationEnvelopes, folder?.id],
   );
 
   // SecurityBootstrap mounts App only after vault activation has captured the
@@ -10323,10 +10348,18 @@ function App() {
     let cancelled = false;
     setDesktopOperationError(null);
     void desktopOperationRuntimeRef.current!.recover()
-      .then(() => refreshDesktopOperationEnvelopes())
-      .catch((error) => {
+      .then((result) => {
+        if (!cancelled && result.failureCount > 0) {
+          const shown = Math.min(result.failureCount, 99);
+          setDesktopOperationError(
+            `${shown}${result.failureCount > shown ? "+" : ""} saved AI operation(s) need recovery attention.`,
+          );
+        }
+        return refreshDesktopOperationEnvelopes();
+      })
+      .catch(() => {
         if (!cancelled) {
-          setDesktopOperationError(error instanceof Error ? error.message : String(error));
+          setDesktopOperationError("Saved AI operation recovery could not finish.");
         }
       });
     return () => { cancelled = true; };
@@ -10339,22 +10372,45 @@ function App() {
         candidate.operationId === envelope.operationId
         && candidate.attempt.attemptId === envelope.attempt.attemptId
       ));
-      return [...next, envelope];
+      return [...next, envelope].slice(-64);
     });
   }
 
-  async function refreshDesktopOperationEnvelopes(): Promise<void> {
+  async function refreshDesktopOperationEnvelopes(
+    cursor: string | null = null,
+    append = false,
+  ): Promise<void> {
     const repository = desktopOperationStoreRef.current;
     if (!repository) return;
-    const records: DesktopOperationEnvelopeV1[] = [];
-    let cursor: string | null = null;
-    for (let pageIndex = 0; pageIndex < 4; pageIndex += 1) {
-      const page = await repository.listPage(cursor, 16);
-      records.push(...page.records);
-      cursor = page.nextCursor;
-      if (!cursor) break;
+    const page = await repository.listPage(cursor, 16);
+    setDesktopOperationEnvelopes((current) => {
+      if (!append) return [...page.records];
+      const byKey = new Map(current.map((envelope) => [
+        desktopAttemptKey(envelope.operationId, envelope.attempt.attemptId),
+        envelope,
+      ]));
+      for (const envelope of page.records) {
+        byKey.set(desktopAttemptKey(envelope.operationId, envelope.attempt.attemptId), envelope);
+      }
+      // Pagination is user-driven but the rendered/private in-memory window is
+      // still bounded. The opaque cursor remains authoritative for continuation.
+      return [...byKey.values()].slice(-64);
+    });
+    setDesktopOperationCursor(page.nextCursor);
+    setDesktopOperationHasMore(page.nextCursor !== null);
+  }
+
+  async function loadMoreDesktopOperationEnvelopes(): Promise<void> {
+    if (!desktopOperationCursor || desktopOperationLoadingMore) return;
+    setDesktopOperationLoadingMore(true);
+    setDesktopOperationError(null);
+    try {
+      await refreshDesktopOperationEnvelopes(desktopOperationCursor, true);
+    } catch {
+      setDesktopOperationError("More saved AI operations could not be loaded.");
+    } finally {
+      setDesktopOperationLoadingMore(false);
     }
-    setDesktopOperationEnvelopes(records);
   }
 
   async function dispatchDesktopOperationAttempt(
@@ -10388,6 +10444,11 @@ function App() {
     const retry = await runtime.retry(key, possibleDuplicateAcknowledged
       ? { possibleDuplicateAcknowledged: true }
       : {});
+    if (desktopAuthorizedAttemptKeysRef.current.has(desktopAttemptKey(key.operationId, key.attemptId))) {
+      desktopAuthorizedAttemptKeysRef.current.add(
+        desktopAttemptKey(retry.operationId, retry.attempt.attemptId),
+      );
+    }
     upsertDesktopOperationEnvelope(retry);
     await dispatchDesktopOperationAttempt(retry);
   }
@@ -10402,10 +10463,24 @@ function App() {
       return;
     }
     if (action === "reprepare") {
+      const prior = await runtime.load(item.key);
+      const target = prior?.prepared.targetRevision;
+      const liveFolder = folderRef.current;
+      const liveFile = target ? filesRef.current[target.path] : undefined;
+      if (
+        !prior || !target || !liveFolder || liveFolder.id !== target.folderId
+        || !liveFile || liveFile.kind === "folder" || liveFile.traceId !== target.traceId
+      ) {
+        setDesktopOperationError(
+          "Restore the original workspace and trace before re-preparing this stale draft.",
+        );
+        return;
+      }
       desktopReprepareKeyRef.current = item.key;
       modelOperationControllerRef.current?.invalidate();
       setApprovedRequestHash(null);
-      void openInspector("extend");
+      activateLiveTab(target.path);
+      window.requestAnimationFrame(() => void openInspector("extend"));
       return;
     }
     if (
@@ -10458,6 +10533,9 @@ function App() {
       const retry = await runtime.retry(staleKey, {
         freshPreparation: { prepared, provider, maxOutputTokens: 4096 },
       });
+      desktopAuthorizedAttemptKeysRef.current.add(
+        desktopAttemptKey(retry.operationId, retry.attempt.attemptId),
+      );
       upsertDesktopOperationEnvelope(retry);
       await dispatchDesktopOperationAttempt(retry);
       await refreshDesktopOperationEnvelopes();
@@ -11206,6 +11284,9 @@ function App() {
         provider,
         maxOutputTokens: 4096,
       });
+      desktopAuthorizedAttemptKeysRef.current.add(
+        desktopAttemptKey(envelope.operationId, envelope.attempt.attemptId),
+      );
       upsertDesktopOperationEnvelope(envelope);
       envelope = await runtime.approve({
         operationId: envelope.operationId,
@@ -15054,52 +15135,93 @@ function App() {
 
   async function restoreAppliedDesktopPad(
     path: string,
-    resultingContentHash: string,
+    intentId: string,
+    modelVoicePubkey: string,
   ): Promise<boolean> {
     const liveFolder = folderRef.current;
     const padFile = liveFolder ? loadPad(liveFolder.id)?.[path] : undefined;
-    if (!liveFolder || !padFile || contentFingerprint(padFile.content) !== resultingContentHash) {
+    if (
+      !liveFolder || !padFile || padFile.desktopOperationReceipt?.intentId !== intentId
+      || padFile.desktopOperationReceipt.modelVoicePubkey !== modelVoicePubkey
+      || !isExactDesktopOperationCrashPadReceipt(padFile)
+      || !padFile.runs || !padFile.kedits
+    ) {
       return false;
     }
     const current = filesRef.current[path];
-    const recoveryVoice = await getReconcilerVoice();
-    const restored = restoreCrashPadFile(
-      current,
-      padFile,
-      modelPubkeyRef.current,
-      recoveryVoice.publicKey,
-    );
+    if (!current || current.kind === "folder") return false;
+    const restored: FileState = {
+      ...current,
+      runs: padFile.runs,
+      tags: padFile.tags,
+      nodeId: padFile.nodeId,
+      ...(padFile.traceId ? { traceId: padFile.traceId } : {}),
+      ...(padFile.citationIds ? { citationIds: padFile.citationIds } : {}),
+      kedits: keditLogFromArray(padFile.kedits),
+    };
     filesRef.current = { ...filesRef.current, [path]: restored };
     setFiles((state) => ({ ...state, [path]: restored }));
     const view = desktopTargetView(path);
-    if (view && contentFingerprint(view.state.doc.toString()) !== resultingContentHash) {
+    if (view) {
       view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: padFile.content },
+        ...(view.state.doc.toString() === padFile.content
+          ? {}
+          : { changes: { from: 0, to: view.state.doc.length, insert: padFile.content } }),
         effects: [
-          setRunsEffect.of(restored.runs),
-          setKEditsEffect.of(restored.kedits ?? EMPTY_KEDIT_LOG),
+          setRunsEffect.of(padFile.runs),
+          setKEditsEffect.of(keditLogFromArray(padFile.kedits)),
         ],
       });
+      const verified = createDesktopOperationCrashPadReceiptV1({
+        intentId,
+        content: view.state.doc.toString(),
+        runs: view.state.field(voiceField),
+        kedits: keditLogToArray(view.state.field(keditField)),
+        modelVoicePubkey,
+      });
+      if (
+        verified.resultingContentHash !== padFile.desktopOperationReceipt.resultingContentHash
+        || verified.resultingRunsSha256 !== padFile.desktopOperationReceipt.resultingRunsSha256
+        || verified.resultingKEditsSha256 !== padFile.desktopOperationReceipt.resultingKEditsSha256
+      ) return false;
     }
     return true;
   }
 
   async function applyDesktopArtifact(
     input: DesktopArtifactApplyInputV1,
-  ): Promise<{ status: "applied" | "already-applied"; resultingContentHash: string } | { status: "stale" }> {
+  ): Promise<
+    { status: "applied" | "already-applied"; resultingContentHash: string }
+    | { status: "stale" | "deferred" }
+  > {
     const target = input.intent.targetRevision;
     const liveFolder = folderRef.current;
-    const receipt = liveFolder ? loadPad(liveFolder.id)?.[target.path]?.desktopOperationReceipt : undefined;
+    if (!liveFolder || liveFolder.id !== target.folderId) return { status: "deferred" };
+    if (
+      input.envelope.prepared.traceAuthoring.compiled.directives.length > 0
+      && !desktopAuthorizedAttemptKeysRef.current.has(
+        desktopAttemptKey(input.envelope.operationId, input.envelope.attempt.attemptId),
+      )
+    ) return { status: "stale" };
+    const modelVoicePubkey = input.envelope.prepared.modelVoicePubkey;
+    const padFile = loadPad(liveFolder.id)?.[target.path];
+    const receipt = padFile?.desktopOperationReceipt;
     if (receipt?.intentId === input.intent.intentId) {
       const expected = prepareDesktopExtendApplyV1(
         input.envelope.selectedContext.manifest.operation.target.currentText,
         input.intent,
         input.responseText,
+        input.envelope.prepared.traceAuthoring,
       );
-      if (receipt.resultingContentHash !== expected.resultingContentHash) {
+      if (
+        receipt.resultingContentHash !== expected.resultingContentHash
+        || receipt.modelVoicePubkey !== modelVoicePubkey
+        || !padFile || !isExactDesktopOperationCrashPadReceipt(padFile)
+        || padFile.traceId !== target.traceId || padFile.nodeId !== target.headId
+      ) {
         throw new Error("Accepted Extend receipt does not match the durable response intent");
       }
-      if (await restoreAppliedDesktopPad(target.path, receipt.resultingContentHash)) {
+      if (await restoreAppliedDesktopPad(target.path, receipt.intentId, modelVoicePubkey)) {
         return { status: "already-applied", resultingContentHash: receipt.resultingContentHash };
       }
       throw new Error("Accepted Extend receipt exists without its exact crash-pad buffer");
@@ -15122,13 +15244,18 @@ function App() {
     if (targetText !== flatten(file.runs)) return { status: "stale" };
     let planned;
     try {
-      planned = prepareDesktopExtendApplyV1(targetText, input.intent, input.responseText);
+      planned = prepareDesktopExtendApplyV1(
+        targetText,
+        input.intent,
+        input.responseText,
+        input.envelope.prepared.traceAuthoring,
+      );
     } catch {
       return { status: "stale" };
     }
     const transaction = view.state.update({
-      changes: planned.change,
-      effects: opVoiceEffect.of(modelPubkeyRef.current),
+      changes: planned.changes,
+      effects: opVoiceEffect.of(modelVoicePubkey),
     });
     const nextText = transaction.state.doc.toString();
     const nextRuns = transaction.state.field(voiceField);
@@ -15140,11 +15267,13 @@ function App() {
     ) {
       throw new Error("Accepted Extend transaction no longer matches its precomputed buffer");
     }
-    const desktopOperationReceipt: DesktopOperationCrashPadReceiptV1 = {
-      version: 1,
+    const desktopOperationReceipt = createDesktopOperationCrashPadReceiptV1({
       intentId: input.intent.intentId,
-      resultingContentHash: planned.resultingContentHash,
-    };
+      content: nextText,
+      runs: nextRuns,
+      kedits: keditLogToArray(nextKedits),
+      modelVoicePubkey,
+    });
     const persisted = mirrorPad(target.folderId, target.path, {
       content: nextText,
       tags: file.tags,
@@ -15153,7 +15282,7 @@ function App() {
       runs: nextRuns,
       citationIds: file.citationIds,
       kedits: keditLogToArray(nextKedits),
-      voicePubkey: modelPubkeyRef.current,
+      voicePubkey: modelVoicePubkey,
       desktopOperationReceipt,
     });
     if (!persisted) {
@@ -17048,7 +17177,10 @@ function App() {
                 items={desktopOperationQueue}
                 busyKey={desktopOperationBusyKey}
                 error={desktopOperationError}
+                hasMore={desktopOperationHasMore}
+                loadingMore={desktopOperationLoadingMore}
                 onAction={(item, action) => void handleDesktopOperationAction(item, action)}
+                onMore={() => void loadMoreDesktopOperationEnvelopes()}
               />
               <ActionPalette
                 replayTransport={

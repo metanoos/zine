@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   clearFolderStepOperation,
+  createDesktopOperationCrashPadReceiptV1,
   loadLocalFolder,
   loadPad,
   mirrorPad,
@@ -106,20 +107,25 @@ test("crash pads preserve stable trace identity with the buffered head", () => {
 
 test("crash pads atomically retain an accepted desktop operation receipt", () => {
   values.clear();
-  const receipt = {
-    version: 1 as const,
+  const runs = [
+    { voice: "author", text: "draft" },
+    { voice: "ab".repeat(32), text: "\nMODEL" },
+  ];
+  const receipt = createDesktopOperationCrashPadReceiptV1({
     intentId: "artifact-intent-12345678",
-    resultingContentHash: "ab".repeat(32),
-  };
+    content: "draft\nMODEL",
+    runs,
+    kedits: [],
+    modelVoicePubkey: "ab".repeat(32),
+  });
   assert.equal(mirrorPad("root", "draft.md", {
     content: "draft\nMODEL",
     tags: [],
     nodeId: "head-2",
     traceId: "genesis-1",
-    runs: [
-      { voice: "author", text: "draft" },
-      { voice: "model", text: "\nMODEL" },
-    ],
+    runs,
+    kedits: [],
+    voicePubkey: "ab".repeat(32),
     desktopOperationReceipt: receipt,
   }), true);
 
@@ -131,24 +137,61 @@ test("crash pads atomically retain an accepted desktop operation receipt", () =>
   });
   assert.deepEqual(
     loadPad("root")?.["draft.md"]?.desktopOperationReceipt,
-    receipt,
-    "the editor's synchronous follow-up mirror must not erase the apply receipt",
+    undefined,
+    "a changed buffer must not retain a receipt for different exact state",
   );
+});
+
+test("receipt-bearing pads fail closed when runs, KEdits, or model metadata are tampered", () => {
+  values.clear();
+  const receipt = createDesktopOperationCrashPadReceiptV1({
+    intentId: "artifact-intent-12345678",
+    content: "MODEL",
+    runs: [{ voice: "cd".repeat(32), text: "MODEL" }],
+    kedits: [],
+    modelVoicePubkey: "cd".repeat(32),
+  });
+  const base = {
+    kind: "file",
+    content: "MODEL",
+    tags: [],
+    nodeId: "head-2",
+    updatedAt: 1,
+    runs: [{ voice: "cd".repeat(32), text: "MODEL" }],
+    kedits: [],
+    voicePubkey: "cd".repeat(32),
+    desktopOperationReceipt: receipt,
+  };
+  for (const tampered of [
+    { ...base, runs: [{ voice: "author", text: "MODEL" }] },
+    { ...base, kedits: [{ op: "ins", from: 0, to: 0, text: "MODEL", voice: "author", t: 1, tx: 1 }] },
+    { ...base, voicePubkey: "ef".repeat(32) },
+    { ...base, runs: undefined },
+  ]) {
+    values.set("zine.pad.root", JSON.stringify({ "draft.md": tampered }));
+    assert.equal(loadPad("root"), null);
+  }
 });
 
 test("crash-pad receipt writes report persistence failure", () => {
   values.clear();
   failWrites = true;
   try {
+    const runs = [{ voice: "cd".repeat(32), text: "draft\nMODEL" }];
     assert.equal(mirrorPad("root", "draft.md", {
       content: "draft\nMODEL",
       tags: [],
       nodeId: "head-2",
-      desktopOperationReceipt: {
-        version: 1,
+      runs,
+      kedits: [],
+      voicePubkey: "cd".repeat(32),
+      desktopOperationReceipt: createDesktopOperationCrashPadReceiptV1({
         intentId: "artifact-intent-12345678",
-        resultingContentHash: "cd".repeat(32),
-      },
+        content: "draft\nMODEL",
+        runs,
+        kedits: [],
+        modelVoicePubkey: "cd".repeat(32),
+      }),
     }), false);
     assert.equal(loadPad("root"), null);
   } finally {

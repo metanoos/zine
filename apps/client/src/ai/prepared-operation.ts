@@ -256,15 +256,9 @@ function prepareOperationInternal(
   }
   const renderedContextBlock = traceContextSelection?.renderedContext
     ?? compiledAuthoring.renderedContextBlock;
-  if (
-    traceContextSelection
-    && compiledAuthoring.authoring
-    && compiledAuthoring.renderedContextBlock !== input.contextSnapshot.renderedBlock
-  ) {
-    throw new PreparedOperationError([
-      "Selected trace context cannot silently substitute markerized authoring bytes",
-    ]);
-  }
+  // Package-selected trace context remains byte-exact evidence. Authorized
+  // directives are carried separately in the markerized operation input and
+  // instruction section; the selected context is never silently rewritten.
   const assembled = assembleOpMessages(input.operation, operationInputs, {
     voicePrompt: input.voicePrompt ?? "",
     contextBlock: renderedContextBlock,

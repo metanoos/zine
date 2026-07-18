@@ -34,6 +34,7 @@ import {
   type PreparedOperation,
 } from "./prepared-operation.js";
 import { providerProfileFingerprint } from "./provider-fingerprint.js";
+import { compileTraceAuthoringOperation } from "./trace-authoring-adapter.js";
 
 const BASE_TIME = 10_000;
 const HASH = (value: string) => contentFingerprint(value);
@@ -137,6 +138,20 @@ async function preparedFor(
     contentHash: targetFixture.contentHash,
   };
   const dependencyFingerprint = HASH(`dependency-${targetFixture.path}`);
+  const traceAuthoring = compileTraceAuthoringOperation({
+    operation: "extend",
+    operationInputs,
+    targetText: targetFixture.text,
+    renderedContextBlock: selection.renderedContext,
+    actingAuthorId: "",
+    authoritySpans: [],
+    sourceRevision: {
+      traceId: targetFixture.traceId,
+      headId: targetFixture.headId,
+      path: targetFixture.path,
+      contentHash: targetFixture.contentHash,
+    },
+  }).authoring!;
   return Object.freeze({
     version: 1,
     requestId,
@@ -144,7 +159,7 @@ async function preparedFor(
     operationInputs,
     contextSnapshot: {} as PreparedOperation["contextSnapshot"],
     contextFingerprint: HASH(`context-${targetFixture.path}`),
-    traceAuthoring: null,
+    traceAuthoring,
     traceContextSelection: selection,
     messages,
     providerId: providerFixture.id,
@@ -168,7 +183,7 @@ async function preparedFor(
       operation: "extend",
       operationInputs,
       messages,
-      traceAuthoring: null,
+      traceAuthoring,
       providerFingerprint,
       targetRevision,
       dependencyFingerprint,
@@ -781,6 +796,43 @@ test("apply-before-receipt crash is recovered through an idempotent artifact app
   const recovered = await reconstructed.load(keyFor(ready));
   assert.ok(recovered!.artifactReceipt);
   assert.equal(calls, 2);
+});
+
+test("vault-wide recovery defers accepted intents until their exact workspace is restored", async () => {
+  const repository = new MemoryRepository();
+  const setup = new DesktopOperationRuntimeV1(runtimeDependencies({ repository }));
+  const workspaceA = target("workspace-a");
+  const workspaceB = target("workspace-b");
+  const ready = await responseReady(setup, workspaceA);
+  const accepted = await replaceWithTransition(
+    repository,
+    ready,
+    transition("accept-result", ready, { artifactIntentId: "intent-workspace-deferred" }),
+  );
+  let restoredFolderId = workspaceB.folderId;
+  let mutations = 0;
+  const recovering = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    applyArtifact: async ({ intent, responseText }) => {
+      if (intent.targetRevision.folderId !== restoredFolderId) return { status: "deferred" };
+      mutations += 1;
+      return { status: "applied", resultingContentHash: HASH(responseText) };
+    },
+  }));
+
+  const whileB = await recovering.recover();
+  const stillAccepted = await recovering.load(keyFor(accepted));
+  assert.equal(whileB.failureCount, 0);
+  assert.equal(stillAccepted?.lifecycle.status, "accepted");
+  assert.equal(stillAccepted?.artifactReceipt, null);
+  assert.equal(mutations, 0);
+
+  restoredFolderId = workspaceA.folderId;
+  const whileA = await recovering.recover();
+  const applied = await recovering.load(keyFor(accepted));
+  assert.equal(whileA.failureCount, 0);
+  assert.ok(applied?.artifactReceipt);
+  assert.equal(mutations, 1);
 });
 
 test("two runtimes converge on one idempotent application and one durable receipt", async () => {

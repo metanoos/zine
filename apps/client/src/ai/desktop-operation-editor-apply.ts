@@ -1,8 +1,13 @@
 import { contentFingerprint } from "./context-snapshot.js";
 import type { AcceptedArtifactIntentV1 } from "./desktop-operation-envelope.js";
+import {
+  buildAcceptedExtendChanges,
+  type EditorTextChange,
+  type PreparedTraceAuthoringV1,
+} from "./trace-authoring-adapter.js";
 
 export interface PreparedDesktopExtendApplyV1 {
-  change: { from: number; to: number; insert: string };
+  changes: readonly EditorTextChange[];
   resultingText: string;
   resultingContentHash: string;
 }
@@ -12,6 +17,7 @@ export function prepareDesktopExtendApplyV1(
   targetText: string,
   intent: AcceptedArtifactIntentV1,
   responseText: string,
+  authoring: PreparedTraceAuthoringV1,
 ): PreparedDesktopExtendApplyV1 {
   if (contentFingerprint(targetText) !== intent.targetRevision.contentHash) {
     throw new Error("Desktop Extend target content no longer matches its accepted intent");
@@ -26,11 +32,15 @@ export function prepareDesktopExtendApplyV1(
   ) {
     throw new Error("Desktop Extend accepted intent has an invalid insertion range");
   }
-  const previous = fromUtf16 > 0 ? targetText.slice(fromUtf16 - 1, fromUtf16) : "";
-  const insert = `${fromUtf16 > 0 && previous !== "\n" ? "\n" : ""}${responseText}`;
-  const resultingText = targetText.slice(0, fromUtf16) + insert + targetText.slice(toUtf16);
+  const changes = buildAcceptedExtendChanges(authoring, targetText, fromUtf16, responseText);
+  let resultingText = targetText;
+  for (const change of [...changes].sort((left, right) => right.from - left.from)) {
+    resultingText = resultingText.slice(0, change.from)
+      + change.insert
+      + resultingText.slice(change.to ?? change.from);
+  }
   return Object.freeze({
-    change: Object.freeze({ from: fromUtf16, to: toUtf16, insert }),
+    changes: Object.freeze(changes.map((change) => Object.freeze({ ...change }))),
     resultingText,
     resultingContentHash: contentFingerprint(resultingText),
   });

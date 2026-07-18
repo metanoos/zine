@@ -27,7 +27,9 @@ function envelope(
       requestId: "request-12345678",
       operation: "extend",
       operationInputs: {},
+      traceAuthoring: {} as DesktopOperationEnvelopeV1["prepared"]["traceAuthoring"],
       messages: [],
+      modelVoicePubkey: "aa".repeat(32),
       provider: {
         version: 1,
         providerId: "provider-12345678",
@@ -79,7 +81,8 @@ test("completed, unknown, and stale attempts expose only explicit safe actions",
     "reprepare",
     "reject",
   ]);
-  assert.deepEqual(projectDesktopOperationReviewV1(envelope("dispatch-intent"))?.actions, ["abandon"]);
+  assert.deepEqual(projectDesktopOperationReviewV1(envelope("dispatch-intent"))?.actions, []);
+  assert.deepEqual(projectDesktopOperationReviewV1(envelope("provider-io"))?.actions, []);
 });
 
 test("an applied local receipt and abandoned work leave the compact queue", () => {

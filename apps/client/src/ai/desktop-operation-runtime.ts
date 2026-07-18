@@ -84,7 +84,9 @@ export type DesktopOperationTransportV1 = (
 
 export type DesktopArtifactApplyResultV1 =
   | { status: "applied" | "already-applied"; resultingContentHash: string }
-  | { status: "stale" };
+  | { status: "stale" }
+  /** The target workspace is not currently restored; recovery must retry later. */
+  | { status: "deferred" };
 
 export interface DesktopArtifactApplyInputV1 {
   envelope: DesktopOperationEnvelopeV1;
@@ -161,7 +163,8 @@ export interface RetryDesktopOperationCommandV1 {
 
 export type DesktopOperationAcceptResultV1 =
   | { status: "applied" | "already-applied"; envelope: DesktopOperationEnvelopeV1 }
-  | { status: "stale"; envelope: DesktopOperationEnvelopeV1 };
+  | { status: "stale"; envelope: DesktopOperationEnvelopeV1 }
+  | { status: "deferred"; envelope: DesktopOperationEnvelopeV1 };
 
 export interface DesktopOperationRecoveryResultV1 {
   deletedCount: number;
@@ -679,6 +682,9 @@ export class DesktopOperationRuntimeV1 {
       intent,
       responseText: response.text,
     });
+    if (result.status === "deferred") {
+      return { status: "deferred", envelope: current };
+    }
     if (result.status === "stale") {
       const latest = await this.requireEnvelope(keyFor(current));
       if (latest.artifactReceipt) {

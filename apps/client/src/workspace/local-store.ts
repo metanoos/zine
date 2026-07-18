@@ -24,6 +24,8 @@ import { vaultStorage as localStorage } from "../storage/vault-storage.js";
  */
 
 import type { KEdit } from "../provenance/provenance.js";
+import { contentFingerprint } from "../ai/context-snapshot.js";
+import { hashCanonicalV1 } from "../ai/desktop-operation-envelope.js";
 import type { FolderRef, Run } from "./workspace-core.js";
 
 const PREFIX = "zine.folder.";
@@ -121,6 +123,9 @@ export interface DesktopOperationCrashPadReceiptV1 {
   version: 1;
   intentId: string;
   resultingContentHash: string;
+  resultingRunsSha256: string;
+  resultingKEditsSha256: string;
+  modelVoicePubkey: string;
 }
 
 export interface LocalFolder {
@@ -178,10 +183,10 @@ function isLocalFile(value: unknown): value is LocalFile {
     file.tags.every((tag) => typeof tag === "string") &&
     typeof file.nodeId === "string" &&
     (file.coinComplete === undefined || typeof file.coinComplete === "boolean") &&
-    (
-      file.desktopOperationReceipt === undefined ||
+    (file.desktopOperationReceipt === undefined || (
       isDesktopOperationCrashPadReceiptV1(file.desktopOperationReceipt)
-    ) &&
+      && isExactDesktopOperationCrashPadReceipt(file as LocalFile)
+    )) &&
     typeof file.updatedAt === "number"
   );
 }
@@ -195,7 +200,57 @@ function isDesktopOperationCrashPadReceiptV1(
     && typeof receipt.intentId === "string"
     && receipt.intentId.length > 0
     && typeof receipt.resultingContentHash === "string"
-    && /^[0-9a-f]{64}$/.test(receipt.resultingContentHash);
+    && /^[0-9a-f]{64}$/.test(receipt.resultingContentHash)
+    && typeof receipt.resultingRunsSha256 === "string"
+    && /^[0-9a-f]{64}$/.test(receipt.resultingRunsSha256)
+    && typeof receipt.resultingKEditsSha256 === "string"
+    && /^[0-9a-f]{64}$/.test(receipt.resultingKEditsSha256)
+    && typeof receipt.modelVoicePubkey === "string"
+    && /^[0-9a-f]{64}$/.test(receipt.modelVoicePubkey);
+}
+
+export function createDesktopOperationCrashPadReceiptV1(input: {
+  intentId: string;
+  content: string;
+  runs: readonly Run[];
+  kedits: readonly KEdit[];
+  modelVoicePubkey: string;
+}): DesktopOperationCrashPadReceiptV1 {
+  if (!input.intentId || !/^[0-9a-f]{64}$/.test(input.modelVoicePubkey)) {
+    throw new Error("Desktop operation crash-pad receipt identity is invalid");
+  }
+  if (input.runs.map((run) => run.text).join("") !== input.content) {
+    throw new Error("Desktop operation crash-pad runs do not match their content");
+  }
+  return Object.freeze({
+    version: 1,
+    intentId: input.intentId,
+    resultingContentHash: contentFingerprint(input.content),
+    resultingRunsSha256: hashCanonicalV1("zine.desktop-operation.pad-runs.v1", input.runs),
+    resultingKEditsSha256: hashCanonicalV1("zine.desktop-operation.pad-kedits.v1", input.kedits),
+    modelVoicePubkey: input.modelVoicePubkey,
+  });
+}
+
+export function isExactDesktopOperationCrashPadReceipt(file: LocalFile): boolean {
+  const receipt = file.desktopOperationReceipt;
+  if (
+    !receipt
+    || !isDesktopOperationCrashPadReceiptV1(receipt)
+    || !Array.isArray(file.runs)
+    || !Array.isArray(file.kedits)
+    || file.voicePubkey !== receipt.modelVoicePubkey
+    || file.runs.map((run) => run.text).join("") !== file.content
+  ) return false;
+  try {
+    return receipt.resultingContentHash === contentFingerprint(file.content)
+      && receipt.resultingRunsSha256
+        === hashCanonicalV1("zine.desktop-operation.pad-runs.v1", file.runs)
+      && receipt.resultingKEditsSha256
+        === hashCanonicalV1("zine.desktop-operation.pad-kedits.v1", file.kedits);
+  } catch {
+    return false;
+  }
 }
 
 /** Persist a whole folder (overwrites). Returns false when browser storage
@@ -413,21 +468,30 @@ export function mirrorPad(
     const raw = localStorage.getItem(padKey(folderId));
     const parsed: unknown = raw ? JSON.parse(raw) : {};
     const pad = currentLocalFiles(parsed) ?? {};
-    const desktopOperationReceipt = data.desktopOperationReceipt
-      ?? pad[relativePath]?.desktopOperationReceipt;
-    pad[relativePath] = {
+    const candidate: LocalFile = {
       kind: "file",
       content: data.content,
       tags: data.tags,
       nodeId: data.nodeId,
       ...(data.traceId ? { traceId: data.traceId } : {}),
       updatedAt: Date.now(),
-      ...(data.runs && data.runs.length > 0 ? { runs: data.runs } : {}),
+      ...(data.runs ? { runs: data.runs } : {}),
       ...(data.voicePubkey ? { voicePubkey: data.voicePubkey } : {}),
       ...(data.citationIds && data.citationIds.length > 0 ? { citationIds: data.citationIds } : {}),
-      ...(data.kedits && data.kedits.length > 0 ? { kedits: data.kedits } : {}),
-      ...(desktopOperationReceipt ? { desktopOperationReceipt } : {}),
+      ...(data.kedits ? { kedits: data.kedits } : {}),
     };
+    const desktopOperationReceipt = data.desktopOperationReceipt
+      ?? pad[relativePath]?.desktopOperationReceipt;
+    if (desktopOperationReceipt) {
+      candidate.desktopOperationReceipt = desktopOperationReceipt;
+      if (!isExactDesktopOperationCrashPadReceipt(candidate)) {
+        if (data.desktopOperationReceipt) {
+          throw new Error("Desktop operation crash-pad receipt does not bind the exact pad state");
+        }
+        delete candidate.desktopOperationReceipt;
+      }
+    }
+    pad[relativePath] = candidate;
     localStorage.setItem(padKey(folderId), JSON.stringify(pad));
     return true;
   } catch {

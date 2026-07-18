@@ -498,6 +498,15 @@ export function createDesktopOperationRetryV1(
     ) {
       fail("fresh retry must use a new prepared request identity");
     }
+    const freshTarget = input.freshPreparation.prepared.targetRevision;
+    const priorTarget = prior.prepared.targetRevision;
+    if (
+      freshTarget.folderId !== priorTarget.folderId
+      || freshTarget.path !== priorTarget.path
+      || freshTarget.traceId !== priorTarget.traceId
+    ) {
+      fail("stale retry must re-prepare the same stable folder, path, and trace target");
+    }
     const fresh = createDesktopOperationEnvelopeV1({
       operationId: prior.operationId,
       attemptId: input.attemptId,

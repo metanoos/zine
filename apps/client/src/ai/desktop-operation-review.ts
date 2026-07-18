@@ -50,12 +50,17 @@ export function projectDesktopOperationReviewV1(
     case "dispatch-intent":
       return {
         ...common,
-        label: "Dispatch outcome unknown",
-        detail: "The saved intent will not be resumed",
-        actions: ["abandon"],
+        label: "Reconciling saved Extend…",
+        detail: "No operator action is available yet",
+        actions: [],
       };
     case "provider-io":
-      return { ...common, label: "Extending…", detail: "Waiting for the provider", actions: [] };
+      return {
+        ...common,
+        label: "Reconciling saved Extend…",
+        detail: "No operator action is available yet",
+        actions: [],
+      };
     case "response-completed":
       return {
         ...common,

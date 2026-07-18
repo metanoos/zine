@@ -94,7 +94,7 @@ test("Settle retains current-session authoring while durable Extend accepts thro
 });
 
 test("Inspector binds Extend to the fetched signed-chain selector boundary", () => {
-  const prepare = functionBody("prepareInspectorOperation", "/** Read the authoritative local Mint inventory");
+  const prepare = functionBody("prepareInspectorOperation", "function renderSteppedTraceReferences");
   assert.match(prepare, /operation === "extend"[\s\S]*fetchChain\(liveFolder\.id, activePath\)/);
   assert.match(prepare, /policy: "selected-trace-v1"/);
   assert.match(prepare, /verifyEvent/);
@@ -104,11 +104,52 @@ test("Inspector binds Extend to the fetched signed-chain selector boundary", () 
 test("desktop Accept writes one exact crash-pad receipt before dispatching CodeMirror", () => {
   const apply = functionBody("applyDesktopArtifact", "function editFile");
   assert.match(apply, /prepareDesktopExtendApplyV1/);
+  assert.match(apply, /prepared\.traceAuthoring/);
+  assert.match(apply, /planned\.changes/);
   assert.match(apply, /transaction\.state\.field\(voiceField\)/);
   assert.match(apply, /transaction\.state\.field\(keditField\)/);
   assert.ok(apply.indexOf("mirrorPad(") < apply.indexOf("view.dispatch(transaction)"));
-  assert.match(apply, /desktopOperationReceipt/);
+  assert.match(apply, /createDesktopOperationCrashPadReceiptV1/);
+  assert.match(apply, /prepared\.modelVoicePubkey/);
+  assert.doesNotMatch(apply, /modelPubkeyRef\.current/);
   assert.doesNotMatch(apply, /stepFile\(|sendStep\(|publish|mint/i);
+});
+
+test("directive authority expires across App activations and recovery then fails stale", () => {
+  const apply = functionBody("applyDesktopArtifact", "function editFile");
+  assert.match(app, /desktopAuthorizedAttemptKeysRef = useRef\(new Set<string>\(\)\)/);
+  assert.match(apply, /compiled\.directives\.length > 0/);
+  assert.match(apply, /desktopAuthorizedAttemptKeysRef\.current\.has/);
+  assert.match(apply, /return \{ status: "stale" \}/);
+});
+
+test("desktop recovery defers inactive workspaces and keeps review scoped to the live folder", () => {
+  const apply = functionBody("applyDesktopArtifact", "function editFile");
+  assert.match(apply, /liveFolder\.id !== target\.folderId/);
+  assert.match(apply, /status: "deferred"/);
+  assert.match(app, /targetRevision\.folderId === folder\?\.id/);
+});
+
+test("recovery errors stay generic and saved-operation pages continue through an opaque cursor", () => {
+  const refresh = functionBody(
+    "refreshDesktopOperationEnvelopes",
+    "function loadMoreDesktopOperationEnvelopes",
+  );
+  assert.match(app, /result\.failureCount > 0/);
+  assert.match(app, /saved AI operation\(s\) need recovery attention/);
+  assert.doesNotMatch(app, /failureSamples\[/);
+  assert.match(refresh, /repository\.listPage\(cursor, 16\)/);
+  assert.match(refresh, /setDesktopOperationCursor\(page\.nextCursor\)/);
+  assert.match(refresh, /slice\(-64\)/);
+  assert.match(app, /More saved Extend attempts/);
+});
+
+test("stale re-prepare opens only the original workspace path and trace", () => {
+  const action = functionBody("handleDesktopOperationAction", "function dispatchFreshDesktopRetry");
+  assert.match(action, /liveFolder\.id !== target\.folderId/);
+  assert.match(action, /liveFile\.traceId !== target\.traceId/);
+  assert.match(action, /activateLiveTab\(target\.path\)/);
+  assert.match(action, /Restore the original workspace and trace/);
 });
 
 test("desktop recovery constructs the native frozen-session store only after App mounts", () => {

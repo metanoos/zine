@@ -29,6 +29,7 @@ import {
   computePreparedOperationRequestHashV1,
   type PreparedOperation,
 } from "./prepared-operation.js";
+import { compileTraceAuthoringOperation } from "./trace-authoring-adapter.js";
 
 const BASE_TIME = 10_000;
 const TARGET_TEXT = "draft";
@@ -87,6 +88,20 @@ async function envelope(suffix = "0001"): Promise<DesktopOperationEnvelopeV1> {
   };
   const dependencyFingerprint = HASH("dependency");
   const createdAt = BASE_TIME;
+  const traceAuthoring = compileTraceAuthoringOperation({
+    operation: "extend",
+    operationInputs,
+    targetText: TARGET_TEXT,
+    renderedContextBlock: selected.renderedContext,
+    actingAuthorId: "",
+    authoritySpans: [],
+    sourceRevision: {
+      traceId: targetRevision.traceId,
+      headId: targetRevision.headId,
+      path: targetRevision.path,
+      contentHash: targetRevision.contentHash,
+    },
+  }).authoring!;
   const prepared: PreparedOperation = Object.freeze({
     version: 1,
     requestId,
@@ -94,7 +109,7 @@ async function envelope(suffix = "0001"): Promise<DesktopOperationEnvelopeV1> {
     operationInputs,
     contextSnapshot: {} as PreparedOperation["contextSnapshot"],
     contextFingerprint: HASH("context"),
-    traceAuthoring: null,
+    traceAuthoring,
     messages,
     providerId: "provider-0001",
     providerFingerprint,
@@ -117,7 +132,7 @@ async function envelope(suffix = "0001"): Promise<DesktopOperationEnvelopeV1> {
       operation: "extend",
       operationInputs,
       messages,
-      traceAuthoring: null,
+      traceAuthoring,
       providerFingerprint,
       targetRevision,
       dependencyFingerprint,

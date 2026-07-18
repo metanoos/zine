@@ -43,6 +43,10 @@ acknowledged possible duplicate dispatch.
 The envelope retains, as private local data:
 
 - the exact ordered provider-neutral messages and operation inputs;
+- the exact prepared Extend authoring/apply contract, including staged
+  directive deletions, while its authority remains valid only for the current
+  editor activation;
+- the approved public MODEL voice key (never its credential or signing key);
 - the exact prepared target revision and apply range;
 - generation limits and credential-free provider identity;
 - the exact selected-context manifest and selected source range, rendered
@@ -106,6 +110,21 @@ selected-context manifest, and response. Recording a local application receipt
 does not create, sign, or publish a MODEL Step; durable signed provenance remains
 Phase 3 work.
 
+Accept applies the validated result and every prepared one-shot directive
+deletion in one CodeMirror transaction. It never inserts raw provider output.
+Directive authority is intentionally not persisted across App activations: the
+App keeps a per-mount authorization set for locally created attempt ids. A
+recovered directive-bearing attempt without that same-mount authorization is
+marked stale and must be re-prepared. Directive-free attempts remain
+recoverable across activations.
+
+The public MODEL voice key frozen in the prepared request is the sole identity
+used for CodeMirror attribution, local runs, KEdits, crash-pad metadata, and
+recovery verification. The crash-pad receipt binds the intent id to canonical
+content, canonical runs, canonical KEdits, and that public MODEL key. A missing
+or tampered component cannot produce `already-applied`; recovery never
+synthesizes attribution or KEdits as a fallback.
+
 The caller rechecks the captured target before acceptance and uses compare-and-
 set when applying an accepted intent. A failed recheck moves
 `response-completed` to durable `stale` with a `TARGET_STALE` review fault. A
@@ -116,11 +135,15 @@ effect, and offer review, discard, or a safe linked retry without a
 duplicate-dispatch acknowledgement. An explicitly rejected recorded response
 has the same safe linked-retry policy.
 
-A stale retry cannot reuse the stale request or selector output. It requires a
+A stale retry cannot reuse the stale request or selector output or move to a
+different document. It requires a
 new `PreparedOperation`, new selected-context manifest/rendered bytes captured
 from the current editor state, a new request id, and a new attempt id. The target
-revision may be byte-identical after focus-only staleness and refocus. The
-operation id and `retryOfAttemptId` linkage remain stable; the new attempt starts
+must retain the exact prior folder id, path, and stable trace id; head and
+content may advance. The UI opens and focuses that exact target before
+preparation, or refuses the retry. A different target begins a new operation.
+The target revision may be byte-identical after focus-only staleness and
+refocus. The operation id and `retryOfAttemptId` linkage remain stable; the new attempt starts
 with an empty transition chain, and its caller must issue new transition ids.
 Other retry states cannot replace their frozen request through this path.
 
@@ -146,6 +169,19 @@ The one artifact receipt is also bound back to its sole
 match, and the transition action hash is recomputed from its transition id,
 receipt id, resulting content hash, and exact timestamp during parsing.
 
+Recovery scans the vault-wide journal, but the editor can apply only to the
+currently restored workspace. An accepted intent for another workspace returns
+the private local `deferred` outcome and remains accepted and unreceipted. A
+later recovery after that exact workspace is restored may apply it. The compact
+review strip filters records to the current workspace without deleting hidden
+records.
+
+Per-record recovery failures are counted and bounded. The App exposes only a
+generic count/error; it never displays diagnostic samples or raw provider
+exceptions. Raw `dispatch-intent` and `provider-io` projections expose no
+operator actions while recovery reconciles them to durable `unknown`. Only
+durable `unknown` offers the explicit duplicate-risk retry or abandon choices.
+
 ## Private retention
 
 Exact requests, selected context, responses, hashes, and lifecycle metadata are
@@ -170,9 +206,14 @@ The narrow TypeScript adapter validates the strict V1 contract before writes
 and after reads. It exposes create/update CAS, recovery load/list,
 whole-envelope deletion, and expiry deletion. Production construction names the
 native authority explicitly; browser tests may inject a backend, but there is
-no silent local-storage fallback. This is storage substrate only—the app does
-not yet route Extend through it. Selective portable commitments and disclosure
-belong to Phase 3 after the trust/schema review.
+no silent local-storage fallback. The app now routes desktop Extend through
+this substrate: Inspector approval persists the request before
+provider I/O, completion enters explicit local review, Accept performs the
+idempotent local editor/crash-pad transaction, and recovery resumes only safe
+local effects. The compact UI reads one bounded page at a time, retains the
+opaque continuation cursor, and exposes an explicit **More** action while
+keeping at most 64 records in memory. Selective portable commitments and
+disclosure belong to Phase 3 after the trust/schema review.
 
 ## Not included
 
@@ -180,13 +221,11 @@ This contract intentionally does not:
 
 - change protocol or relay schemas;
 - create or encode signed Steps;
-- dispatch a provider request itself;
-- apply text to the editor;
-- perform compare-and-set or directive-consumption transactions;
 - add Settle, Stir, Reply, Analyze, Run, or multi-provider orchestration; or
 - claim that selected trace improves writing.
 
-The next integration can wire Extend through this contract, a vault-scoped
-native store, explicit result review, compare-and-set application, and the
-separate accepted MODEL Step transaction. Settle should reuse the lifecycle
-rather than invent a second one.
+The current integration is desktop-only and Extend-only. It does not Step,
+Mint, attest, publish, or produce portable provenance when a draft is accepted.
+The separate accepted MODEL Step transaction remains Phase 3 work. Settle
+should reuse the lifecycle rather than invent a second one; mobile and
+multi-provider orchestration remain explicitly postponed.
