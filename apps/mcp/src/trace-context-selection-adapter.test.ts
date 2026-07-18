@@ -102,6 +102,50 @@ test("internally verifies one immutable chain and derives exact Extend/Settle se
   }
 });
 
+test("binds operation ranges to exact Unicode boundaries in the verified head snapshot", async () => {
+  const currentText = "a😀雪b";
+  const fixture = await snapshotOnlyFixture(currentText);
+  for (const [name, range, error] of [
+    [
+      "past verified snapshot end",
+      { fromUtf16: 0, toUtf16: currentText.length + 1 },
+      /operation range must be within the verified head snapshot/,
+    ],
+    [
+      "surrogate split at end",
+      { fromUtf16: 0, toUtf16: 2 },
+      /operation range must not split a UTF-16 surrogate pair/,
+    ],
+    [
+      "surrogate split at start",
+      { fromUtf16: 2, toUtf16: 4 },
+      /operation range must not split a UTF-16 surrogate pair/,
+    ],
+  ] as const) {
+    await assert.rejects(
+      adaptVerifiedMcpFileForTraceContextSelectionV1({
+        ...fixture,
+        policy: "text-only-v1",
+        operation: { ...ADAPTER_CASES[1].operation, range },
+      }),
+      error,
+      name,
+    );
+  }
+
+  const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1({
+    ...fixture,
+    policy: "text-only-v1",
+    operation: {
+      ...ADAPTER_CASES[1].operation,
+      range: { fromUtf16: 1, toUtf16: 4 },
+    },
+  });
+  assert.deepEqual(adapted.operation.range, { fromUtf16: 1, toUtf16: 4 });
+  const selected = await selectTraceContextV1(adapted);
+  assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
+});
+
 test("rejects mutated head content carrying a stale accepted id and signature", async () => {
   const fixture = await fullFixture();
   const mutated = fixture.input.chain.map((event) => structuredClone(event));
@@ -157,6 +201,28 @@ test("captures the chain before caller mutation after the async boundary", async
   assert.equal(adapted.candidates.length, fixture.input.processFactRequests.length);
 });
 
+test("returned selector input is recursively frozen against caller mutation", async () => {
+  const fixture = await fullFixture();
+  const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1(fixture.input);
+  assertDeepFrozen(adapted);
+
+  assert.throws(() => {
+    adapted.operation.target.currentText = "caller mutation";
+  }, TypeError);
+  assert.throws(() => {
+    (adapted.candidates as TraceContextSelectionInputV1["candidates"][number][]).pop();
+  }, TypeError);
+  const change = adapted.candidates.at(-1);
+  assert.equal(change?.kind, "process-fact");
+  if (change?.kind === "process-fact" && change.fact.kind === "change") {
+    const range = change.fact.range;
+    assert.throws(() => {
+      range.fromUtf16 = 999;
+    }, TypeError);
+  }
+  assert.equal(adapted.operation.target.currentText, CURRENT_TEXT);
+});
+
 test("maps snapshot-only status to selector failure while text-only excludes it", async () => {
   const fixture = await snapshotOnlyFixture();
   const selectedInput = await adaptVerifiedMcpFileForTraceContextSelectionV1(fixture);
@@ -175,6 +241,26 @@ test("maps snapshot-only status to selector failure while text-only excludes it"
   const textOnly = await selectTraceContextV1(textOnlyInput);
   assert.equal(textOnly.ok, true, textOnly.ok ? undefined : textOnly.error.message);
   if (textOnly.ok) assert.equal(textOnly.manifest.selected.length, 0);
+});
+
+test("text-only drops malformed process requests before coordinate validation", async () => {
+  const fixture = await fullFixture();
+  const malformedRequests = [{
+    version: 2,
+    kind: "change",
+    nodeId: "not-a-node-id",
+    chainDistance: -1,
+    transactionIndex: -1,
+    changeIndex: -1,
+  }] as unknown as readonly McpProcessFactRequestV1[];
+  const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1({
+    ...fixture.input,
+    policy: "text-only-v1",
+    processFactRequests: malformedRequests,
+  });
+  assert.deepEqual(adapted.candidates, []);
+  const selected = await selectTraceContextV1(adapted);
+  assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
 });
 
 test("maps invalid ancestry to selector failure when the signed head remains valid", async () => {
@@ -265,8 +351,9 @@ async function fullFixture(): Promise<Fixture> {
   };
 }
 
-async function snapshotOnlyFixture(): Promise<McpTraceContextSelectionAdapterInputV1> {
-  const snapshot = "Readable signed snapshot";
+async function snapshotOnlyFixture(
+  snapshot = "Readable signed snapshot",
+): Promise<McpTraceContextSelectionAdapterInputV1> {
   const contentHash = await sha256(snapshot);
   const chain = [event(HEAD_ID, [], snapshot, contentHash, undefined, "4".repeat(64))];
   return {
@@ -339,6 +426,12 @@ function eventIdentity(event: ProtocolEvent): string {
     event.content,
     event.sig,
   ]);
+}
+
+function assertDeepFrozen(value: unknown): void {
+  if (value === null || typeof value !== "object") return;
+  assert.equal(Object.isFrozen(value), true);
+  for (const child of Object.values(value)) assertDeepFrozen(child);
 }
 
 function headSummary(): TraceProcessFactV1 {
