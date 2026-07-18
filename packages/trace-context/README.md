@@ -51,14 +51,22 @@ psychology, or latent-intent field. The supported kinds have fixed priority:
 operation instruction, protected range, correction, explicit preference,
 prepared-head process fact, prior process fact, then direct citation.
 
-The selector validates every input field, rejects unpaired UTF-16 surrogates,
-sorts strings by raw UTF-8 bytes, collapses identical duplicate references
-while retaining every reason, and budgets exact UTF-8 bytes of its canonical
-rendered segment array. Operation instructions and protected ranges are
-mandatory. Optional overflow produces deterministic exclusion counts and a
-first rejected reference; mandatory overflow, cancellation, candidate limits,
-manifest limits, and conflicting duplicates return typed failures rather than
-an apparently complete result.
+Successful V1 policies are `text-only-v1` and `selected-trace-v1` only.
+`bounded-trace-v1` returns the typed `UNSUPPORTED_POLICY` failure. This package
+does not claim bounded-history behavior until it can construct the newest
+complete conforming Step suffix, commit to an omitted prefix, and prove the
+window under one reviewed contract.
+
+The selector validates every policy-projected input field, rejects unpaired
+UTF-16 surrogates, sorts strings by raw UTF-8 bytes, collapses identical
+duplicate references while retaining every reason, and budgets exact UTF-8
+bytes of its canonical rendered segment array. Operation instructions and
+protected ranges are
+mandatory, as is one package-owned current-target segment containing the exact
+current text. Optional overflow produces deterministic exclusion counts and a
+first rejected reference. Mandatory overflow, cancellation, total/per-candidate
+input limits, candidate limits, manifest limits, and conflicting duplicates
+return typed failures rather than an apparently complete result.
 
 Source ranges remain exact half-open UTF-16 coordinates and are never remapped
 or normalized. The validating adapter must reject a boundary that splits a
@@ -66,19 +74,44 @@ surrogate pair in its named source revision; the selector intentionally does
 not receive or duplicate every historical source body just to re-derive that
 validation.
 
-Only `process-fact` candidates backed by `full-trace` sources are eligible.
-`snapshot-only` and `invalid` process records remain visible in exclusion
-decisions and cannot become persuasive process evidence. A snapshot may still
-be supplied as an explicitly approved citation because quoted content and a
-claim about its process are different things.
+`process-fact` has no caller-authored text field. It carries one closed
+`step-summary`, `transaction`, or `change` shape; the package validates its
+numeric/range relationships and owns the only prompt rendering. Transaction
+intent is limited to explicit `undo` or `redo`. No V1 fact can name motive,
+retention, rejection, influence, inferred preference, or psychology.
 
-`text-only-v1`, `bounded-trace-v1`, and `selected-trace-v1` use the same result
-contract. In this package slice, bounded trace means deterministic filtering of
-adapter-materialized chronological candidates; it does not yet build or prove
-the newest complete-Step suffix required by the accepted destination design.
+Selected-trace process evidence must be `full-trace`, belong to the operation's
+exact target trace and prepared-head chain, and use the target head itself at
+distance zero. Invalid process returns `INVALID_PROCESS_EVIDENCE` and
+snapshot-only process returns `CONTEXT_INCOMPLETE`; neither produces a result
+containing `selectionComplete`. A snapshot or cross-trace body may still enter
+as an explicitly approved citation because quoted content is not a claim about
+its process.
 
-Successful results contain an exact rendered byte string, per-candidate
-Inspector decisions, a compact frozen `SelectedTraceContextManifestV1`, and
+Text-only selection projects out corrections, preferences, and process facts
+before candidate validation, duplicate handling, input-byte limits, hashing,
+or rendering. Those excluded values and conflicts cannot change a successful
+baseline identity. Target and citation sources are projected to trace-free
+render shapes; exact-byte tests prohibit node, trace, process-status, and
+excluded-value leakage into the rendered context. The separate fixed raw-slot
+scan ceiling remains a resource guard for hostile arrays.
+
+The effective rendered-context ceiling is exactly
+`min(operation.maxContextBytes, 256 KiB, operation.preparedRequestMaxBytes -
+operation.reservedPromptBytes)`, clamped at zero. Reserved prompt bytes are not
+also subtracted from the context ceiling. Exact rendered target and evidence
+bytes count once. The manifest reports raw target-text bytes, rendered target
+bytes, request remainder, effective ceiling, and final rendered bytes so the
+arithmetic can be independently checked.
+
+The hard projected-input ceiling is 4 MiB and the hard per-candidate ceiling is
+128 KiB; callers may lower either. Validation and selection yield at bounded
+intervals when an abort signal is supplied. Hitting any ceiling or cancellation
+returns a typed failure instead of a false completeness claim.
+
+Successful results contain an exact rendered byte string,
+per-projected-candidate Inspector decisions, a compact frozen
+`SelectedTraceContextManifestV1`, and
 domain-separated SHA-256 identities for normalized frozen inputs, rendered
 context, and the package manifest. The manifest labels itself
 `package-local-non-normative-v1`. It is not the final
@@ -108,11 +141,17 @@ store or cache. The evidence selector has cancellation and hard package-local
 candidate, rendered-context, and manifest ceilings; cache-cold/cache-warm
 selection benchmarks and the future durable envelope remain deferred.
 
-The fixed selector corpus at `corpus/evidence-selection-v1.json` pins nil,
-empty, malformed, Unicode, oversize, exact-boundary, duplicate, invalid-trace,
-snapshot-only, and cancellation behavior plus deterministic hashes. Existing
-syntax callers and the `./corpus` export remain unchanged; the new corpus is
-available at `./selection-corpus`.
+The fixed selector corpus at `corpus/evidence-selection-v1.json` pins exact
+rendered bytes and contract invariants for nil, unsupported policy, current
+target, portable lone-surrogate construction, closed mechanical facts,
+invalid/snapshot process, cross-trace binding, strict text-only projection,
+budget arithmetic, and input ceilings. Existing syntax callers and the
+`./corpus` export remain unchanged; the selector corpus is available at
+`./selection-corpus`.
+
+`benchmark/selection.ts` exercises deterministic 0, 100, 1,000, and 10,000
+candidate structures and reports byte/count/hash results. It is a relative
+correctness/resource harness, not a product wall-clock latency claim.
 
 ## Development
 
@@ -120,6 +159,7 @@ available at `./selection-corpus`.
 npm test
 npm run typecheck
 npm run benchmark
+npm run benchmark:selector
 ```
 
 The benchmark reports first-run and repeated-run local timings plus byte/count

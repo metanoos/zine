@@ -1,9 +1,7 @@
 import type { Utf16Range } from "./types.js";
 
-export type TraceContextPolicyV1 =
-  | "text-only-v1"
-  | "bounded-trace-v1"
-  | "selected-trace-v1";
+/** Bounded history is intentionally absent until complete-Step suffix semantics exist. */
+export type TraceContextPolicyV1 = "text-only-v1" | "selected-trace-v1";
 
 export type TraceContextOperationV1 = "extend" | "settle";
 
@@ -14,10 +12,15 @@ export interface TraceContextSelectionOperationV1 {
     traceId: string;
     headId: string;
     contentHash: string;
+    currentText: string;
     chosenPath?: string;
   };
   range?: Utf16Range;
+  /** Selector/context ceiling only. Reserved request bytes are not subtracted from it. */
   maxContextBytes: number;
+  /** Ceiling for the complete prepared request, including non-context prompt bytes. */
+  preparedRequestMaxBytes: number;
+  /** Exact bytes outside the rendered context in the prepared request. */
   reservedPromptBytes: number;
 }
 
@@ -66,6 +69,7 @@ export interface TraceEvidenceSourceV1 {
   kind: "trace";
   ref: string;
   traceId: string;
+  /** The prepared target head whose validated linear chain was traversed. */
   headId: string;
   nodeId: string;
   processStatus: TraceProcessStatusV1;
@@ -91,24 +95,104 @@ export type EvidenceSourceV1 =
   | TraceEvidenceSourceV1
   | CitationEvidenceSourceV1;
 
-/**
- * Adapter-materialized evidence. V1 accepts explicit and mechanical claims
- * only; it has no confidence, inferred preference, or psychological field.
- */
-export interface EvidenceCandidateV1 {
+/** Trace-free source projections emitted by text-only selection. */
+export type TextOnlyEvidenceSourceV1 =
+  | OperationEvidenceSourceV1
+  | {
+      kind: "target";
+      ref: string;
+      range: Utf16Range;
+    }
+  | {
+      kind: "citation";
+      ref: string;
+      approvedOrder: number;
+    };
+
+export type SelectedEvidenceSourceV1 = EvidenceSourceV1 | TextOnlyEvidenceSourceV1;
+
+export type TraceProcessFactV1 =
+  | {
+      kind: "step-summary";
+      transactionCount: number;
+      rangeCount: number;
+      insertedCodePointCount: number;
+      deletedCodePointCount: number;
+      firstCapturedAtMs?: number;
+      lastCapturedAtMs?: number;
+      spanMs: number;
+      longestGapMs: number;
+      undoCount: number;
+      redoCount: number;
+    }
+  | {
+      kind: "transaction";
+      transactionIndex: number;
+      capturedAtMs: number;
+      intent?: "undo" | "redo";
+      changeCount: number;
+      voiceIds: readonly string[];
+    }
+  | {
+      kind: "change";
+      transactionIndex: number;
+      operation: "insert" | "delete" | "replace";
+      range: Utf16Range;
+      insertedCodePointCount: number;
+      deletedCodePointCount: number;
+      voiceId: string;
+    };
+
+interface EvidenceCandidateBaseV1 {
   version: 1;
   id: string;
   dedupeKey: string;
-  kind: EvidenceCandidateKindV1;
-  claimClass: EvidenceClaimClassV1;
-  source: EvidenceSourceV1;
   reasons: readonly EvidenceInclusionReasonV1[];
-  text: string;
 }
+
+export type EvidenceCandidateV1 =
+  | (EvidenceCandidateBaseV1 & {
+      kind: "operation-instruction";
+      claimClass: "explicit";
+      source: OperationEvidenceSourceV1;
+      text: string;
+    })
+  | (EvidenceCandidateBaseV1 & {
+      kind: "protected-range";
+      claimClass: "explicit";
+      source: TargetEvidenceSourceV1;
+      text: string;
+    })
+  | (EvidenceCandidateBaseV1 & {
+      kind: "correction";
+      claimClass: "explicit";
+      source: LocalEvidenceSourceV1;
+      text: string;
+    })
+  | (EvidenceCandidateBaseV1 & {
+      kind: "explicit-preference";
+      claimClass: "explicit";
+      source: LocalEvidenceSourceV1;
+      text: string;
+    })
+  | (EvidenceCandidateBaseV1 & {
+      kind: "process-fact";
+      claimClass: "mechanical";
+      source: TraceEvidenceSourceV1;
+      fact: TraceProcessFactV1;
+    })
+  | (EvidenceCandidateBaseV1 & {
+      kind: "citation";
+      claimClass: "explicit";
+      source: CitationEvidenceSourceV1;
+      text: string;
+    });
 
 export interface TraceContextSelectionLimitsV1 {
   version: 1;
   maxCandidates?: number;
+  maxInputBytes?: number;
+  maxCandidateInputBytes?: number;
   maxManifestBytes?: number;
 }
 
@@ -142,10 +226,11 @@ export interface SelectedEvidenceV1 {
   kind: EvidenceCandidateKindV1;
   claimClass: EvidenceClaimClassV1;
   authority: EvidenceAuthorityV1;
-  source: EvidenceSourceV1;
+  source: SelectedEvidenceSourceV1;
   reasons: readonly EvidenceInclusionReasonV1[];
   priorityClass: EvidencePriorityClassV1;
   renderedByteCost: number;
+  fact?: TraceProcessFactV1;
 }
 
 export type EvidenceDecisionDispositionV1 = "selected" | "excluded" | "collapsed";
@@ -153,9 +238,6 @@ export type EvidenceDecisionDispositionV1 = "selected" | "excluded" | "collapsed
 export type EvidenceDecisionReasonV1 =
   | "mandatory"
   | "policy-eligible"
-  | "policy-excluded"
-  | "invalid-trace"
-  | "snapshot-only-trace"
   | "budget-exceeded"
   | "duplicate-collapsed";
 
@@ -170,9 +252,6 @@ export interface EvidenceSelectionDecisionV1 {
 }
 
 export interface EvidenceExclusionCountsV1 {
-  policyExcluded: number;
-  invalidTrace: number;
-  snapshotOnlyTrace: number;
   budgetExceeded: number;
   duplicateCollapsed: number;
 }
@@ -190,10 +269,20 @@ export interface SelectedTraceContextManifestV1 {
       dedupeKey: string;
     };
   };
+  input: {
+    projectedInputBytes: number;
+    maxInputBytes: number;
+    maxCandidateInputBytes: number;
+  };
   budget: {
-    effectiveContextBytes: number;
+    contextCeilingBytes: number;
+    hardContextCeilingBytes: number;
+    preparedRequestMaxBytes: number;
     reservedPromptBytes: number;
-    availableRenderedBytes: number;
+    preparedRequestAvailableBytes: number;
+    effectiveContextBytes: number;
+    currentTargetTextBytes: number;
+    currentTargetRenderedBytes: number;
     usedRenderedBytes: number;
     candidateCount: number;
     uniqueCandidateCount: number;
@@ -241,6 +330,11 @@ export type TraceContextSelectionErrorV1 =
       receivedVersionType: TraceContextInputValueTypeV1;
     })
   | (SelectionErrorBaseV1 & {
+      code: "UNSUPPORTED_POLICY";
+      stage: "validate";
+      receivedPolicy: "bounded-trace-v1";
+    })
+  | (SelectionErrorBaseV1 & {
       code: "MALFORMED_INPUT";
       stage: "validate";
       path: string;
@@ -254,6 +348,38 @@ export type TraceContextSelectionErrorV1 =
       stage: "validate";
       actual: number;
       limit: number;
+    })
+  | (SelectionErrorBaseV1 & {
+      code: "INPUT_LIMIT_EXCEEDED";
+      stage: "validate";
+      actual: number;
+      limit: number;
+    })
+  | (SelectionErrorBaseV1 & {
+      code: "CANDIDATE_INPUT_LIMIT_EXCEEDED";
+      stage: "validate";
+      candidateId: string;
+      actual: number;
+      limit: number;
+    })
+  | (SelectionErrorBaseV1 & {
+      code: "INVALID_PROCESS_EVIDENCE";
+      stage: "select";
+      candidateId: string;
+      sourceRef: string;
+    })
+  | (SelectionErrorBaseV1 & {
+      code: "CONTEXT_INCOMPLETE";
+      stage: "select";
+      candidateId: string;
+      sourceRef: string;
+      reason: "snapshot-only-process";
+    })
+  | (SelectionErrorBaseV1 & {
+      code: "PROCESS_SOURCE_MISMATCH";
+      stage: "select";
+      candidateId: string;
+      sourceRef: string;
     })
   | (SelectionErrorBaseV1 & {
       code: "DUPLICATE_CONFLICT";
@@ -295,6 +421,10 @@ export type TraceContextSelectionResultV1 =
 
 export const TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1 = Object.freeze({
   maxCandidates: 10_000,
+  maxCandidateSlots: 100_000,
+  maxInputBytes: 4 * 1_024 * 1_024,
+  maxCandidateInputBytes: 128 * 1_024,
   maxRenderedContextBytes: 256 * 1_024,
   maxManifestBytes: 512 * 1_024,
+  maxFactVoiceIds: 256,
 });

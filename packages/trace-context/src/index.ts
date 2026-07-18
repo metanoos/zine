@@ -4,5 +4,6 @@ export * from "./protected-output.js";
 export * from "./ranges.js";
 export * from "./scanner.js";
 export * from "./selector.js";
+export { TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1 } from "./selection-types.js";
 export type * from "./selection-types.js";
 export type * from "./types.js";
