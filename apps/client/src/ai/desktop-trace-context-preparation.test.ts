@@ -12,7 +12,11 @@ import {
 } from "./desktop-trace-context-preparation.js";
 import { ModelOperationController } from "./model-operation-controller.js";
 import type { ProviderConfig } from "./models-store.js";
-import { prepareOperation, type PrepareOperationInput } from "./prepared-operation.js";
+import {
+  prepareOperation,
+  prepareOperationWithSelectedTraceContext,
+  type PrepareOperationInput,
+} from "./prepared-operation.js";
 import { adaptPreparedOperationForTraceContextInspector } from "./trace-context-inspector-adapter.js";
 
 const SECRET = Uint8Array.from([...new Uint8Array(31), 9]);
@@ -296,11 +300,16 @@ test("rejects a target/head mismatch and a mutated selected output", async () =>
   const mutated = structuredClone(prepared.traceContextSelection!);
   mutated.renderedContext += " ";
   assert.throws(
+    () => prepareOperationWithSelectedTraceContext(preparationInput(node, body), mutated),
+    /rendered bytes do not match their frozen identity/,
+  );
+
+  assert.throws(
     () => prepareOperation({
       ...preparationInput(node, body),
-      traceContextSelection: mutated,
-    }),
-    /rendered bytes do not match their frozen identity/,
+      traceContextSelection: prepared.traceContextSelection,
+    } as PrepareOperationInput),
+    /Caller-supplied trace-context selection is not accepted/,
   );
 });
 
@@ -314,10 +323,10 @@ test("deep-freezes a valid shallow-frozen selection supplied at the internal bou
   const shallowFrozen = Object.freeze(structuredClone(selected.traceContextSelection!));
   assert.equal(Object.isFrozen(shallowFrozen.manifest), false);
 
-  const prepared = prepareOperation({
-    ...preparationInput(node, body),
-    traceContextSelection: shallowFrozen,
-  });
+  const prepared = prepareOperationWithSelectedTraceContext(
+    preparationInput(node, body),
+    shallowFrozen,
+  );
 
   assert.equal(Object.isFrozen(prepared.traceContextSelection?.manifest), true);
   assert.equal(Object.isFrozen(prepared.traceContextSelection?.manifest.operation.target), true);
@@ -384,4 +393,64 @@ test("controller invalidates approval when only the selection policy identity ch
     /Inspect and approve this AI request before running it/,
   );
   assert.equal(gathers, 2);
+});
+
+test("controller invalidation aborts selector preparation after context gathering completes", async () => {
+  const body = "Cancel selected context";
+  const node = await fileNode(body);
+  const snapshot = snapshotFor(node, body);
+  let gathered = false;
+  let verifierCalls = 0;
+  let controller: ModelOperationController;
+  controller = new ModelOperationController({
+    capture: (panelIndex) => ({
+      workspaceId: "folder-1",
+      activePath: "draft.md",
+      focus: {
+        kind: "file",
+        path: "draft.md",
+        nodeId: node.id,
+        panelIndex,
+        tabPath: "draft.md",
+      },
+      target: {
+        path: "draft.md",
+        traceId: node.id,
+        headId: node.id,
+        contentHash: snapshot.target.contentHash,
+        authoritySpans: [],
+      },
+      mount: { kind: "file", path: "draft.md" },
+      shields: [],
+      voicePrompt: "",
+      dirtyTarget: false,
+      actingAuthorId: "author-a",
+      gatherContext: async () => {
+        gathered = true;
+        return snapshot;
+      },
+    }),
+    readCurrentTarget: (prepared) => ({ ...prepared.targetRevision, focused: true }),
+  });
+  const traceContext = boundary(node);
+  traceContext.verifyEvent = (event) => {
+    verifierCalls += 1;
+    controller.invalidate();
+    return verifyEvent(event as Parameters<typeof verifyEvent>[0]);
+  };
+
+  await assert.rejects(
+    controller.prepare({
+      panelIndex: 0,
+      operation: "extend",
+      operationInputs: preparationInput(node, body).operationInputs,
+      provider,
+      modelVoicePubkey: "a".repeat(64),
+      lensId: "default",
+      traceContext,
+    }),
+    /cancelled/,
+  );
+  assert.equal(gathered, true);
+  assert.ok(verifierCalls > 0);
 });

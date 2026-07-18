@@ -88,8 +88,6 @@ export interface PrepareOperationInput {
   /** Exact current-editor authority evidence. Omission fails closed. */
   actingAuthorId?: string;
   authoritySpans?: readonly AuthoritySpanV1[];
-  /** Internally verified package-local selection; omission preserves V1 behavior. */
-  traceContextSelection?: TraceContextSelectionSuccessV1;
 }
 
 export class PreparedOperationError extends Error {
@@ -128,26 +126,43 @@ function bytes(value: string): number {
  * object; transport receives this object and cannot rebuild its messages.
  */
 export function prepareOperation(input: PrepareOperationInput): PreparedOperation {
-  return prepareOperationInternal(input, true);
+  if ("traceContextSelection" in (input as unknown as Record<string, unknown>)) {
+    throw new PreparedOperationError([
+      "Caller-supplied trace-context selection is not accepted by public preparation",
+    ]);
+  }
+  return prepareOperationInternal(input, undefined, true);
 }
 
 /**
  * Measure the exact prepared-message bytes outside a selected rendered
  * context. The caller must run final preparation afterward; this probe cannot
  * be approved or dispatched.
+ * @internal Canonical desktop selector boundary only.
  */
 export function measurePreparedRequestReservedBytes(
-  input: PrepareOperationInput & { traceContextSelection: TraceContextSelectionSuccessV1 },
+  input: PrepareOperationInput,
+  traceContextSelection: TraceContextSelectionSuccessV1,
 ): number {
   const measured = prepareOperationInternal(
     { ...input, maxBytes: Number.MAX_SAFE_INTEGER },
+    traceContextSelection,
     false,
   );
   return measured.budget.totalBytes - measured.budget.contextBytes;
 }
 
+/** @internal Canonical desktop adapter/selector boundary only. */
+export function prepareOperationWithSelectedTraceContext(
+  input: PrepareOperationInput,
+  traceContextSelection: TraceContextSelectionSuccessV1,
+): PreparedOperation {
+  return prepareOperationInternal(input, traceContextSelection, true);
+}
+
 function prepareOperationInternal(
   input: PrepareOperationInput,
+  traceContextSelection: TraceContextSelectionSuccessV1 | undefined,
   requireExactSelectorBudget: boolean,
 ): PreparedOperation {
   const issues: string[] = [];
@@ -184,9 +199,9 @@ function prepareOperationInternal(
       contentHash: target.contentHash,
     },
   });
-  if (input.traceContextSelection) {
+  if (traceContextSelection) {
     assertTraceContextSelection(
-      input.traceContextSelection,
+      traceContextSelection,
       input.operation,
       target,
       compiledAuthoring.authoring?.operationRange,
@@ -210,10 +225,10 @@ function prepareOperationInternal(
       ),
     );
   }
-  const renderedContextBlock = input.traceContextSelection?.renderedContext
+  const renderedContextBlock = traceContextSelection?.renderedContext
     ?? compiledAuthoring.renderedContextBlock;
   if (
-    input.traceContextSelection
+    traceContextSelection
     && compiledAuthoring.authoring
     && compiledAuthoring.renderedContextBlock !== input.contextSnapshot.renderedBlock
   ) {
@@ -238,8 +253,8 @@ function prepareOperationInternal(
       `Prepared request exceeds ${maxBytes} bytes (${totalBytes}); context contributes ${contextBytes}`,
     ]);
   }
-  if (input.traceContextSelection) {
-    const expectedContextBytes = input.traceContextSelection.manifest.budget.usedRenderedBytes;
+  if (traceContextSelection) {
+    const expectedContextBytes = traceContextSelection.manifest.budget.usedRenderedBytes;
     if (contextBytes !== expectedContextBytes) {
       throw new PreparedOperationError([
         `Selected trace context byte count changed (${contextBytes} != ${expectedContextBytes})`,
@@ -248,10 +263,10 @@ function prepareOperationInternal(
     const reservedPromptBytes = totalBytes - contextBytes;
     if (
       requireExactSelectorBudget
-      && input.traceContextSelection.manifest.budget.reservedPromptBytes !== reservedPromptBytes
+      && traceContextSelection.manifest.budget.reservedPromptBytes !== reservedPromptBytes
     ) {
       throw new PreparedOperationError([
-        `Selected trace context reserved-byte boundary changed (${reservedPromptBytes} != ${input.traceContextSelection.manifest.budget.reservedPromptBytes})`,
+        `Selected trace context reserved-byte boundary changed (${reservedPromptBytes} != ${traceContextSelection.manifest.budget.reservedPromptBytes})`,
       ]);
     }
   }
@@ -263,8 +278,8 @@ function prepareOperationInternal(
     operationInputs,
     contextFingerprint: input.contextSnapshot.fingerprint,
     traceAuthoring: compiledAuthoring.authoring,
-    ...(input.traceContextSelection ? {
-      traceContextSelection: selectionIdentity(input.traceContextSelection),
+    ...(traceContextSelection ? {
+      traceContextSelection: selectionIdentity(traceContextSelection),
     } : {}),
     providerFingerprint,
     modelVoicePubkey: input.modelVoicePubkey,
@@ -287,8 +302,8 @@ function prepareOperationInternal(
     operationInputs,
     messages,
     traceAuthoring: compiledAuthoring.authoring,
-    ...(input.traceContextSelection ? {
-      traceContextSelection: input.traceContextSelection,
+    ...(traceContextSelection ? {
+      traceContextSelection,
     } : {}),
     providerFingerprint,
     targetRevision,
@@ -303,8 +318,8 @@ function prepareOperationInternal(
     contextSnapshot: input.contextSnapshot,
     contextFingerprint: input.contextSnapshot.fingerprint,
     traceAuthoring: compiledAuthoring.authoring,
-    ...(input.traceContextSelection ? {
-      traceContextSelection: input.traceContextSelection,
+    ...(traceContextSelection ? {
+      traceContextSelection,
     } : {}),
     messages,
     providerId: input.provider.id,

@@ -18,7 +18,11 @@ import {
   type PrepareOperationInput,
 } from "./prepared-operation.js";
 import { providerProfileFingerprint } from "./provider-fingerprint.js";
-import { SnapshotCoordinator, type SnapshotDependencies } from "./snapshot-coordinator.js";
+import {
+  SnapshotCoordinator,
+  snapshotDependencyKey,
+  type SnapshotDependencies,
+} from "./snapshot-coordinator.js";
 import type { AuthoritySpanV1 } from "@zine/trace-context";
 import {
   desktopTraceContextBoundaryFingerprintV1,
@@ -95,6 +99,8 @@ export interface ApprovedModelExecution {
 export class ModelOperationController {
   private readonly snapshots = new SnapshotCoordinator();
   private readonly approval = new PreparedOperationApproval();
+  private preparationKey: string | null = null;
+  private readonly preparationControllers = new Set<AbortController>();
 
   constructor(private readonly dependencies: ModelOperationControllerDependencies) {}
 
@@ -151,38 +157,58 @@ export class ModelOperationController {
         `prepared-operation:v${PREPARED_OPERATION_VERSION}`,
       ],
     };
-    const snapshot = await this.snapshots.request(
-      dependencies,
-      capture.gatherContext,
-      input.signal,
-    );
-    if (
-      snapshot.target.path !== target.path ||
-      snapshot.target.contentHash !== target.contentHash ||
-      snapshot.target.traceId !== target.traceId ||
-      snapshot.target.headId !== target.headId
-    ) {
-      throw new Error("The gathered context no longer matches the captured target revision");
+    const preparationKey = snapshotDependencyKey(dependencies);
+    if (this.preparationKey !== preparationKey) {
+      this.abortPreparations("model operation dependencies changed");
+      this.preparationKey = preparationKey;
     }
-    const preparationInput: PrepareOperationInput = {
-      operation: input.operation,
-      operationInputs: input.operationInputs,
-      contextSnapshot: snapshot,
-      provider: input.provider,
-      modelVoicePubkey: input.modelVoicePubkey,
-      voicePrompt: capture.voicePrompt,
-      lensId: input.lensId,
-      dirtyTarget: capture.dirtyTarget,
-      actingAuthorId: capture.actingAuthorId,
-      authoritySpans: target.authoritySpans,
-    };
-    return input.traceContext
-      ? prepareDesktopTraceContextOperationV1(
-          preparationInput,
-          input.traceContext,
-          input.signal,
-        )
-      : prepareOperation(preparationInput);
+    const preparationController = new AbortController();
+    const onAbort = () => preparationController.abort(input.signal?.reason);
+    if (input.signal?.aborted) preparationController.abort(input.signal.reason);
+    else input.signal?.addEventListener("abort", onAbort, { once: true });
+    this.preparationControllers.add(preparationController);
+
+    try {
+      throwIfPreparationAborted(preparationController.signal);
+      const snapshot = await this.snapshots.request(
+        dependencies,
+        capture.gatherContext,
+        preparationController.signal,
+      );
+      throwIfPreparationAborted(preparationController.signal);
+      if (
+        snapshot.target.path !== target.path ||
+        snapshot.target.contentHash !== target.contentHash ||
+        snapshot.target.traceId !== target.traceId ||
+        snapshot.target.headId !== target.headId
+      ) {
+        throw new Error("The gathered context no longer matches the captured target revision");
+      }
+      const preparationInput: PrepareOperationInput = {
+        operation: input.operation,
+        operationInputs: input.operationInputs,
+        contextSnapshot: snapshot,
+        provider: input.provider,
+        modelVoicePubkey: input.modelVoicePubkey,
+        voicePrompt: capture.voicePrompt,
+        lensId: input.lensId,
+        dirtyTarget: capture.dirtyTarget,
+        actingAuthorId: capture.actingAuthorId,
+        authoritySpans: target.authoritySpans,
+      };
+      const prepared = input.traceContext
+        ? await prepareDesktopTraceContextOperationV1(
+            preparationInput,
+            input.traceContext,
+            preparationController.signal,
+          )
+        : prepareOperation(preparationInput);
+      throwIfPreparationAborted(preparationController.signal);
+      return prepared;
+    } finally {
+      input.signal?.removeEventListener("abort", onAbort);
+      this.preparationControllers.delete(preparationController);
+    }
   }
 
   approve(prepared: PreparedOperation): void {
@@ -212,7 +238,21 @@ export class ModelOperationController {
   }
 
   invalidate(): void {
+    this.abortPreparations("model operation invalidated");
+    this.preparationKey = null;
     this.snapshots.invalidate();
     this.approval.invalidate();
   }
+
+  private abortPreparations(reason: string): void {
+    for (const controller of this.preparationControllers) controller.abort(reason);
+    this.preparationControllers.clear();
+  }
+}
+
+function throwIfPreparationAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  const error = new Error("Model operation preparation was cancelled");
+  error.name = "AbortError";
+  throw error;
 }

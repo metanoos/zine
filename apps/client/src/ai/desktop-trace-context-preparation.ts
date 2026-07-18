@@ -12,7 +12,7 @@ import { contentFingerprint } from "./context-snapshot.js";
 import {
   PREPARED_REQUEST_MAX_BYTES,
   measurePreparedRequestReservedBytes,
-  prepareOperation,
+  prepareOperationWithSelectedTraceContext,
   type PreparedOperation,
   type PrepareOperationInput,
 } from "./prepared-operation.js";
@@ -74,15 +74,13 @@ export async function prepareDesktopTraceContextOperationV1(
     chain: boundary.chain,
     verifyEvent: boundary.verifyEvent,
     ...(boundary.limits ? { limits: boundary.limits } : {}),
+    ...(signal ? { signal } : {}),
   };
   const adapted = await adaptDesktopTraceContextSelectionV1(adapterInput);
   const preliminary = requireCompleteSelection(
     await selectTraceContextV1(adapted, { signal }),
   );
-  const reservedPromptBytes = measurePreparedRequestReservedBytes({
-    ...input,
-    traceContextSelection: preliminary,
-  });
+  const reservedPromptBytes = measurePreparedRequestReservedBytes(input, preliminary);
   const exactInput = {
     ...adapted,
     operation: {
@@ -93,11 +91,10 @@ export async function prepareDesktopTraceContextOperationV1(
   const selection = requireCompleteSelection(
     await selectTraceContextV1(exactInput, { signal }),
   );
-  return prepareOperation({
+  return prepareOperationWithSelectedTraceContext({
     ...input,
     maxBytes: preparedRequestMaxBytes,
-    traceContextSelection: selection,
-  });
+  }, selection);
 }
 
 /** Cache/approval dependency only; verification still happens inside prepare. */
