@@ -6,7 +6,7 @@ repository and the app's About view.
 
 The organizing product thesis is that current content discards information
 useful to both collaborators and reviewers. A zine is a file or folder together
-with its trace; Root is the topmost folder zine. Zine preserves that trace so an
+with its trace. Zine preserves that trace so an
 AI can work with selected, inspectable process context while people retain
 portable evidence of what happened. The [Evidence](EVIDENCE.md) page
 distinguishes that foundational bet from what the repository has actually
@@ -23,7 +23,7 @@ demonstrated.
 ## Accepted migration direction
 
 [Trace-Native Zines](TRACE_NATIVE_ZINES.md) records the complete accepted
-pre-product direction: recursive file/folder/Root zines, trace-aware AI,
+pre-product direction: recursive file and folder zines, trace-aware AI,
 publication disclosure, Full Trace, manual Mint, coin supply, and the evidence
 program. Its folder ontology is now owned normatively by the trace
 specification. Other items remain coordinated migration targets until their

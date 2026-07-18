@@ -3,7 +3,7 @@
 
 Zine records how a file or folder was actually made — by people, by AI, or
 both — as signed, replayable history. A **zine** is that stably identified file
-or folder together with its trace; the **Root zine** is the topmost folder.
+or folder together with its trace.
 Zine uses the trace to help the next act of writing, not only the later audit.
 This page explains the daily loop, the initial buyer, and the evidence still
 required. The accepted migration direction is recorded in
@@ -73,8 +73,8 @@ somewhere else.
 The foundational product bet is straightforward: for at least some writing
 tasks, models given the current scoped content plus relevant process evidence
 will collaborate better than models given current content alone. At file scope
-this is text plus trace; at folder or Root scope it is a content tree plus
-trace. “Better” must be measured through writer preference, editing required
+this is text plus trace; at folder scope — up to the Root, the topmost folder
+— it is a content tree plus trace. “Better” must be measured through writer preference, editing required
 before acceptance, time to an acceptable result, preservation of intent,
 recurrence of rejected directions, and later reversion—not through a
 persuasive demo.
@@ -193,8 +193,8 @@ required for the first user to benefit.
 - **Evidence, not verdicts.** Preserve checkable claims and state their limits.
 - **Trace is useful during writing.** Process context is a collaboration input,
   not merely an audit attachment.
-- **Files and folders are zines.** Root is the topmost folder zine; replay and
-  publication follow the selected recursive scope.
+- **Files and folders are zines.** Replay and publication follow the selected
+  recursive scope.
 - **Inspectable AI context.** Writers see, correct, and approve what Zine sends.
 - **Sovereign by default.** Local authoring works without a hosted account.
 - **Protocol before platform lock-in.** Files and signed events remain usable
@@ -255,9 +255,8 @@ saw, which passages it produced, what a person accepted, or where copied
 material came from. Looking only at the final text is too late.
 
 A **zine** is a stably identified file or folder together with its
-high-fidelity **trace**. Root is the topmost folder zine, not a separate project
-object. You can play a file zine or a whole folder subtree and see how the work
-changed, not just where it ended. Each checkpoint is signed and self-contained,
+high-fidelity **trace**. You can play a file zine or a whole folder subtree
+and see how the work changed, not just where it ended. Each checkpoint is signed and self-contained,
 so another reader can inspect the evidence without trusting one editor account.
 
 That history gives human and LLM readers something plain text loses: process.
@@ -290,8 +289,9 @@ well. Fonts and colors distinguish interleaved voices. The result shows who
 wrote what and how the text came to be.
 
 `Ctrl/Cmd+S` places a **Step** in the selected zine's trace. A file Step batches
-the editor-action log into one signed checkpoint. A folder or Root Step pins an
-exact recursive frontier after dirty descendants are durably checkpointed.
+the editor-action log into one signed checkpoint. A folder Step — up to the
+topmost Root — pins an exact recursive frontier after dirty descendants are
+durably checkpointed.
 Automatic child-head roll-ups are signed derived checkpoints, not extra author
 Steps. No event fires per keystroke. Send later publishes one exact
 checkpoint, including its high-resolution action log, for playback and
@@ -337,7 +337,8 @@ until real usage produces enough citation density to justify it.
 One primitive: a **zine**, whose file or folder body is carried with an
 append-only trace of signed checkpoints. A file body is Markdown text. A folder body
 is an ordered direct-membership list whose pinned child heads recursively
-define the exact subtree frontier. Root is an ordinary top-level folder zine.
+define the exact subtree frontier. **Root**, the topmost folder, is an
+ordinary folder zine; there is no separate project object.
 
 Each checkpoint is a **node** (Nostr kind `4290`, a signed event). Two things
 make a node unlike an ordinary revision:

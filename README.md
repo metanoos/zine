@@ -8,14 +8,13 @@ accepted, or repeatedly revised. Final text is a lossy summary of writing.
 
 Zine's foundational bet is that an AI can help you write better when it receives
 the current scoped content plus a bounded, inspectable account of its trace—not
-content alone. At file scope that means text plus trace; at folder or Root scope
-it means a content tree plus trace. This thesis is under active evaluation, not
+content alone. At file scope that means text plus trace; at folder scope it
+means a content tree plus trace. This thesis is under active evaluation, not
 a proven claim.
 
 Zine records the process at the point of writing. A **zine** is one stably
-identified file or folder together with its signed **trace**; the **Root zine**
-is the topmost folder, not a separate project object. File zines replay one
-Markdown history. Folder zines replay the changing descendant tree and the
+identified file or folder together with its signed **trace**. File zines replay
+one Markdown history. Folder zines replay the changing descendant tree and the
 interactions across it. Human and model voices remain visible. Draft
 checkpoints stay local until their author sends them.
 
@@ -53,7 +52,7 @@ current scoped content + selected trace evidence
           extend the signed trace
 ```
 
-At file scope, content is Markdown text; at folder or Root scope, it is the
+At file scope, content is Markdown text; at folder scope, it is the
 recursive content tree. Context must remain bounded, task-specific, and visible
 before dispatch. A writer should be able to see which Step, edit, preference,
 or correction was selected, exclude it for one operation, and correct durable
@@ -95,8 +94,8 @@ The [headless MCP press](apps/mcp/README.md) lets an MCP-capable agent write
 through Zine under its own key. The [desktop press](apps/client/README.md) is
 the reference authoring and review experience.
 
-Each named headless profile owns one permanent Root; no source folder or live
-relay is required. Offline Steps persist as exact signed events and synchronize
+Each named headless profile owns one permanent Root, its topmost folder zine;
+no source folder or live relay is required. Offline Steps persist as exact signed events and synchronize
 to the loopback home later. LLMs consume the raw trace directly, while a Send
 can return a locator for the desktop to verify and render for a human.
 

@@ -2,7 +2,7 @@
 
 Zine records how a file or folder was actually made — by people, by AI, or
 both — as signed, replayable history. A **zine** is that stably identified file
-or folder together with its trace; the **Root zine** is the topmost folder.
+or folder together with its trace.
 Zine uses the trace to help the next act of writing, not only the later audit.
 This page explains the daily loop, the initial buyer, and the evidence still
 required. The accepted migration direction is recorded in
@@ -72,8 +72,8 @@ somewhere else.
 The foundational product bet is straightforward: for at least some writing
 tasks, models given the current scoped content plus relevant process evidence
 will collaborate better than models given current content alone. At file scope
-this is text plus trace; at folder or Root scope it is a content tree plus
-trace. “Better” must be measured through writer preference, editing required
+this is text plus trace; at folder scope — up to the Root, the topmost folder
+— it is a content tree plus trace. “Better” must be measured through writer preference, editing required
 before acceptance, time to an acceptable result, preservation of intent,
 recurrence of rejected directions, and later reversion—not through a
 persuasive demo.
@@ -192,8 +192,8 @@ required for the first user to benefit.
 - **Evidence, not verdicts.** Preserve checkable claims and state their limits.
 - **Trace is useful during writing.** Process context is a collaboration input,
   not merely an audit attachment.
-- **Files and folders are zines.** Root is the topmost folder zine; replay and
-  publication follow the selected recursive scope.
+- **Files and folders are zines.** Replay and publication follow the selected
+  recursive scope.
 - **Inspectable AI context.** Writers see, correct, and approve what Zine sends.
 - **Sovereign by default.** Local authoring works without a hosted account.
 - **Protocol before platform lock-in.** Files and signed events remain usable
