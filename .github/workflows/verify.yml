@@ -29,6 +29,21 @@ jobs:
       - run: npm test
         working-directory: packages/protocol
 
+  trace-context:
+    name: Trace-context syntax kernel
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: packages/trace-context/package-lock.json
+      - run: npm ci
+        working-directory: packages/trace-context
+      - run: npm test
+        working-directory: packages/trace-context
+
   client:
     name: Client tests and build
     runs-on: ubuntu-22.04

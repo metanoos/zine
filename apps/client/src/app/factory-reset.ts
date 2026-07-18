@@ -1,6 +1,10 @@
 import { isTauri } from "../identity/identity.js";
 import { closeSecretSession } from "../identity/secret-store.js";
 import { clearRendezvousOutbox } from "../provenance/rendezvous-outbox.js";
+import {
+  fenceVaultStorageSession,
+  vaultStorage as localStorage,
+} from "../storage/vault-storage.js";
 
 export interface FactoryResetActions {
   resetDesktopState?: () => Promise<void>;
@@ -27,7 +31,12 @@ export async function runFactoryReset(actions: FactoryResetActions): Promise<voi
   }
 
   await actions.resetDesktopState();
-  await actions.closeSecrets();
+  try {
+    await actions.closeSecrets();
+  } catch (error) {
+    actions.reload();
+    throw error;
+  }
   try {
     await actions.clearDurableBrowserState?.();
     actions.clearBrowserState();
@@ -40,6 +49,7 @@ export async function runFactoryReset(actions: FactoryResetActions): Promise<voi
 }
 
 export async function resetLocalApp(): Promise<void> {
+  fenceVaultStorageSession();
   if (!isTauri()) {
     await runFactoryReset({
       clearDurableBrowserState: clearRendezvousOutbox,

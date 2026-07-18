@@ -1,11 +1,21 @@
 import type { Event } from "nostr-tools";
 import { verifyEvent } from "nostr-tools/pure";
 
+import {
+  activeVaultStorageId,
+  activeVaultStorageMigratesLegacy,
+  vaultStorageGeneration,
+  vaultStorageSessionAcceptsWork,
+} from "../storage/vault-storage.js";
+
 const DB_NAME = "zine-rendezvous-outbox";
-const DB_VERSION = 1;
-const EVENTS_STORE = "events";
-const META_STORE = "meta";
+const DB_VERSION = 2;
+const LEGACY_EVENTS_STORE = "events";
+const LEGACY_META_STORE = "meta";
+const EVENTS_STORE = "vault-events";
+const META_STORE = "vault-meta";
 const USAGE_KEY = "usage";
+const BROWSER_SCOPE = "browser";
 const HEX_64 = /^[0-9a-f]{64}$/;
 
 /** The queue stores immutable event ids, not complete trace snapshots. Send has
@@ -20,19 +30,51 @@ export interface PendingRendezvousEvent {
 }
 
 export interface RendezvousOutboxStorage {
-  add(record: PendingRendezvousEvent): Promise<"added" | "exists">;
-  remove(eventId: string): Promise<void>;
-  list(): Promise<PendingRendezvousEvent[]>;
+  add(scope: string, record: PendingRendezvousEvent): Promise<"added" | "exists">;
+  remove(scope: string, eventId: string): Promise<void>;
+  list(scope: string): Promise<PendingRendezvousEvent[]>;
+}
+
+interface StoredRendezvousEvent extends PendingRendezvousEvent {
+  scope: string;
 }
 
 interface OutboxUsage {
+  scope: string;
   key: typeof USAGE_KEY;
   totalBytes: number;
   count: number;
 }
 
+export interface RendezvousOutboxSession {
+  readonly scope: string;
+  readonly generation: number;
+}
+
+/** Capture the active encrypted-vault boundary once for a complete enqueue or
+ * drain. Browser reader builds retain one ordinary browser-local queue. */
+export function captureRendezvousOutboxSession(): RendezvousOutboxSession {
+  return {
+    scope: activeVaultStorageId() ?? BROWSER_SCOPE,
+    generation: vaultStorageGeneration(),
+  };
+}
+
+export function isRendezvousOutboxSessionCurrent(
+  session: RendezvousOutboxSession,
+): boolean {
+  return vaultStorageSessionAcceptsWork() &&
+    session.generation === vaultStorageGeneration() &&
+    session.scope === (activeVaultStorageId() ?? BROWSER_SCOPE);
+}
+
 function recordBytes(record: PendingRendezvousEvent): number {
-  return new TextEncoder().encode(JSON.stringify(record)).byteLength;
+  // Persisted IndexedDB rows also carry their vault scope. Quota accounting is
+  // defined over the logical record so add/remove always use identical bytes.
+  return new TextEncoder().encode(JSON.stringify({
+    eventId: record.eventId,
+    queuedAt: record.queuedAt,
+  })).byteLength;
 }
 
 function validateRecord(value: unknown, index: number): PendingRendezvousEvent {
@@ -62,6 +104,7 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
  * serializes or scans the rest of the queue on the UI thread. */
 class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
   private database: Promise<IDBDatabase> | null = null;
+  private legacyMigration: Promise<void> | null = null;
 
   private open(): Promise<IDBDatabase> {
     if (this.database) return this.database;
@@ -73,10 +116,10 @@ class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains(EVENTS_STORE)) {
-          db.createObjectStore(EVENTS_STORE, { keyPath: "eventId" });
+          db.createObjectStore(EVENTS_STORE, { keyPath: ["scope", "eventId"] });
         }
         if (!db.objectStoreNames.contains(META_STORE)) {
-          db.createObjectStore(META_STORE, { keyPath: "key" });
+          db.createObjectStore(META_STORE, { keyPath: ["scope", "key"] });
         }
       };
       request.onsuccess = () => resolve(request.result);
@@ -86,18 +129,90 @@ class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
     return this.database;
   }
 
-  async add(record: PendingRendezvousEvent): Promise<"added" | "exists"> {
+  /** Version 1 had one install-global queue. Only the vault explicitly chosen
+   * by the multi-vault bootstrap to adopt legacy state may claim those records. */
+  private async migrateLegacyIfAuthorized(db: IDBDatabase, scope: string): Promise<void> {
+    if (
+      scope === BROWSER_SCOPE ||
+      activeVaultStorageId() !== scope ||
+      !activeVaultStorageMigratesLegacy() ||
+      !db.objectStoreNames.contains(LEGACY_EVENTS_STORE)
+    ) return;
+    if (this.legacyMigration) return this.legacyMigration;
+
+    const migration = (async () => {
+      const stores = [LEGACY_EVENTS_STORE, EVENTS_STORE, META_STORE];
+      if (db.objectStoreNames.contains(LEGACY_META_STORE)) stores.push(LEGACY_META_STORE);
+      const transaction = db.transaction(stores, "readwrite");
+      const done = transactionDone(transaction);
+      try {
+        const legacyEvents = transaction.objectStore(LEGACY_EVENTS_STORE);
+        const events = transaction.objectStore(EVENTS_STORE);
+        const meta = transaction.objectStore(META_STORE);
+        const records = (await requestResult(legacyEvents.getAll()) as unknown[])
+          .map(validateRecord);
+        const usageKey: [string, typeof USAGE_KEY] = [scope, USAGE_KEY];
+        const usage = (await requestResult(meta.get(usageKey)) as OutboxUsage | undefined) ?? {
+          scope,
+          key: USAGE_KEY,
+          totalBytes: 0,
+          count: 0,
+        };
+        let totalBytes = usage.totalBytes;
+        let count = usage.count;
+        for (const record of records) {
+          const eventKey: [string, string] = [scope, record.eventId];
+          if (await requestResult(events.get(eventKey))) continue;
+          const bytes = recordBytes(record);
+          if (totalBytes + bytes > MAX_RENDEZVOUS_OUTBOX_BYTES) {
+            throw new Error(
+              `legacy rendezvous outbox cannot fit in vault ${scope} ` +
+              `(${totalBytes} of ${MAX_RENDEZVOUS_OUTBOX_BYTES} bytes already used)`,
+            );
+          }
+          events.add({ scope, ...record } satisfies StoredRendezvousEvent);
+          totalBytes += bytes;
+          count++;
+        }
+        meta.put({ scope, key: USAGE_KEY, totalBytes, count } satisfies OutboxUsage);
+        legacyEvents.clear();
+        if (db.objectStoreNames.contains(LEGACY_META_STORE)) {
+          transaction.objectStore(LEGACY_META_STORE).clear();
+        }
+        await done;
+      } catch (error) {
+        try {
+          transaction.abort();
+        } catch {
+          // A failed request may already have aborted the versioned migration.
+        }
+        await done.catch(() => undefined);
+        throw error;
+      }
+    })();
+    this.legacyMigration = migration.catch((error) => {
+      this.legacyMigration = null;
+      throw error;
+    });
+    return this.legacyMigration;
+  }
+
+  async add(scope: string, record: PendingRendezvousEvent): Promise<"added" | "exists"> {
     const db = await this.open();
+    await this.migrateLegacyIfAuthorized(db, scope);
     const transaction = db.transaction([EVENTS_STORE, META_STORE], "readwrite");
     const done = transactionDone(transaction);
     const events = transaction.objectStore(EVENTS_STORE);
     const meta = transaction.objectStore(META_STORE);
-    const existing = await requestResult(events.get(record.eventId));
+    const eventKey: [string, string] = [scope, record.eventId];
+    const usageKey: [string, typeof USAGE_KEY] = [scope, USAGE_KEY];
+    const existing = await requestResult(events.get(eventKey));
     if (existing) {
       await done;
       return "exists";
     }
-    const usage = (await requestResult(meta.get(USAGE_KEY)) as OutboxUsage | undefined) ?? {
+    const usage = (await requestResult(meta.get(usageKey)) as OutboxUsage | undefined) ?? {
+      scope,
       key: USAGE_KEY,
       totalBytes: 0,
       count: 0,
@@ -110,8 +225,9 @@ class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
         `rendezvous outbox is full (${usage.totalBytes} of ${MAX_RENDEZVOUS_OUTBOX_BYTES} bytes); indexing must catch up before Send can complete`,
       );
     }
-    events.add(record);
+    events.add({ scope, ...record } satisfies StoredRendezvousEvent);
     meta.put({
+      scope,
       key: USAGE_KEY,
       totalBytes: usage.totalBytes + bytes,
       count: usage.count + 1,
@@ -120,21 +236,26 @@ class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
     return "added";
   }
 
-  async remove(eventId: string): Promise<void> {
+  async remove(scope: string, eventId: string): Promise<void> {
     const db = await this.open();
+    await this.migrateLegacyIfAuthorized(db, scope);
     const transaction = db.transaction([EVENTS_STORE, META_STORE], "readwrite");
     const done = transactionDone(transaction);
     const events = transaction.objectStore(EVENTS_STORE);
     const meta = transaction.objectStore(META_STORE);
-    const existing = await requestResult(events.get(eventId)) as PendingRendezvousEvent | undefined;
+    const eventKey: [string, string] = [scope, eventId];
+    const usageKey: [string, typeof USAGE_KEY] = [scope, USAGE_KEY];
+    const existing = await requestResult(events.get(eventKey)) as StoredRendezvousEvent | undefined;
     if (existing) {
-      const usage = (await requestResult(meta.get(USAGE_KEY)) as OutboxUsage | undefined) ?? {
+      const usage = (await requestResult(meta.get(usageKey)) as OutboxUsage | undefined) ?? {
+        scope,
         key: USAGE_KEY,
         totalBytes: recordBytes(existing),
         count: 1,
       };
-      events.delete(eventId);
+      events.delete(eventKey);
       meta.put({
+        scope,
         key: USAGE_KEY,
         totalBytes: Math.max(0, usage.totalBytes - recordBytes(existing)),
         count: Math.max(0, usage.count - 1),
@@ -143,11 +264,15 @@ class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
     await done;
   }
 
-  async list(): Promise<PendingRendezvousEvent[]> {
+  async list(scope: string): Promise<PendingRendezvousEvent[]> {
     const db = await this.open();
+    await this.migrateLegacyIfAuthorized(db, scope);
     const transaction = db.transaction(EVENTS_STORE, "readonly");
     const done = transactionDone(transaction);
-    const records = await requestResult(transaction.objectStore(EVENTS_STORE).getAll()) as unknown[];
+    const range = IDBKeyRange.bound([scope, ""], [scope, "\uffff"]);
+    const records = await requestResult(
+      transaction.objectStore(EVENTS_STORE).getAll(range),
+    ) as unknown[];
     await done;
     return records.map(validateRecord)
       .sort((left, right) => left.queuedAt - right.queuedAt || left.eventId.localeCompare(right.eventId));
@@ -156,37 +281,46 @@ class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
   async close(): Promise<void> {
     const database = this.database;
     this.database = null;
+    this.legacyMigration = null;
     if (database) (await database).close();
   }
 }
 
 /** In-memory adapter for deterministic unit tests. Production uses IndexedDB. */
 export class MemoryRendezvousOutbox implements RendezvousOutboxStorage {
-  readonly records = new Map<string, PendingRendezvousEvent>();
-  private totalBytes = 0;
+  readonly records = new Map<string, Map<string, PendingRendezvousEvent>>();
+  private readonly totalBytes = new Map<string, number>();
 
   constructor(private readonly maxBytes = MAX_RENDEZVOUS_OUTBOX_BYTES) {}
 
-  async add(record: PendingRendezvousEvent): Promise<"added" | "exists"> {
-    if (this.records.has(record.eventId)) return "exists";
+  async add(scope: string, record: PendingRendezvousEvent): Promise<"added" | "exists"> {
+    const records = this.records.get(scope) ?? new Map<string, PendingRendezvousEvent>();
+    if (records.has(record.eventId)) return "exists";
     const bytes = recordBytes(record);
-    if (this.totalBytes + bytes > this.maxBytes) {
+    const totalBytes = this.totalBytes.get(scope) ?? 0;
+    if (totalBytes + bytes > this.maxBytes) {
       throw new Error("rendezvous outbox is full; indexing must catch up before Send can complete");
     }
-    this.records.set(record.eventId, record);
-    this.totalBytes += bytes;
+    records.set(record.eventId, record);
+    this.records.set(scope, records);
+    this.totalBytes.set(scope, totalBytes + bytes);
     return "added";
   }
 
-  async remove(eventId: string): Promise<void> {
-    const existing = this.records.get(eventId);
+  async remove(scope: string, eventId: string): Promise<void> {
+    const records = this.records.get(scope);
+    const existing = records?.get(eventId);
     if (!existing) return;
-    this.records.delete(eventId);
-    this.totalBytes = Math.max(0, this.totalBytes - recordBytes(existing));
+    records!.delete(eventId);
+    if (records!.size === 0) this.records.delete(scope);
+    this.totalBytes.set(
+      scope,
+      Math.max(0, (this.totalBytes.get(scope) ?? recordBytes(existing)) - recordBytes(existing)),
+    );
   }
 
-  async list(): Promise<PendingRendezvousEvent[]> {
-    return [...this.records.values()].map(validateRecord)
+  async list(scope: string): Promise<PendingRendezvousEvent[]> {
+    return [...(this.records.get(scope)?.values() ?? [])].map(validateRecord)
       .sort((left, right) => left.queuedAt - right.queuedAt || left.eventId.localeCompare(right.eventId));
   }
 }
@@ -220,24 +354,27 @@ export async function enqueueRendezvousEvent(
   event: Event,
   storage: RendezvousOutboxStorage = productionStorage(),
   now = Date.now(),
+  session: RendezvousOutboxSession = captureRendezvousOutboxSession(),
 ): Promise<void> {
   if (!verifyEvent(event)) {
     throw new Error("refusing to queue an invalid rendezvous event");
   }
-  await storage.add({ eventId: event.id, queuedAt: now });
+  await storage.add(session.scope, { eventId: event.id, queuedAt: now });
 }
 
 export async function removeRendezvousEvent(
   eventId: string,
   storage: RendezvousOutboxStorage = productionStorage(),
+  session: RendezvousOutboxSession = captureRendezvousOutboxSession(),
 ): Promise<void> {
-  await storage.remove(eventId);
+  await storage.remove(session.scope, eventId);
 }
 
 export async function pendingRendezvousEvents(
   storage: RendezvousOutboxStorage = productionStorage(),
+  session: RendezvousOutboxSession = captureRendezvousOutboxSession(),
 ): Promise<PendingRendezvousEvent[]> {
-  return storage.list();
+  return storage.list(session.scope);
 }
 
 /** Drain independent Send-side indexing work without allowing one unavailable
@@ -246,18 +383,22 @@ export async function pendingRendezvousEvents(
 export async function drainRendezvousEvents(
   process: (eventId: string) => Promise<boolean>,
   storage: RendezvousOutboxStorage = productionStorage(),
+  session: RendezvousOutboxSession = captureRendezvousOutboxSession(),
 ): Promise<{ pending: number; completed: number }> {
-  const records = await storage.list();
+  const records = await storage.list(session.scope);
   let completed = 0;
   for (const record of records) {
+    if (!isRendezvousOutboxSessionCurrent(session)) break;
     try {
-      if (await process(record.eventId)) {
-        await storage.remove(record.eventId);
+      const terminal = await process(record.eventId);
+      if (!isRendezvousOutboxSessionCurrent(session)) break;
+      if (terminal) {
+        await storage.remove(session.scope, record.eventId);
         completed++;
       }
     } catch {
       // Retryable failures remain durable for the next pass.
     }
   }
-  return { pending: (await storage.list()).length, completed };
+  return { pending: (await storage.list(session.scope)).length, completed };
 }

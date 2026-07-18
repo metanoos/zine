@@ -1,6 +1,7 @@
 import { loadFollows } from "./follows-store.js";
 import { loadKeys } from "../identity/keys-store.js";
 import { listPeers } from "./peers-store.js";
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
 
 const STORAGE_KEY = "zine.social-query";
 
@@ -91,4 +92,3 @@ export function matchesSocialText(
     .filter(Boolean)
     .every((term) => haystack.includes(term.replace(/^#/, "")));
 }
-

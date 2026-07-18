@@ -193,9 +193,36 @@ test("the action palette omits prompt-context summaries", () => {
   const modelEnd = appSource.indexOf('<div className="action-palette-group">', modelStart + 1);
   const modelRow = appSource.slice(modelStart, modelEnd);
 
-  assert.match(modelRow, /className="action-palette-token-count"/);
+  assert.match(modelRow, /className="action-palette-inspect"[\s\S]*?onClick=\{\(\) => onInspect\(\)\}/);
   assert.doesNotMatch(appSource, /action-palette-context-(?:status|value)|promptContextStatus/);
   assert.doesNotMatch(cssSource, /action-palette-context-(?:status|value)/);
+});
+
+test("the Prompt Inspector opener survives missing estimates and tight layouts", () => {
+  const modelStart = appSource.indexOf('<div className="action-palette-group action-palette-model-row">');
+  const modelEnd = appSource.indexOf('<div className="action-palette-group">', modelStart + 1);
+  const modelRow = appSource.slice(modelStart, modelEnd);
+
+  assert.match(modelRow, /className="action-palette-inspect"/);
+  assert.match(
+    modelRow,
+    />\s*Inspect\s*\{tokenEstimate != null && \(\s*<span className="action-palette-inspect-estimate">/,
+  );
+  assert.doesNotMatch(modelRow, /\{tokenEstimate != null && \(\s*<button/);
+  assert.doesNotMatch(
+    cssSource,
+    /@container action-palette \(max-width: 36rem\)[\s\S]*?\.action-palette-inspect\s*\{\s*display:\s*none;/,
+  );
+});
+
+test("single-shot MODEL actions open their corresponding Prompt Inspector tab", () => {
+  const modelStart = appSource.indexOf('<div className="action-palette-group action-palette-model-row">');
+  const modelEnd = appSource.indexOf('<div className="action-palette-group">', modelStart + 1);
+  const modelRow = appSource.slice(modelStart, modelEnd);
+
+  assert.match(modelRow, /action\.kind === "operation"[\s\S]*?onInspect\(action\.id\)/);
+  assert.match(modelRow, /else \{\s*onOp\(action\.id\);\s*\}/);
+  assert.match(appSource, /onInspect=\{\(operation\) => void openInspector\(operation\)\}/);
 });
 
 test("the MODEL row does not inject directory-mount controls", () => {
@@ -205,7 +232,7 @@ test("the MODEL row does not inject directory-mount controls", () => {
 
   assert.doesNotMatch(modelRow, /Mount folder|action-palette-rescope|onScopeToTarget/);
   assert.doesNotMatch(appSource, /action-palette-rescope|onScopeToTarget/);
-  assert.match(modelRow, /\{tokenEstimate != null && \(/);
+  assert.match(modelRow, /\{tokenEstimate != null && \(\s*<span/);
 });
 
 test("an empty model catalog keeps the model selector visible", () => {

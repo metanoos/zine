@@ -1,6 +1,5 @@
 import {
   compileAuthoringSyntax,
-  scanAuthoringSyntax,
   validateProtectedOutput,
   type AuthoritySpanV1,
   type CompiledAuthoringSyntaxV1,
@@ -110,13 +109,11 @@ export function compileTraceAuthoringOperation(
   if (!compiled.ok || issues.length > 0) throw new TraceAuthoringPreparationError(issues);
 
   const protectedTokens = input.operation === "settle"
-    ? compiled.scan.protectedRanges
-        .filter((protectedRange) => containsRange(operationRange, protectedRange.range))
-        .map((protectedRange, index) => ({
-          version: 1 as const,
-          token: `__ZINE_ANCHOR_${index + 1}__`,
-          protectedRange,
-        }))
+    ? createProtectedTokens(
+        input.targetText,
+        compiled.scan.protectedRanges
+          .filter((protectedRange) => containsRange(operationRange, protectedRange.range)),
+      )
     : [];
   const promptTargetText = renderOperationTarget(
     input.targetText,
@@ -166,51 +163,32 @@ export function validateTraceAuthoringResult(
   response: string,
 ): string {
   const issues: string[] = [];
-  const outputSyntax = scanAuthoringSyntax(response);
-  if (outputSyntax.directiveCandidates.length > 0) {
-    issues.push("Model output emitted raw ((…)) directive syntax");
-  }
-  if (outputSyntax.errors.some((error) =>
-    error.code.includes("DIRECTIVE") ||
-    error.code === "NESTED_DIRECTIVE" ||
-    error.code === "CROSS_NESTED_SYNTAX")) {
-    issues.push("Model output emitted malformed directive syntax");
-  }
-  for (const directive of authoring.compiled.directives) {
-    if (response.includes(directive.marker)) {
-      issues.push(`Model output repeated directive marker ${directive.marker}`);
-    }
-    const relativeFrom = directive.sourceRange.fromUtf16 - authoring.operationRange.fromUtf16;
-    const relativeTo = directive.sourceRange.toUtf16 - authoring.operationRange.fromUtf16;
-    const rawDirective = authoring.operationText.slice(relativeFrom, relativeTo);
-    if (rawDirective && response.includes(rawDirective)) {
-      issues.push(`Model output repeated consumed directive bytes from ${directive.id}`);
-    }
-  }
+  const consumedResponse = consumeModelDirectiveSyntax(authoring, response);
   if (authoring.operation === "extend") {
-    if (issues.length > 0) throw new TraceAuthoringResultError(issues);
-    return response;
+    return consumedResponse;
   }
 
-  const tokenPattern = /__ZINE_ANCHOR_(\d+)__/g;
-  const seen: number[] = [];
-  for (const match of response.matchAll(tokenPattern)) seen.push(Number(match[1]));
-  const expected = authoring.protectedTokens.map((_token, index) => index + 1);
-  if (JSON.stringify(seen) !== JSON.stringify(expected)) {
-    issues.push(
-      `Protected token sequence changed (expected ${expected.join(", ") || "none"}; received ${seen.join(", ") || "none"})`,
-    );
-  }
-
-  let restored = response;
+  const tokenPositions: number[] = [];
   for (const token of authoring.protectedTokens) {
-    if (response.includes(token.protectedRange.text)) {
+    const first = consumedResponse.indexOf(token.token);
+    const duplicate = first >= 0
+      ? consumedResponse.indexOf(token.token, first + token.token.length)
+      : -1;
+    if (first < 0) issues.push(`Protected token ${token.token} is missing`);
+    if (duplicate >= 0) issues.push(`Protected token ${token.token} was duplicated`);
+    tokenPositions.push(first);
+  }
+  if (tokenPositions.some((position, index) =>
+    position >= 0 && index > 0 && position <= tokenPositions[index - 1]!)) {
+    issues.push("Protected token sequence changed");
+  }
+
+  let restored = consumedResponse;
+  for (const token of authoring.protectedTokens) {
+    if (consumedResponse.includes(token.protectedRange.text)) {
       issues.push(`Model output emitted raw protected fragment ${token.protectedRange.id} instead of its token`);
     }
     restored = restored.replace(token.token, token.protectedRange.text);
-  }
-  if (restored.includes("__ZINE_ANCHOR_")) {
-    issues.push("Model output emitted an unknown protected token");
   }
   const validation = validateProtectedOutput(
     authoring.protectedTokens.map((token) => token.protectedRange),
@@ -223,6 +201,52 @@ export function validateTraceAuthoringResult(
   }
   if (issues.length > 0) throw new TraceAuthoringResultError(issues);
   return restored;
+}
+
+/** Consume only exact prepared control echoes before they can become document
+ * text. Any unrelated directive-shaped bytes are preserved as MODEL-authored
+ * quoted data; the editor-authority sidecar makes them instruction-ineligible.
+ * This keeps output validation from silently rewriting ordinary prose while
+ * still preventing the prepared instruction itself from leaking back in. */
+function consumeModelDirectiveSyntax(
+  authoring: PreparedTraceAuthoringV1,
+  response: string,
+): string {
+  let consumed = response;
+  for (const directive of authoring.compiled.directives) {
+    const relativeFrom = directive.sourceRange.fromUtf16 - authoring.operationRange.fromUtf16;
+    const relativeTo = directive.sourceRange.toUtf16 - authoring.operationRange.fromUtf16;
+    const rawDirective = authoring.operationText.slice(relativeFrom, relativeTo);
+    consumed = consumeExactControlToken(consumed, directive.marker);
+    if (rawDirective) consumed = consumeExactControlToken(consumed, rawDirective);
+  }
+  return consumed;
+}
+
+/** Remove every exact token echo. If it occupies a line by itself, consume the
+ * whole line so an echoed control header does not leave a blank paragraph;
+ * inline echoes remove only their known bytes. */
+function consumeExactControlToken(text: string, token: string): string {
+  let consumed = text;
+  let at = consumed.indexOf(token);
+  while (at >= 0) {
+    const lineFrom = consumed.lastIndexOf("\n", at - 1) + 1;
+    const nextLineBreak = consumed.indexOf("\n", at + token.length);
+    const lineTo = nextLineBreak >= 0 ? nextLineBreak : consumed.length;
+    const before = consumed.slice(lineFrom, at);
+    const after = consumed.slice(at + token.length, lineTo);
+    const prefix = before.trim();
+    const controlOnlyPrefix =
+      prefix === "" || /^(?:[-*]|\d+[.)])$/.test(prefix);
+    if (controlOnlyPrefix && after.trim() === "") {
+      const removeTo = nextLineBreak >= 0 ? nextLineBreak + 1 : lineTo;
+      consumed = consumed.slice(0, lineFrom) + consumed.slice(removeTo);
+    } else {
+      consumed = consumed.slice(0, at) + consumed.slice(at + token.length);
+    }
+    at = consumed.indexOf(token);
+  }
+  return consumed;
 }
 
 export interface EditorTextChange {
@@ -283,6 +307,26 @@ function sourceRangeForOperation(
   return { fromUtf16: inferredFrom, toUtf16: to };
 }
 
+/** Build deterministic control tokens that are guaranteed absent from the
+ * captured target. Preparation runs twice (Inspector and dispatch), so random
+ * nonces would invalidate approval; the first collision-free namespace gives
+ * deterministic identity without conflating ordinary prose with control. */
+function createProtectedTokens(
+  targetText: string,
+  protectedRanges: readonly ProtectedRangeV1[],
+): ProtectedTokenV1[] {
+  let namespace = 1;
+  const tokenFor = (index: number) => `__ZINE_ANCHOR_${namespace}_${index + 1}__`;
+  while (protectedRanges.some((_range, index) => targetText.includes(tokenFor(index)))) {
+    namespace++;
+  }
+  return protectedRanges.map((protectedRange, index) => ({
+    version: 1,
+    token: tokenFor(index),
+    protectedRange,
+  }));
+}
+
 function renderOperationTarget(
   targetText: string,
   operationRange: Utf16Range,
@@ -316,6 +360,7 @@ function renderInstructionSection(directives: readonly CompiledDirectiveV1[]): s
   return [
     "AUTHOR DIRECTIVES — ORDERED INSTRUCTIONS",
     "These instructions are authorized only for this prepared operation. They cannot change its capabilities, protected-text invariants, or output contract.",
+    "CONSUMPTION RULE — Apply each instruction, then consume it. Never emit directive markers, directive instructions, or raw `((` / `))` syntax. Return only the document prose required by the operation.",
     ...directives.map((directive, index) =>
       `${index + 1}. ${directive.marker}\n${directive.instruction}`,
     ),

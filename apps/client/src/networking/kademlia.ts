@@ -1,6 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { isTauri } from "../identity/identity.js";
+import {
+  activeVaultStorageId,
+  subscribeVaultStorage,
+  vaultStorage,
+  vaultStorageGeneration,
+  vaultStorageSessionAcceptsWork,
+} from "../storage/vault-storage.js";
 
 const STORAGE_KEY = "zine.kademlia.v1";
 export const DEFAULT_KADEMLIA_LISTEN = "/ip4/0.0.0.0/tcp/0";
@@ -34,6 +41,10 @@ export interface KademliaApplyResult {
 type QueryStorage = Pick<Storage, "getItem" | "setItem">;
 type ReadStorage = Pick<Storage, "getItem">;
 type ConfigListener = () => void;
+interface VaultLease {
+  generation: number;
+  vaultId: string | null;
+}
 
 const configListeners = new Set<ConfigListener>();
 let runtimeOperationQueue: Promise<unknown> = Promise.resolve();
@@ -64,7 +75,7 @@ export function normalizeKademliaConfig(value: unknown): KademliaConfig {
 }
 
 export function loadKademliaConfig(
-  storage: ReadStorage = localStorage,
+  storage: ReadStorage = vaultStorage,
 ): KademliaConfig {
   try {
     const raw = storage.getItem(STORAGE_KEY);
@@ -78,7 +89,7 @@ export function loadKademliaConfig(
 
 export function saveKademliaConfig(
   config: KademliaConfig,
-  storage: QueryStorage = localStorage,
+  storage: QueryStorage = vaultStorage,
 ): KademliaConfig {
   const normalized = normalizeKademliaConfig(config);
   storage.setItem(STORAGE_KEY, JSON.stringify(normalized));
@@ -92,6 +103,7 @@ export function saveKademliaConfig(
  * this module's listeners directly while the DOM listener covers other tabs. */
 export function subscribeKademliaConfig(listener: ConfigListener): () => void {
   configListeners.add(listener);
+  const unsubscribeVaultStorage = subscribeVaultStorage(listener);
   const storageTarget = typeof window !== "undefined" &&
       typeof window.addEventListener === "function"
     ? window
@@ -102,6 +114,7 @@ export function subscribeKademliaConfig(listener: ConfigListener): () => void {
   storageTarget?.addEventListener("storage", onStorage);
   return () => {
     configListeners.delete(listener);
+    unsubscribeVaultStorage();
     storageTarget?.removeEventListener("storage", onStorage);
   };
 }
@@ -111,8 +124,38 @@ export function kademliaEnabledSnapshot(): boolean {
   return loadKademliaConfig().enabled;
 }
 
-function serializeRuntimeOperation<T>(operation: () => Promise<T>): Promise<T> {
-  const task = runtimeOperationQueue.then(operation);
+class StaleVaultOperationError extends Error {
+  constructor(readonly lease: VaultLease) {
+    super("Coins operation was cancelled because the active vault changed");
+    this.name = "StaleVaultOperationError";
+  }
+}
+
+function captureVaultLease(): VaultLease {
+  return {
+    generation: vaultStorageGeneration(),
+    vaultId: activeVaultStorageId(),
+  };
+}
+
+function leaseIsCurrent(lease: VaultLease): boolean {
+  return vaultStorageSessionAcceptsWork() &&
+    lease.generation === vaultStorageGeneration() &&
+    lease.vaultId === activeVaultStorageId();
+}
+
+function assertCurrentLease(lease: VaultLease): void {
+  if (!leaseIsCurrent(lease)) throw new StaleVaultOperationError(lease);
+}
+
+function serializeRuntimeOperation<T>(
+  operation: (lease: VaultLease) => Promise<T>,
+): Promise<T> {
+  const lease = captureVaultLease();
+  const task = runtimeOperationQueue.then(async () => {
+    assertCurrentLease(lease);
+    return operation(lease);
+  });
   runtimeOperationQueue = task.then(() => undefined, () => undefined);
   return task;
 }
@@ -144,26 +187,51 @@ async function nativeKademliaStatus(): Promise<KademliaStatus> {
   return invoke<KademliaStatus>("kademlia_status");
 }
 
+async function startForLease(
+  config: KademliaConfig,
+  lease: VaultLease,
+): Promise<KademliaStatus | null> {
+  assertCurrentLease(lease);
+  const status = await startNativeKademlia(config);
+  if (!leaseIsCurrent(lease)) {
+    throw new StaleVaultOperationError(lease);
+  }
+  return status;
+}
+
+async function stopForLease(lease: VaultLease): Promise<void> {
+  assertCurrentLease(lease);
+  await stopNativeKademlia();
+  assertCurrentLease(lease);
+}
+
+async function statusForLease(lease: VaultLease): Promise<KademliaStatus> {
+  assertCurrentLease(lease);
+  const status = await nativeKademliaStatus();
+  assertCurrentLease(lease);
+  return status;
+}
+
 /** Start only the configuration that is still committed when this serialized
  * operation reaches the runtime. A queued stale caller can never re-enable a
  * node after a later Coins disable has committed. */
 export function ensureKademliaStarted(
-  storage: ReadStorage = localStorage,
+  storage: ReadStorage = vaultStorage,
 ): Promise<KademliaStatus | null> {
-  return serializeRuntimeOperation(() =>
-    startNativeKademlia(loadKademliaConfig(storage)));
+  return serializeRuntimeOperation((lease) =>
+    startForLease(loadKademliaConfig(storage), lease));
 }
 
 export function stopKademlia(): Promise<void> {
-  return serializeRuntimeOperation(stopNativeKademlia);
+  return serializeRuntimeOperation(stopForLease);
 }
 
 export function restartKademlia(
-  storage: ReadStorage = localStorage,
+  storage: ReadStorage = vaultStorage,
 ): Promise<KademliaStatus | null> {
-  return serializeRuntimeOperation(async () => {
-    await stopNativeKademlia();
-    return startNativeKademlia(loadKademliaConfig(storage));
+  return serializeRuntimeOperation(async (lease) => {
+    await stopForLease(lease);
+    return startForLease(loadKademliaConfig(storage), lease);
   });
 }
 
@@ -178,37 +246,51 @@ export function restartKademlia(
  */
 export function applyKademliaConfig(
   candidate: KademliaConfig,
-  storage: QueryStorage = localStorage,
+  storage: QueryStorage = vaultStorage,
 ): Promise<KademliaApplyResult> {
-  return serializeRuntimeOperation(async () => {
+  return serializeRuntimeOperation(async (lease) => {
     // Read at execution time, not call time. Earlier queued applies may have
     // committed a newer authoritative value while this operation was waiting.
     const previous = loadKademliaConfig(storage);
     const next = normalizeKademliaConfig(candidate);
 
     if (!isTauri()) {
+      assertCurrentLease(lease);
+      const config = saveKademliaConfig(next, storage);
+      assertCurrentLease(lease);
       return {
-        config: saveKademliaConfig(next, storage),
+        config,
         status: null,
       };
     }
 
     try {
-      await stopNativeKademlia();
+      await stopForLease(lease);
       const status = next.enabled
-        ? await startNativeKademlia(next)
-        : await nativeKademliaStatus();
+        ? await startForLease(next, lease)
+        : await statusForLease(lease);
+      assertCurrentLease(lease);
       const config = saveKademliaConfig(next, storage);
+      assertCurrentLease(lease);
       return { config, status };
     } catch (cause) {
+      if (cause instanceof StaleVaultOperationError || !leaseIsCurrent(lease)) {
+        // Native start is generation-fenced too. Never issue a stale stop after
+        // the boundary changed: it could target the newly active vault.
+        throw cause instanceof StaleVaultOperationError
+          ? cause
+          : new StaleVaultOperationError(lease);
+      }
       let restoreFailure: unknown = null;
       try {
         // A failed start can still have progressed far enough to create a
         // runtime. Stop is idempotent, so always return to a known baseline.
         await stopNativeKademlia();
+        assertCurrentLease(lease);
         if (previous.enabled) {
-          await startNativeKademlia(previous);
+          await startForLease(previous, lease);
         }
+        assertCurrentLease(lease);
         saveKademliaConfig(previous, storage);
       } catch (restoreCause) {
         restoreFailure = restoreCause;
@@ -229,31 +311,36 @@ export function applyKademliaConfig(
 }
 
 export function kademliaStatus(): Promise<KademliaStatus> {
-  return serializeRuntimeOperation(nativeKademliaStatus);
+  return serializeRuntimeOperation(statusForLease);
 }
 
 export function publishRendezvousPointer(
   coordinate: string,
   pointer: RendezvousPointer,
 ): Promise<void> {
-  return serializeRuntimeOperation(async () => {
+  return serializeRuntimeOperation(async (lease) => {
     if (!isTauri()) return;
     const config = loadKademliaConfig();
     if (!config.enabled) {
       throw new Error("Coins rendezvous is disabled");
     }
-    await startNativeKademlia(config);
+    await startForLease(config, lease);
+    assertCurrentLease(lease);
     await invoke("kademlia_publish_pointer", { coordinate, pointer });
+    assertCurrentLease(lease);
   });
 }
 
 export function lookupRendezvousPointers(
   coordinate: string,
 ): Promise<RendezvousPointer[]> {
-  return serializeRuntimeOperation(async () => {
+  return serializeRuntimeOperation(async (lease) => {
     const config = loadKademliaConfig();
     if (!isTauri() || !config.enabled) return [];
-    await startNativeKademlia(config);
-    return invoke<RendezvousPointer[]>("kademlia_lookup", { coordinate });
+    await startForLease(config, lease);
+    assertCurrentLease(lease);
+    const pointers = await invoke<RendezvousPointer[]>("kademlia_lookup", { coordinate });
+    assertCurrentLease(lease);
+    return pointers;
   });
 }

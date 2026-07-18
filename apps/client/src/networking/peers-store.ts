@@ -1,10 +1,10 @@
 /**
  * Access-policy management — the bridge to the Rust peer-config commands.
  *
- * The peer list lives at ~/.tracer/peers.json and is read by the relay to
- * decide who may connect (transport.md §5). This module wraps the Tauri
- * commands that manage that file; the relay re-reads it on a 5s poll, so
- * changes here take effect without a restart.
+ * The active vault's peer list lives beside its isolated relay database and is
+ * read by that relay to decide who may connect (transport.md §5). Legacy
+ * installs retain ~/.tracer/peers.json. This module wraps the Tauri commands;
+ * the relay re-reads the selected ACL on a 5s poll.
  *
  * These commands only exist in the desktop (Tauri) build — the webapp has no
  * relay to gate access on. Callers must guard with isTauri().

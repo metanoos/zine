@@ -1,4 +1,5 @@
 import { getPublicKey } from "nostr-tools/pure";
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
 
 import {
   identityFromPubkey,

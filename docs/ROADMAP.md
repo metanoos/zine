@@ -48,7 +48,8 @@ Already built:
 - distinct human, model, and agent voice keys with per-delta attribution;
 - local and hosted relay implementations, with a remaining hosted ACL gap;
 - raw-file Reify with an optional signed-event bundle and report;
-- Stronghold-backed desktop signing and provider secrets;
+- passphrase-gated desktop vault sessions with independent Roots, encrypted
+  webview state, relay databases, ACLs, signing keys, and provider secrets;
 - verified recursive folder/Root checkpoint causes, distinct child `advance`,
   durable operation grouping, explicit folder/Root Step, and derived Replay
   collapse;

@@ -1,4 +1,5 @@
 import { resolveRelayUrl } from "../identity/identity.js";
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
 
 /**
  * User-configurable relay set.
@@ -43,9 +44,10 @@ export interface RelayEntry {
 const STORAGE_KEY = "zine.relays";
 
 /**
- * The home relay entry. One per install. URL is whatever resolveRelayUrl()
- * yields for this runtime — local sidecar on desktop, hosted relay on webapp.
- * Always read+write: the local node is never off, never toggleable.
+ * The home relay entry. One active vault at a time uses the fixed loopback URL;
+ * the native shell binds that URL to the selected vault's isolated database.
+ * Browser builds use the hosted relay. Always read+write: the local node is
+ * never off, never toggleable.
  */
 function builtinEntry(): RelayEntry {
   return {

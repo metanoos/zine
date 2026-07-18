@@ -1,3 +1,5 @@
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+
 /**
  * Per-press (per-folder) workspace layout: which tabs are open in which panels,
  * which panel is focused, the per-tab Preview/Markdown surface, and the column

@@ -47,6 +47,48 @@ func TestAccessPolicyPollerActivatesAfterOwnerIsCreated(t *testing.T) {
 	}
 }
 
+func TestReadyFileProvesTheRelayOwnsItsListener(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.ready")
+	if err := writeReadyFile(path, "owned-child-token"); err != nil {
+		t.Fatalf("write readiness file: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read readiness file: %v", err)
+	}
+	if string(raw) != "owned-child-token" {
+		t.Fatalf("readiness token = %q", raw)
+	}
+	if err := writeReadyFile(path, "competitor"); err == nil {
+		t.Fatal("readiness file must not overwrite an existing owner token")
+	}
+	if err := writeReadyFile("", "token"); err == nil {
+		t.Fatal("partial readiness configuration must fail")
+	}
+}
+
+func TestFirstRemoteConnectionRefreshesNewlyActivatedPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "peers.json")
+	policy := NewAccessPolicy(path)
+	if policy.Active() {
+		t.Fatal("policy unexpectedly active before owner write")
+	}
+	owner := strings.Repeat("a", 64)
+	raw, err := json.Marshal(PeersFile{Owner: owner})
+	if err != nil {
+		t.Fatalf("encode owner policy: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write owner policy: %v", err)
+	}
+	if rejected := refreshPolicyOnConnection(policy)(nil); rejected {
+		t.Fatal("policy refresh must not itself reject the connection")
+	}
+	if !policy.Active() || !policy.IsOwner(owner) {
+		t.Fatal("first connection did not observe the newly activated owner ACL")
+	}
+}
+
 func TestResetLocalStateClearsEventsAndAccessPolicy(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "relay.sqlite3")

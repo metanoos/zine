@@ -41,6 +41,34 @@ The hosted browser surface is deliberately read-only and model-free: it cannot
 sign, Send, Attest, or execute MODEL actions until the deferred encrypted
 browser vault exists.
 
+## Desktop vaults
+
+Desktop startup lists the local vaults and unlocks exactly one for the session.
+Each vault has its own passphrase, Stronghold snapshot and KDF salt, permanent
+Root, encrypted workspace records, relay database, access-control list, public
+key/model profiles, crash pads, layouts, recipes, and other local workspace
+state. Logical webview keys and values are both hidden before unlock, while
+per-record ciphertext keeps ordinary editor saves proportional to the record
+that changed. Appearance preferences such as theme and navigation width remain
+shared across the install. The **Vaults** view, immediately before **Keys**,
+can lock the active vault, switch to another vault, or create a new one.
+Locking is fail-closed: another vault is never selectable until Stronghold,
+relay, and Tor reachability have all confirmed shutdown. Normal application
+exit performs the same native shutdown; an unexpected stale listener blocks
+the next unlock instead of being reused across vaults.
+
+Installs created before multi-vault support are adopted in place as a vault
+named **Personal**. Its Stronghold snapshot and KDF salt are neither moved nor
+re-encrypted, so the existing passphrase continues to work. Its existing relay
+database and ACL remain at `~/.tracer`; every newly-created vault keeps those
+files in its own native directory. After the first successful legacy unlock,
+plaintext webview workspace records are migrated into encrypted vault storage.
+Factory reset remains the only operation that deletes every local vault.
+
+Relay databases are physically partitioned and bound only after their vault
+unlocks, but their canonical signed protocol events are not additionally
+encrypted with the vault passphrase at rest.
+
 Nested paths are stored as recursive folder traces, not slash-joined file
 names. Scanning a source tree preserves its directory hierarchy inside the
 private Scan folder, and adopting or forking a file into Root creates any

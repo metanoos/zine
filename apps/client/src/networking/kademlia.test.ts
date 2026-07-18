@@ -4,6 +4,12 @@ import { readFileSync } from "node:fs";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 
 import {
+  activateVaultStorage,
+  deactivateVaultStorage,
+  fenceVaultStorageSession,
+} from "../storage/vault-storage.js";
+
+import {
   DEFAULT_KADEMLIA_LISTEN,
   applyKademliaConfig,
   ensureKademliaStarted,
@@ -44,12 +50,23 @@ function installTauriMock(
   mockIPC(handler);
 }
 
-function installLocalStorage(storage: ReturnType<typeof memoryStorage>) {
+function installLocalStorage(storage: object) {
   Object.defineProperty(globalThis, "localStorage", {
     configurable: true,
     value: storage,
     writable: true,
   });
+}
+
+class FakeStorage implements Storage {
+  private values = new Map<string, string>();
+
+  get length(): number { return this.values.size; }
+  clear(): void { this.values.clear(); }
+  getItem(key: string): string | null { return this.values.get(key) ?? null; }
+  key(index: number): string | null { return [...this.values.keys()][index] ?? null; }
+  removeItem(key: string): void { this.values.delete(key); }
+  setItem(key: string, value: string): void { this.values.set(key, String(value)); }
 }
 
 function memoryStorage(
@@ -109,6 +126,8 @@ const ENABLED_CONFIG: KademliaConfig = {
     "/dns4/seed.example/tcp/4001/p2p/12D3KooWbootstrap",
   ],
 };
+const VAULT_KEY_A = new Uint8Array(32).fill(0x41);
+const VAULT_KEY_B = new Uint8Array(32).fill(0x42);
 
 test("Kademlia config defaults off and binds an ephemeral TCP port", () => {
   assert.deepEqual(normalizeKademliaConfig(null), {
@@ -504,4 +523,98 @@ test("disabling stops the runtime before committing and returns mapped status", 
     "ipc:kademlia_status",
     "storage:set",
   ]);
+});
+
+test("Coins opt-in migrates into vault A and remains isolated from vault B", () => {
+  const rawStorage = new FakeStorage();
+  rawStorage.setItem(STORAGE_KEY, JSON.stringify(ENABLED_CONFIG));
+  installLocalStorage(rawStorage);
+  const snapshots: boolean[] = [];
+  const unsubscribe = subscribeKademliaConfig(() => {
+    snapshots.push(loadKademliaConfig().enabled);
+  });
+
+  try {
+    activateVaultStorage("vault-a", VAULT_KEY_A, true);
+    assert.equal(loadKademliaConfig().enabled, true);
+    assert.equal(rawStorage.getItem(STORAGE_KEY), null);
+
+    activateVaultStorage("vault-b", VAULT_KEY_B);
+    assert.equal(loadKademliaConfig().enabled, false);
+
+    activateVaultStorage("vault-a", VAULT_KEY_A);
+    assert.deepEqual(loadKademliaConfig(), ENABLED_CONFIG);
+    assert.deepEqual(snapshots, [true, false, true]);
+  } finally {
+    unsubscribe();
+    deactivateVaultStorage();
+  }
+});
+
+test("the pre-lock fence rejects newly submitted Kademlia work", async () => {
+  const rawStorage = new FakeStorage();
+  installLocalStorage(rawStorage);
+  activateVaultStorage("vault-a", VAULT_KEY_A);
+  saveKademliaConfig(ENABLED_CONFIG);
+  const trace: string[] = [];
+  installTauriMock((command) => {
+    trace.push(command);
+    return command === "kademlia_start" ? RUNNING_STATUS : undefined;
+  });
+
+  try {
+    fenceVaultStorageSession();
+    await assert.rejects(ensureKademliaStarted(), /active vault changed/);
+    await assert.rejects(
+      applyKademliaConfig({ ...ENABLED_CONFIG, enabled: false }),
+      /active vault changed/,
+    );
+    assert.deepEqual(trace, []);
+    assert.equal(loadKademliaConfig().enabled, true);
+  } finally {
+    deactivateVaultStorage();
+  }
+});
+
+test("a delayed vault-A start cannot stop or commit configuration into vault B", async () => {
+  const rawStorage = new FakeStorage();
+  installLocalStorage(rawStorage);
+  activateVaultStorage("vault-a", VAULT_KEY_A);
+  saveKademliaConfig(ENABLED_CONFIG);
+
+  const trace: string[] = [];
+  const startGate = deferred();
+  const startStarted = deferred();
+  installTauriMock((command) => {
+    trace.push(command);
+    if (command === "kademlia_start") {
+      startStarted.resolve();
+      return startGate.promise.then(() => RUNNING_STATUS);
+    }
+    if (command === "kademlia_status") return STOPPED_STATUS;
+    return undefined;
+  });
+
+  try {
+    const starting = ensureKademliaStarted();
+    await startStarted.promise;
+    const queuedApply = applyKademliaConfig({
+      ...ENABLED_CONFIG,
+      listenAddress: "/ip4/127.0.0.1/tcp/4999",
+    });
+    const startRejected = assert.rejects(starting, /active vault changed/);
+    const applyRejected = assert.rejects(queuedApply, /active vault changed/);
+
+    activateVaultStorage("vault-b", VAULT_KEY_B);
+    startGate.resolve();
+    await Promise.all([startRejected, applyRejected]);
+
+    assert.deepEqual(trace, ["kademlia_start"]);
+    assert.equal(loadKademliaConfig().enabled, false);
+    assert.equal(await ensureKademliaStarted(), null);
+    assert.deepEqual(trace, ["kademlia_start"]);
+  } finally {
+    startGate.resolve();
+    deactivateVaultStorage();
+  }
 });

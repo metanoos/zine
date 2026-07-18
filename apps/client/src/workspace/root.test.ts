@@ -1,5 +1,5 @@
-import test from "node:test";
 import assert from "node:assert/strict";
+import test from "node:test";
 
 // @ts-expect-error minimal localStorage shim for Root and onboarding demo state
 globalThis.localStorage = {
@@ -22,12 +22,83 @@ import { loadLocalFolder, saveLocalFile } from "./local-store.js";
 import { buildDirectoryTree } from "./tree-model.js";
 import { authorVoice, getModelKeyId, loadKeys } from "../identity/keys-store.js";
 import { getPublicKey } from "nostr-tools/pure";
-import { getScanFolderId, rootAuthorSigner } from "./root.js";
+import { createRootMinter, getScanFolderId, rootAuthorSigner } from "./root.js";
 import {
   loadOnboardingDemo,
   ONBOARDING_DEMO_FILE_CONTENT,
   ONBOARDING_DEMO_FILE_PATH,
 } from "../app/onboarding-demo.js";
+
+test("concurrent first-Root callers share one genesis publication", async () => {
+  let creates = 0;
+  let stored: string | null = null;
+  let resolveGenesis!: (id: string) => void;
+  const genesis = new Promise<string>((resolve) => { resolveGenesis = resolve; });
+  const mint = createRootMinter({
+    scope: () => "vault-a",
+    existing: () => stored,
+    async create() {
+      creates += 1;
+      return genesis;
+    },
+    persist(id) { stored = id; },
+  });
+
+  const first = mint();
+  const strictModeReplay = mint();
+  assert.equal(creates, 1);
+  resolveGenesis("root-genesis");
+  assert.equal(await first, "root-genesis");
+  assert.equal(await strictModeReplay, "root-genesis");
+  assert.equal(stored, "root-genesis");
+  assert.equal(await mint(), "root-genesis");
+  assert.equal(creates, 1);
+});
+
+test("failed Root creation clears the pending attempt for retry", async () => {
+  let attempts = 0;
+  const mint = createRootMinter({
+    scope: () => "vault-a",
+    existing: () => null,
+    async create() {
+      attempts += 1;
+      if (attempts === 1) throw new Error("relay unavailable");
+      return "root-after-retry";
+    },
+    persist() {},
+  });
+
+  await assert.rejects(mint(), /relay unavailable/);
+  assert.equal(await mint(), "root-after-retry");
+  assert.equal(attempts, 2);
+});
+
+test("a pending Root publication cannot cross a vault switch", async () => {
+  let activeScope = "vault-a";
+  const stored = new Map<string, string>();
+  let resolveFirst!: (id: string) => void;
+  const firstGenesis = new Promise<string>((resolve) => { resolveFirst = resolve; });
+  const creates: string[] = [];
+  const mint = createRootMinter({
+    scope: () => activeScope,
+    existing: () => stored.get(activeScope) ?? null,
+    create: async () => {
+      creates.push(activeScope);
+      return activeScope === "vault-a" ? firstGenesis : "root-b";
+    },
+    persist(id) { stored.set(activeScope, id); },
+  });
+
+  const first = mint();
+  activeScope = "vault-b";
+  assert.equal(await mint(), "root-b");
+  resolveFirst("root-a");
+  await assert.rejects(first, /active vault changed/);
+
+  assert.deepEqual(creates, ["vault-a", "vault-b"]);
+  assert.equal(stored.get("vault-a"), undefined);
+  assert.equal(stored.get("vault-b"), "root-b");
+});
 
 test("a fresh Root genesis uses the AUTHOR signing key", () => {
   localStorage.clear();

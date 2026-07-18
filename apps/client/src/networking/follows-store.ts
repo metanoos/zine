@@ -1,4 +1,5 @@
 import { resolvePubkey } from "./peers-store.js";
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
 
 const STORAGE_KEY = "zine.follows";
 
@@ -79,4 +80,3 @@ export function removeFollow(
 ): FollowEntry[] {
   return saveFollows(loadFollows(storage).filter((entry) => entry.pubkey !== pubkey), storage);
 }
-

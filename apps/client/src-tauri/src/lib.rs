@@ -3,22 +3,41 @@ mod kademlia;
 mod llm_proxy;
 mod rendezvous_relay;
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::{path::BaseDirectory, Manager};
+use zeroize::{Zeroize, Zeroizing};
 
 static RELAY_SPAWNED: AtomicBool = AtomicBool::new(false);
+static RELAY_CHILD: Mutex<Option<Child>> = Mutex::new(None);
+static VAULT_RUNTIME_GATE: Mutex<()> = Mutex::new(());
+static VAULT_TRANSITION_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static WEBVIEW_RESTART_PENDING: AtomicBool = AtomicBool::new(false);
+static NEXT_VAULT_RUNTIME_GENERATION: AtomicU64 = AtomicU64::new(1);
 const SECRET_VAULT_FILENAME: &str = "zine-secrets.hold";
 const SECRET_SALT_FILENAME: &str = "zine-secrets.salt";
+const SECRET_VAULTS_DIRNAME: &str = "vaults";
+const SECRET_VAULT_SNAPSHOT_FILENAME: &str = "secrets.hold";
+const SECRET_VAULT_SALT_FILENAME: &str = "secrets.salt";
+const VAULT_RELAY_FILENAME: &str = "relay.sqlite3";
+const VAULT_PEERS_FILENAME: &str = "peers.json";
+const VAULT_RUNTIME_VERIFIER_FILENAME: &str = "runtime.keycheck";
+const SECRET_VAULT_REGISTRY_FILENAME: &str = "zine-vaults.json";
+const ACTIVE_ONION_MARKER_PREFIX: &str = ".zine-active-onion-";
+const LEGACY_VAULT_ID: &str = "legacy";
+const VAULT_REGISTRY_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const VAULT_REGISTRY_STALE_LOCK_AGE: Duration = Duration::from_secs(30);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,20 +45,707 @@ struct SecretVaultStatus {
     vault_exists: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretVaultRecord {
+    id: String,
+    name: String,
+    created_at: u64,
+    legacy: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretVaultSummary {
+    id: String,
+    name: String,
+    created_at: u64,
+    legacy: bool,
+    snapshot_exists: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StrongholdKdfEnvelope {
+    version: u8,
+    vault_id: Option<String>,
+    passphrase: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveVaultRuntime {
+    id: String,
+    directory: PathBuf,
+    generation: u64,
+    closing: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct VaultRuntimeBinding {
+    pub(crate) id: String,
+    pub(crate) directory: PathBuf,
+    pub(crate) generation: u64,
+}
+
+impl ActiveVaultRuntime {
+    fn binding(&self) -> VaultRuntimeBinding {
+        VaultRuntimeBinding {
+            id: self.id.clone(),
+            directory: self.directory.clone(),
+            generation: self.generation,
+        }
+    }
+}
+
+static ACTIVE_VAULT_RUNTIME: Mutex<Option<ActiveVaultRuntime>> = Mutex::new(None);
+
 fn secret_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_local_data_dir()
         .map_err(|error| format!("could not resolve secure-vault directory: {error}"))
 }
 
-/// Report whether this install already has a Stronghold snapshot. The path is
-/// deliberately kept native; JavaScript only needs create-vs-unlock wording.
+fn ensure_private_directory(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|error| format!("create {}: {error}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = fs::Permissions::from_mode(0o700);
+        fs::set_permissions(path, permissions)
+            .map_err(|error| format!("protect {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Make directory-entry updates durable after rename or removal. Syncing a
+/// file persists its payload, but not the parent directory entry that names it.
+fn sync_directory(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        fs::File::open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("sync directory {}: {error}", path.display()))?;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("sync directory {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn vault_registry_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(SECRET_VAULT_REGISTRY_FILENAME)
+}
+
+fn vault_registry_staging_path(data_dir: &Path) -> PathBuf {
+    vault_registry_path(data_dir).with_extension("json.tmp")
+}
+
+fn vault_registry_backup_path(data_dir: &Path) -> PathBuf {
+    vault_registry_path(data_dir).with_extension("json.bak")
+}
+
+fn vault_registry_lock_path(data_dir: &Path) -> PathBuf {
+    vault_registry_path(data_dir).with_extension("json.lock")
+}
+
+fn valid_vault_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 96
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn vault_directory(data_dir: &Path, vault: &SecretVaultRecord) -> Result<PathBuf, String> {
+    if vault.legacy {
+        if vault.id != LEGACY_VAULT_ID {
+            return Err("secure-vault registry has an invalid legacy entry".into());
+        }
+        return Ok(data_dir.to_path_buf());
+    }
+    if !valid_vault_id(&vault.id) || vault.id == LEGACY_VAULT_ID {
+        return Err(format!(
+            "secure-vault registry has an invalid id: {}",
+            vault.id
+        ));
+    }
+    Ok(data_dir.join(SECRET_VAULTS_DIRNAME).join(&vault.id))
+}
+
+fn vault_snapshot_path(data_dir: &Path, vault: &SecretVaultRecord) -> Result<PathBuf, String> {
+    if vault.legacy {
+        return Ok(data_dir.join(SECRET_VAULT_FILENAME));
+    }
+    Ok(vault_directory(data_dir, vault)?.join(SECRET_VAULT_SNAPSHOT_FILENAME))
+}
+
+fn vault_salt_path(data_dir: &Path, vault_id: Option<&str>) -> Result<PathBuf, String> {
+    match vault_id {
+        None => Ok(data_dir.join(SECRET_SALT_FILENAME)),
+        Some(id) if valid_vault_id(id) && id != LEGACY_VAULT_ID => Ok(data_dir
+            .join(SECRET_VAULTS_DIRNAME)
+            .join(id)
+            .join(SECRET_VAULT_SALT_FILENAME)),
+        Some(id) => Err(format!("secure-vault KDF has an invalid id: {id}")),
+    }
+}
+
+fn create_or_read_vault_salt(path: &Path) -> Result<[u8; 32], String> {
+    if let Some(parent) = path.parent() {
+        ensure_private_directory(parent)
+            .map_err(|error| format!("create secure-vault KDF directory: {error}"))?;
+    }
+    loop {
+        match fs::read(path) {
+            Ok(raw) => {
+                return raw.try_into().map_err(|raw: Vec<u8>| {
+                    format!(
+                        "secure-vault KDF salt {} has {} bytes instead of 32",
+                        path.display(),
+                        raw.len()
+                    )
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut salt = [0u8; 32];
+                getrandom::fill(&mut salt)
+                    .map_err(|error| format!("generate secure-vault KDF salt: {error}"))?;
+                match fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                {
+                    Ok(mut file) => {
+                        file.write_all(&salt)
+                            .map_err(|error| format!("write secure-vault KDF salt: {error}"))?;
+                        file.sync_all()
+                            .map_err(|error| format!("sync secure-vault KDF salt: {error}"))?;
+                        return Ok(salt);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => {
+                        return Err(format!("create secure-vault KDF salt: {error}"));
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "read secure-vault KDF salt {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+}
+
+fn derive_stronghold_key_v1(passphrase: &[u8], salt: &[u8]) -> Vec<u8> {
+    // KDF v1 is the exact rust-argon2 1.0 default used by
+    // tauri-plugin-stronghold 2.3.1. Never replace this with Config::default:
+    // rust-argon2 2.x changed that default to Argon2id with stronger but
+    // incompatible parameters, which would make existing snapshots unreadable.
+    argon2::hash_raw(passphrase, salt, &argon2::Config::original())
+        .expect("could not derive secure-vault encryption key")
+}
+
+fn derive_stronghold_key(data_dir: &Path, encoded: &str) -> Vec<u8> {
+    let parsed = serde_json::from_str::<StrongholdKdfEnvelope>(encoded)
+        .ok()
+        .filter(|envelope| envelope.version == 1);
+    let (vault_id, mut passphrase) = match parsed {
+        Some(envelope) => (envelope.vault_id, envelope.passphrase),
+        None => (None, encoded.to_string()),
+    };
+    let salt_path =
+        vault_salt_path(data_dir, vault_id.as_deref()).expect("invalid secure-vault KDF envelope");
+    let salt =
+        create_or_read_vault_salt(&salt_path).expect("could not initialize secure-vault KDF salt");
+    let derived = derive_stronghold_key_v1(passphrase.as_bytes(), &salt);
+    passphrase.zeroize();
+    derived
+}
+
+fn validate_vault_registry(data_dir: &Path, raw: &[u8]) -> Result<Vec<SecretVaultRecord>, String> {
+    let vaults: Vec<SecretVaultRecord> = serde_json::from_slice(raw)
+        .map_err(|error| format!("decode secure-vault registry: {error}"))?;
+    let mut ids = HashSet::new();
+    let mut names = HashSet::new();
+    for vault in &vaults {
+        let _ = vault_snapshot_path(data_dir, vault)?;
+        let name = vault.name.trim();
+        if name.is_empty() {
+            return Err("secure-vault registry contains an empty name".into());
+        }
+        if name.chars().count() > 64 {
+            return Err("secure-vault registry contains an overlong name".into());
+        }
+        if !ids.insert(vault.id.as_str()) {
+            return Err(format!(
+                "secure-vault registry contains duplicate id: {}",
+                vault.id
+            ));
+        }
+        if !names.insert(name.to_lowercase()) {
+            return Err(format!(
+                "secure-vault registry contains duplicate name: {}",
+                vault.name
+            ));
+        }
+    }
+    Ok(vaults)
+}
+
+struct VaultRegistryLock {
+    path: PathBuf,
+    _file: fs::File,
+}
+
+impl VaultRegistryLock {
+    fn acquire(data_dir: &Path) -> Result<Self, String> {
+        ensure_private_directory(data_dir)
+            .map_err(|error| format!("create secure-vault directory: {error}"))?;
+        let path = vault_registry_lock_path(data_dir);
+        let deadline = Instant::now() + VAULT_REGISTRY_LOCK_TIMEOUT;
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => {
+                    return Ok(Self { path, _file: file });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = fs::metadata(&path)
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| modified.elapsed().ok())
+                        .is_some_and(|age| age > VAULT_REGISTRY_STALE_LOCK_AGE);
+                    if stale {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "timed out waiting for secure-vault registry lock {}",
+                            path.display()
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "create secure-vault registry lock {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for VaultRegistryLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn write_vault_registry_unlocked(
+    data_dir: &Path,
+    vaults: &[SecretVaultRecord],
+) -> Result<(), String> {
+    ensure_private_directory(data_dir)
+        .map_err(|error| format!("create secure-vault directory: {error}"))?;
+    let encoded = serde_json::to_vec_pretty(vaults)
+        .map_err(|error| format!("encode secure-vault registry: {error}"))?;
+    let registry = vault_registry_path(data_dir);
+    let temporary = vault_registry_staging_path(data_dir);
+    let backup = vault_registry_backup_path(data_dir);
+    let mut staged = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|error| format!("open secure-vault registry staging file: {error}"))?;
+    staged
+        .write_all(&encoded)
+        .map_err(|error| format!("write secure-vault registry staging file: {error}"))?;
+    staged
+        .sync_all()
+        .map_err(|error| format!("sync secure-vault registry staging file: {error}"))?;
+    drop(staged);
+
+    if registry.is_file() {
+        fs::copy(&registry, &backup)
+            .map_err(|error| format!("back up secure-vault registry: {error}"))?;
+        fs::File::open(&backup)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("sync secure-vault registry backup: {error}"))?;
+        sync_directory(data_dir)?;
+    }
+
+    #[cfg(windows)]
+    if registry.exists() {
+        fs::remove_file(&registry)
+            .map_err(|error| format!("replace secure-vault registry: {error}"))?;
+    }
+    fs::rename(&temporary, &registry)
+        .map_err(|error| format!("install secure-vault registry: {error}"))?;
+    sync_directory(data_dir)?;
+    match fs::remove_file(&backup) {
+        Ok(()) => sync_directory(data_dir)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        // The live registry is already installed and durable. A stale recovery
+        // copy is safe to overwrite on the next transaction; reporting failure
+        // here would falsely tell the caller that its committed write failed.
+        Err(_) => {}
+    }
+    Ok(())
+}
+
+/// Load the non-secret vault index. An install with the old single snapshot is
+/// adopted in place as one named vault; the snapshot is never copied or
+/// re-encrypted, so the existing passphrase and KDF inputs remain valid.
+fn load_vault_registry_unlocked(data_dir: &Path) -> Result<Vec<SecretVaultRecord>, String> {
+    let registry = vault_registry_path(data_dir);
+    let candidates = [
+        registry.clone(),
+        vault_registry_staging_path(data_dir),
+        vault_registry_backup_path(data_dir),
+    ];
+    let mut candidate_errors = Vec::new();
+    for candidate in candidates {
+        if candidate.is_file() {
+            match fs::read(&candidate)
+                .map_err(|error| format!("read {}: {error}", candidate.display()))
+                .and_then(|raw| validate_vault_registry(data_dir, &raw))
+            {
+                Ok(vaults) => return Ok(vaults),
+                Err(error) => candidate_errors.push(error),
+            }
+        }
+    }
+    if !candidate_errors.is_empty() {
+        return Err(format!(
+            "secure-vault registry and recovery copies are unreadable: {}",
+            candidate_errors.join("; ")
+        ));
+    }
+
+    if data_dir.join(SECRET_VAULT_FILENAME).is_file() {
+        let created_at = fs::metadata(data_dir.join(SECRET_VAULT_FILENAME))
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let vaults = vec![SecretVaultRecord {
+            id: LEGACY_VAULT_ID.into(),
+            name: "Personal".into(),
+            created_at,
+            legacy: true,
+        }];
+        write_vault_registry_unlocked(data_dir, &vaults)?;
+        return Ok(vaults);
+    }
+
+    Ok(Vec::new())
+}
+
+fn load_vault_registry(data_dir: &Path) -> Result<Vec<SecretVaultRecord>, String> {
+    let _lock = VaultRegistryLock::acquire(data_dir)?;
+    load_vault_registry_unlocked(data_dir)
+}
+
+fn vault_summaries(
+    data_dir: &Path,
+    vaults: Vec<SecretVaultRecord>,
+) -> Result<Vec<SecretVaultSummary>, String> {
+    vaults
+        .into_iter()
+        .map(|vault| {
+            let snapshot_exists = vault_snapshot_path(data_dir, &vault)?.is_file();
+            Ok(SecretVaultSummary {
+                id: vault.id,
+                name: vault.name,
+                created_at: vault.created_at,
+                legacy: vault.legacy,
+                snapshot_exists,
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn list_secret_vaults(app: tauri::AppHandle) -> Result<Vec<SecretVaultSummary>, String> {
+    let data_dir = secret_data_dir(&app)?;
+    vault_summaries(&data_dir, load_vault_registry(&data_dir)?)
+}
+
+fn reserve_secret_vault(
+    data_dir: &Path,
+    name: &str,
+    nonce: u128,
+) -> Result<SecretVaultSummary, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Enter a vault name".into());
+    }
+    if name.chars().count() > 64 {
+        return Err("Vault names must be 64 characters or fewer".into());
+    }
+
+    let _lock = VaultRegistryLock::acquire(data_dir)?;
+    let mut vaults = load_vault_registry_unlocked(data_dir)?;
+    let normalized_name = name.to_lowercase();
+    if vaults
+        .iter()
+        .any(|vault| vault.name.trim().to_lowercase() == normalized_name)
+    {
+        return Err(format!("A vault named {name} already exists"));
+    }
+    let mut suffix = 0u32;
+    let id = loop {
+        let candidate = if suffix == 0 {
+            format!("vault-{nonce:x}")
+        } else {
+            format!("vault-{nonce:x}-{suffix}")
+        };
+        if !vaults.iter().any(|vault| vault.id == candidate) {
+            break candidate;
+        }
+        suffix += 1;
+    };
+    let record = SecretVaultRecord {
+        id,
+        name: name.into(),
+        created_at: (nonce / 1_000_000) as u64,
+        legacy: false,
+    };
+    ensure_private_directory(&vault_directory(data_dir, &record)?)
+        .map_err(|error| format!("create secure-vault directory: {error}"))?;
+    vaults.push(record.clone());
+    write_vault_registry_unlocked(data_dir, &vaults)?;
+    vault_summaries(data_dir, vec![record])?
+        .pop()
+        .ok_or_else(|| "created vault is unavailable".into())
+}
+
+#[tauri::command]
+fn create_secret_vault(app: tauri::AppHandle, name: String) -> Result<SecretVaultSummary, String> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("system clock cannot create a vault id: {error}"))?
+        .as_nanos();
+    reserve_secret_vault(&secret_data_dir(&app)?, &name, nonce)
+}
+
+/// A failed first unlock may leave only its registry reservation. Remove that
+/// empty record, but refuse once Stronghold has written any encrypted state.
+#[tauri::command]
+fn discard_empty_secret_vault(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let data_dir = secret_data_dir(&app)?;
+    let _lock = VaultRegistryLock::acquire(&data_dir)?;
+    let mut vaults = load_vault_registry_unlocked(&data_dir)?;
+    let Some(index) = vaults.iter().position(|vault| vault.id == id) else {
+        return Ok(());
+    };
+    if vault_snapshot_path(&data_dir, &vaults[index])?.is_file() {
+        return Err("Cannot discard a vault after encrypted state has been created".into());
+    }
+    if !vaults[index].legacy {
+        let directory = vault_directory(&data_dir, &vaults[index])?;
+        match fs::remove_dir_all(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "remove empty secure-vault directory {}: {error}",
+                    directory.display()
+                ));
+            }
+        }
+    }
+    vaults.remove(index);
+    write_vault_registry_unlocked(&data_dir, &vaults)
+}
+
+/// Compatibility status for older frontend bundles. New clients consume the
+/// full vault list instead of flattening the install to one Boolean.
 #[tauri::command]
 fn secret_vault_status(app: tauri::AppHandle) -> Result<SecretVaultStatus, String> {
     let data_dir = secret_data_dir(&app)?;
+    let vaults = load_vault_registry(&data_dir)?;
     Ok(SecretVaultStatus {
-        vault_exists: data_dir.join(SECRET_VAULT_FILENAME).is_file(),
+        vault_exists: vaults.iter().any(|vault| {
+            vault_snapshot_path(&data_dir, vault)
+                .map(|path| path.is_file())
+                .unwrap_or(false)
+        }),
     })
+}
+
+fn vault_runtime_directory(data_dir: &Path, vault: &SecretVaultRecord) -> Result<PathBuf, String> {
+    if vault.legacy {
+        let home = dirs_home().ok_or("could not determine home directory")?;
+        return Ok(home.join(".tracer"));
+    }
+    vault_directory(data_dir, vault)
+}
+
+fn active_vault_runtime() -> Result<ActiveVaultRuntime, String> {
+    let active = ACTIVE_VAULT_RUNTIME
+        .lock()
+        .map_err(|_| "active vault runtime lock is poisoned".to_string())?
+        .clone();
+    usable_vault_runtime(active)
+}
+
+fn usable_vault_runtime(active: Option<ActiveVaultRuntime>) -> Result<ActiveVaultRuntime, String> {
+    let active =
+        active.ok_or_else(|| "Unlock a vault before using its native runtime".to_string())?;
+    if active.closing {
+        return Err("The active vault is locking; wait for shutdown to finish".into());
+    }
+    Ok(active)
+}
+
+pub(crate) fn active_vault_binding() -> Result<VaultRuntimeBinding, String> {
+    Ok(active_vault_runtime()?.binding())
+}
+
+pub(crate) fn require_active_vault_binding(expected: &VaultRuntimeBinding) -> Result<(), String> {
+    let active = active_vault_runtime()?;
+    if active.binding() != *expected {
+        return Err("The Kademlia command belongs to a stale vault session".into());
+    }
+    Ok(())
+}
+
+fn next_vault_runtime_generation() -> Result<u64, String> {
+    NEXT_VAULT_RUNTIME_GENERATION
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |generation| {
+            generation.checked_add(1)
+        })
+        .map_err(|_| "vault runtime generation counter is exhausted".to_string())
+}
+
+fn verify_vault_runtime_key(directory: &Path, key: &[u8]) -> Result<(), String> {
+    if key.len() != 32 {
+        return Err("The vault runtime key is invalid".into());
+    }
+    let verifier_path = directory.join(VAULT_RUNTIME_VERIFIER_FILENAME);
+    let mut hasher = Sha256::new();
+    hasher.update(b"zine-vault-runtime-v1\0");
+    hasher.update(key);
+    let expected = hasher.finalize();
+    match fs::read(&verifier_path) {
+        Ok(stored) => {
+            if stored.len() != expected.len() {
+                return Err("The vault runtime verifier is corrupt".into());
+            }
+            let mismatch = stored
+                .iter()
+                .zip(expected.iter())
+                .fold(0u8, |acc, (left, right)| acc | (left ^ right));
+            if mismatch != 0 {
+                return Err("The selected vault did not authorize its native runtime".into());
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&verifier_path)
+                .map_err(|error| format!("create vault runtime verifier: {error}"))?;
+            file.write_all(&expected)
+                .map_err(|error| format!("write vault runtime verifier: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("sync vault runtime verifier: {error}"))
+        }
+        Err(error) => Err(format!("read vault runtime verifier: {error}")),
+    }
+}
+
+#[tauri::command]
+fn activate_vault_runtime(
+    app: tauri::AppHandle,
+    id: String,
+    workspace_key: Vec<u8>,
+) -> Result<(), String> {
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let workspace_key = Zeroizing::new(workspace_key);
+    let data_dir = secret_data_dir(&app)?;
+    let vaults = load_vault_registry(&data_dir)?;
+    let vault = vaults
+        .iter()
+        .find(|vault| vault.id == id)
+        .ok_or_else(|| "The selected vault is not registered".to_string())?;
+    if !vault_snapshot_path(&data_dir, vault)?.is_file() {
+        return Err("Finish creating the encrypted vault before activating it".into());
+    }
+    let directory = vault_runtime_directory(&data_dir, vault)?;
+    ensure_private_directory(&directory)
+        .map_err(|error| format!("create vault runtime directory: {error}"))?;
+    let verified = verify_vault_runtime_key(&directory, &workspace_key);
+    verified?;
+
+    let mut active = ACTIVE_VAULT_RUNTIME
+        .lock()
+        .map_err(|_| "active vault runtime lock is poisoned".to_string())?;
+    if let Some(existing) = active.as_ref() {
+        if existing.closing {
+            return Err("The active vault is locking; wait for shutdown to finish".into());
+        }
+        if existing.id == id {
+            return Ok(());
+        }
+        return Err(format!("Lock vault {} before activating {id}", existing.id));
+    }
+    *active = Some(ActiveVaultRuntime {
+        id,
+        directory,
+        generation: next_vault_runtime_generation()?,
+        closing: false,
+    });
+    Ok(())
+}
+
+fn stop_owned_relay() -> Result<(), String> {
+    let mut owned = RELAY_CHILD
+        .lock()
+        .map_err(|_| "relay process lock is poisoned".to_string())?;
+    if let Some(mut child) = owned.take() {
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if let Err(error) = child.kill() {
+                    *owned = Some(child);
+                    return Err(format!("stop active vault relay: {error}"));
+                }
+                if let Err(error) = child.wait() {
+                    *owned = Some(child);
+                    return Err(format!("wait for active vault relay shutdown: {error}"));
+                }
+            }
+            Err(error) => {
+                *owned = Some(child);
+                return Err(format!("inspect active vault relay: {error}"));
+            }
+        }
+    }
+    RELAY_SPAWNED.store(false, Ordering::SeqCst);
+    Ok(())
 }
 
 // Segments skipped when walking an attached folder — non-content noise that
@@ -65,32 +771,59 @@ const IGNORED_SEGMENTS: &[&str] = &[
 ///      path that makes a distributed build actually run)
 ///   4. the monorepo path as a final fallback when no resource exists
 ///
-/// Then connects to ws://127.0.0.1:4869 — if that's already accepting TCP, we
-/// assume a relay is already running (e.g. another launch started one) and
-/// don't spawn a second. Otherwise spawn detached and poll the port until it's
-/// listening (or timeout).
+/// Then connects to ws://127.0.0.1:4869. A listener not owned by this process
+/// is rejected because it may be serving another vault. Otherwise spawn the
+/// active vault's relay and wait for a child-owned readiness token written
+/// only after that child has bound the port.
 ///
 /// Uses std::process::Command rather than tauri-plugin-shell's sidecar
 /// declaration: the resource is bundled via `bundle.resources` in
 /// tauri.conf.json, which avoids the target-triple rename convention while
 /// still shipping the binary inside the installer.
 #[tauri::command]
-async fn spawn_relay(app: tauri::AppHandle) -> Result<String, String> {
+fn spawn_relay(app: tauri::AppHandle) -> Result<String, String> {
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
     if RELAY_SPAWNED.load(Ordering::SeqCst) {
-        return Ok("already spawned".into());
+        let mut owned = RELAY_CHILD
+            .lock()
+            .map_err(|_| "relay process lock is poisoned".to_string())?;
+        if let Some(child) = owned.as_mut() {
+            match child.try_wait() {
+                Ok(None) => return Ok("already spawned".into()),
+                Ok(Some(_)) => {
+                    *owned = None;
+                    RELAY_SPAWNED.store(false, Ordering::SeqCst);
+                }
+                Err(error) => return Err(format!("inspect active vault relay: {error}")),
+            }
+        } else {
+            RELAY_SPAWNED.store(false, Ordering::SeqCst);
+        }
     }
 
     let addr: SocketAddr = "127.0.0.1:4869"
         .parse::<SocketAddr>()
         .map_err(|e: std::net::AddrParseError| e.to_string())?;
 
-    // Already listening? Don't double-spawn.
+    // A process we do not own could be serving another vault's database. Never
+    // silently attach to it: the fixed loopback port is part of the active
+    // vault boundary.
     if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
-        RELAY_SPAWNED.store(true, Ordering::SeqCst);
-        return Ok("already running".into());
+        return Err("relay port 4869 is already in use by another process".into());
     }
 
     let bin = resolve_relay_binary(&app)?;
+    let runtime = active_vault_runtime()?;
+    let database = runtime.directory.join(VAULT_RELAY_FILENAME);
+    let mut ready_nonce = [0u8; 32];
+    getrandom::fill(&mut ready_nonce)
+        .map_err(|error| format!("generate relay readiness nonce: {error}"))?;
+    let ready_token = hex::encode(ready_nonce);
+    let ready_path = runtime
+        .directory
+        .join(format!(".relay-ready-{}-{ready_token}", std::process::id()));
 
     // The bundled resource may not be executable on disk (resource_dir copy
     // preserves mode on some platforms, not others). Make sure the owner can
@@ -107,23 +840,96 @@ async fn spawn_relay(app: tauri::AppHandle) -> Result<String, String> {
         }
     }
 
-    Command::new(&bin)
+    let child = Command::new(&bin)
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
         .arg("4869")
+        .arg("--db")
+        .arg(&database)
+        .arg("--ready-file")
+        .arg(&ready_path)
+        .arg("--ready-token")
+        .arg(&ready_token)
         .spawn()
         .map_err(|e| format!("failed to spawn relay binary at {}: {}", bin, e))?;
+    *RELAY_CHILD
+        .lock()
+        .map_err(|_| "relay process lock is poisoned".to_string())? = Some(child);
 
-    // Wait for the port to accept connections.
+    // The relay writes the nonce only after its own net.Listen succeeds. A
+    // competing process may win the port race, but it cannot make this child
+    // appear ready; the child exit below is surfaced instead.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if Instant::now() > deadline {
+            let _ = stop_owned_relay();
+            let _ = fs::remove_file(&ready_path);
             return Err("relay spawned but did not start listening within 5s".into());
         }
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
-            RELAY_SPAWNED.store(true, Ordering::SeqCst);
-            return Ok("spawned".into());
+
+        let exited = {
+            let mut owned = RELAY_CHILD
+                .lock()
+                .map_err(|_| "relay process lock is poisoned".to_string())?;
+            let child = owned
+                .as_mut()
+                .ok_or_else(|| "relay process disappeared before readiness".to_string())?;
+            match child.try_wait() {
+                Ok(None) => None,
+                Ok(Some(status)) => {
+                    *owned = None;
+                    Some(status)
+                }
+                Err(error) => return Err(format!("inspect starting vault relay: {error}")),
+            }
+        };
+        if let Some(status) = exited {
+            RELAY_SPAWNED.store(false, Ordering::SeqCst);
+            let _ = fs::remove_file(&ready_path);
+            return Err(format!("vault relay exited before readiness: {status}"));
+        }
+
+        match fs::read_to_string(&ready_path) {
+            Ok(token) if token == ready_token => {
+                if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+                    let child_still_running = {
+                        let mut owned = RELAY_CHILD
+                            .lock()
+                            .map_err(|_| "relay process lock is poisoned".to_string())?;
+                        let child = owned.as_mut().ok_or_else(|| {
+                            "relay process disappeared after readiness".to_string()
+                        })?;
+                        match child.try_wait() {
+                            Ok(None) => true,
+                            Ok(Some(_)) => {
+                                *owned = None;
+                                false
+                            }
+                            Err(error) => return Err(format!("verify ready vault relay: {error}")),
+                        }
+                    };
+                    if child_still_running {
+                        let _ = fs::remove_file(&ready_path);
+                        RELAY_SPAWNED.store(true, Ordering::SeqCst);
+                        return Ok("spawned".into());
+                    }
+                    RELAY_SPAWNED.store(false, Ordering::SeqCst);
+                    let _ = fs::remove_file(&ready_path);
+                    return Err("vault relay exited after publishing readiness".into());
+                }
+            }
+            Ok(_) => {
+                let _ = stop_owned_relay();
+                let _ = fs::remove_file(&ready_path);
+                return Err("vault relay wrote an invalid readiness token".into());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let _ = stop_owned_relay();
+                let _ = fs::remove_file(&ready_path);
+                return Err(format!("read vault relay readiness: {error}"));
+            }
         }
         std::thread::sleep(Duration::from_millis(150));
     }
@@ -151,8 +957,8 @@ fn resolve_relay_binary(app: &tauri::AppHandle) -> Result<String, String> {
     // The checked-in bundle resource can target a prior source revision and is
     // for release packaging, not the live development loop.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let candidate = Path::new(manifest_dir)
-        .join(format!("../../../relay/zine-relay{}", EXE_SUFFIX));
+    let candidate =
+        Path::new(manifest_dir).join(format!("../../../relay/zine-relay{}", EXE_SUFFIX));
     let candidate = candidate.canonicalize().unwrap_or(candidate);
     #[cfg(debug_assertions)]
     if candidate.exists() {
@@ -227,31 +1033,87 @@ async fn factory_reset(
     // Revoke app-owned Tor reachability before deleting the ACL. Otherwise the
     // relay's deliberate local-mode reset window would be reachable through a
     // still-running onion while the new vault screen waits for user input.
-    stop_owned_tor()?;
-    kademlia::reset_runtime(&app, &kademlia_runtime).await?;
+    let active_kademlia_directory = active_vault_binding()?.directory;
+    lock_vault_runtime(app.clone()).await?;
+    kademlia::reset_runtime(&active_kademlia_directory, &kademlia_runtime).await?;
     let bin = resolve_relay_binary(&app)?;
     run_relay_factory_reset(&bin)?;
     std::thread::sleep(Duration::from_millis(5_250));
-    run_relay_factory_reset(&bin)
+    run_relay_factory_reset(&bin)?;
+    if let Some(home) = dirs_home() {
+        let verifier = home.join(".tracer").join(VAULT_RUNTIME_VERIFIER_FILENAME);
+        match fs::remove_file(&verifier) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "remove legacy vault runtime verifier {}: {error}",
+                    verifier.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
-/// Delete the encrypted Stronghold snapshot after JavaScript has unloaded its
-/// active handle. The per-install Argon2 salt is deliberately retained: it is
-/// not key material, and the native process survives a webview reload, so
-/// retaining it avoids a salt/snapshot race while the next empty vault is
-/// created. With no snapshot, bootstrap presents the create-vault flow.
-fn remove_secret_vault_snapshot(data_dir: &Path) -> Result<(), String> {
-    let path = data_dir.join(SECRET_VAULT_FILENAME);
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("remove secure vault {}: {error}", path.display())),
+/// Delete every encrypted vault snapshot and its non-secret index after
+/// JavaScript has unloaded the active Stronghold handle. The per-install
+/// Argon2 salt is retained: it is not key material, and the native process
+/// survives a webview reload.
+fn remove_secret_vaults(data_dir: &Path) -> Result<(), String> {
+    let legacy = data_dir.join(SECRET_VAULT_FILENAME);
+    match fs::remove_file(&legacy) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("remove secure vault {}: {error}", legacy.display())),
     }
+
+    let snapshots = data_dir.join(SECRET_VAULTS_DIRNAME);
+    match fs::remove_dir_all(&snapshots) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "remove secure vaults directory {}: {error}",
+                snapshots.display()
+            ))
+        }
+    }
+
+    for registry in [
+        vault_registry_path(data_dir),
+        vault_registry_staging_path(data_dir),
+        vault_registry_backup_path(data_dir),
+    ] {
+        match fs::remove_file(&registry) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "remove secure-vault registry {}: {error}",
+                    registry.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn factory_reset_vault(app: tauri::AppHandle) -> Result<(), String> {
-    remove_secret_vault_snapshot(&secret_data_dir(&app)?)
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    if ACTIVE_VAULT_RUNTIME
+        .lock()
+        .map_err(|_| "active vault runtime lock is poisoned".to_string())?
+        .is_some()
+    {
+        return Err("Lock the active vault before factory reset".into());
+    }
+    let data_dir = secret_data_dir(&app)?;
+    let _registry_lock = VaultRegistryLock::acquire(&data_dir)?;
+    remove_secret_vaults(&data_dir)
 }
 
 // --- native scan/reify substrate -----------------------------------------
@@ -276,7 +1138,9 @@ fn resolve_under(root: &str, relative: &str) -> Result<PathBuf, String> {
             )
         })
     {
-        return Err(format!("path must be relative to the folder root: {relative}"));
+        return Err(format!(
+            "path must be relative to the folder root: {relative}"
+        ));
     }
     let root_canon = root_path
         .canonicalize()
@@ -433,7 +1297,10 @@ fn scan_external_blocking(abs_path: String) -> Result<Vec<ScannedFile>, String> 
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "scanned".to_string());
-        return Ok(vec![ScannedFile { relative_path: name, content }]);
+        return Ok(vec![ScannedFile {
+            relative_path: name,
+            content,
+        }]);
     }
     // Folder: recurse, one entry per file, relative to the picked root.
     let canon = path
@@ -452,13 +1319,16 @@ fn scan_walk(
     out: &mut Vec<ScannedFile>,
     budget: &mut ScanBudget,
 ) -> Result<(), String> {
-    let entries = fs::read_dir(dir)
-        .map_err(|e| format!("failed to read {}: {}", dir.display(), e))?;
+    let entries =
+        fs::read_dir(dir).map_err(|e| format!("failed to read {}: {}", dir.display(), e))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("entry error: {}", e))?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if IGNORED_SEGMENTS.iter().any(|segment| *segment == name.as_ref()) {
+        if IGNORED_SEGMENTS
+            .iter()
+            .any(|segment| *segment == name.as_ref())
+        {
             continue;
         }
         let ft = match entry.file_type() {
@@ -538,8 +1408,7 @@ const OTS_CALENDAR: &str = "https://alice.btc.calendar.opentimestamps.org";
 /// hours; occasionally never if the calendar drops it).
 #[tauri::command]
 async fn stamp_ots(digest_hex: String) -> Result<String, String> {
-    let bytes = hex::decode(&digest_hex)
-        .map_err(|e| format!("invalid hex digest: {e}"))?;
+    let bytes = hex::decode(&digest_hex).map_err(|e| format!("invalid hex digest: {e}"))?;
     if bytes.len() != 32 {
         return Err(format!("expected 32-byte digest, got {}", bytes.len()));
     }
@@ -604,7 +1473,9 @@ async fn upgrade_ots(proof_b64: String) -> Result<Option<String>, String> {
     // still-pending proof comes back unchanged (same bytes). If nothing grew,
     // there's nothing to republish.
     if upgraded.len() > proof.len() {
-        Ok(Some(base64::engine::general_purpose::STANDARD.encode(&upgraded)))
+        Ok(Some(
+            base64::engine::general_purpose::STANDARD.encode(&upgraded),
+        ))
     } else {
         Ok(None)
     }
@@ -612,11 +1483,10 @@ async fn upgrade_ots(proof_b64: String) -> Result<Option<String>, String> {
 
 // --- Access policy management -------------------------------------------
 //
-// The relay reads ~/.tracer/peers.json (sibling to the relay DB) to decide
-// who may connect. These commands let the webview manage that file without
-// touching the filesystem directly (no tauri-plugin-fs exposed to JS). The
-// relay re-reads the file on its 5s poll, so changes take effect without a
-// restart. See relay/access-policy.go + protocol/transport.md §5.
+// The relay reads the active vault's peers.json (sibling to its relay DB) to
+// decide who may connect. Legacy installs retain ~/.tracer; new vaults keep
+// both files inside their private native directory. The relay re-reads the file
+// on its 5s poll, so changes take effect without a restart.
 
 /// On-disk shape, matching relay/access-policy.go's PeersFile. The `writers`
 /// field is omitted on older files — serde defaults it to empty, and writing
@@ -632,11 +1502,11 @@ struct PeersFile {
     writers: Vec<String>,
 }
 
-/// Resolve ~/.tracer/peers.json — the same path the relay uses (sibling to the
-/// relay DB at ~/.tracer/relay.sqlite3).
-fn peers_json_path() -> Result<PathBuf, String> {
-    let home = dirs_home().ok_or("could not determine home directory")?;
-    Ok(home.join(".tracer").join("peers.json"))
+/// Resolve peers.json from one captured runtime. Callers hold
+/// VAULT_RUNTIME_GATE while capturing the runtime and completing the full
+/// lock/read/write transaction, so a vault switch cannot change the path.
+fn peers_json_path(runtime: &ActiveVaultRuntime) -> PathBuf {
+    runtime.directory.join(VAULT_PEERS_FILENAME)
 }
 
 const PEERS_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -654,8 +1524,7 @@ struct PeersFileLock {
 impl PeersFileLock {
     fn acquire(path: &Path, timeout: Duration) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+            ensure_private_directory(parent)?;
         }
         let deadline = Instant::now() + timeout;
         loop {
@@ -706,8 +1575,7 @@ impl Drop for PeersFileLock {
     }
 }
 
-fn peers_lock_path() -> Result<PathBuf, String> {
-    let peers_path = peers_json_path()?;
+fn peers_lock_path(peers_path: &Path) -> Result<PathBuf, String> {
     let file_name = peers_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -715,53 +1583,98 @@ fn peers_lock_path() -> Result<PathBuf, String> {
     Ok(peers_path.with_file_name(format!("{file_name}.lock")))
 }
 
-fn acquire_peers_file_lock() -> Result<PeersFileLock, String> {
-    PeersFileLock::acquire(&peers_lock_path()?, PEERS_LOCK_TIMEOUT)
+fn acquire_peers_file_lock(peers_path: &Path) -> Result<PeersFileLock, String> {
+    PeersFileLock::acquire(&peers_lock_path(peers_path)?, PEERS_LOCK_TIMEOUT)
 }
 
 /// Read peers.json. Returns a default (empty owner, no peers) if the file
 /// doesn't exist yet — that's the local-mode state.
-fn read_peers_file_unlocked() -> Result<PeersFile, String> {
-    let path = peers_json_path()?;
-    if !path.exists() {
+fn read_peers_file_unlocked(path: &Path) -> Result<PeersFile, String> {
+    let candidates = [
+        path.to_path_buf(),
+        path.with_extension("json.tmp"),
+        path.with_extension("json.bak"),
+    ];
+    let mut errors = Vec::new();
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        match fs::read_to_string(&candidate)
+            .map_err(|error| format!("read {}: {error}", candidate.display()))
+            .and_then(|raw| {
+                serde_json::from_str(&raw)
+                    .map_err(|error| format!("parse {}: {error}", candidate.display()))
+            }) {
+            Ok(peers) => return Ok(peers),
+            Err(error) => errors.push(error),
+        }
+    }
+    if errors.is_empty() {
         return Ok(PeersFile {
             owner: String::new(),
             peers: Vec::new(),
             writers: Vec::new(),
         });
     }
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {}", path.display(), e))?;
-    serde_json::from_str(&raw).map_err(|e| format!("parse {}: {}", path.display(), e))
+    Err(format!(
+        "active vault access policy and recovery copies are unreadable: {}",
+        errors.join("; ")
+    ))
 }
 
 fn read_peers_file() -> Result<PeersFile, String> {
-    let _lock = acquire_peers_file_lock()?;
-    read_peers_file_unlocked()
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let path = peers_json_path(&active_vault_runtime()?);
+    let _lock = acquire_peers_file_lock(&path)?;
+    read_peers_file_unlocked(&path)
 }
 
 /// Write peers.json atomically (temp + rename), mirroring operator.go's
 /// persistence pattern. Writes to a sibling temp file then renames, so a crash
 /// mid-write never leaves a corrupt file.
-fn write_peers_file_unlocked(data: &PeersFile) -> Result<(), String> {
-    let path = peers_json_path()?;
+fn write_peers_file_unlocked(path: &Path, data: &PeersFile) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+        ensure_private_directory(parent)?;
     }
-    let json = serde_json::to_string_pretty(data)
-        .map_err(|e| format!("serialize peers.json: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(data).map_err(|e| format!("serialize peers.json: {e}"))?;
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json)
-        .map_err(|e| format!("write {}: {}", tmp.display(), e))?;
-    fs::rename(&tmp, &path)
-        .map_err(|e| format!("rename {} -> {}: {}", tmp.display(), path.display(), e))
+    let backup = path.with_extension("json.bak");
+    let mut staged = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&tmp)
+        .map_err(|error| format!("open {}: {error}", tmp.display()))?;
+    staged
+        .write_all(json.as_bytes())
+        .map_err(|error| format!("write {}: {error}", tmp.display()))?;
+    staged
+        .sync_all()
+        .map_err(|error| format!("sync {}: {error}", tmp.display()))?;
+    drop(staged);
+    if path.is_file() {
+        fs::copy(path, &backup).map_err(|error| format!("back up {}: {error}", path.display()))?;
+    }
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(&path).map_err(|error| format!("replace {}: {error}", path.display()))?;
+    }
+    fs::rename(&tmp, path)
+        .map_err(|e| format!("rename {} -> {}: {}", tmp.display(), path.display(), e))?;
+    let _ = fs::remove_file(backup);
+    Ok(())
 }
 
 /// Validate a hex pubkey: 64 lowercase hex chars (32 bytes). Matches
 /// relay/access-policy.go's isValidPubkey.
 fn is_valid_pubkey(s: &str) -> bool {
-    s.len() == 64 && s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    s.len() == 64
+        && s.chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 #[derive(Serialize)]
@@ -803,10 +1716,14 @@ fn set_owner(pubkey: String) -> Result<PeersState, String> {
             pubkey
         ));
     }
-    let _lock = acquire_peers_file_lock()?;
-    let mut pf = read_peers_file_unlocked()?;
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let path = peers_json_path(&active_vault_runtime()?);
+    let _lock = acquire_peers_file_lock(&path)?;
+    let mut pf = read_peers_file_unlocked(&path)?;
     pf.owner = pubkey;
-    write_peers_file_unlocked(&pf)?;
+    write_peers_file_unlocked(&path, &pf)?;
     Ok(peers_state(pf))
 }
 
@@ -821,14 +1738,18 @@ fn add_peer(pubkey: String) -> Result<PeersState, String> {
             pubkey
         ));
     }
-    let _lock = acquire_peers_file_lock()?;
-    let mut pf = read_peers_file_unlocked()?;
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let path = peers_json_path(&active_vault_runtime()?);
+    let _lock = acquire_peers_file_lock(&path)?;
+    let mut pf = read_peers_file_unlocked(&path)?;
     if pf.owner == pubkey {
         return Err("that pubkey is the owner (owners have write access, not peer access)".into());
     }
     if !pf.peers.contains(&pubkey) {
         pf.peers.push(pubkey);
-        write_peers_file_unlocked(&pf)?;
+        write_peers_file_unlocked(&path, &pf)?;
     }
     Ok(peers_state(pf))
 }
@@ -836,10 +1757,14 @@ fn add_peer(pubkey: String) -> Result<PeersState, String> {
 /// Remove a peer pubkey.
 #[tauri::command]
 fn remove_peer(pubkey: String) -> Result<PeersState, String> {
-    let _lock = acquire_peers_file_lock()?;
-    let mut pf = read_peers_file_unlocked()?;
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let path = peers_json_path(&active_vault_runtime()?);
+    let _lock = acquire_peers_file_lock(&path)?;
+    let mut pf = read_peers_file_unlocked(&path)?;
     pf.peers.retain(|p| p != &pubkey);
-    write_peers_file_unlocked(&pf)?;
+    write_peers_file_unlocked(&path, &pf)?;
     Ok(peers_state(pf))
 }
 
@@ -855,8 +1780,12 @@ fn add_writer(pubkey: String) -> Result<PeersState, String> {
             pubkey
         ));
     }
-    let _lock = acquire_peers_file_lock()?;
-    let mut pf = read_peers_file_unlocked()?;
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let path = peers_json_path(&active_vault_runtime()?);
+    let _lock = acquire_peers_file_lock(&path)?;
+    let mut pf = read_peers_file_unlocked(&path)?;
     if pf.owner == pubkey {
         return Err("that pubkey is the owner (owners have full write access)".into());
     }
@@ -865,7 +1794,7 @@ fn add_writer(pubkey: String) -> Result<PeersState, String> {
     }
     if !pf.writers.contains(&pubkey) {
         pf.writers.push(pubkey);
-        write_peers_file_unlocked(&pf)?;
+        write_peers_file_unlocked(&path, &pf)?;
     }
     Ok(peers_state(pf))
 }
@@ -873,10 +1802,14 @@ fn add_writer(pubkey: String) -> Result<PeersState, String> {
 /// Remove a writer pubkey.
 #[tauri::command]
 fn remove_writer(pubkey: String) -> Result<PeersState, String> {
-    let _lock = acquire_peers_file_lock()?;
-    let mut pf = read_peers_file_unlocked()?;
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let path = peers_json_path(&active_vault_runtime()?);
+    let _lock = acquire_peers_file_lock(&path)?;
+    let mut pf = read_peers_file_unlocked(&path)?;
     pf.writers.retain(|p| p != &pubkey);
-    write_peers_file_unlocked(&pf)?;
+    write_peers_file_unlocked(&path, &pf)?;
     Ok(peers_state(pf))
 }
 
@@ -894,27 +1827,313 @@ fn remove_writer(pubkey: String) -> Result<PeersState, String> {
 
 static TOR_SPAWNED: AtomicBool = AtomicBool::new(false);
 static TOR_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
+static ACTIVE_ONION_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn valid_onion_service_id(id: &str) -> bool {
+    id.len() == 56
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte))
+}
+
+fn active_onion_marker_path(data_dir: &Path, id: &str) -> PathBuf {
+    data_dir.join(format!("{ACTIVE_ONION_MARKER_PREFIX}{id}"))
+}
+
+/// Detached Tor services survive a process crash, so persist their public
+/// service IDs before ADD_ONION. One create-new marker per ID avoids a JSON
+/// rewrite window where the cleanup registry itself could be lost.
+fn remember_active_onion(data_dir: &Path, id: &str) -> Result<(), String> {
+    if !valid_onion_service_id(id) {
+        return Err("The onion service id is invalid".into());
+    }
+    ensure_private_directory(data_dir)?;
+    let marker = active_onion_marker_path(data_dir, id);
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(mut file) => {
+            file.write_all(id.as_bytes())
+                .map_err(|error| format!("write onion cleanup marker: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("sync onion cleanup marker: {error}"))?;
+            sync_directory(data_dir)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(format!("create onion cleanup marker: {error}")),
+    }
+    let mut ids = ACTIVE_ONION_IDS
+        .lock()
+        .map_err(|_| "active onion registry lock is poisoned".to_string())?;
+    if !ids.iter().any(|candidate| candidate == id) {
+        ids.push(id.to_string());
+    }
+    Ok(())
+}
+
+fn forget_active_onion(data_dir: &Path, id: &str) -> Result<(), String> {
+    let marker = active_onion_marker_path(data_dir, id);
+    match fs::remove_file(&marker) {
+        Ok(()) => sync_directory(data_dir)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("remove onion cleanup marker: {error}")),
+    }
+    ACTIVE_ONION_IDS
+        .lock()
+        .map_err(|_| "active onion registry lock is poisoned".to_string())?
+        .retain(|candidate| candidate != id);
+    Ok(())
+}
+
+fn persisted_onion_ids(data_dir: &Path) -> Result<Vec<String>, String> {
+    let mut ids = Vec::new();
+    let entries = match fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(ids),
+        Err(error) => return Err(format!("read onion cleanup markers: {error}")),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read onion cleanup marker: {error}"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(id) = name.strip_prefix(ACTIVE_ONION_MARKER_PREFIX) else {
+            continue;
+        };
+        if !valid_onion_service_id(id) {
+            return Err(format!("invalid onion cleanup marker: {name}"));
+        }
+        ids.push(id.to_string());
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
 
 fn stop_owned_tor() -> Result<(), String> {
     let mut owned = TOR_CHILD
         .lock()
         .map_err(|_| "Tor process lock is poisoned".to_string())?;
     if let Some(mut child) = owned.take() {
-        if child
-            .try_wait()
-            .map_err(|error| format!("inspect Tor process before reset: {error}"))?
-            .is_none()
-        {
-            child
-                .kill()
-                .map_err(|error| format!("stop Tor before factory reset: {error}"))?;
-            child
-                .wait()
-                .map_err(|error| format!("wait for Tor shutdown before factory reset: {error}"))?;
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if let Err(error) = child.kill() {
+                    *owned = Some(child);
+                    return Err(format!("stop active vault Tor process: {error}"));
+                }
+                if let Err(error) = child.wait() {
+                    *owned = Some(child);
+                    return Err(format!("wait for active vault Tor shutdown: {error}"));
+                }
+            }
+            Err(error) => {
+                *owned = Some(child);
+                return Err(format!("inspect active vault Tor process: {error}"));
+            }
         }
     }
     TOR_SPAWNED.store(false, Ordering::SeqCst);
     Ok(())
+}
+
+fn authenticated_tor_control(
+    app: &tauri::AppHandle,
+) -> Result<(TcpStream, BufReader<TcpStream>), String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("could not resolve app data dir: {error}"))?
+        .join(".tor");
+    let cookie_path = data_dir.join("control_auth_cookie");
+    let mut stream = TcpStream::connect("127.0.0.1:9051")
+        .map_err(|error| format!("could not connect to tor control port: {error}"))?;
+    let reader_stream = stream
+        .try_clone()
+        .map_err(|error| format!("clone tor control stream: {error}"))?;
+    let mut reader = BufReader::new(reader_stream);
+    let cookie_hex = fs::read(&cookie_path)
+        .map_err(|error| format!("could not read control auth cookie: {error}"))
+        .map(|bytes| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        })?;
+    stream
+        .write_all(format!("AUTHENTICATE {cookie_hex}\r\n").as_bytes())
+        .map_err(|error| format!("control write AUTHENTICATE: {error}"))?;
+    read_control_reply(&mut reader, "AUTHENTICATE")?;
+    Ok((stream, reader))
+}
+
+fn remove_active_onions(app: &tauri::AppHandle) -> Result<(), String> {
+    let data_dir = secret_data_dir(app)?;
+    for id in persisted_onion_ids(&data_dir)? {
+        remember_active_onion(&data_dir, &id)?;
+    }
+    let has_ids = !ACTIVE_ONION_IDS
+        .lock()
+        .map_err(|_| "active onion registry lock is poisoned".to_string())?
+        .is_empty();
+    if !has_ids {
+        return Ok(());
+    }
+    // Port unreachability is not proof that the prior Tor process is gone: it
+    // may still be starting after an app crash. `?` retains the durable IDs
+    // until an authenticated control connection confirms DEL_ONION/552.
+    let (mut stream, mut reader) = authenticated_tor_control(app)?;
+    loop {
+        let id = ACTIVE_ONION_IDS
+            .lock()
+            .map_err(|_| "active onion registry lock is poisoned".to_string())?
+            .last()
+            .cloned();
+        let Some(id) = id else {
+            break;
+        };
+        stream
+            .write_all(format!("DEL_ONION {id}\r\n").as_bytes())
+            .map_err(|error| format!("control write DEL_ONION: {error}"))?;
+        match read_control_reply(&mut reader, "DEL_ONION") {
+            Ok(_) => forget_active_onion(&data_dir, &id)?,
+            Err(error) if error.contains("552") => forget_active_onion(&data_dir, &id)?,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Resolve persisted detached services before the first vault can bind the
+/// shared relay port. If the old Tor process is gone, starting our configured
+/// Tor gives us an authenticated control connection where DEL_ONION returning
+/// 552 definitively retires each stale marker.
+fn cleanup_persisted_onions_on_startup(app: &tauri::AppHandle) -> Result<(), String> {
+    let data_dir = secret_data_dir(app)?;
+    if persisted_onion_ids(&data_dir)?.is_empty() {
+        return Ok(());
+    }
+    if remove_active_onions(app).is_ok() {
+        return Ok(());
+    }
+
+    let start_result = spawn_tor(app.clone())
+        .map_err(|error| format!("could not recover detached onion cleanup ownership: {error}"))?;
+    let cleanup_result = remove_active_onions(app);
+    let stop_result = if start_result == "spawned" {
+        stop_owned_tor()
+    } else {
+        Ok(())
+    };
+    match (cleanup_result, stop_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(cleanup), Ok(())) => Err(cleanup),
+        (Ok(()), Err(stop)) => Err(stop),
+        (Err(cleanup), Err(stop)) => Err(format!("{cleanup}; additionally, {stop}")),
+    }
+}
+
+#[tauri::command]
+fn remove_onion(app: tauri::AppHandle, address: String) -> Result<(), String> {
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let id = address.strip_suffix(".onion").unwrap_or(&address);
+    if !valid_onion_service_id(id) {
+        return Err("The onion address is invalid".into());
+    }
+    let is_active = ACTIVE_ONION_IDS
+        .lock()
+        .map_err(|_| "active onion registry lock is poisoned".to_string())?
+        .iter()
+        .any(|candidate| candidate == id);
+    if !is_active {
+        return Ok(());
+    }
+    let (mut stream, mut reader) = authenticated_tor_control(&app)?;
+    stream
+        .write_all(format!("DEL_ONION {id}\r\n").as_bytes())
+        .map_err(|error| format!("control write DEL_ONION: {error}"))?;
+    match read_control_reply(&mut reader, "DEL_ONION") {
+        Ok(_) => {}
+        Err(error) if error.contains("552") => {}
+        Err(error) => return Err(error),
+    }
+    forget_active_onion(&secret_data_dir(&app)?, id)
+}
+
+/// End vault-owned reachability before the webview releases its secret
+/// session. Marking the generation as closing rejects new native work while
+/// Kademlia drains its persistence queue; the active binding remains installed
+/// until every vault-owned service has stopped.
+async fn lock_vault_runtime_inner(
+    app: &tauri::AppHandle,
+    kademlia_runtime: &kademlia::KademliaRuntime,
+) -> Result<(), String> {
+    let _transition = VAULT_TRANSITION_GATE.lock().await;
+    let binding = {
+        let _gate = VAULT_RUNTIME_GATE
+            .lock()
+            .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+        let mut active = ACTIVE_VAULT_RUNTIME
+            .lock()
+            .map_err(|_| "active vault runtime lock is poisoned".to_string())?;
+        let Some(active) = active.as_mut() else {
+            return Ok(());
+        };
+        active.closing = true;
+        active.binding()
+    };
+
+    kademlia::stop_for_vault_transition(kademlia_runtime, &binding).await?;
+
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    remove_active_onions(app)?;
+    stop_owned_tor()?;
+    stop_owned_relay()?;
+    let mut active = ACTIVE_VAULT_RUNTIME
+        .lock()
+        .map_err(|_| "active vault runtime lock is poisoned".to_string())?;
+    match active.as_ref() {
+        Some(current) if current.binding() == binding => *active = None,
+        Some(_) => return Err("The active vault changed during native shutdown".into()),
+        None => return Err("The active vault disappeared during native shutdown".into()),
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn lock_vault_runtime(app: tauri::AppHandle) -> Result<(), String> {
+    let kademlia_runtime = app.state::<kademlia::KademliaRuntime>();
+    lock_vault_runtime_inner(&app, &kademlia_runtime).await
+}
+
+/// A webview reload does not reset native plugin or sidecar state. If the new
+/// renderer finds an already-active vault, close its native reachability and
+/// restart the process so Stronghold is unloaded before any selector appears.
+#[tauri::command]
+async fn recover_webview_reload(app: tauri::AppHandle) -> Result<bool, String> {
+    if WEBVIEW_RESTART_PENDING.load(Ordering::SeqCst) {
+        return Ok(true);
+    }
+    if WEBVIEW_RESTART_PENDING.load(Ordering::SeqCst) {
+        return Ok(true);
+    }
+    let active = ACTIVE_VAULT_RUNTIME
+        .lock()
+        .map_err(|_| "active vault runtime lock is poisoned".to_string())?
+        .is_some();
+    if !active {
+        return Ok(false);
+    }
+    lock_vault_runtime(app.clone()).await?;
+    WEBVIEW_RESTART_PENDING.store(true, Ordering::SeqCst);
+    app.request_restart();
+    Ok(true)
 }
 
 /// Spawn the Tor daemon if it isn't already up. Mirrors spawn_relay: locate the
@@ -922,7 +2141,10 @@ fn stop_owned_tor() -> Result<(), String> {
 /// / "spawned" / "already spawned" so the caller can decide whether to set up
 /// the onion service next.
 #[tauri::command]
-async fn spawn_tor(app: tauri::AppHandle) -> Result<String, String> {
+fn spawn_tor(app: tauri::AppHandle) -> Result<String, String> {
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
     if TOR_SPAWNED.load(Ordering::SeqCst) {
         return Ok("already spawned".into());
     }
@@ -946,7 +2168,7 @@ async fn spawn_tor(app: tauri::AppHandle) -> Result<String, String> {
         .app_data_dir()
         .map_err(|e| format!("could not resolve app data dir: {e}"))?
         .join(".tor");
-    fs::create_dir_all(&data_dir)
+    ensure_private_directory(&data_dir)
         .map_err(|e| format!("could not create tor data dir: {e}"))?;
 
     // Cookie auth for the control port — safer than a hashed password (no
@@ -997,10 +2219,10 @@ fn resolve_tor_binary(app: &tauri::AppHandle) -> Result<String, String> {
         }
         return Err(format!("TRACER_TOR_BIN set but not found: {}", bin));
     }
-    if let Ok(resource) =
-        app.path()
-            .resolve(format!("binaries/tor{}", EXE_SUFFIX), BaseDirectory::Resource)
-    {
+    if let Ok(resource) = app.path().resolve(
+        format!("binaries/tor{}", EXE_SUFFIX),
+        BaseDirectory::Resource,
+    ) {
         if resource.exists() {
             // Ensure the exec bit is set (same fixup as the relay binary).
             #[cfg(unix)]
@@ -1040,49 +2262,74 @@ fn resolve_tor_binary(app: &tauri::AppHandle) -> Result<String, String> {
 /// relay at 127.0.0.1:4869. The seed is the 32-byte ed25519 key derived from
 /// the Nostr secret (see onion-key.ts), passed as base64. Returns the .onion
 /// address Tor reports — which MUST match the address the press computed
-/// independently (pure crypto, no Tor). A mismatch means the seed was corrupted
-/// in transit; the caller should treat it as an error.
+/// independently (pure crypto, no Tor). The expected address is persisted
+/// before registration so a crash cannot lose cleanup ownership of a detached
+/// service. A mismatch means the seed was corrupted in transit.
 #[tauri::command]
-async fn setup_onion(app: tauri::AppHandle, seed_base64: String) -> Result<String, String> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("could not resolve app data dir: {e}"))?
-        .join(".tor");
-    let cookie_path = data_dir.join("control_auth_cookie");
+fn setup_onion(
+    app: tauri::AppHandle,
+    seed_base64: String,
+    expected_address: String,
+) -> Result<String, String> {
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let runtime = active_vault_runtime()?;
+    let peers_path = peers_json_path(&runtime);
+    let peers = {
+        let _peers_lock = acquire_peers_file_lock(&peers_path)?;
+        read_peers_file_unlocked(&peers_path)?
+    };
+    if !is_valid_pubkey(&peers.owner) {
+        return Err("Activate networked mode before making this vault reachable".into());
+    }
 
-    // Connect to Tor's control port (line-based text protocol, RFC-ish).
-    let mut stream = TcpStream::connect("127.0.0.1:9051")
-        .map_err(|e| format!("could not connect to tor control port: {e}"))?;
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-
-    // Authenticate via cookie. Tor sends the hex-encoded cookie on connect.
-    let cookie_hex = fs::read(&cookie_path)
-        .map_err(|e| format!("could not read control auth cookie: {e}"))
-        .map(|bytes| {
-            bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
-        })?;
-    let auth_cmd = format!("AUTHENTICATE {}\r\n", cookie_hex);
-    stream
-        .write_all(auth_cmd.as_bytes())
-        .map_err(|e| format!("control write AUTHENTICATE: {e}"))?;
-    read_control_reply(&mut reader, "AUTHENTICATE")?;
+    let expected_id = expected_address
+        .strip_suffix(".onion")
+        .unwrap_or(&expected_address);
+    if !valid_onion_service_id(expected_id) {
+        return Err("The expected onion address is invalid".into());
+    }
+    let (mut stream, mut reader) = authenticated_tor_control(&app)?;
+    let data_dir = secret_data_dir(&app)?;
+    remember_active_onion(&data_dir, expected_id)?;
 
     // ADD_ONION with the derived key. Port=80,127.0.0.1:4869 means inbound
     // onion port 80 forwards to the relay's localhost port. The key is passed
     // inline — never persisted to disk by Tor (transport.md §3.4).
     let add_cmd = format!(
-        "ADD_ONION ED25519-V3:{} Port=80,127.0.0.1:4869\r\n",
+        "ADD_ONION ED25519-V3:{} Flags=Detach Port=80,127.0.0.1:4869\r\n",
         seed_base64
     );
     stream
         .write_all(add_cmd.as_bytes())
         .map_err(|e| format!("control write ADD_ONION: {e}"))?;
 
-    // The reply contains a line like: 250-ServiceID=<address-without-.onion>
+    // The reply contains a line like: 250-ServiceID=<address-without-.onion>.
+    // Keep the expected marker on ambiguous control failures; the next normal
+    // lock or app startup will issue a harmless DEL_ONION retry.
     let reply = read_control_reply(&mut reader, "ADD_ONION")?;
     for line in &reply {
         if let Some(rest) = line.strip_prefix("ServiceID=") {
+            if rest != expected_id {
+                if valid_onion_service_id(rest) {
+                    remember_active_onion(&data_dir, rest)?;
+                    stream
+                        .write_all(format!("DEL_ONION {rest}\r\n").as_bytes())
+                        .map_err(|error| format!("control write mismatched DEL_ONION: {error}"))?;
+                    match read_control_reply(&mut reader, "DEL_ONION") {
+                        Ok(_) => forget_active_onion(&data_dir, rest)?,
+                        Err(error) if error.contains("552") => {
+                            forget_active_onion(&data_dir, rest)?
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                forget_active_onion(&data_dir, expected_id)?;
+                return Err(format!(
+                    "Tor reported {rest}.onion but the selected key derives {expected_address}"
+                ));
+            }
             return Ok(format!("{}.onion", rest));
         }
     }
@@ -1096,10 +2343,7 @@ async fn setup_onion(app: tauri::AppHandle, seed_base64: String) -> Result<Strin
 /// the (250 OK) response. Tor uses 3-digit codes: 6xx = multiline, 250 = OK.
 /// We read until a line whose 4th char is a space (not '-'), which ends the
 /// reply. Non-250 final codes are errors.
-fn read_control_reply<R: BufRead>(
-    reader: &mut R,
-    label: &str,
-) -> Result<Vec<String>, String> {
+fn read_control_reply<R: BufRead>(reader: &mut R, label: &str) -> Result<Vec<String>, String> {
     let mut lines = Vec::new();
     loop {
         let mut line = String::new();
@@ -1130,24 +2374,43 @@ fn read_control_reply<R: BufRead>(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        // Must be the first plugin: a second process must exit before it can
+        // open Stronghold or a decrypted workspace cache.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
+            }
+        }));
+    }
+    let app = builder
         .manage(kademlia::KademliaRuntime::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let data_dir = secret_data_dir(app.handle())
-                .map_err(std::io::Error::other)?;
-            fs::create_dir_all(&data_dir)?;
+            let data_dir = secret_data_dir(app.handle()).map_err(std::io::Error::other)?;
+            ensure_private_directory(&data_dir).map_err(std::io::Error::other)?;
+            // A prior crash may have left detached onion services alive. Drain
+            // their durable IDs before any vault can bind the shared relay port.
+            cleanup_persisted_onions_on_startup(app.handle()).map_err(std::io::Error::other)?;
             app.handle().plugin(
-                tauri_plugin_stronghold::Builder::with_argon2(
-                    &data_dir.join(SECRET_SALT_FILENAME),
-                )
+                tauri_plugin_stronghold::Builder::new(move |password| {
+                    derive_stronghold_key(&data_dir, password)
+                })
                 .build(),
             )?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             secret_vault_status,
+            list_secret_vaults,
+            create_secret_vault,
+            discard_empty_secret_vault,
+            activate_vault_runtime,
+            lock_vault_runtime,
+            recover_webview_reload,
             spawn_relay,
             factory_reset,
             factory_reset_vault,
@@ -1160,6 +2423,7 @@ pub fn run() {
             upgrade_ots,
             spawn_tor,
             setup_onion,
+            remove_onion,
             list_peers,
             set_owner,
             add_peer,
@@ -1173,8 +2437,18 @@ pub fn run() {
             kademlia::kademlia_lookup,
             rendezvous_relay::rendezvous_sample_relay,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if let Err(error) =
+                tauri::async_runtime::block_on(lock_vault_runtime(app_handle.clone()))
+            {
+                eprintln!("could not stop the active vault runtime: {error}");
+                api.prevent_exit();
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1209,28 +2483,302 @@ mod tests {
     }
 
     #[test]
-    fn factory_reset_removes_only_the_secret_vault_snapshot() {
+    fn vault_registry_adopts_the_legacy_snapshot_without_moving_it() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("zine-secret-adopt-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create secret adoption test directory");
+        let legacy = dir.join(SECRET_VAULT_FILENAME);
+        fs::write(&legacy, b"encrypted").expect("write legacy vault fixture");
+
+        let first = load_vault_registry(&dir).expect("adopt legacy vault");
+        let second = load_vault_registry(&dir).expect("reopen adopted registry");
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].id, LEGACY_VAULT_ID);
+        assert!(first[0].legacy);
+        assert_eq!(second.len(), 1, "adoption must be idempotent");
+        assert!(legacy.exists(), "adoption must preserve the snapshot path");
+        assert!(vault_registry_path(&dir).is_file());
+        fs::remove_dir_all(dir).expect("remove secret adoption test directory");
+    }
+
+    #[test]
+    fn reserved_vaults_get_distinct_snapshot_paths_and_start_empty() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after Unix epoch")
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "zine-secret-reset-{}-{nonce}",
+            "zine-secret-reserve-{}-{nonce}",
             std::process::id()
         ));
+        fs::create_dir_all(&dir).expect("create secret reservation test directory");
+
+        let first = reserve_secret_vault(&dir, "Work", nonce).expect("reserve first vault");
+        let second = reserve_secret_vault(&dir, "Personal", nonce).expect("reserve second vault");
+        let records = load_vault_registry(&dir).expect("reopen vault registry");
+
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.name, "Work");
+        assert!(!first.snapshot_exists);
+        assert!(!second.snapshot_exists);
+        assert_eq!(records.len(), 2);
+        let first_path = vault_snapshot_path(
+            &dir,
+            records
+                .iter()
+                .find(|vault| vault.id == first.id)
+                .expect("first record"),
+        )
+        .expect("first snapshot path");
+        let second_path = vault_snapshot_path(
+            &dir,
+            records
+                .iter()
+                .find(|vault| vault.id == second.id)
+                .expect("second record"),
+        )
+        .expect("second snapshot path");
+        assert_ne!(first_path, second_path);
+        assert_eq!(
+            first_path.file_name().and_then(|name| name.to_str()),
+            Some(SECRET_VAULT_SNAPSHOT_FILENAME)
+        );
+        assert_eq!(
+            first_path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str()),
+            Some(first.id.as_str())
+        );
+        fs::remove_dir_all(dir).expect("remove secret reservation test directory");
+    }
+
+    #[test]
+    fn vault_names_are_unique_without_case_or_whitespace_ambiguity() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("zine-secret-name-{}-{nonce}", std::process::id()));
+        reserve_secret_vault(&dir, "Work", nonce).expect("reserve named vault");
+        let duplicate = reserve_secret_vault(&dir, " work ", nonce + 1);
+        assert!(duplicate.unwrap_err().contains("already exists"));
+        fs::remove_dir_all(dir).expect("remove vault name test directory");
+    }
+
+    #[test]
+    fn vault_registry_recovers_when_the_live_file_is_missing_or_corrupt() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "zine-secret-recovery-{}-{nonce}",
+            std::process::id()
+        ));
+        let created =
+            reserve_secret_vault(&dir, "Recoverable", nonce).expect("reserve recoverable vault");
+        let registry = vault_registry_path(&dir);
+        let backup = vault_registry_backup_path(&dir);
+        fs::copy(&registry, &backup).expect("stage registry backup");
+        fs::write(&registry, b"not-json").expect("corrupt live registry");
+
+        let recovered = load_vault_registry(&dir).expect("recover registry backup");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].id, created.id);
+
+        fs::remove_file(&registry).expect("remove live registry");
+        let recovered_missing = load_vault_registry(&dir).expect("recover missing registry");
+        assert_eq!(recovered_missing[0].id, created.id);
+        fs::remove_dir_all(dir).expect("remove registry recovery test directory");
+    }
+
+    #[test]
+    fn vault_registry_rejects_duplicate_ids_and_names() {
+        let dir =
+            std::env::temp_dir().join(format!("zine-secret-duplicates-{}", std::process::id()));
+        let duplicate_ids = br#"[
+          {"id":"vault-one","name":"One","createdAt":1,"legacy":false},
+          {"id":"vault-one","name":"Two","createdAt":2,"legacy":false}
+        ]"#;
+        assert!(validate_vault_registry(&dir, duplicate_ids)
+            .unwrap_err()
+            .contains("duplicate id"));
+
+        let duplicate_names = br#"[
+          {"id":"vault-one","name":"Work","createdAt":1,"legacy":false},
+          {"id":"vault-two","name":" work ","createdAt":2,"legacy":false}
+        ]"#;
+        assert!(validate_vault_registry(&dir, duplicate_names)
+            .unwrap_err()
+            .contains("duplicate name"));
+    }
+
+    #[test]
+    fn vault_registry_lock_excludes_a_second_transaction() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("zine-secret-lock-{}-{nonce}", std::process::id()));
+        let first = VaultRegistryLock::acquire(&dir).expect("acquire first registry lock");
+        let second = VaultRegistryLock::acquire(&dir);
+        assert!(second.is_err(), "a second registry transaction must wait");
+        drop(first);
+        VaultRegistryLock::acquire(&dir).expect("registry lock should be reusable");
+        fs::remove_dir_all(dir).expect("remove registry lock test directory");
+    }
+
+    #[test]
+    fn new_vaults_have_distinct_kdf_salt_paths() {
+        let dir = std::env::temp_dir().join(format!("zine-secret-salts-{}", std::process::id()));
+        let first = vault_salt_path(&dir, Some("vault-one")).expect("first salt path");
+        let second = vault_salt_path(&dir, Some("vault-two")).expect("second salt path");
+        let legacy = vault_salt_path(&dir, None).expect("legacy salt path");
+        assert_ne!(first, second);
+        assert_ne!(first, legacy);
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some(SECRET_VAULT_SALT_FILENAME)
+        );
+    }
+
+    #[test]
+    fn kdf_v1_matches_the_legacy_stronghold_plugin() {
+        let passphrase = b"legacy vault passphrase";
+        let salt = [0x5au8; 32];
+        let legacy = argon2_legacy::hash_raw(passphrase, &salt, &argon2_legacy::Config::default())
+            .expect("legacy plugin KDF vector");
+
+        assert_eq!(derive_stronghold_key_v1(passphrase, &salt), legacy);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_relay_can_stop_and_relaunch_without_leaving_a_child() {
+        let _gate = VAULT_RUNTIME_GATE
+            .lock()
+            .expect("vault runtime operation lock");
+
+        for _ in 0..2 {
+            let child = Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn relay stand-in");
+            *RELAY_CHILD.lock().expect("relay process lock") = Some(child);
+            RELAY_SPAWNED.store(true, Ordering::SeqCst);
+
+            stop_owned_relay().expect("stop relay stand-in");
+            assert!(!RELAY_SPAWNED.load(Ordering::SeqCst));
+            assert!(RELAY_CHILD.lock().expect("relay process lock").is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_directories_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("zine-private-directory-{}", std::process::id()));
+        ensure_private_directory(&dir).expect("create protected vault directory");
+        let mode = fs::metadata(&dir)
+            .expect("read protected directory metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0);
+        fs::remove_dir_all(dir).expect("remove protected directory test fixture");
+    }
+
+    #[test]
+    fn native_runtime_requires_the_workspace_key_sealed_by_the_vault() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("zine-runtime-key-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create runtime verifier directory");
+        verify_vault_runtime_key(&dir, &[0x11; 32]).expect("install runtime verifier");
+        verify_vault_runtime_key(&dir, &[0x11; 32]).expect("reopen with matching key");
+        assert!(verify_vault_runtime_key(&dir, &[0x22; 32])
+            .unwrap_err()
+            .contains("did not authorize"));
+        fs::remove_dir_all(dir).expect("remove runtime verifier test directory");
+    }
+
+    #[test]
+    fn native_commands_require_an_open_non_closing_vault_generation() {
+        assert!(usable_vault_runtime(None)
+            .expect_err("locked vault must reject native commands")
+            .contains("Unlock a vault"));
+
+        let closing = ActiveVaultRuntime {
+            id: "vault-a".into(),
+            directory: PathBuf::from("vault-a"),
+            generation: 41,
+            closing: true,
+        };
+        assert!(usable_vault_runtime(Some(closing))
+            .expect_err("closing generation must reject native commands")
+            .contains("locking"));
+
+        let open = ActiveVaultRuntime {
+            id: "vault-a".into(),
+            directory: PathBuf::from("vault-a"),
+            generation: 42,
+            closing: false,
+        };
+        assert_eq!(
+            usable_vault_runtime(Some(open.clone()))
+                .expect("open generation is usable")
+                .binding(),
+            open.binding()
+        );
+    }
+
+    #[test]
+    fn factory_reset_removes_all_secret_vaults_but_keeps_the_kdf_salt() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("zine-secret-reset-{}-{nonce}", std::process::id()));
         fs::create_dir_all(&dir).expect("create secret reset test directory");
         let vault = dir.join(SECRET_VAULT_FILENAME);
+        let vaults_dir = dir.join(SECRET_VAULTS_DIRNAME);
+        let second_vault = vaults_dir
+            .join("vault-test")
+            .join(SECRET_VAULT_SNAPSHOT_FILENAME);
+        let registry = vault_registry_path(&dir);
         let salt = dir.join(SECRET_SALT_FILENAME);
         let unrelated = dir.join("keep-me");
+        fs::create_dir_all(second_vault.parent().expect("second vault directory"))
+            .expect("create vault snapshots directory");
         fs::write(&vault, b"encrypted").expect("write vault fixture");
+        fs::write(&second_vault, b"encrypted-too").expect("write second vault fixture");
+        fs::write(&registry, b"[]").expect("write registry fixture");
         fs::write(&salt, b"salt").expect("write salt fixture");
         fs::write(&unrelated, b"other").expect("write unrelated fixture");
 
-        remove_secret_vault_snapshot(&dir).expect("reset vault snapshot");
-        remove_secret_vault_snapshot(&dir).expect("reset should be idempotent");
+        remove_secret_vaults(&dir).expect("reset vault snapshots");
+        remove_secret_vaults(&dir).expect("reset should be idempotent");
 
         assert!(!vault.exists());
-        assert!(salt.exists(), "the live plugin's KDF salt must survive reload");
+        assert!(!vaults_dir.exists());
+        assert!(!registry.exists());
+        assert!(
+            salt.exists(),
+            "the live plugin's KDF salt must survive reload"
+        );
         assert!(unrelated.exists());
         fs::remove_dir_all(dir).expect("remove secret reset test directory");
     }
@@ -1262,6 +2810,91 @@ mod tests {
             .expect("lock should be reusable after release");
         drop(second);
         fs::remove_dir_all(dir).expect("remove lock test directory");
+    }
+
+    #[test]
+    fn peers_transaction_keeps_the_captured_vault_path() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "zine-peers-captured-path-{}-{nonce}",
+            std::process::id()
+        ));
+        let vault_a = ActiveVaultRuntime {
+            id: "vault-a".into(),
+            directory: dir.join("vault-a"),
+            generation: 1,
+            closing: false,
+        };
+        let vault_b = ActiveVaultRuntime {
+            id: "vault-b".into(),
+            directory: dir.join("vault-b"),
+            generation: 2,
+            closing: false,
+        };
+        let path_a = peers_json_path(&vault_a);
+        let path_b = peers_json_path(&vault_b);
+        let owner = "a".repeat(64);
+        {
+            let _lock = acquire_peers_file_lock(&path_a).expect("lock captured vault ACL");
+            write_peers_file_unlocked(
+                &path_a,
+                &PeersFile {
+                    owner: owner.clone(),
+                    peers: Vec::new(),
+                    writers: Vec::new(),
+                },
+            )
+            .expect("write captured vault ACL");
+        }
+
+        assert_eq!(
+            read_peers_file_unlocked(&path_a)
+                .expect("read captured vault ACL")
+                .owner,
+            owner
+        );
+        assert!(!path_b.exists(), "another vault path must remain untouched");
+        fs::remove_dir_all(dir).expect("remove captured path test directory");
+    }
+
+    #[test]
+    fn detached_onion_cleanup_ids_survive_process_memory_loss() {
+        let _gate = VAULT_RUNTIME_GATE
+            .lock()
+            .expect("vault runtime operation lock");
+        ACTIVE_ONION_IDS
+            .lock()
+            .expect("active onion registry")
+            .clear();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("zine-onion-cleanup-{}-{nonce}", std::process::id()));
+        let id = "a".repeat(56);
+
+        remember_active_onion(&dir, &id).expect("persist detached onion id");
+        ACTIVE_ONION_IDS
+            .lock()
+            .expect("active onion registry")
+            .clear();
+        let persisted = persisted_onion_ids(&dir).expect("recover marker");
+        assert_eq!(persisted.as_slice(), std::slice::from_ref(&id));
+
+        remember_active_onion(&dir, &id).expect("reload detached onion id");
+        forget_active_onion(&dir, &id).expect("retire detached onion id");
+        assert!(persisted_onion_ids(&dir)
+            .expect("read retired markers")
+            .is_empty());
+        assert!(ACTIVE_ONION_IDS
+            .lock()
+            .expect("active onion registry")
+            .is_empty());
+        fs::remove_dir_all(dir).expect("remove onion cleanup test directory");
     }
 
     #[test]

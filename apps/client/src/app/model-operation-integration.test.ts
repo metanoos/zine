@@ -30,9 +30,10 @@ test("all five MODEL actions delegate approved preparation and stale-safe execut
   }
 });
 
-test("Inspector renders frozen PreparedOperation messages and owns explicit approval", () => {
+test("Inspector dispatches the frozen PreparedOperation through App's explicit approval boundary", () => {
   assert.match(inspector, /preparedOperation\?\.messages \?\? \[\]/);
-  assert.match(inspector, /onApprove\(preparedOperation\)/);
+  assert.match(inspector, /onDispatch\(preparedOperation\)/);
+  assert.match(app, /onDispatch=\{\(prepared\) => \{[\s\S]*?\.approve\(prepared\);[\s\S]*?runOp\(opTargetPanel\(\), prepared\.operation, prepared\)/);
   assert.doesNotMatch(inspector, /assembleOpMessages|prepareChatMessages|complete\(/);
 });
 
@@ -81,4 +82,29 @@ test("Extend and Settle alone use the current-session trace-authoring adapter", 
   assert.match(settle, /sourceFrom/);
   assert.match(settle, /validateTraceAuthoringResult/);
   assert.doesNotMatch(stir, /traceAuthoring|buildAcceptedExtendChanges|validateTraceAuthoringResult/);
+});
+
+test("Inspector prepares local operations without waiting on ancillary relay reads", () => {
+  const source = functionBody("openInspector", "/** Begin an in-place op");
+  const hydrate = functionBody("hydrateInspectorInputs", "async function prepareInspectorSelection");
+  assert.match(source, /setInspectOp\(defaultOperation\)[\s\S]*prepareInspectorSelection\(/);
+  assert.doesNotMatch(source, /fetchPalette\(|focusTimeline\(|Promise\.allSettled/);
+  assert.match(hydrate, /operation === "reply"[\s\S]*fetchPalette\(/);
+  assert.match(hydrate, /operation === "analyze"[\s\S]*focusTimeline\(/);
+  assert.match(source, /inspectOpenSequenceRef\.current/);
+});
+
+test("Inspector invalidates pending preparation when its prompt context changes", () => {
+  assert.match(app, /if \(!inspectIsOpenRef\.current\) return;/);
+  assert.match(app, /inspectOpenSequenceRef\.current\+\+;/);
+  assert.match(app, /inspectInputsReadyRef\.current = \{[\s\S]*extend: false/);
+  assert.match(app, /The file or prompt context changed/);
+});
+
+test("Reply freezes the selected source range into Inspector and execution inputs", () => {
+  const derive = functionBody("deriveInspectInputs", "async function prepareInspectorOperation");
+  const reply = functionBody("replyLLM", "function analyzeLLM");
+  assert.match(derive, /reply: \{ source: stirText, sourceFrom: .*sourceTo:/s);
+  assert.match(reply, /approvedRequest\?\.operation === "reply"[\s\S]*approvedRequest\.operationInputs/);
+  assert.match(reply, /inputs = \{ source: sourceText, traces, sourceFrom, sourceTo \}/);
 });

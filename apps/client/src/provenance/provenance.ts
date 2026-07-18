@@ -1,6 +1,10 @@
 import { finalizeEvent, getPublicKey, verifyEvent } from "nostr-tools/pure";
 import type { Event, EventTemplate } from "nostr-tools";
 import type { Filter } from "nostr-tools";
+import {
+  subscribeVaultStorage,
+  vaultStorage as localStorage,
+} from "../storage/vault-storage.js";
 import { Relay } from "nostr-tools/relay";
 import {
   createTraceOperationId,
@@ -37,9 +41,12 @@ import {
   removeLocalEvent,
 } from "./event-outbox.js";
 import {
+  captureRendezvousOutboxSession,
   drainRendezvousEvents,
   enqueueRendezvousEvent,
+  isRendezvousOutboxSessionCurrent,
   pendingRendezvousEvents,
+  type RendezvousOutboxSession,
 } from "./rendezvous-outbox.js";
 
 /**
@@ -1220,10 +1227,22 @@ const RENDEZVOUS_RETRY_MIN_MS = 5_000;
 const RENDEZVOUS_RETRY_MAX_MS = 5 * 60_000;
 let rendezvousRetryTimer: ReturnType<typeof setTimeout> | undefined;
 let rendezvousRetryDelayMs = RENDEZVOUS_RETRY_MIN_MS;
+let rendezvousRetrySession: RendezvousOutboxSession | undefined;
+const rendezvousFlushControllers = new Set<AbortController>();
 
-function scheduleRendezvousOutboxRetry(): void {
+function sameRendezvousSession(
+  left: RendezvousOutboxSession | undefined,
+  right: RendezvousOutboxSession,
+): boolean {
+  return !!left && left.scope === right.scope && left.generation === right.generation;
+}
+
+function scheduleRendezvousOutboxRetry(
+  session: RendezvousOutboxSession = captureRendezvousOutboxSession(),
+): void {
   if (
     rendezvousRetryTimer ||
+    !isRendezvousOutboxSessionCurrent(session) ||
     !isTauri() ||
     !loadKademliaConfig().enabled
   ) return;
@@ -1232,20 +1251,37 @@ function scheduleRendezvousOutboxRetry(): void {
     RENDEZVOUS_RETRY_MAX_MS,
     rendezvousRetryDelayMs * 2,
   );
+  rendezvousRetrySession = session;
   rendezvousRetryTimer = setTimeout(() => {
     rendezvousRetryTimer = undefined;
+    rendezvousRetrySession = undefined;
+    if (!isRendezvousOutboxSessionCurrent(session)) return;
     void flushRendezvousPublicationOutbox().catch((error) => {
       console.warn("[rendezvous] scheduled indexing retry failed:", error);
-      scheduleRendezvousOutboxRetry();
+      scheduleRendezvousOutboxRetry(session);
     });
   }, delayMs);
 }
 
-function resetRendezvousOutboxRetry(): void {
+function resetRendezvousOutboxRetry(session?: RendezvousOutboxSession): void {
+  if (session && rendezvousRetrySession && !sameRendezvousSession(rendezvousRetrySession, session)) {
+    return;
+  }
   if (rendezvousRetryTimer) clearTimeout(rendezvousRetryTimer);
   rendezvousRetryTimer = undefined;
+  rendezvousRetrySession = undefined;
   rendezvousRetryDelayMs = RENDEZVOUS_RETRY_MIN_MS;
 }
+
+/** The shared vault fence fires before native shutdown. Abort active network
+ * waits immediately; queued tasks retain their captured generation and become
+ * inert when they reach the serialized drain. */
+subscribeVaultStorage(() => {
+  resetRendezvousOutboxRetry();
+  const reason = new Error("vault session changed during rendezvous indexing");
+  reason.name = "AbortError";
+  for (const controller of rendezvousFlushControllers) controller.abort(reason);
+});
 
 /** Retry durable Send-side indexing without allowing one event's unavailable
  * relay to starve independent work. Disabled presses retain queued work until
@@ -1254,41 +1290,75 @@ export async function flushRendezvousPublicationOutbox(): Promise<{
   pending: number;
   completed: number;
 }> {
+  const session = captureRendezvousOutboxSession();
   if (!isTauri()) return { pending: 0, completed: 0 };
   if (!loadKademliaConfig().enabled) {
-    return { pending: (await pendingRendezvousEvents()).length, completed: 0 };
+    return {
+      pending: (await pendingRendezvousEvents(undefined, session)).length,
+      completed: 0,
+    };
   }
   const task = rendezvousOutboxFlushQueue.then(async () => {
-    const { publishSentCoinCitations } = await import("./rendezvous.js");
-    const result = await drainRendezvousEvents(async (eventId) => {
-      // Configuration can change while an earlier event is in flight. Never
-      // treat the rendezvous module's disabled no-op as terminal completion.
-      if (!isTauri() || !loadKademliaConfig().enabled) return false;
-      try {
-        const event = await fetchEventById(eventId);
-        if (!event) {
-          console.warn(
-            `[rendezvous] Send ${eventId} remains queued because its carrying event is not fetchable`,
-          );
-          return false;
+    if (!isRendezvousOutboxSessionCurrent(session)) {
+      return {
+        pending: (await pendingRendezvousEvents(undefined, session)).length,
+        completed: 0,
+      };
+    }
+    const controller = new AbortController();
+    rendezvousFlushControllers.add(controller);
+    try {
+      const { publishSentCoinCitations } = await import("./rendezvous.js");
+      const result = await drainRendezvousEvents(async (eventId) => {
+        // Configuration or vault authority can change while an earlier event is
+        // in flight. Never let the old task remove or reschedule another vault's
+        // durable work.
+        if (
+          controller.signal.aborted ||
+          !isRendezvousOutboxSessionCurrent(session) ||
+          !isTauri() ||
+          !loadKademliaConfig().enabled
+        ) return false;
+        try {
+          const event = await fetchEventById(eventId);
+          if (!event) {
+            console.warn(
+              `[rendezvous] Send ${eventId} remains queued because its carrying event is not fetchable`,
+            );
+            return false;
+          }
+          if (controller.signal.aborted || !isRendezvousOutboxSessionCurrent(session)) {
+            return false;
+          }
+          const report = await publishSentCoinCitations(event, { signal: controller.signal });
+          if (
+            controller.signal.aborted ||
+            !isRendezvousOutboxSessionCurrent(session) ||
+            !isTauri() ||
+            !loadKademliaConfig().enabled
+          ) return false;
+          if (!report.complete) {
+            console.warn(
+              `[rendezvous] Send ${event.id} remains queued for indexing:`,
+              report.failures,
+            );
+          }
+          return report.complete;
+        } catch (error) {
+          if (!controller.signal.aborted && isRendezvousOutboxSessionCurrent(session)) {
+            console.warn(`[rendezvous] Send ${eventId} remains queued for indexing:`, error);
+          }
+          throw error;
         }
-        const report = await publishSentCoinCitations(event);
-        if (!isTauri() || !loadKademliaConfig().enabled) return false;
-        if (!report.complete) {
-          console.warn(
-            `[rendezvous] Send ${event.id} remains queued for indexing:`,
-            report.failures,
-          );
-        }
-        return report.complete;
-      } catch (error) {
-        console.warn(`[rendezvous] Send ${eventId} remains queued for indexing:`, error);
-        throw error;
+      }, undefined, session);
+      if (isRendezvousOutboxSessionCurrent(session)) {
+        if (result.pending > 0) scheduleRendezvousOutboxRetry(session);
+        else resetRendezvousOutboxRetry(session);
       }
-    });
-    if (result.pending > 0) scheduleRendezvousOutboxRetry();
-    else resetRendezvousOutboxRetry();
-    return result;
+      return result;
+    } finally {
+      rendezvousFlushControllers.delete(controller);
+    }
   });
   rendezvousOutboxFlushQueue = task.then(() => undefined, () => undefined);
   return task;

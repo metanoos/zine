@@ -55,3 +55,21 @@ test("a vault deletion failure reloads instead of leaving a closed session rende
 
   assert.deepEqual(calls, ["desktop", "close", "browser", "vault", "reload"]);
 });
+
+test("a vault unload failure reloads instead of leaving a locked app rendered", async () => {
+  const calls: string[] = [];
+  await assert.rejects(
+    runFactoryReset({
+      resetDesktopState: async () => { calls.push("desktop"); },
+      closeSecrets: async () => {
+        calls.push("close");
+        throw new Error("vault unload failed");
+      },
+      deleteDesktopVault: async () => { calls.push("vault"); },
+      clearBrowserState: () => { calls.push("browser"); },
+      reload: () => { calls.push("reload"); },
+    }),
+    /vault unload failed/,
+  );
+  assert.deepEqual(calls, ["desktop", "close", "reload"]);
+});

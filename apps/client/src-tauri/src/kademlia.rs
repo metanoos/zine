@@ -26,10 +26,12 @@ use libp2p::multiaddr::Protocol;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder};
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, State};
+use tauri::State;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{interval_at, timeout, Instant};
+
+use crate::VaultRuntimeBinding;
 
 const IDENTITY_FILENAME: &str = "zine-kademlia-identity.pb";
 const OWNED_POINTERS_FILENAME: &str = "zine-kademlia-pointers.json";
@@ -85,7 +87,7 @@ struct OwnedPointerFile {
     records: BTreeMap<String, Vec<RendezvousPointer>>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KademliaStartConfig {
     #[serde(default)]
@@ -106,7 +108,14 @@ pub struct KademliaStatus {
 }
 
 #[derive(Default)]
-pub struct KademliaRuntime(tokio::sync::Mutex<Option<KademliaClient>>);
+pub struct KademliaRuntime(tokio::sync::Mutex<Option<BoundKademliaRuntime>>);
+
+#[derive(Clone)]
+struct BoundKademliaRuntime {
+    binding: VaultRuntimeBinding,
+    config: KademliaStartConfig,
+    client: KademliaClient,
+}
 
 #[derive(Clone)]
 struct KademliaClient {
@@ -1287,66 +1296,131 @@ async fn start_runtime(
     Ok(KademliaClient { sender })
 }
 
-async fn runtime_client(runtime: &State<'_, KademliaRuntime>) -> Result<KademliaClient, String> {
-    runtime
-        .0
-        .lock()
-        .await
-        .clone()
+fn stopped_status() -> KademliaStatus {
+    KademliaStatus {
+        running: false,
+        peer_id: String::new(),
+        listeners: Vec::new(),
+        connected_peers: 0,
+        routing_peers: 0,
+        stored_coordinates: 0,
+        last_error: None,
+    }
+}
+
+fn require_bound_runtime<'a>(
+    bound: Option<&'a BoundKademliaRuntime>,
+    binding: &VaultRuntimeBinding,
+) -> Result<Option<&'a BoundKademliaRuntime>, String> {
+    match bound {
+        Some(bound) if bound.binding == *binding => Ok(Some(bound)),
+        Some(_) => Err("Kademlia is bound to a different vault session".into()),
+        None => Ok(None),
+    }
+}
+
+async fn runtime_client(
+    runtime: &KademliaRuntime,
+    binding: &VaultRuntimeBinding,
+) -> Result<KademliaClient, String> {
+    require_bound_runtime(runtime.0.lock().await.as_ref(), binding)?
+        .map(|bound| bound.client.clone())
         .ok_or_else(|| "Kademlia rendezvous is disabled".to_string())
+}
+
+async fn start_for_binding(
+    runtime: &KademliaRuntime,
+    binding: VaultRuntimeBinding,
+    config: KademliaStartConfig,
+    validate_binding: impl Fn(&VaultRuntimeBinding) -> Result<(), String>,
+) -> Result<KademliaStatus, String> {
+    let mut slot = runtime.0.lock().await;
+    if let Some(existing) = require_bound_runtime(slot.as_ref(), &binding)? {
+        if existing.config != config {
+            return Err("Kademlia is already running with different vault configuration".into());
+        }
+        let client = existing.client.clone();
+        let status = client.status().await?;
+        validate_binding(&binding)?;
+        return Ok(status);
+    }
+
+    let client = start_runtime(binding.directory.clone(), config.clone()).await?;
+    if let Err(error) = validate_binding(&binding) {
+        client.stop().await;
+        return Err(error);
+    }
+    *slot = Some(BoundKademliaRuntime {
+        binding: binding.clone(),
+        config,
+        client: client.clone(),
+    });
+    let status = client.status().await;
+    if let Err(error) = validate_binding(&binding) {
+        slot.take();
+        client.stop().await;
+        return Err(error);
+    }
+    status
+}
+
+async fn stop_for_binding(
+    runtime: &KademliaRuntime,
+    binding: &VaultRuntimeBinding,
+) -> Result<(), String> {
+    let mut slot = runtime.0.lock().await;
+    require_bound_runtime(slot.as_ref(), binding)?;
+    if let Some(bound) = slot.take() {
+        bound.client.stop().await;
+    }
+    Ok(())
+}
+
+async fn status_for_binding(
+    runtime: &KademliaRuntime,
+    binding: &VaultRuntimeBinding,
+) -> Result<KademliaStatus, String> {
+    let client = require_bound_runtime(runtime.0.lock().await.as_ref(), binding)?
+        .map(|bound| bound.client.clone());
+    match client {
+        Some(client) => client.status().await,
+        None => Ok(stopped_status()),
+    }
 }
 
 #[tauri::command]
 pub async fn kademlia_start(
-    app: tauri::AppHandle,
     runtime: State<'_, KademliaRuntime>,
     config: KademliaStartConfig,
 ) -> Result<KademliaStatus, String> {
-    let mut slot = runtime.0.lock().await;
-    let existing = slot.clone();
-    if let Some(existing) = existing {
-        drop(slot);
-        return existing.status().await;
-    }
-    let data_dir = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|error| format!("resolve Kademlia data directory: {error}"))?;
-    let client = start_runtime(data_dir, config).await?;
-    *slot = Some(client.clone());
-    drop(slot);
-    client.status().await
+    let binding = crate::active_vault_binding()?;
+    start_for_binding(
+        &runtime,
+        binding,
+        config,
+        crate::require_active_vault_binding,
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn kademlia_stop(runtime: State<'_, KademliaRuntime>) -> Result<(), String> {
+    let binding = crate::active_vault_binding()?;
     // Keep start/stop serialized through shutdown. Otherwise a concurrent
     // start can open the identity and pointer files while the old event loop
     // still has a blocking persistence write in flight.
-    let mut slot = runtime.0.lock().await;
-    if let Some(client) = slot.take() {
-        client.stop().await;
-    }
-    Ok(())
+    stop_for_binding(&runtime, &binding).await?;
+    crate::require_active_vault_binding(&binding)
 }
 
 #[tauri::command]
 pub async fn kademlia_status(
     runtime: State<'_, KademliaRuntime>,
 ) -> Result<KademliaStatus, String> {
-    let client = runtime.0.lock().await.clone();
-    match client {
-        Some(client) => client.status().await,
-        None => Ok(KademliaStatus {
-            running: false,
-            peer_id: String::new(),
-            listeners: Vec::new(),
-            connected_peers: 0,
-            routing_peers: 0,
-            stored_coordinates: 0,
-            last_error: None,
-        }),
-    }
+    let binding = crate::active_vault_binding()?;
+    let status = status_for_binding(&runtime, &binding).await?;
+    crate::require_active_vault_binding(&binding)?;
+    Ok(status)
 }
 
 #[tauri::command]
@@ -1355,12 +1429,15 @@ pub async fn kademlia_publish_pointer(
     coordinate: String,
     pointer: RendezvousPointer,
 ) -> Result<(), String> {
+    let binding = crate::active_vault_binding()?;
     validate_coordinate(&coordinate)?;
     validate_pointer(&pointer)?;
-    runtime_client(&runtime)
+    let result = runtime_client(&runtime, &binding)
         .await?
         .publish(coordinate, pointer)
-        .await
+        .await;
+    crate::require_active_vault_binding(&binding)?;
+    result
 }
 
 #[tauri::command]
@@ -1368,24 +1445,30 @@ pub async fn kademlia_lookup(
     runtime: State<'_, KademliaRuntime>,
     coordinate: String,
 ) -> Result<Vec<RendezvousPointer>, String> {
+    let binding = crate::active_vault_binding()?;
     validate_coordinate(&coordinate)?;
-    runtime_client(&runtime).await?.lookup(coordinate).await
+    let result = runtime_client(&runtime, &binding)
+        .await?
+        .lookup(coordinate)
+        .await;
+    crate::require_active_vault_binding(&binding)?;
+    result
 }
 
-pub async fn reset_runtime(
-    app: &tauri::AppHandle,
-    runtime: &State<'_, KademliaRuntime>,
+pub async fn stop_for_vault_transition(
+    runtime: &KademliaRuntime,
+    binding: &VaultRuntimeBinding,
 ) -> Result<(), String> {
+    stop_for_binding(runtime, binding).await
+}
+
+pub async fn reset_runtime(data_dir: &Path, runtime: &KademliaRuntime) -> Result<(), String> {
     // Factory reset owns the runtime slot until shutdown and deletion finish;
     // no replacement runtime may recreate files that this reset then removes.
-    let mut slot = runtime.0.lock().await;
-    if let Some(client) = slot.take() {
-        client.stop().await;
+    let slot = runtime.0.lock().await;
+    if slot.is_some() {
+        return Err("Kademlia must stop before its vault files can be reset".into());
     }
-    let data_dir = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|error| format!("resolve Kademlia data directory: {error}"))?;
     for filename in [IDENTITY_FILENAME, OWNED_POINTERS_FILENAME] {
         let path = data_dir.join(filename);
         match fs::remove_file(&path) {
@@ -1624,6 +1707,21 @@ mod tests {
         ))
     }
 
+    fn test_binding(root: &Path, id: &str, generation: u64) -> VaultRuntimeBinding {
+        VaultRuntimeBinding {
+            id: id.to_string(),
+            directory: root.join(id),
+            generation,
+        }
+    }
+
+    fn local_test_config() -> KademliaStartConfig {
+        KademliaStartConfig {
+            bootstrap_peers: Vec::new(),
+            listen_address: Some("/ip4/127.0.0.1/tcp/0".to_string()),
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn identity_is_created_private_and_rejects_unsafe_files() {
@@ -1720,6 +1818,143 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         panic!("Kademlia runtime did not reach the expected state");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn vault_transition_stops_and_restores_isolated_identity_and_pointers() {
+        let root = temporary_test_root("vault-isolation");
+        let runtime = KademliaRuntime::default();
+        let vault_a_first = test_binding(&root, "vault-a", 1);
+        let vault_b = test_binding(&root, "vault-b", 2);
+        let vault_a_reopened = test_binding(&root, "vault-a", 3);
+
+        let first_status =
+            start_for_binding(&runtime, vault_a_first.clone(), local_test_config(), |_| {
+                Ok(())
+            })
+            .await
+            .expect("start vault A runtime");
+        let owned = pointer('b', "wss://vault-a.example");
+        runtime_client(&runtime, &vault_a_first)
+            .await
+            .expect("vault A client")
+            .publish(H.to_string(), owned.clone())
+            .await
+            .expect("persist vault A pointer");
+
+        stop_for_vault_transition(&runtime, &vault_a_first)
+            .await
+            .expect("locking vault A stops its runtime");
+        assert!(
+            !status_for_binding(&runtime, &vault_a_first)
+                .await
+                .expect("vault A stopped status")
+                .running
+        );
+
+        let second_status =
+            start_for_binding(&runtime, vault_b.clone(), local_test_config(), |_| Ok(()))
+                .await
+                .expect("start vault B runtime");
+        assert_ne!(first_status.peer_id, second_status.peer_id);
+        assert_eq!(second_status.stored_coordinates, 0);
+        assert!(
+            load_owned_pointers(&vault_b.directory.join(OWNED_POINTERS_FILENAME))
+                .expect("vault B owned-pointer index")
+                .is_empty()
+        );
+        stop_for_vault_transition(&runtime, &vault_b)
+            .await
+            .expect("locking vault B stops its runtime");
+
+        let reopened_status = start_for_binding(
+            &runtime,
+            vault_a_reopened.clone(),
+            local_test_config(),
+            |_| Ok(()),
+        )
+        .await
+        .expect("reopen vault A runtime");
+        assert_eq!(first_status.peer_id, reopened_status.peer_id);
+        assert_eq!(
+            load_owned_pointers(&vault_a_reopened.directory.join(OWNED_POINTERS_FILENAME))
+                .expect("restored vault A owned-pointer index")[H],
+            vec![owned]
+        );
+
+        stop_for_vault_transition(&runtime, &vault_a_reopened)
+            .await
+            .expect("stop reopened vault A runtime");
+        fs::remove_dir_all(root).expect("remove vault-isolation test directory");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_generation_and_configuration_cannot_reuse_a_bound_runtime() {
+        let root = temporary_test_root("vault-generation-fence");
+        let runtime = KademliaRuntime::default();
+        let current = test_binding(&root, "vault-a", 7);
+        let stale = test_binding(&root, "vault-a", 8);
+        start_for_binding(&runtime, current.clone(), local_test_config(), |_| Ok(()))
+            .await
+            .expect("start current generation");
+
+        assert!(status_for_binding(&runtime, &stale)
+            .await
+            .expect_err("stale status must be fenced")
+            .contains("different vault session"));
+        assert!(runtime_client(&runtime, &stale)
+            .await
+            .err()
+            .expect("stale publish/lookup client must be fenced")
+            .contains("different vault session"));
+        assert!(stop_for_binding(&runtime, &stale)
+            .await
+            .expect_err("stale stop must be fenced")
+            .contains("different vault session"));
+        assert!(start_for_binding(
+            &runtime,
+            current.clone(),
+            KademliaStartConfig {
+                bootstrap_peers: Vec::new(),
+                listen_address: Some("/ip4/127.0.0.1/tcp/1".to_string()),
+            },
+            |_| Ok(()),
+        )
+        .await
+        .expect_err("a running vault cannot silently replace its bound config")
+        .contains("different vault configuration"));
+        assert!(
+            status_for_binding(&runtime, &current)
+                .await
+                .expect("current generation remains usable")
+                .running
+        );
+
+        stop_for_vault_transition(&runtime, &current)
+            .await
+            .expect("stop current generation");
+        fs::remove_dir_all(root).expect("remove generation-fence test directory");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_that_loses_its_active_generation_stops_before_installing() {
+        let root = temporary_test_root("vault-startup-fence");
+        let runtime = KademliaRuntime::default();
+        let binding = test_binding(&root, "vault-a", 1);
+        let error = start_for_binding(&runtime, binding.clone(), local_test_config(), |_| {
+            Err("The Kademlia command belongs to a stale vault session".into())
+        })
+        .await
+        .expect_err("a stale startup must fail closed");
+        assert!(error.contains("stale vault session"));
+        assert!(
+            !status_for_binding(&runtime, &binding)
+                .await
+                .expect("failed candidate was removed")
+                .running
+        );
+
+        fs::remove_dir_all(root).expect("remove startup-fence test directory");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

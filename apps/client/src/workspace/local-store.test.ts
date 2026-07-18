@@ -5,6 +5,7 @@ import {
   clearFolderStepOperation,
   loadLocalFolder,
   loadPad,
+  mirrorPad,
   pendingFolderStepOperation,
   saveLocalFile,
   stageFolderStepOperation,
@@ -65,6 +66,19 @@ test("crash pads reject records without the current kind discriminator", () => {
     "draft.md": { content: "draft", tags: [], nodeId: "", updatedAt: 1 },
   }));
   assert.equal(loadPad("root"), null);
+});
+
+test("crash pads preserve stable trace identity with the buffered head", () => {
+  values.clear();
+  mirrorPad("root", "draft.md", {
+    content: "draft",
+    tags: [],
+    nodeId: "head-2",
+    traceId: "genesis-1",
+  });
+
+  assert.equal(loadPad("root")?.["draft.md"]?.nodeId, "head-2");
+  assert.equal(loadPad("root")?.["draft.md"]?.traceId, "genesis-1");
 });
 
 test("staged file and recursive folder operations survive reload until cleared", () => {

@@ -52,15 +52,18 @@ storage stays limited to events the NODE policy authorized.
 | **Peer** (in the ACL) | allowed | ✅ read-only | ❌ |
 | **Unknown** | challenged (NIP-42) | ❌ until authed | ❌ |
 
-The owner, writers, and peers live in a **private local ACL**
-(`~/.tracer/peers.json`), never a public Nostr event. A future kind-3 contact
-list may support reader-side discovery, but it MUST NOT control relay access.
+The owner, writers, and peers live in a **private local ACL** beside the NODE's
+relay database, never a public Nostr event. The headless press and legacy
+single-vault desktop use `~/.tracer/peers.json`; a multi-vault desktop keeps an
+independent ACL and relay database inside each vault's native directory. A
+future kind-3 contact list may support reader-side discovery, but it MUST NOT
+control relay access.
 "Whose work do I follow?" and "who may read my relay?" are different questions.
 
 **Following is local reader preference.** It filters Stacks, Times, and Spaces,
 but grants no access, implies no reciprocity, and is not an attestation. The
 current client stores follows locally. If kind-3 publication is added later, it
-MUST remain separate from `peers.json`: Follows control what I read; Peers
+MUST remain separate from the private ACL: Follows control what I read; Peers
 control who can read me; Writers control who may publish under their own key.
 
 ### Super-peers
@@ -158,7 +161,7 @@ Tor's control-port `ADD_ONION` command accepts the key inline, but expects the
 **64-byte expanded private key** (not the 32-byte seed):
 
 ```
-ADD_ONION ED25519-V3:<base64-of-64-byte-expanded-key> Port=80,127.0.0.1:4869
+ADD_ONION ED25519-V3:<base64-of-64-byte-expanded-key> Flags=Detach Port=80,127.0.0.1:4869
 ```
 
 The expanded key is `SHA-512(seed)` split into two 32-byte halves: the first
@@ -168,8 +171,10 @@ format libsodium's `crypto_sign_seed_keypair` produces internally. Passing only
 the 32-byte seed fails with "Failed to decode ED25519-V3 key."
 
 The press derives the seed, expands it to 64 bytes, passes it through Tor's
-control port, and receives an in-memory onion service. On the next launch it
-derives and registers the same service again. There is no
+control port, and receives an in-memory onion service. A detached control
+registration lets the press explicitly `DEL_ONION` every active door while
+locking a vault, including when Tor itself is system-owned. On the next unlock
+it derives and registers the same service again. There is no
 `~/.tracer/onion-key`; the assigned NODE or DOOR secret is the source.
 
 This makes a door portable across networks: the same assigned secret, on a new

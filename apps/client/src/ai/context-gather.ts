@@ -128,6 +128,7 @@ interface CanonicalMerged {
   steppedAt: number;
   action: string;
   relativePath: string;
+  fromPath?: string;
   source: "file" | "folder";
   prompt: string | null;
   summary: string | null;
@@ -137,6 +138,70 @@ interface CanonicalMerged {
   conformanceReason: string | undefined;
   nodeId: string | undefined;
   stableId: string;
+}
+
+type DecodedFolderMembershipDelta =
+  | { kind: "skip" }
+  | { kind: "invalid"; message: string }
+  | {
+      kind: "membership";
+      action: "add" | "remove" | "rename";
+      relativePath: string;
+      fromPath?: string;
+    };
+
+/** Decode only structural folder deltas. Focus is valid folder provenance but
+ * belongs to the separate limelight/focus timeline, not the membership log. */
+function decodeFolderMembershipDelta(value: unknown): DecodedFolderMembershipDelta {
+  if (!value || typeof value !== "object") return { kind: "skip" };
+  const delta = value as Record<string, unknown>;
+  if (delta.type === "focus") return { kind: "skip" };
+  if (delta.type === "add" || delta.type === "remove") {
+    if (typeof delta.relativePath !== "string") {
+      return { kind: "invalid", message: `${delta.type} delta has no relativePath` };
+    }
+    return {
+      kind: "membership",
+      action: delta.type,
+      relativePath: delta.relativePath,
+    };
+  }
+  if (delta.type === "rename") {
+    if (typeof delta.fromPath !== "string" || typeof delta.toPath !== "string") {
+      return { kind: "invalid", message: "rename delta has no fromPath/toPath" };
+    }
+    return {
+      kind: "membership",
+      action: "rename",
+      relativePath: delta.toPath,
+      fromPath: delta.fromPath,
+    };
+  }
+  // Unknown future folder observations do not masquerade as membership.
+  return { kind: "skip" };
+}
+
+function projectFolderMembershipToScope(
+  delta: Extract<DecodedFolderMembershipDelta, { kind: "membership" }>,
+  scopes: ContextMounts,
+  shielded: Set<string>,
+): Extract<DecodedFolderMembershipDelta, { kind: "membership" }> | null {
+  const destinationVisible = pathInEffectiveScope(scopes, shielded, delta.relativePath);
+  if (delta.action !== "rename" || delta.fromPath === undefined) {
+    return destinationVisible ? delta : null;
+  }
+
+  const sourceVisible = pathInEffectiveScope(scopes, shielded, delta.fromPath);
+  if (sourceVisible && destinationVisible) return delta;
+  // A crossing rename must never disclose the hidden endpoint. Project it as
+  // the visible structural effect at the active context boundary.
+  if (sourceVisible) {
+    return { kind: "membership", action: "remove", relativePath: delta.fromPath };
+  }
+  if (destinationVisible) {
+    return { kind: "membership", action: "add", relativePath: delta.relativePath };
+  }
+  return null;
 }
 
 /** Gather one immutable, fail-closed snapshot. Parallel completion order never
@@ -248,6 +313,7 @@ export async function gatherContextSnapshot(
         unstepped: !state.nodeId,
       };
     }),
+    deltaLog,
     renderedBlock,
     failures,
     maxBytes: options.maxBytes,
@@ -365,10 +431,7 @@ async function gatherFolderLog(
     throwIfAborted(signal);
     const merged: CanonicalMerged[] = [];
     for (const node of nodes) {
-      let parsed: {
-        steppedAt?: number;
-        deltas?: Array<{ type: string; relativePath: string }>;
-      };
+      let parsed: { steppedAt?: number; deltas?: unknown[] };
       try {
         parsed = JSON.parse(node.content) as typeof parsed;
       } catch {
@@ -377,14 +440,30 @@ async function gatherFolderLog(
           failures: [{ stage: "folder-log", path: "", message: `invalid event ${node.id.slice(0, 8)}…` }],
         };
       }
-      for (const delta of parsed.deltas ?? []) {
-        if (!pathInEffectiveScope(scopes, shielded, delta.relativePath)) continue;
+      if (parsed.deltas !== undefined && !Array.isArray(parsed.deltas)) {
+        return {
+          merged: [],
+          failures: [{ stage: "folder-log", path: "", message: `event ${node.id.slice(0, 8)}… has invalid deltas` }],
+        };
+      }
+      for (const rawDelta of parsed.deltas ?? []) {
+        const delta = decodeFolderMembershipDelta(rawDelta);
+        if (delta.kind === "skip") continue;
+        if (delta.kind === "invalid") {
+          return {
+            merged: [],
+            failures: [{ stage: "folder-log", path: "", message: `${delta.message} in event ${node.id.slice(0, 8)}…` }],
+          };
+        }
+        const visibleDelta = projectFolderMembershipToScope(delta, scopes, shielded);
+        if (!visibleDelta) continue;
         merged.push({
           steppedAt: typeof parsed.steppedAt === "number"
             ? parsed.steppedAt
             : (node.created_at ?? 0) * 1000,
-          action: delta.type,
-          relativePath: delta.relativePath,
+          action: visibleDelta.action,
+          relativePath: visibleDelta.relativePath,
+          ...(visibleDelta.fromPath !== undefined ? { fromPath: visibleDelta.fromPath } : {}),
           source: "folder",
           prompt: null,
           summary: null,
@@ -393,7 +472,7 @@ async function gatherFolderLog(
           conformance: undefined,
           conformanceReason: undefined,
           nodeId: node.id,
-          stableId: `${node.id}:${delta.type}:${delta.relativePath}`,
+          stableId: `${node.id}:${visibleDelta.action}:${visibleDelta.fromPath ?? ""}:${visibleDelta.relativePath}`,
         });
       }
     }
@@ -524,6 +603,7 @@ export interface FolderLogObservation {
   steppedAt: number;
   action: "add" | "remove" | "rename" | "advance" | "step" | "metadata";
   relativePath: string;
+  fromPath?: string;
 }
 
 /** Project one verified-shape folder payload into mechanical AI observations.
@@ -538,6 +618,7 @@ export function folderCheckpointLogObservations(
     deltas?: Array<{
       type?: string;
       relativePath?: string;
+      fromPath?: string;
       toPath?: string;
     }>;
     folderCheckpoint?: { cause?: string };
@@ -558,9 +639,18 @@ export function folderCheckpointLogObservations(
       delta.type !== "rename" &&
       delta.type !== "advance"
     ) return [];
-    const path = delta.type === "rename" ? delta.toPath : delta.relativePath;
-    return path
-      ? [{ steppedAt, action: delta.type, relativePath: qualify(path) }]
+    if (delta.type === "rename") {
+      return delta.fromPath && delta.toPath
+        ? [{
+            steppedAt,
+            action: "rename",
+            relativePath: qualify(delta.toPath),
+            fromPath: qualify(delta.fromPath),
+          }]
+        : [];
+    }
+    return delta.relativePath
+      ? [{ steppedAt, action: delta.type, relativePath: qualify(delta.relativePath) }]
       : [];
   });
   if (structural.length > 0) return structural;
@@ -571,6 +661,36 @@ export function folderCheckpointLogObservations(
     return [{ steppedAt, action: "metadata", relativePath: folderPath }];
   }
   return [];
+}
+
+function projectFolderLogObservationToScope(
+  observation: FolderLogObservation,
+  scopes: ContextMounts,
+  shielded: Set<string>,
+): FolderLogObservation | null {
+  if (
+    observation.action === "add" ||
+    observation.action === "remove" ||
+    observation.action === "rename"
+  ) {
+    const projected = projectFolderMembershipToScope({
+      kind: "membership",
+      action: observation.action,
+      relativePath: observation.relativePath,
+      ...(observation.fromPath !== undefined ? { fromPath: observation.fromPath } : {}),
+    }, scopes, shielded);
+    return projected
+      ? {
+          steppedAt: observation.steppedAt,
+          action: projected.action,
+          relativePath: projected.relativePath,
+          ...(projected.fromPath !== undefined ? { fromPath: projected.fromPath } : {}),
+        }
+      : null;
+  }
+  return pathInEffectiveScope(scopes, shielded, observation.relativePath)
+    ? observation
+    : null;
 }
 
 /** Build the aggregated directory log for the scope subtree: every descendant
@@ -641,6 +761,7 @@ export async function loadDirectoryLog(
     steppedAt: number;
     action: string;
     relativePath: string;
+    fromPath?: string;
     source: "file" | "folder";
     prompt: string | null;
     summary: string | null;
@@ -729,9 +850,14 @@ export async function loadDirectoryLog(
       if (conformance.status !== "full") continue;
       for (const node of chain) {
         for (const observation of folderCheckpointLogObservations(node, folderTrace.path)) {
-          if (!pathInEffectiveScope(scopes, shielded, observation.relativePath)) continue;
+          const visibleObservation = projectFolderLogObservationToScope(
+            observation,
+            scopes,
+            shielded,
+          );
+          if (!visibleObservation) continue;
           merged.push({
-            ...observation,
+            ...visibleObservation,
             source: "folder",
             prompt: null,
             summary: null,

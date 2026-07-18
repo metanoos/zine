@@ -64,6 +64,7 @@ import type {
 import {
   ensureMdExt,
   flattenRuns,
+  resolveStepKEdits,
   synthesizeKEditTransition,
 } from "./workspace-core.js";
 import {
@@ -1023,6 +1024,13 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     }
 
     const deltas = diffToDeltas(prevContent, content);
+    const stepKEdits = resolveStepKEdits(
+      prevContent,
+      content,
+      file.pendingKedits,
+      signerPubkey,
+      file.updatedAt,
+    );
     const event = await publishEdit({
       prevEventId: prevId,
       previousSnapshot: prevContent,
@@ -1053,11 +1061,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       inlineCitations: findAddedInlineCitations(prevContent, content),
       ...(file.pendingReplyingTo ? { replyingTo: file.pendingReplyingTo } : {}),
       ...(citationIds.length > 0 ? { citationIds } : {}),
-      kedits: file.pendingKedits ?? synthesizeKEditTransition(
-        prevContent,
-        content,
-        signerPubkey,
-      ),
+      kedits: stepKEdits.kedits,
       ...(file.pendingLocalOnly ? { localOnly: true } : {}),
       signer,
       operationId,

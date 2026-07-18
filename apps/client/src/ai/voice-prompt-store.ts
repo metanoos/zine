@@ -1,3 +1,5 @@
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+
 /**
  * Per-voice custom prompt. Maps a voice's pubkey to a free-text instruction
  * that gets injected into that voice's single-shot LLM ops —

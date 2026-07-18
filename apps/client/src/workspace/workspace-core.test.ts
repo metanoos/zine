@@ -21,6 +21,8 @@ import {
   minimalTextChange,
   nextKEditTx,
   reconcileRunsText,
+  recoverStepKEdits,
+  resolveStepKEdits,
   spliceRuns,
   synthesizeKEditTransition,
   validateKEditTransition,
@@ -134,6 +136,63 @@ test("KEdit transition validation fails closed on bad ranges and replay mismatch
     }]).reason ?? "",
     /do not reproduce/,
   );
+});
+
+test("only explicit crash recovery replaces an unusable partial KEdit log with a snapshot transition", () => {
+  const legacyText = "legacy draft";
+  const currentText = `${legacyText}!`;
+  const partialCapture: KEdit[] = [{
+    op: "ins",
+    from: legacyText.length,
+    to: legacyText.length,
+    text: "!",
+    voice: A,
+    t: 2,
+    tx: 0,
+  }];
+
+  assert.match(
+    validateKEditTransition("", currentText, partialCapture).reason ?? "",
+    /outside its pre-state/,
+  );
+  const resolved = recoverStepKEdits("", currentText, partialCapture, A, 3);
+  assert.equal(resolved.source, "snapshot");
+  assert.match(resolved.rejectedReason ?? "", /outside its pre-state/);
+  assert.deepEqual(validateKEditTransition("", currentText, resolved.kedits), { valid: true });
+});
+
+test("ordinary Step rejects an invalid current-session KEdit journal", () => {
+  const partialCapture: KEdit[] = [{
+    op: "ins",
+    from: 12,
+    to: 12,
+    text: "!",
+    voice: A,
+    t: 2,
+    tx: 0,
+  }];
+
+  assert.throws(
+    () => resolveStepKEdits("", "legacy draft!", partialCapture, A, 3),
+    /invalid captured KEdit log.*outside its pre-state/,
+  );
+});
+
+test("Step recovery preserves a complete captured KEdit log exactly", () => {
+  const captured: KEdit[] = [{
+    op: "ins",
+    from: 3,
+    to: 3,
+    text: "!",
+    voice: A,
+    t: 2,
+    tx: 4,
+  }];
+
+  assert.deepEqual(resolveStepKEdits("hey", "hey!", captured, B, 9), {
+    kedits: captured,
+    source: "captured",
+  });
 });
 
 test("reconcileRunsText keeps model prose voiced during a metadata rewrite", () => {

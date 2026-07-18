@@ -186,7 +186,7 @@ not claim an operated public network or meaningful citation density. The
 | Top-level foreign-file fork-on-write | Implemented; recursive nested-folder fork-on-write is deferred |
 | Mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
 | Raw-file Reify export with an optional signed-event bundle | Implemented on desktop |
-| Stronghold storage for signing and provider secrets | Implemented on desktop; the browser remains read-only |
+| Multiple desktop vaults with independent passphrases, Roots, encrypted webview state, Stronghold secrets, relay databases, ACLs, and KDF salts | Implemented on desktop; the browser remains read-only |
 | Shared trace-context authoring-syntax kernel | Initial deterministic `[[…]]` / `((…))` scanner and compiler implemented with golden and generated scale corpora; task-specific evidence selection and cross-press rendering are not yet implemented |
 | Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures; Extend (continuation) and Settle (revision) now use the shared syntax kernel, exact current-session authority spans, protected-output validation, and accepted-success directive cleanup, while the other operations, durable receipts, and context binding remain deferred |
 | Hosted relay | Implemented; an operator ACL equivalent to the local relay policy remains a gap |
