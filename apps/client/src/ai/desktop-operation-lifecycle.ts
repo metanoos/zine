@@ -3,10 +3,12 @@ import {
   DESKTOP_OPERATION_MAX_RETENTION_MS,
   DESKTOP_OPERATION_MAX_TRANSITIONS,
   cloneAndFreezeDesktopOperationEnvelopeV1,
+  createDesktopOperationEnvelopeV1,
   hashCanonicalV1,
   hashTextV1,
   validateOperationFaultV1,
   type AcceptedArtifactIntentV1,
+  type CreateDesktopOperationEnvelopeV1Input,
   type DesktopOperationEnvelopeV1,
   type DesktopOperationStatusV1,
   type DesktopOperationTransitionTypeV1,
@@ -458,6 +460,11 @@ export interface CreateDesktopOperationRetryV1Input {
   createdAtMs: number;
   retainForMs?: number;
   possibleDuplicateAcknowledged?: true;
+  /** Required after TARGET_STALE; must be captured from the current editor revision. */
+  freshPreparation?: Pick<
+    CreateDesktopOperationEnvelopeV1Input,
+    "prepared" | "provider" | "selectedContext" | "maxOutputTokens"
+  >;
 }
 
 /** Create a linked attempt; never mutate or redispatch the prior attempt. */
@@ -486,6 +493,34 @@ export function createDesktopOperationRetryV1(
     ?? (prior.retention.deleteByMs - prior.retention.startedAtMs);
   if (!Number.isSafeInteger(retainForMs) || retainForMs <= 0 || retainForMs > DESKTOP_OPERATION_MAX_RETENTION_MS) {
     fail(`retry retention must be between 1 and ${DESKTOP_OPERATION_MAX_RETENTION_MS}`);
+  }
+  if (prior.lifecycle.status === "stale" && !input.freshPreparation) {
+    fail("stale retry requires a fresh prepared operation and selected context");
+  }
+  if (input.freshPreparation) {
+    if (prior.lifecycle.status !== "stale") {
+      fail("fresh preparation is valid only for a stale retry");
+    }
+    if (input.freshPreparation.prepared.requestId === prior.prepared.requestId) {
+      fail("fresh retry must use a new prepared request id");
+    }
+    const fresh = createDesktopOperationEnvelopeV1({
+      operationId: prior.operationId,
+      attemptId: input.attemptId,
+      ...input.freshPreparation,
+      createdAtMs: input.createdAtMs,
+      retainForMs,
+    });
+    return cloneAndFreezeDesktopOperationEnvelopeV1({
+      ...fresh,
+      attempt: {
+        ...fresh.attempt,
+        retryOfAttemptId: prior.attempt.attemptId,
+        possibleDuplicateAcknowledgedAtMs: input.possibleDuplicateAcknowledged
+          ? input.createdAtMs
+          : null,
+      },
+    });
   }
   const next: DesktopOperationEnvelopeV1 = {
     ...prior,

@@ -11,6 +11,7 @@ import {
 } from "./selection-types.js";
 import type { Utf16Range } from "./types.js";
 import { isUtf16Boundary } from "./ranges.js";
+import { validateSelectorManifestSemanticsV1 } from "./selector.js";
 
 const encoder = new TextEncoder();
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -45,6 +46,7 @@ export class SelectedTraceContextManifestValidationError extends Error {
  */
 export function validateSelectedTraceContextManifestV1(
   value: unknown,
+  renderedContext?: string,
 ): asserts value is SelectedTraceContextManifestV1 {
   const manifest = record(value, "$", [
     "version", "contract", "policy", "operation", "selected", "exclusionSummary",
@@ -211,6 +213,14 @@ export function validateSelectedTraceContextManifestV1(
   hash(hashes.renderedContextSha256, "$.hashes.renderedContextSha256");
   if (encoder.encode(JSON.stringify(manifest)).length > TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxManifestBytes) {
     fail("$", "exceeds the package manifest byte limit");
+  }
+  try {
+    validateSelectorManifestSemanticsV1(
+      manifest as unknown as SelectedTraceContextManifestV1,
+      renderedContext,
+    );
+  } catch (error) {
+    fail("$", error instanceof Error ? error.message : String(error));
   }
 }
 

@@ -111,6 +111,14 @@ effect, and offer review, discard, or a safe linked retry without a
 duplicate-dispatch acknowledgement. An explicitly rejected recorded response
 has the same safe linked-retry policy.
 
+A stale retry cannot reuse the stale request or selector output. It requires a
+new `PreparedOperation`, new selected-context manifest/rendered bytes captured
+from the current editor state, a new request id, and a new attempt id. The target
+revision may be byte-identical after focus-only staleness and refocus. The
+operation id and `retryOfAttemptId` linkage remain stable; the new attempt starts
+with an empty transition chain, and its caller must issue new transition ids.
+Other retry states cannot replace their frozen request through this path.
+
 ## Fault and recovery contract
 
 `OperationFaultV1` is redacted by construction. It carries only a closed code,
@@ -129,6 +137,10 @@ The recovery projection gives native and UI integrations closed effects for:
 
 Every reduction returns `mustPersistBeforeEffects: true`. An interpreter that
 executes an effect before committing the new envelope violates this contract.
+The one artifact receipt is also bound back to its sole
+`record-artifact-applied` transition: receipt and transition timestamps must
+match, and the transition action hash is recomputed from its transition id,
+receipt id, resulting content hash, and exact timestamp during parsing.
 
 ## Private retention
 

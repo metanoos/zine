@@ -39,6 +39,7 @@ const TRACE_ID = HASH("trace-1");
 const HEAD_ID = HASH("head-1");
 const CONTENT_HASH = HASH(TARGET_TEXT);
 let selectionPromise: Promise<TraceContextSelectionSuccessV1> | null = null;
+let evidenceSelectionPromise: Promise<TraceContextSelectionSuccessV1> | null = null;
 
 async function selection(): Promise<TraceContextSelectionSuccessV1> {
   selectionPromise ??= selectTraceContextV1({
@@ -67,6 +68,57 @@ async function selection(): Promise<TraceContextSelectionSuccessV1> {
   const result = await selectionPromise;
   assert.equal(result.ok, true);
   return result;
+}
+
+async function evidenceSelection(): Promise<TraceContextSelectionSuccessV1> {
+  evidenceSelectionPromise ??= selectTraceContextV1({
+    version: 1,
+    policy: "text-only-v1",
+    operation: {
+      version: 1,
+      operation: "extend",
+      target: {
+        traceId: TRACE_ID,
+        headId: HEAD_ID,
+        contentHash: CONTENT_HASH,
+        currentText: TARGET_TEXT,
+        chosenPath: "draft.md",
+      },
+      range: { fromUtf16: 0, toUtf16: TARGET_TEXT.length },
+      maxContextBytes: 16_384,
+      preparedRequestMaxBytes: 32_768,
+      reservedPromptBytes: 1_024,
+    },
+    candidates: [
+      {
+        version: 1,
+        id: "instruction-evidence",
+        dedupeKey: "instruction-evidence",
+        kind: "operation-instruction",
+        claimClass: "explicit",
+        source: { kind: "operation", ref: "operation:extend" },
+        reasons: ["explicit-operation-intent"],
+        text: "Continue from the selected source.",
+      },
+      {
+        version: 1,
+        id: "citation-evidence",
+        dedupeKey: "citation-evidence",
+        kind: "citation",
+        claimClass: "explicit",
+        source: {
+          kind: "citation", ref: "citation:1", nodeId: HASH("citation-node"),
+          approvedOrder: 0, processStatus: "full-trace",
+        },
+        reasons: ["approved-direct-citation"],
+        text: "Quoted source.",
+      },
+    ],
+  }).then((result) => {
+    if (!result.ok) assert.fail(result.error.message);
+    return result;
+  });
+  return evidenceSelectionPromise;
 }
 
 function prepared(renderedContext: string): PreparedOperation {
@@ -327,6 +379,80 @@ test("canonical bytes are deterministic, I-JSON safe, and round-trip with integr
   }
 });
 
+test("creation and parsing reject rehashed manifests with reordered selected evidence", async () => {
+  const selected = await evidenceSelection();
+  const valid = createDesktopOperationEnvelopeV1({
+    operationId: "operation-evidence-order",
+    attemptId: "attempt-evidence-order",
+    prepared: prepared(selected.renderedContext),
+    provider: {
+      protocol: "openai",
+      modelId: "model-1",
+      transportConfigSha256: HASH("redacted-transport-config"),
+    },
+    selectedContext: withPlacement(selected),
+    maxOutputTokens: 1_024,
+    createdAtMs: BASE_TIME,
+    retainForMs: 60_000,
+  });
+  const reorderedManifest = structuredClone(selected.manifest) as unknown as Record<string, any>;
+  reorderedManifest.selected.reverse();
+  const reorderedSegments = JSON.parse(selected.renderedContext) as unknown[];
+  [reorderedSegments[1], reorderedSegments[2]] = [reorderedSegments[2], reorderedSegments[1]];
+  const reorderedRenderedContext = canonicalJsonV1(reorderedSegments);
+  reorderedManifest.hashes.renderedContextSha256 = hashTextV1(
+    "zine.trace-context.rendered-selection.v1",
+    reorderedRenderedContext,
+  );
+  const reorderedManifestSha256 = hashCanonicalV1(
+    "zine.trace-context.package-manifest.v1",
+    reorderedManifest,
+  );
+  assert.throws(() => createDesktopOperationEnvelopeV1({
+    operationId: "operation-reordered-create",
+    attemptId: "attempt-reordered-create",
+    prepared: prepared(reorderedRenderedContext),
+    provider: {
+      protocol: "openai",
+      modelId: "model-1",
+      transportConfigSha256: HASH("redacted-transport-config"),
+    },
+    selectedContext: {
+      manifest: reorderedManifest as never,
+      manifestSha256: reorderedManifestSha256,
+      renderedContext: reorderedRenderedContext,
+      placement: {
+        messageIndex: 1,
+        fromUtf16: 0,
+        toUtf16: reorderedRenderedContext.length,
+      },
+    },
+    maxOutputTokens: 1_024,
+    createdAtMs: BASE_TIME,
+  }), /deterministic selector order/);
+
+  const reparsed = JSON.parse(serializeDesktopOperationEnvelopeV1(valid)) as Record<string, any>;
+  reparsed.selectedContext.manifest = reorderedManifest;
+  reparsed.selectedContext.manifestSha256 = reorderedManifestSha256;
+  reparsed.selectedContext.renderedContext = reorderedRenderedContext;
+  reparsed.selectedContext.renderedContextSha256 = hashTextV1(
+    "zine.trace-context.rendered-selection.v1",
+    reorderedRenderedContext,
+  );
+  reparsed.selectedContext.placement.toUtf16 = reorderedRenderedContext.length;
+  reparsed.prepared.messages[1].content = reorderedRenderedContext;
+  const requestWithoutHash = { ...reparsed.prepared };
+  delete requestWithoutHash.requestSha256;
+  reparsed.prepared.requestSha256 = hashCanonicalV1(
+    "zine.desktop-operation.request.v1",
+    requestWithoutHash,
+  );
+  assert.throws(
+    () => parseDesktopOperationEnvelopeV1(JSON.stringify(reparsed)),
+    /deterministic selector order/,
+  );
+});
+
 test("creation rejects mismatched context identity, non-Extend operations, split Unicode, and unbounded retention", async () => {
   const selected = await selection();
   const base = {
@@ -345,7 +471,7 @@ test("creation rejects mismatched context identity, non-Extend operations, split
   assert.throws(() => createDesktopOperationEnvelopeV1({
     ...base,
     selectedContext: { ...withPlacement(selected), renderedContext: `${selected.renderedContext}x` },
-  }), /rendered-context identity/);
+  }), /rendered-context identity|rendered context must be selector-owned JSON/);
   assert.throws(() => createDesktopOperationEnvelopeV1({
     ...base,
     selectedContext: {
@@ -648,12 +774,129 @@ test("target staleness is durable before review or after acceptance and never re
   const reviewRecovery = projectDesktopOperationRecoveryV1(reviewStale, reviewStale.updatedAtMs + 1);
   assert.deepEqual(reviewRecovery.automaticEffects, []);
   assert.equal(reviewRecovery.operatorAction, "review-stale-result");
+  assert.throws(() => createDesktopOperationRetryV1(reviewStale, {
+    attemptId: "attempt-stale-missing-fresh",
+    createdAtMs: reviewStale.updatedAtMs + 1,
+  }), /requires a fresh prepared operation and selected context/);
+
+  const focusOnlySelected = await selection();
+  const focusOnlyPrepared = Object.freeze({
+    ...prepared(focusOnlySelected.renderedContext),
+    requestId: "request-after-focus-stale",
+    createdAt: reviewStale.updatedAtMs + 1,
+  });
+  const focusOnlyRetry = createDesktopOperationRetryV1(reviewStale, {
+    attemptId: "attempt-focus-stale-retry",
+    createdAtMs: reviewStale.updatedAtMs + 1,
+    freshPreparation: {
+      prepared: focusOnlyPrepared,
+      provider: {
+        protocol: "openai",
+        modelId: "model-1",
+        transportConfigSha256: HASH("redacted-transport-config"),
+      },
+      selectedContext: withPlacement(focusOnlySelected),
+      maxOutputTokens: 1_024,
+    },
+  });
+  assert.deepEqual(focusOnlyRetry.prepared.targetRevision, reviewStale.prepared.targetRevision);
+  assert.equal(focusOnlyRetry.prepared.requestId, "request-after-focus-stale");
+
+  const freshText = "draft changed after response";
+  const freshHeadId = HASH("head-after-stale");
+  const freshSelectionResult = await selectTraceContextV1({
+    version: 1,
+    policy: "text-only-v1",
+    operation: {
+      version: 1,
+      operation: "extend",
+      target: {
+        traceId: TRACE_ID,
+        headId: freshHeadId,
+        contentHash: HASH(freshText),
+        currentText: freshText,
+        chosenPath: "draft.md",
+      },
+      range: { fromUtf16: 0, toUtf16: freshText.length },
+      maxContextBytes: 16_384,
+      preparedRequestMaxBytes: 32_768,
+      reservedPromptBytes: 1_024,
+    },
+    candidates: [],
+  });
+  if (!freshSelectionResult.ok) assert.fail(freshSelectionResult.error.message);
+  const freshPrepared: PreparedOperation = Object.freeze({
+    ...prepared(freshSelectionResult.renderedContext),
+    requestId: "request-after-stale",
+    operationInputs: Object.freeze({
+      seed: freshText,
+      hasSelection: false,
+      rangeFrom: freshText.length,
+      rangeTo: freshText.length,
+      sourceFrom: 0,
+      sourceTo: freshText.length,
+    }),
+    messages: Object.freeze([
+      { role: "system" as const, content: "Continue the document." },
+      { role: "user" as const, content: freshSelectionResult.renderedContext },
+    ]),
+    targetRevision: {
+      folderId: FOLDER_ID,
+      path: "draft.md",
+      traceId: TRACE_ID,
+      headId: freshHeadId,
+      contentHash: HASH(freshText),
+    },
+    preparedRequestHash: HASH("upstream-request-after-stale"),
+    createdAt: reviewStale.updatedAtMs + 1,
+  });
   const retry = createDesktopOperationRetryV1(reviewStale, {
     attemptId: "attempt-stale-retry",
     createdAtMs: reviewStale.updatedAtMs + 1,
+    freshPreparation: {
+      prepared: freshPrepared,
+      provider: {
+        protocol: "openai",
+        modelId: "model-1",
+        transportConfigSha256: HASH("redacted-transport-config"),
+      },
+      selectedContext: withPlacement(freshSelectionResult),
+      maxOutputTokens: 1_024,
+    },
   });
+  assert.equal(retry.operationId, reviewStale.operationId);
   assert.equal(retry.attempt.retryOfAttemptId, reviewStale.attempt.attemptId);
   assert.equal(retry.attempt.possibleDuplicateAcknowledgedAtMs, null);
+  assert.equal(retry.prepared.requestId, "request-after-stale");
+  assert.equal(retry.prepared.targetRevision.headId, freshHeadId);
+  assert.equal(retry.selectedContext.manifest.operation.target.currentText, freshText);
+  assert.deepEqual(retry.appliedTransitions, []);
+  const retryApproved = apply(
+    retry,
+    transition("approve", retry.updatedAtMs + 1, {}),
+  );
+  assert.equal(
+    reviewStale.appliedTransitions.some(
+      (priorTransition) => priorTransition.transitionId === retryApproved.appliedTransitions[0]?.transitionId,
+    ),
+    false,
+  );
+
+  const rejected = await atStatus("rejected");
+  assert.throws(() => createDesktopOperationRetryV1(rejected, {
+    attemptId: "attempt-rejected-fresh",
+    createdAtMs: rejected.updatedAtMs + 1,
+    freshPreparation: {
+      prepared: focusOnlyPrepared,
+      provider: {
+        protocol: "openai",
+        modelId: "model-1",
+        transportConfigSha256: HASH("redacted-transport-config"),
+      },
+      selectedContext: withPlacement(focusOnlySelected),
+      maxOutputTokens: 1_024,
+    },
+  }), /valid only for a stale retry/);
 
   const accepted = await atStatus("accepted");
   const applyStaleReduction = reduceDesktopOperationV1(
@@ -830,6 +1073,34 @@ test("serialized receipts must form one legal monotonic chain to the recorded li
     () => parseDesktopOperationEnvelopeV1(JSON.stringify(staleAfterApplied)),
     /applied artifact cannot later be marked target-stale/,
   );
+
+  const acceptedWithReceipt = apply(
+    await atStatus("accepted"),
+    transition("record-artifact-applied", BASE_TIME + 30, {
+      receiptId: "artifact-receipt-bound",
+      resultingContentHash: HASH("receipt-bound-result"),
+    }),
+  );
+  const receiptSerialized = serializeDesktopOperationEnvelopeV1(acceptedWithReceipt);
+  for (const [name, mutate, expected] of [
+    ["receipt id", (value: Record<string, any>) => {
+      value.artifactReceipt.receiptId = "artifact-receipt-mutated";
+    }, /exact transition action/],
+    ["receipt time", (value: Record<string, any>) => {
+      value.artifactReceipt.recordedAtMs += 1;
+    }, /receipt time does not match/],
+    ["result hash", (value: Record<string, any>) => {
+      value.artifactReceipt.resultingContentHash = HASH("mutated-result");
+    }, /exact transition action/],
+  ] as const) {
+    const malformed = JSON.parse(receiptSerialized) as Record<string, any>;
+    mutate(malformed);
+    assert.throws(
+      () => parseDesktopOperationEnvelopeV1(JSON.stringify(malformed)),
+      expected,
+      name,
+    );
+  }
 });
 
 test("post-marker ambiguity becomes unknown and recovery never automatically redispatches", async () => {

@@ -335,6 +335,123 @@ export async function selectTraceContextV1(
   });
 }
 
+/**
+ * Re-apply selector-owned semantics to a persisted manifest. When the exact
+ * rendered context is available, this also binds evidence order, rendered
+ * byte costs, and process prose to the selector's canonical renderer.
+ */
+export function validateSelectorManifestSemanticsV1(
+  manifest: SelectedTraceContextManifestV1,
+  renderedContext?: string,
+): void {
+  let renderedSegments: unknown[] | undefined;
+  if (renderedContext !== undefined) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(renderedContext) as unknown;
+    } catch {
+      throw new Error("rendered context must be selector-owned JSON");
+    }
+    if (!Array.isArray(parsed) || parsed.length !== manifest.selected.length + 1) {
+      throw new Error("rendered context segment count does not match selected evidence");
+    }
+    if (canonicalJson(parsed) !== renderedContext) {
+      throw new Error("rendered context is not in selector canonical form");
+    }
+    renderedSegments = parsed;
+    if (canonicalJson(parsed[0]) !== renderCurrentTarget(manifest.operation.target.currentText)) {
+      throw new Error("rendered context does not contain the exact current target first");
+    }
+    if (manifest.budget.currentTargetRenderedBytes !== utf8Bytes(canonicalJson(parsed[0]))) {
+      throw new Error("current-target rendered byte cost does not match selector rendering");
+    }
+    if (manifest.budget.usedRenderedBytes !== utf8Bytes(renderedContext)) {
+      throw new Error("used rendered bytes do not match the exact rendered context");
+    }
+  }
+
+  const candidates = manifest.selected.map((selected, index): NormalizedCandidate => {
+    if (canonicalJson(selected.reasons) !== canonicalJson(uniqueSortedStrings(selected.reasons))) {
+      throw new Error(`selected[${index}] reasons are not in selector order`);
+    }
+    let normalizedFact: TraceProcessFactV1 | undefined;
+    if (selected.fact !== undefined) {
+      const normalized = normalizeProcessFact(selected.fact, `$.selected[${index}].fact`);
+      if (!normalized.ok) throw new Error(normalized.error.message);
+      if (canonicalJson(normalized.value) !== canonicalJson(selected.fact)) {
+        throw new Error(`selected[${index}] fact is not selector-normalized`);
+      }
+      normalizedFact = normalized.value;
+    }
+    const renderedSegment = renderedSegments?.[index + 1];
+    const renderedText = isRecord(renderedSegment) && typeof renderedSegment.text === "string"
+      ? renderedSegment.text
+      : "";
+    return {
+      version: 1,
+      id: selected.id,
+      dedupeKey: selected.dedupeKey,
+      kind: selected.kind,
+      claimClass: selected.claimClass,
+      source: selected.source,
+      reasons: selected.reasons,
+      ...(normalizedFact ? { fact: normalizedFact } : { text: renderedText }),
+    };
+  });
+
+  const bindingCandidates = renderedSegments
+    ? candidates
+    : candidates.filter((candidate) => candidate.kind === "process-fact");
+  const bindingError = validateSelectedEvidenceBindings({
+    version: 1,
+    policy: manifest.policy,
+    operation: manifest.operation,
+    candidates: bindingCandidates,
+    projectedInputBytes: manifest.input.projectedInputBytes,
+  });
+  if (bindingError) throw new Error(bindingError.error.message);
+
+  const groups: CandidateGroup[] = candidates.map((candidate) => ({
+    representative: candidate,
+    candidates: [candidate],
+    reasons: candidate.reasons,
+    priorityClass: priorityClass(candidate),
+  }));
+  const ordered = [...groups].sort(compareGroups);
+  for (let index = 0; index < groups.length; index += 1) {
+    if (groups[index]!.representative.id !== ordered[index]!.representative.id) {
+      throw new Error("selected evidence is not in deterministic selector order");
+    }
+  }
+
+  if (!renderedSegments) return;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index]!;
+    const selected = manifest.selected[index]!;
+    const segment = renderedSegments[index + 1];
+    if (!isRecord(segment) || typeof segment.text !== "string") {
+      throw new Error(`rendered evidence ${index} is not a selector segment`);
+    }
+    const expected = canonicalJson({
+      version: 1,
+      authority: authorityFor(candidate.kind),
+      evidenceId: candidate.id,
+      kind: candidate.kind,
+      claimClass: candidate.claimClass,
+      source: candidate.source,
+      reasons: candidate.reasons,
+      text: candidate.fact ? renderProcessFact(candidate.fact, candidate.source) : segment.text,
+    });
+    const exactSegment = canonicalJson(segment);
+    if (exactSegment !== expected) {
+      throw new Error(`rendered evidence ${index} does not match its manifest entry`);
+    }
+    if (selected.renderedByteCost !== utf8Bytes(exactSegment) + 1) {
+      throw new Error(`selected[${index}] rendered byte cost does not match selector rendering`);
+    }
+  }
+}
+
 async function validateAndNormalizeInput(
   input: unknown,
   signal?: AbortSignal,

@@ -440,9 +440,9 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
     "version", "manifest", "manifestSha256", "renderedContext", "renderedContextSha256", "placement",
   ], "selectedContext");
   if (selected.version !== 1) fail("selectedContext version is unsupported");
-  validatePackageManifest(selected.manifest);
   requireHash(selected.manifestSha256, "selectedContext.manifestSha256");
-  requireText(selected.renderedContext, "selectedContext.renderedContext");
+  const renderedContext = requireText(selected.renderedContext, "selectedContext.renderedContext");
+  validatePackageManifest(selected.manifest, renderedContext);
   requireHash(selected.renderedContextSha256, "selectedContext.renderedContextSha256");
   if (
     selected.renderedContextSha256
@@ -539,6 +539,11 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   let receiptTime = attempt.createdAtMs as number;
   let finalTransitionFromStatus: DesktopOperationStatusV1 | null = null;
   let artifactApplicationRecorded = false;
+  let artifactApplicationTransition: {
+    transitionId: string;
+    actionSha256: string;
+    appliedAtMs: number;
+  } | null = null;
   for (const [index, raw] of envelope.appliedTransitions.entries()) {
     const transition = requireRecord(raw, `appliedTransitions[${index}]`);
     requireExactKeys(
@@ -569,12 +574,18 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
     if (toStatus !== expectedToStatus) {
       fail(`appliedTransitions[${index}] must transition to ${expectedToStatus}`);
     }
-    requireHash(transition.actionSha256, `appliedTransitions[${index}].actionSha256`);
+    const actionSha256 = requireHash(
+      transition.actionSha256,
+      `appliedTransitions[${index}].actionSha256`,
+    );
     const appliedAtMs = requireTimestamp(
       transition.appliedAtMs,
       `appliedTransitions[${index}].appliedAtMs`,
     );
     if (appliedAtMs < receiptTime) fail("applied transition times must be monotonic");
+    if (transitionType === "record-artifact-applied") {
+      artifactApplicationTransition = { transitionId: id, actionSha256, appliedAtMs };
+    }
     finalTransitionFromStatus = fromStatus;
     receiptStatus = toStatus;
     receiptTime = appliedAtMs;
@@ -584,6 +595,27 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   if (updatedAtMs !== receiptTime) fail("updatedAtMs does not match the applied transition chain");
   if (artifactApplicationRecorded !== (envelope.artifactReceipt !== null)) {
     fail("artifact application receipt does not match the applied transition chain");
+  }
+  if (envelope.artifactReceipt !== null) {
+    if (!artifactApplicationTransition) fail("artifact application transition is missing");
+    const receipt = requireRecord(envelope.artifactReceipt, "artifactReceipt");
+    if (receipt.recordedAtMs !== artifactApplicationTransition.appliedAtMs) {
+      fail("artifact receipt time does not match its transition");
+    }
+    const exactAction = {
+      version: 1 as const,
+      type: "record-artifact-applied" as const,
+      transitionId: artifactApplicationTransition.transitionId,
+      atMs: artifactApplicationTransition.appliedAtMs,
+      receiptId: receipt.receiptId,
+      resultingContentHash: receipt.resultingContentHash,
+    };
+    if (
+      artifactApplicationTransition.actionSha256
+      !== hashCanonicalV1("zine.desktop-operation.transition.v1", exactAction)
+    ) {
+      fail("artifact receipt does not match its exact transition action");
+    }
   }
   if (status === "stale") {
     const staleFault = requireRecord(envelope.fault, "fault");
@@ -646,9 +678,9 @@ function validateSelectedContext(
   prepared: PreparedOperation,
   selected: CreateDesktopOperationEnvelopeV1Input["selectedContext"],
 ): void {
-  validatePackageManifest(selected.manifest);
   requireHash(selected.manifestSha256, "selectedContext manifestSha256");
   requireText(selected.renderedContext, "selectedContext renderedContext");
+  validatePackageManifest(selected.manifest, selected.renderedContext);
   if (
     selected.manifestSha256
     !== hashCanonicalV1("zine.trace-context.package-manifest.v1", selected.manifest)
@@ -743,9 +775,12 @@ function validateSelectedContextPlacement(
   }
 }
 
-function validatePackageManifest(value: unknown): asserts value is SelectedTraceContextManifestV1 {
+function validatePackageManifest(
+  value: unknown,
+  renderedContext?: string,
+): asserts value is SelectedTraceContextManifestV1 {
   try {
-    validateSelectedTraceContextManifestV1(value);
+    validateSelectedTraceContextManifestV1(value, renderedContext);
   } catch (error) {
     fail(`selected context manifest is invalid: ${error instanceof Error ? error.message : String(error)}`);
   }
