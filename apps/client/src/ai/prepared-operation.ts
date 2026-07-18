@@ -9,6 +9,11 @@ import {
   type ContextSnapshot,
 } from "./context-snapshot.js";
 import { renderTraceProcessLog } from "../provenance/trace-process.js";
+import type { AuthoritySpanV1 } from "@zine/trace-context";
+import {
+  compileTraceAuthoringOperation,
+  type PreparedTraceAuthoringV1,
+} from "./trace-authoring-adapter.js";
 
 const encoder = new TextEncoder();
 export const PREPARED_OPERATION_VERSION = 1;
@@ -18,6 +23,7 @@ export const PROMPT_LAYER_VERSIONS = [
   "op-prompts:v2",
   "context-snapshot:v1",
   "trace-process:v1",
+  "trace-authoring-adapter:v1",
 ] as const;
 
 export interface PreparedTargetRevision {
@@ -35,6 +41,7 @@ export interface PreparedOperation {
   operationInputs: Readonly<OpInputs>;
   contextSnapshot: ContextSnapshot;
   contextFingerprint: string;
+  traceAuthoring: PreparedTraceAuthoringV1 | null;
   messages: readonly ChatMessage[];
   providerId: string;
   providerFingerprint: string;
@@ -68,6 +75,9 @@ export interface PrepareOperationInput {
   requestId?: string;
   createdAt?: number;
   maxBytes?: number;
+  /** Exact current-editor authority evidence. Omission fails closed. */
+  actingAuthorId?: string;
+  authoritySpans?: readonly AuthoritySpanV1[];
 }
 
 export class PreparedOperationError extends Error {
@@ -92,10 +102,6 @@ function deepFreeze<T>(value: T): T {
     for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
   }
   return value;
-}
-
-function copyInputs(inputs: OpInputs): OpInputs {
-  return JSON.parse(JSON.stringify(inputs)) as OpInputs;
 }
 
 function bytes(value: string): number {
@@ -128,7 +134,20 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
   }
   if (issues.length > 0) throw new PreparedOperationError(issues);
 
-  const operationInputs = copyInputs(input.operationInputs);
+  const compiledAuthoring = compileTraceAuthoringOperation({
+    operation: input.operation,
+    operationInputs: input.operationInputs,
+    targetText: target.body,
+    actingAuthorId: input.actingAuthorId ?? "",
+    authoritySpans: input.authoritySpans ?? [],
+    sourceRevision: {
+      traceId: target.traceId ?? undefined,
+      headId: target.headId ?? undefined,
+      path: target.path,
+      contentHash: target.contentHash,
+    },
+  });
+  const operationInputs = compiledAuthoring.operationInputs;
   if (input.operation === "analyze") {
     operationInputs.traceLog = renderTraceProcessLog(
       input.contextSnapshot.inputs.flatMap((contextInput) =>
@@ -150,6 +169,8 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
     voicePrompt: input.voicePrompt ?? "",
     contextBlock: input.contextSnapshot.renderedBlock,
     lensId: input.lensId,
+    authorDirectiveInstructions: compiledAuthoring.authoring?.instructionSection,
+    authorDirectiveExcerpts: compiledAuthoring.authoring?.quotedExcerptSection,
   });
   const messages = prepareChatMessages(input.provider, assembled)
     .map((message) => ({ ...message }));
@@ -167,6 +188,7 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
     operation: input.operation,
     operationInputs,
     contextFingerprint: input.contextSnapshot.fingerprint,
+    traceAuthoring: compiledAuthoring.authoring,
     providerFingerprint,
     modelVoicePubkey: input.modelVoicePubkey,
     voicePromptHash,
@@ -187,6 +209,7 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
     operation: input.operation,
     operationInputs,
     messages,
+    traceAuthoring: compiledAuthoring.authoring,
     providerFingerprint,
     targetRevision,
     dependencyFingerprint,
@@ -199,6 +222,7 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
     operationInputs,
     contextSnapshot: input.contextSnapshot,
     contextFingerprint: input.contextSnapshot.fingerprint,
+    traceAuthoring: compiledAuthoring.authoring,
     messages,
     providerId: input.provider.id,
     providerFingerprint,

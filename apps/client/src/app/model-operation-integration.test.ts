@@ -49,3 +49,19 @@ test("Analyze produces an ordinary review with citations to every analyzed sourc
   assert.match(source, /editCitations\(newPath, sourceHeadIds\)/);
   assert.match(source, /openInPanel\(newPath, destIdx\)/);
 });
+
+test("Extend and Settle alone use the current-session trace-authoring adapter", () => {
+  const extend = functionBody("extendLLM", "function settleDeDupeLLM");
+  const settle = functionBody("settleLLM", "function stirLLM");
+  const stir = functionBody("stirLLM", "function replyLLM");
+  assert.match(app, /const authoringAuthorityField = StateField\.define/);
+  assert.match(app, /resetEditorAuthorityState\(authority, tr\.newDoc\.length\)/);
+  assert.match(app, /paste: tr\.isUserEvent\("input\.paste"\)/);
+  assert.match(app, /undoRedo: tr\.isUserEvent\("undo"\) \|\| tr\.isUserEvent\("redo"\)/);
+  assert.match(app, /actingAuthorId: authorPubkeyRef\.current/);
+  assert.match(extend, /sourceFrom/);
+  assert.match(extend, /buildAcceptedExtendChanges/);
+  assert.match(settle, /sourceFrom/);
+  assert.match(settle, /validateTraceAuthoringResult/);
+  assert.doesNotMatch(stir, /traceAuthoring|buildAcceptedExtendChanges|validateTraceAuthoringResult/);
+});

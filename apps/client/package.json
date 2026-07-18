@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@zine/protocol": "file:../../packages/protocol",
+    "@zine/trace-context": "file:../../packages/trace-context",
     "@codemirror/commands": "^6.10.4",
     "@codemirror/language": "^6.12.4",
     "@codemirror/state": "^6.7.1",

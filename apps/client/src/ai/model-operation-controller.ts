@@ -18,6 +18,7 @@ import {
 } from "./prepared-operation.js";
 import { providerProfileFingerprint } from "./provider-fingerprint.js";
 import { SnapshotCoordinator, type SnapshotDependencies } from "./snapshot-coordinator.js";
+import type { AuthoritySpanV1 } from "@zine/trace-context";
 
 export interface ModelOperationFocusSnapshot {
   kind: string;
@@ -32,6 +33,7 @@ export interface ModelOperationTargetSnapshot {
   traceId: string | null;
   headId: string | null;
   contentHash: string;
+  authoritySpans: readonly AuthoritySpanV1[];
 }
 
 /** Live authoring state captured by App at one preparation boundary. */
@@ -44,6 +46,7 @@ export interface ModelOperationCapture {
   shields: readonly string[];
   voicePrompt: string;
   dirtyTarget: boolean;
+  actingAuthorId: string;
   gatherContext: (signal: AbortSignal) => Promise<ContextSnapshot>;
 }
 
@@ -130,6 +133,10 @@ export class ModelOperationController {
       lensId: input.lensId,
       operation: input.operation,
       operationInputsHash: contentFingerprint(JSON.stringify(input.operationInputs)),
+      authoringAuthorityHash: contentFingerprint(JSON.stringify({
+        actingAuthorId: capture.actingAuthorId,
+        spans: target.authoritySpans,
+      })),
       promptLayerVersions: [
         ...PROMPT_LAYER_VERSIONS,
         `prepared-operation:v${PREPARED_OPERATION_VERSION}`,
@@ -140,6 +147,14 @@ export class ModelOperationController {
       capture.gatherContext,
       input.signal,
     );
+    if (
+      snapshot.target.path !== target.path ||
+      snapshot.target.contentHash !== target.contentHash ||
+      snapshot.target.traceId !== target.traceId ||
+      snapshot.target.headId !== target.headId
+    ) {
+      throw new Error("The gathered context no longer matches the captured target revision");
+    }
     return prepareOperation({
       operation: input.operation,
       operationInputs: input.operationInputs,
@@ -149,6 +164,8 @@ export class ModelOperationController {
       voicePrompt: capture.voicePrompt,
       lensId: input.lensId,
       dirtyTarget: capture.dirtyTarget,
+      actingAuthorId: capture.actingAuthorId,
+      authoritySpans: target.authoritySpans,
     });
   }
 
