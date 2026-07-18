@@ -7,12 +7,12 @@ import {
   type TraceConformanceStep,
   type TraceConformanceVerdict,
   type TraceEventVerifier,
-  type TraceProcessChange,
-  type TraceProcessTransaction,
 } from "@zine/protocol";
 import {
   isUtf16Boundary,
+  projectTraceProcessCandidatesV1,
   type EvidenceCandidateV1,
+  type TraceContextProcessProjectionInputV1,
   type TraceContextPolicyV1,
   type TraceContextSelectionInputV1,
   type TraceContextSelectionLimitsV1,
@@ -31,31 +31,6 @@ export interface DesktopTraceContextOperationMetadataV1 {
   reservedPromptBytes: number;
 }
 
-/**
- * Coordinates for one mechanical fact. The fact body, node identity, trace
- * identity, and process status are always derived from the stable verified
- * chain inside the adapter.
- */
-export type DesktopProcessFactRequestV1 =
-  | {
-      version: 1;
-      kind: "step-summary";
-      chainDistance: number;
-    }
-  | {
-      version: 1;
-      kind: "transaction";
-      chainDistance: number;
-      transactionIndex: number;
-    }
-  | {
-      version: 1;
-      kind: "change";
-      chainDistance: number;
-      transactionIndex: number;
-      changeIndex: number;
-    };
-
 export interface DesktopTraceContextSelectionAdapterInputV1 {
   version: 1;
   policy: TraceContextPolicyV1;
@@ -64,7 +39,6 @@ export interface DesktopTraceContextSelectionAdapterInputV1 {
   chain: readonly ProtocolEvent[];
   /** Trusted cryptographic verifier injected by the native desktop boundary. */
   verifyEvent: TraceEventVerifier;
-  processFacts: readonly DesktopProcessFactRequestV1[];
   limits?: TraceContextSelectionLimitsV1;
 }
 
@@ -97,7 +71,6 @@ export async function adaptDesktopTraceContextSelectionV1(
   if (typeof input.verifyEvent !== "function") fail("verifyEvent must be a trusted function");
   const policy = input.policy;
   const operation = cloneOperation(input.operation);
-  const processFacts = cloneProcessFactRequests(input.processFacts);
   const limits = input.limits ? { ...input.limits } : undefined;
   const verifyEvent = input.verifyEvent;
   const chain = cloneChain(input.chain);
@@ -114,11 +87,10 @@ export async function adaptDesktopTraceContextSelectionV1(
   // Text-only projection excludes process candidates before their validation,
   // byte accounting, hashing, or rendering. Preserve that exact boundary here.
   // Selected-trace always carries a non-FULL global verdict to the selector,
-  // even when no facts were requested, so completeness cannot disappear.
+  // so completeness cannot disappear.
   const candidates = policy === "text-only-v1"
     ? []
-    : processCandidates(target, verdict, processFacts);
-  requireDistinctCandidates(candidates);
+    : projectVerifiedProcessCandidates(target, chain, verdict);
 
   return deepFreeze({
     version: 1,
@@ -148,35 +120,6 @@ function cloneOperation(
     preparedRequestMaxBytes: operation.preparedRequestMaxBytes,
     reservedPromptBytes: operation.reservedPromptBytes,
   };
-}
-
-function cloneProcessFactRequests(
-  requests: readonly DesktopProcessFactRequestV1[],
-): DesktopProcessFactRequestV1[] {
-  if (!Array.isArray(requests)) fail("process fact requests must be an array");
-  return requests.map((request) => {
-    if (request.kind === "step-summary") {
-      return { version: request.version, kind: request.kind, chainDistance: request.chainDistance };
-    }
-    if (request.kind === "transaction") {
-      return {
-        version: request.version,
-        kind: request.kind,
-        chainDistance: request.chainDistance,
-        transactionIndex: request.transactionIndex,
-      };
-    }
-    if (request.kind === "change") {
-      return {
-        version: request.version,
-        kind: request.kind,
-        chainDistance: request.chainDistance,
-        transactionIndex: request.transactionIndex,
-        changeIndex: request.changeIndex,
-      };
-    }
-    fail("process fact request kind is unsupported");
-  });
 }
 
 function cloneChain(value: readonly ProtocolEvent[]): ProtocolEvent[] {
@@ -254,167 +197,118 @@ function requireVerifiedTarget(
   };
 }
 
-function processCandidates(
+function projectVerifiedProcessCandidates(
   target: VerifiedTargetProjection,
+  chain: readonly ProtocolEvent[],
   verdict: TraceConformanceVerdict,
-  requests: readonly DesktopProcessFactRequestV1[],
-): Extract<EvidenceCandidateV1, { kind: "process-fact" }>[] {
+): readonly Extract<EvidenceCandidateV1, { kind: "process-fact" }>[] {
+  const steps = requireBoundVerifiedSteps(chain, verdict.steps);
   if (verdict.status !== "full") {
-    return [processCandidate(
-      target,
-      verdict.steps,
-      verdict.status,
-      { version: 1, kind: "step-summary", chainDistance: 0 },
-    )];
+    return [nonFullStatusCandidate(target, steps[steps.length - 1]!, verdict.status)];
   }
-  return requests.map((request) =>
-    processCandidate(target, verdict.steps, verdict.status, request));
+  const projection: TraceContextProcessProjectionInputV1 = {
+    version: 1,
+    traceId: target.traceId,
+    headId: target.headId,
+    steps: steps.map((step) => {
+      if (step.status !== "full" || step.process.status !== "complete") {
+        fail("FULL verdict does not contain only complete FULL process Steps");
+      }
+      return {
+        version: 1,
+        nodeId: step.nodeId,
+        chainDistance: steps.length - step.stepIndex - 1,
+        transactions: step.process.transactions.map((transaction) => ({
+          version: 1,
+          sourceTransactionId: transaction.tx,
+          capturedAtMs: transaction.at,
+          ...(transaction.intent ? { intent: transaction.intent } : {}),
+          changes: transaction.changes.map((change) => ({
+            version: 1,
+            operation: change.op === "ins"
+              ? "insert"
+              : change.op === "del" ? "delete" : "replace",
+            range: { fromUtf16: change.from, toUtf16: change.to },
+            insertedText: change.inserted,
+            deletedText: change.deleted,
+            voiceId: change.voice,
+          })),
+        })),
+      };
+    }),
+  };
+  return projectTraceProcessCandidatesV1(projection);
 }
 
-function processCandidate(
-  target: VerifiedTargetProjection,
+function requireBoundVerifiedSteps(
+  chain: readonly ProtocolEvent[],
   steps: readonly TraceConformanceStep[],
-  verdictStatus: TraceConformanceStatus,
-  request: DesktopProcessFactRequestV1,
-): Extract<EvidenceCandidateV1, { kind: "process-fact" }> {
-  requireVersion(request.version, "process fact request");
-  if (!Number.isSafeInteger(request.chainDistance) || request.chainDistance < 0) {
-    fail("process fact chain distance must be a non-negative safe integer");
+): readonly TraceConformanceStep[] {
+  if (steps.length !== chain.length) fail("verification did not cover the captured chain");
+  for (let stepIndex = 0; stepIndex < chain.length; stepIndex += 1) {
+    const event = chain[stepIndex]!;
+    const step = steps[stepIndex];
+    if (!step || step.stepIndex !== stepIndex || step.nodeId !== event.id) {
+      fail("verified process Steps do not bind the captured chain");
+    }
   }
-  const stepIndex = steps.length - 1 - request.chainDistance;
-  const step = steps[stepIndex];
-  if (!step || step.stepIndex !== stepIndex) {
-    fail("process fact distance does not bind a verified chain Step");
-  }
+  return steps;
+}
 
-  const fact = authoritativeFact(step, request);
-  const transactionIndex = fact.kind === "step-summary" ? 0 : fact.transactionIndex;
-  const suffix = factSuffix(fact, request.kind === "change" ? request.changeIndex : undefined);
-  const ref = `desktop-trace:${target.traceId}:${step.nodeId}:${suffix}`;
-  return {
+function nonFullStatusCandidate(
+  target: VerifiedTargetProjection,
+  headStep: TraceConformanceStep,
+  status: Exclude<TraceConformanceStatus, "full">,
+): Extract<EvidenceCandidateV1, { kind: "process-fact" }> {
+  const canonical = projectTraceProcessCandidatesV1({
     version: 1,
-    id: ref,
-    dedupeKey: ref,
-    kind: "process-fact",
-    claimClass: "mechanical",
+    traceId: target.traceId,
+    headId: target.headId,
+    steps: [{
+      version: 1,
+      nodeId: target.headId,
+      chainDistance: 0,
+      transactions: [],
+    }],
+  })[0];
+  if (!canonical || canonical.fact.kind !== "step-summary") {
+    fail("shared projector did not produce the canonical head summary");
+  }
+  return {
+    ...canonical,
     source: {
-      kind: "trace",
-      ref,
+      ...canonical.source,
       traceId: target.traceId,
       headId: target.headId,
-      nodeId: step.nodeId,
-      processStatus: selectorProcessStatus(verdictStatus),
-      chainDistance: request.chainDistance,
-      transactionIndex,
-      ...(fact.kind === "change" ? { range: copyRange(fact.range) } : {}),
+      nodeId: headStep.nodeId,
+      processStatus: selectorProcessStatus(status),
     },
-    reasons: [request.chainDistance === 0 ? "prepared-head-process" : "recent-target-process"],
-    fact,
+    fact: summaryFact(headStep),
   };
 }
 
-function authoritativeFact(
+function summaryFact(
   step: TraceConformanceStep,
-  request: DesktopProcessFactRequestV1,
-): TraceProcessFactV1 {
-  switch (request.kind) {
-    case "step-summary": {
-      const summary = summarizeTraceProcess(step.process);
-      return {
-        kind: "step-summary",
-        transactionCount: summary.transactions,
-        rangeCount: summary.ranges,
-        insertedCodePointCount: summary.inserted,
-        deletedCodePointCount: summary.deleted,
-        ...(summary.firstAt === null ? {} : { firstCapturedAtMs: summary.firstAt }),
-        ...(summary.lastAt === null ? {} : { lastCapturedAtMs: summary.lastAt }),
-        spanMs: summary.spanMs,
-        longestGapMs: summary.longestGapMs,
-        undoCount: summary.undo,
-        redoCount: summary.redo,
-      };
-    }
-    case "transaction":
-      return transactionFact(requireTransaction(step, request.transactionIndex), request.transactionIndex);
-    case "change": {
-      const transaction = requireTransaction(step, request.transactionIndex);
-      if (!Number.isSafeInteger(request.changeIndex) || request.changeIndex < 0) {
-        fail("change facts require a non-negative safe change index");
-      }
-      const change = transaction.changes[request.changeIndex];
-      if (!change) fail("change index does not bind the verified transaction");
-      return changeFact(change, request.transactionIndex);
-    }
-  }
-}
-
-function requireTransaction(
-  step: TraceConformanceStep,
-  transactionIndex: number,
-): TraceProcessTransaction {
-  if (!Number.isSafeInteger(transactionIndex) || transactionIndex < 0) {
-    fail("transaction index must be a non-negative safe integer");
-  }
-  if (step.process.status !== "complete") {
-    fail("transaction facts require a complete verified Step process");
-  }
-  const transaction = step.process.transactions[transactionIndex];
-  if (!transaction) fail("transaction index does not bind the verified Step process");
-  return transaction;
-}
-
-function transactionFact(
-  transaction: TraceProcessTransaction,
-  transactionIndex: number,
-): Extract<TraceProcessFactV1, { kind: "transaction" }> {
-  const voiceIds = [...new Set(transaction.changes.map((change) => change.voice))].sort();
+): Extract<TraceProcessFactV1, { kind: "step-summary" }> {
+  const summary = summarizeTraceProcess(step.process);
   return {
-    kind: "transaction",
-    transactionIndex,
-    capturedAtMs: transaction.at,
-    ...(transaction.intent ? { intent: transaction.intent } : {}),
-    changeCount: transaction.changes.length,
-    voiceIds,
-  };
-}
-
-function changeFact(
-  change: TraceProcessChange,
-  transactionIndex: number,
-): Extract<TraceProcessFactV1, { kind: "change" }> {
-  const insertedCodePointCount = [...change.inserted].length;
-  const deletedCodePointCount = [...change.deleted].length;
-  if (insertedCodePointCount === 0 && deletedCodePointCount === 0) {
-    fail("a no-op range has no selector change-fact shape");
-  }
-  return {
-    kind: "change",
-    transactionIndex,
-    operation: change.op === "ins" ? "insert" : change.op === "del" ? "delete" : "replace",
-    range: { fromUtf16: change.from, toUtf16: change.to },
-    insertedCodePointCount,
-    deletedCodePointCount,
-    voiceId: change.voice,
+    kind: "step-summary",
+    transactionCount: summary.transactions,
+    rangeCount: summary.ranges,
+    insertedCodePointCount: summary.inserted,
+    deletedCodePointCount: summary.deleted,
+    ...(summary.firstAt === null ? {} : { firstCapturedAtMs: summary.firstAt }),
+    ...(summary.lastAt === null ? {} : { lastCapturedAtMs: summary.lastAt }),
+    spanMs: summary.spanMs,
+    longestGapMs: summary.longestGapMs,
+    undoCount: summary.undo,
+    redoCount: summary.redo,
   };
 }
 
 function selectorProcessStatus(status: TraceConformanceStatus): TraceProcessStatusV1 {
   if (status === "full") return "full-trace";
   return status;
-}
-
-function factSuffix(fact: TraceProcessFactV1, changeIndex: number | undefined): string {
-  if (fact.kind === "step-summary") return "summary";
-  if (fact.kind === "transaction") return `transaction:${fact.transactionIndex}`;
-  return `transaction:${fact.transactionIndex}:change:${changeIndex}`;
-}
-
-function requireDistinctCandidates(candidates: readonly EvidenceCandidateV1[]): void {
-  const ids = new Set<string>();
-  for (const candidate of candidates) {
-    if (ids.has(candidate.id)) fail(`duplicate process fact request ${candidate.id}`);
-    ids.add(candidate.id);
-  }
 }
 
 function requirePolicy(policy: TraceContextPolicyV1): void {
