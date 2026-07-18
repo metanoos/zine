@@ -7,7 +7,7 @@
 **Status:** draft, not yet enrolled
 
 **Companion scoring manual:**
-[`trace-writing-scoring-rubric.md`](trace-writing-scoring-rubric.md)
+[`trace-writing-rubric.md`](trace-writing-rubric.md)
 
 This document fixes the confirmatory design for testing Zine's trace-aware
 writing thesis before outcome telemetry or participant enrollment begins. A

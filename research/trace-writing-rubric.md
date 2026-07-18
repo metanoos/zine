@@ -1,6 +1,6 @@
 # Trace-aware writing outcomes — scoring and adjudication manual
 
-**Stable path:** `research/trace-writing-scoring-rubric.md`
+**Stable path:** `research/trace-writing-rubric.md`
 
 **Rubric version:** `trace-writing-scoring-v1`
 
