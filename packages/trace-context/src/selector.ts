@@ -924,12 +924,34 @@ function normalizeProcessFact(
         if (insertedCodePointCount + deletedCodePointCount === 0) {
           return malformed(path, "A non-empty Step must report at least one inserted or deleted code point");
         }
+        if (rangeCount > insertedCodePointCount + deletedCodePointCount) {
+          return malformed(
+            `${path}.rangeCount`,
+            "Every reported range must insert or delete at least one code point",
+          );
+        }
       }
       if (undoCount + redoCount > transactionCount) {
         return malformed(path, "Undo and redo transactions cannot exceed the total transaction count");
       }
-      if (transactionCount <= 1 && longestGapMs !== 0) {
-        return malformed(`${path}.longestGapMs`, "A Step with at most one transaction must have zero longest gap");
+      if (
+        transactionCount === 1
+        && (
+          value.firstCapturedAtMs !== value.lastCapturedAtMs
+          || value.spanMs !== 0
+          || longestGapMs !== 0
+        )
+      ) {
+        return malformed(
+          path,
+          "A one-transaction Step must have identical capture times and zero span and longest gap",
+        );
+      }
+      if (transactionCount === 2 && longestGapMs !== value.spanMs) {
+        return malformed(
+          `${path}.longestGapMs`,
+          "A two-transaction Step's only gap must equal its full span",
+        );
       }
       return {
         ok: true,

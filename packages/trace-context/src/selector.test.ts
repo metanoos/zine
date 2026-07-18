@@ -309,6 +309,107 @@ test("process facts reject impossible summaries, signer identities, and count re
   }
 });
 
+test("Step summaries enforce exact one/two-transaction timing and per-range edit bounds", async () => {
+  const invalidFacts: readonly TraceProcessFactV1[] = [
+    {
+      kind: "step-summary",
+      transactionCount: 1,
+      rangeCount: 1,
+      insertedCodePointCount: 1,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 1,
+      lastCapturedAtMs: 2,
+      spanMs: 1,
+      longestGapMs: 0,
+      undoCount: 0,
+      redoCount: 0,
+    },
+    {
+      kind: "step-summary",
+      transactionCount: 2,
+      rangeCount: 2,
+      insertedCodePointCount: 2,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 1,
+      lastCapturedAtMs: 3,
+      spanMs: 2,
+      longestGapMs: 1,
+      undoCount: 0,
+      redoCount: 0,
+    },
+    {
+      kind: "step-summary",
+      transactionCount: 1,
+      rangeCount: 2,
+      insertedCodePointCount: 1,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 1,
+      lastCapturedAtMs: 1,
+      spanMs: 0,
+      longestGapMs: 0,
+      undoCount: 0,
+      redoCount: 0,
+    },
+  ];
+  for (const [index, fact] of invalidFacts.entries()) {
+    const result = await selectTraceContextV1(selectionInput([
+      processFact(`aggregate-contradiction-${index}`, fact),
+    ]));
+    assert.equal(result.ok, false, `aggregate contradiction ${index}`);
+    if (!result.ok) {
+      assert.equal(result.error.code, "MALFORMED_INPUT", `aggregate contradiction ${index}`);
+    }
+  }
+
+  const validBoundaryFacts: readonly TraceProcessFactV1[] = [
+    {
+      kind: "step-summary",
+      transactionCount: 1,
+      rangeCount: 1,
+      insertedCodePointCount: 1,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 7,
+      lastCapturedAtMs: 7,
+      spanMs: 0,
+      longestGapMs: 0,
+      undoCount: 0,
+      redoCount: 0,
+    },
+    {
+      kind: "step-summary",
+      transactionCount: 2,
+      rangeCount: 2,
+      insertedCodePointCount: 2,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 7,
+      lastCapturedAtMs: 9,
+      spanMs: 2,
+      longestGapMs: 2,
+      undoCount: 0,
+      redoCount: 0,
+    },
+    {
+      kind: "step-summary",
+      transactionCount: 1,
+      rangeCount: 2,
+      insertedCodePointCount: 1,
+      deletedCodePointCount: 1,
+      firstCapturedAtMs: 7,
+      lastCapturedAtMs: 7,
+      spanMs: 0,
+      longestGapMs: 0,
+      undoCount: 0,
+      redoCount: 0,
+    },
+  ];
+  for (const [index, fact] of validBoundaryFacts.entries()) {
+    const result = await selectTraceContextV1(selectionInput([
+      processFact(`aggregate-boundary-${index}`, fact),
+    ]));
+    assertSuccess(result);
+  }
+});
+
 test("canonical signer pubkeys render in full as opaque mechanical identifiers", async () => {
   const result = await selectTraceContextV1(selectionInput([processFact("voices", {
     kind: "transaction",
