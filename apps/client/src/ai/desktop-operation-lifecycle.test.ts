@@ -27,8 +27,11 @@ import {
   reduceDesktopOperationV1,
   type DesktopOperationTransitionV1,
 } from "./desktop-operation-lifecycle.js";
-import type { PreparedOperation } from "./prepared-operation.js";
-import { prepareOperation } from "./prepared-operation.js";
+import {
+  computePreparedOperationRequestHashV1,
+  prepareOperation,
+  type PreparedOperation,
+} from "./prepared-operation.js";
 import type { ProviderConfig } from "./models-store.js";
 
 const TARGET_TEXT = "draft";
@@ -122,39 +125,56 @@ async function evidenceSelection(): Promise<TraceContextSelectionSuccessV1> {
 }
 
 function prepared(renderedContext: string): PreparedOperation {
+  const operationInputs = Object.freeze({
+    seed: TARGET_TEXT,
+    hasSelection: false,
+    rangeFrom: TARGET_TEXT.length,
+    rangeTo: TARGET_TEXT.length,
+    sourceFrom: 0,
+    sourceTo: TARGET_TEXT.length,
+  });
+  const messages = Object.freeze([
+    { role: "system" as const, content: "Continue the document." },
+    { role: "user" as const, content: renderedContext },
+  ]);
+  const targetRevision = {
+    folderId: FOLDER_ID,
+    path: "draft.md",
+    traceId: TRACE_ID,
+    headId: HEAD_ID,
+    contentHash: CONTENT_HASH,
+  };
+  const dependencyFingerprint = HASH("dependency");
+  const requestId = "request-0001";
+  const createdAt = BASE_TIME;
+  const preparedRequestHash = computePreparedOperationRequestHashV1({
+    requestId,
+    operation: "extend",
+    operationInputs,
+    messages,
+    traceAuthoring: null,
+    providerFingerprint: HASH("provider"),
+    targetRevision,
+    dependencyFingerprint,
+    createdAt,
+  });
   return Object.freeze({
     version: 1,
-    requestId: "request-0001",
+    requestId,
     operation: "extend",
-    operationInputs: Object.freeze({
-      seed: TARGET_TEXT,
-      hasSelection: false,
-      rangeFrom: TARGET_TEXT.length,
-      rangeTo: TARGET_TEXT.length,
-      sourceFrom: 0,
-      sourceTo: TARGET_TEXT.length,
-    }),
+    operationInputs,
     contextSnapshot: {} as PreparedOperation["contextSnapshot"],
     contextFingerprint: HASH("context"),
     traceAuthoring: null,
-    messages: Object.freeze([
-      { role: "system" as const, content: "Continue the document." },
-      { role: "user" as const, content: renderedContext },
-    ]),
+    messages,
     providerId: "provider-0001",
     providerFingerprint: HASH("provider"),
-    targetRevision: {
-      folderId: FOLDER_ID,
-      path: "draft.md",
-      traceId: TRACE_ID,
-      headId: HEAD_ID,
-      contentHash: CONTENT_HASH,
-    },
+    targetRevision,
     provenance: Object.freeze({
       modelVoicePubkey: "a".repeat(64),
       lensId: "default" as const,
       voicePromptHash: HASH("voice"),
-      dependencyFingerprint: HASH("dependency"),
+      dependencyFingerprint,
     }),
     budget: Object.freeze({
       maxBytes: 32_768,
@@ -163,9 +183,28 @@ function prepared(renderedContext: string): PreparedOperation {
       contextBytes: 1_024,
       promptLayerBytes: 1_024,
     }),
-    preparedRequestHash: HASH("upstream-request"),
-    createdAt: BASE_TIME,
+    preparedRequestHash,
+    createdAt,
   });
+}
+
+function withRecomputedPreparedRequestHash(
+  value: PreparedOperation,
+): PreparedOperation {
+  return {
+    ...value,
+    preparedRequestHash: computePreparedOperationRequestHashV1({
+      requestId: value.requestId,
+      operation: value.operation,
+      operationInputs: value.operationInputs,
+      messages: value.messages,
+      traceAuthoring: value.traceAuthoring,
+      providerFingerprint: value.providerFingerprint,
+      targetRevision: value.targetRevision,
+      dependencyFingerprint: value.provenance.dependencyFingerprint,
+      createdAt: value.createdAt,
+    }),
+  };
 }
 
 async function envelope(suffix = "0001"): Promise<DesktopOperationEnvelopeV1> {
@@ -479,13 +518,13 @@ test("creation rejects mismatched context identity, non-Extend operations, split
       placement: { messageIndex: 1, fromUtf16: 1, toUtf16: selected.renderedContext.length },
     },
   }), /does not identify the exact rendered context/);
-  const duplicatePrepared = {
+  const duplicatePrepared = withRecomputedPreparedRequestHash({
     ...base.prepared,
     messages: [
       base.prepared.messages[0]!,
       { role: "user" as const, content: `${selected.renderedContext}\n${selected.renderedContext}` },
     ],
-  };
+  });
   assert.throws(() => createDesktopOperationEnvelopeV1({
     ...base,
     prepared: duplicatePrepared,
@@ -494,13 +533,13 @@ test("creation rejects mismatched context identity, non-Extend operations, split
   for (const role of ["system", "assistant"] as const) {
     assert.throws(() => createDesktopOperationEnvelopeV1({
       ...base,
-      prepared: {
+      prepared: withRecomputedPreparedRequestHash({
         ...base.prepared,
         messages: [
           { role, content: selected.renderedContext },
           { role: "user", content: "ordinary seed" },
         ],
-      },
+      }),
       selectedContext: {
         ...withPlacement(selected),
         placement: { messageIndex: 0, fromUtf16: 0, toUtf16: selected.renderedContext.length },
@@ -564,7 +603,7 @@ test("creation rejects mismatched context identity, non-Extend operations, split
     fromUtf16: 1,
     toUtf16: 1,
   };
-  const emojiPrepared = {
+  const emojiPrepared = withRecomputedPreparedRequestHash({
     ...badPrepared,
     operationInputs: {
       ...badPrepared.operationInputs,
@@ -579,7 +618,7 @@ test("creation rejects mismatched context identity, non-Extend operations, split
       { role: "user" as const, content: emojiSelection.renderedContext },
     ],
     targetRevision: { ...badPrepared.targetRevision, contentHash: HASH("😀") },
-  };
+  });
   assert.throws(() => createDesktopOperationEnvelopeV1({
     ...base,
     prepared: emojiPrepared,
@@ -780,11 +819,113 @@ test("target staleness is durable before review or after acceptance and never re
   }), /requires a fresh prepared operation and selected context/);
 
   const focusOnlySelected = await selection();
-  const focusOnlyPrepared = Object.freeze({
+  const cosmeticallyRelabeled = Object.freeze({
     ...prepared(focusOnlySelected.renderedContext),
     requestId: "request-after-focus-stale",
     createdAt: reviewStale.updatedAtMs + 1,
   });
+  assert.equal(
+    cosmeticallyRelabeled.preparedRequestHash,
+    reviewStale.prepared.upstreamPreparedRequestHash,
+  );
+  assert.throws(() => createDesktopOperationRetryV1(reviewStale, {
+    attemptId: "attempt-cosmetic-stale-retry",
+    createdAtMs: reviewStale.updatedAtMs + 1,
+    freshPreparation: {
+      prepared: cosmeticallyRelabeled,
+      provider: {
+        protocol: "openai",
+        modelId: "model-1",
+        transportConfigSha256: HASH("redacted-transport-config"),
+      },
+      selectedContext: withPlacement(focusOnlySelected),
+      maxOutputTokens: 1_024,
+    },
+  }), /new prepared request identity/);
+  const relabeledWithRandomHash = Object.freeze({
+    ...cosmeticallyRelabeled,
+    preparedRequestHash: HASH("cosmetic-random-prepared-request"),
+  });
+  assert.notEqual(
+    relabeledWithRandomHash.preparedRequestHash,
+    reviewStale.prepared.upstreamPreparedRequestHash,
+  );
+  assert.throws(() => createDesktopOperationRetryV1(reviewStale, {
+    attemptId: "attempt-random-hash-stale-retry",
+    createdAtMs: reviewStale.updatedAtMs + 1,
+    freshPreparation: {
+      prepared: relabeledWithRandomHash,
+      provider: {
+        protocol: "openai",
+        modelId: "model-1",
+        transportConfigSha256: HASH("redacted-transport-config"),
+      },
+      selectedContext: withPlacement(focusOnlySelected),
+      maxOutputTokens: 1_024,
+    },
+  }), /prepared preparedRequestHash does not match its exact bytes/);
+
+  const focusOnlySnapshot = createContextSnapshot({
+    target: {
+      kind: "file",
+      folderId: FOLDER_ID,
+      path: "draft.md",
+      traceId: TRACE_ID,
+      headId: HEAD_ID,
+      body: TARGET_TEXT,
+    },
+    mount: { kind: "file", path: "draft.md" },
+    shields: [],
+    inputs: [{
+      path: "draft.md",
+      traceId: TRACE_ID,
+      headId: HEAD_ID,
+      body: TARGET_TEXT,
+      citations: [],
+      deltaLog: [],
+      unstepped: false,
+    }],
+    renderedBlock: focusOnlySelected.renderedContext,
+    createdAt: reviewStale.updatedAtMs + 1,
+  });
+  const focusOnlyProvider: ProviderConfig = {
+    id: "provider-focus-only-retry",
+    label: "Provider",
+    protocol: "openai",
+    baseUrl: "https://example.test/v1",
+    modelId: "model-1",
+    credentialRef: "model:provider:focus-only:api-key",
+    credentialConfigured: true,
+  };
+  const focusOnlyPrepared = prepareOperation({
+    operation: "extend",
+    operationInputs: {
+      seed: TARGET_TEXT,
+      hasSelection: false,
+      rangeFrom: TARGET_TEXT.length,
+      rangeTo: TARGET_TEXT.length,
+      sourceFrom: 0,
+      sourceTo: TARGET_TEXT.length,
+    },
+    contextSnapshot: focusOnlySnapshot,
+    provider: focusOnlyProvider,
+    modelVoicePubkey: "a".repeat(64),
+    lensId: "default",
+    dirtyTarget: false,
+    requestId: "request-after-focus-stale",
+    createdAt: reviewStale.updatedAtMs + 1,
+  });
+  const focusOnlyMessageIndex = focusOnlyPrepared.messages.findIndex(
+    (message) => message.content.includes(focusOnlySelected.renderedContext),
+  );
+  assert.notEqual(focusOnlyMessageIndex, -1);
+  const focusOnlyFromUtf16 = focusOnlyPrepared.messages[focusOnlyMessageIndex]!.content.indexOf(
+    focusOnlySelected.renderedContext,
+  );
+  assert.notEqual(
+    focusOnlyPrepared.preparedRequestHash,
+    reviewStale.prepared.upstreamPreparedRequestHash,
+  );
   const focusOnlyRetry = createDesktopOperationRetryV1(reviewStale, {
     attemptId: "attempt-focus-stale-retry",
     createdAtMs: reviewStale.updatedAtMs + 1,
@@ -795,12 +936,23 @@ test("target staleness is durable before review or after acceptance and never re
         modelId: "model-1",
         transportConfigSha256: HASH("redacted-transport-config"),
       },
-      selectedContext: withPlacement(focusOnlySelected),
+      selectedContext: {
+        ...focusOnlySelected,
+        placement: {
+          messageIndex: focusOnlyMessageIndex,
+          fromUtf16: focusOnlyFromUtf16,
+          toUtf16: focusOnlyFromUtf16 + focusOnlySelected.renderedContext.length,
+        },
+      },
       maxOutputTokens: 1_024,
     },
   });
   assert.deepEqual(focusOnlyRetry.prepared.targetRevision, reviewStale.prepared.targetRevision);
   assert.equal(focusOnlyRetry.prepared.requestId, "request-after-focus-stale");
+  assert.equal(
+    focusOnlyRetry.prepared.upstreamPreparedRequestHash,
+    focusOnlyPrepared.preparedRequestHash,
+  );
 
   const freshText = "draft changed after response";
   const freshHeadId = HASH("head-after-stale");
@@ -825,31 +977,59 @@ test("target staleness is durable before review or after acceptance and never re
     candidates: [],
   });
   if (!freshSelectionResult.ok) assert.fail(freshSelectionResult.error.message);
-  const freshPrepared: PreparedOperation = Object.freeze({
-    ...prepared(freshSelectionResult.renderedContext),
+  const freshSnapshot = createContextSnapshot({
+    target: {
+      kind: "file",
+      folderId: FOLDER_ID,
+      path: "draft.md",
+      traceId: TRACE_ID,
+      headId: freshHeadId,
+      body: freshText,
+    },
+    mount: { kind: "file", path: "draft.md" },
+    shields: [],
+    inputs: [{
+      path: "draft.md",
+      traceId: TRACE_ID,
+      headId: freshHeadId,
+      body: freshText,
+      citations: [],
+      deltaLog: [],
+      unstepped: false,
+    }],
+    renderedBlock: freshSelectionResult.renderedContext,
+    createdAt: reviewStale.updatedAtMs + 1,
+  });
+  const freshProvider: ProviderConfig = {
+    ...focusOnlyProvider,
+    id: "provider-content-stale-retry",
+    credentialRef: "model:provider:content-stale:api-key",
+  };
+  const freshPrepared = prepareOperation({
+    operation: "extend",
     requestId: "request-after-stale",
-    operationInputs: Object.freeze({
+    operationInputs: {
       seed: freshText,
       hasSelection: false,
       rangeFrom: freshText.length,
       rangeTo: freshText.length,
       sourceFrom: 0,
       sourceTo: freshText.length,
-    }),
-    messages: Object.freeze([
-      { role: "system" as const, content: "Continue the document." },
-      { role: "user" as const, content: freshSelectionResult.renderedContext },
-    ]),
-    targetRevision: {
-      folderId: FOLDER_ID,
-      path: "draft.md",
-      traceId: TRACE_ID,
-      headId: freshHeadId,
-      contentHash: HASH(freshText),
     },
-    preparedRequestHash: HASH("upstream-request-after-stale"),
+    contextSnapshot: freshSnapshot,
+    provider: freshProvider,
+    modelVoicePubkey: "a".repeat(64),
+    lensId: "default",
+    dirtyTarget: false,
     createdAt: reviewStale.updatedAtMs + 1,
   });
+  const freshMessageIndex = freshPrepared.messages.findIndex(
+    (message) => message.content.includes(freshSelectionResult.renderedContext),
+  );
+  assert.notEqual(freshMessageIndex, -1);
+  const freshFromUtf16 = freshPrepared.messages[freshMessageIndex]!.content.indexOf(
+    freshSelectionResult.renderedContext,
+  );
   const retry = createDesktopOperationRetryV1(reviewStale, {
     attemptId: "attempt-stale-retry",
     createdAtMs: reviewStale.updatedAtMs + 1,
@@ -860,7 +1040,14 @@ test("target staleness is durable before review or after acceptance and never re
         modelId: "model-1",
         transportConfigSha256: HASH("redacted-transport-config"),
       },
-      selectedContext: withPlacement(freshSelectionResult),
+      selectedContext: {
+        ...freshSelectionResult,
+        placement: {
+          messageIndex: freshMessageIndex,
+          fromUtf16: freshFromUtf16,
+          toUtf16: freshFromUtf16 + freshSelectionResult.renderedContext.length,
+        },
+      },
       maxOutputTokens: 1_024,
     },
   });

@@ -7,7 +7,11 @@ import { contentFingerprint } from "./context-snapshot.js";
 import type { ChatMessage } from "./llm.js";
 import type { ProviderProtocol } from "./models-store.js";
 import type { OpInputs } from "./op-prompts.js";
-import type { PreparedOperation, PreparedTargetRevision } from "./prepared-operation.js";
+import {
+  computePreparedOperationRequestHashV1,
+  type PreparedOperation,
+  type PreparedTargetRevision,
+} from "./prepared-operation.js";
 import { traceSourceRangeForOperationV1 } from "./trace-authoring-adapter.js";
 
 const encoder = new TextEncoder();
@@ -245,6 +249,22 @@ export function createDesktopOperationEnvelopeV1(
     fail("the first durable desktop contract supports Extend only");
   }
   requireHash(input.prepared.preparedRequestHash, "prepared preparedRequestHash");
+  if (
+    input.prepared.preparedRequestHash
+    !== computePreparedOperationRequestHashV1({
+      requestId: input.prepared.requestId,
+      operation: input.prepared.operation,
+      operationInputs: input.prepared.operationInputs,
+      messages: input.prepared.messages,
+      traceAuthoring: input.prepared.traceAuthoring,
+      providerFingerprint: input.prepared.providerFingerprint,
+      targetRevision: input.prepared.targetRevision,
+      dependencyFingerprint: input.prepared.provenance.dependencyFingerprint,
+      createdAt: input.prepared.createdAt,
+    })
+  ) {
+    fail("prepared preparedRequestHash does not match its exact bytes");
+  }
   requireHash(input.prepared.providerFingerprint, "prepared providerFingerprint");
   requireHash(input.provider.transportConfigSha256, "provider transportConfigSha256");
   if (input.provider.protocol !== "openai" && input.provider.protocol !== "anthropic") {

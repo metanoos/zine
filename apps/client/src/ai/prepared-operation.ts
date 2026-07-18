@@ -90,6 +90,18 @@ export interface PrepareOperationInput {
   authoritySpans?: readonly AuthoritySpanV1[];
 }
 
+export interface PreparedOperationRequestHashMaterialV1 {
+  requestId: string;
+  operation: OpKind;
+  operationInputs: Readonly<OpInputs>;
+  messages: readonly ChatMessage[];
+  traceAuthoring: PreparedTraceAuthoringV1 | null;
+  providerFingerprint: string;
+  targetRevision: PreparedTargetRevision;
+  dependencyFingerprint: string;
+  createdAt: number;
+}
+
 export class PreparedOperationError extends Error {
   constructor(readonly issues: readonly string[]) {
     super(issues.join("; "));
@@ -104,6 +116,23 @@ function canonical(value: unknown): string {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, child]) => `${JSON.stringify(key)}:${canonical(child)}`)
     .join(",")}}`;
+}
+
+/** Canonical identity of the exact frozen request produced by preparation. */
+export function computePreparedOperationRequestHashV1(
+  material: PreparedOperationRequestHashMaterialV1,
+): string {
+  return contentFingerprint(canonical({
+    requestId: material.requestId,
+    operation: material.operation,
+    operationInputs: material.operationInputs,
+    messages: material.messages,
+    traceAuthoring: material.traceAuthoring,
+    providerFingerprint: material.providerFingerprint,
+    targetRevision: material.targetRevision,
+    dependencyFingerprint: material.dependencyFingerprint,
+    createdAt: material.createdAt,
+  }));
 }
 
 function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
@@ -296,7 +325,7 @@ function prepareOperationInternal(
     headId: target.headId!,
     contentHash: target.contentHash,
   };
-  const preparedRequestHash = contentFingerprint(canonical({
+  const preparedRequestHash = computePreparedOperationRequestHashV1({
     requestId,
     operation: input.operation,
     operationInputs,
@@ -309,7 +338,7 @@ function prepareOperationInternal(
     targetRevision,
     dependencyFingerprint,
     createdAt,
-  }));
+  });
   return deepFreeze({
     version: PREPARED_OPERATION_VERSION,
     requestId,

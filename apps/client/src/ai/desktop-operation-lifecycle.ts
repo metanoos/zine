@@ -504,6 +504,12 @@ export function createDesktopOperationRetryV1(
     if (input.freshPreparation.prepared.requestId === prior.prepared.requestId) {
       fail("fresh retry must use a new prepared request id");
     }
+    if (
+      input.freshPreparation.prepared.preparedRequestHash
+      === prior.prepared.upstreamPreparedRequestHash
+    ) {
+      fail("fresh retry must use a new prepared request identity");
+    }
     const fresh = createDesktopOperationEnvelopeV1({
       operationId: prior.operationId,
       attemptId: input.attemptId,
