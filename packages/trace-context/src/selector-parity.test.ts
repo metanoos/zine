@@ -52,6 +52,7 @@ interface ParityCase {
   name: string;
   scope: "process-adapter-projectable" | "selector-only";
   protocolFixture?: string;
+  adapterFixture?: string;
   processProjection?: TraceContextProcessProjectionInputV1;
   budgetEdge?: "context-ceiling" | "request-remainder";
   input: TraceContextSelectionInputV1;
@@ -79,6 +80,18 @@ interface AdapterRejectionMutation {
   };
 }
 
+interface AdapterFixture {
+  name: string;
+  provenance: "adapter-owned-static";
+  cryptographicVerification: "required-in-desktop-and-mcp-adapter-tests";
+  expectedStatus: "invalid";
+  expectedIssue: {
+    code: "owner-changed";
+    stepIndex: 1;
+  };
+  chain: ProtocolEvent[];
+}
+
 const corpus = parityCorpusJson as unknown as {
   format: string;
   version: 1;
@@ -90,6 +103,7 @@ const corpus = parityCorpusJson as unknown as {
   cases: ParityCase[];
   processProjectionCases: ProjectionCase[];
   adapterRejectionMutations: AdapterRejectionMutation[];
+  adapterFixtures: AdapterFixture[];
 };
 
 const protocolCorpus = protocolCorpusJson as unknown as {
@@ -315,6 +329,43 @@ test("embedded signed fixtures remain exact protocol-owned conformance vectors",
     );
     assert.equal(verdict.status, fixture.expectedStatus, fixture.name);
   }
+});
+
+test("adapter-owned invalid ancestry fixture has strict hashes and a locally valid head shape", () => {
+  assert.equal(corpus.adapterFixtures.length, 1);
+  const fixture = corpus.adapterFixtures[0]!;
+  assert.equal(fixture.name, "invalid-ancestor-valid-head");
+  assert.equal(fixture.provenance, "adapter-owned-static");
+  assert.equal(
+    fixture.cryptographicVerification,
+    "required-in-desktop-and-mcp-adapter-tests",
+  );
+  assert.deepEqual(fixture.expectedIssue, { code: "owner-changed", stepIndex: 1 });
+  assert.equal(fixture.chain.length, 3);
+
+  for (const [index, event] of fixture.chain.entries()) {
+    assert.equal(event.kind, 4_290);
+    assert.match(event.pubkey, /^[0-9a-f]{64}$/);
+    assert.match(event.sig, /^[0-9a-f]{128}$/);
+    assert.equal(event.tags.filter((tag) => tag[0] === "F")[0]?.[1], "essay.md");
+    const expectedId = createHash("sha256")
+      .update(JSON.stringify([0, event.pubkey, event.created_at, event.kind, event.tags, event.content]))
+      .digest("hex");
+    assert.equal(event.id, expectedId);
+    const previous = event.tags.filter((tag) => tag[0] === "e" && tag[3] === "prev");
+    assert.equal(previous.length, index === 0 ? 0 : 1);
+    if (index > 0) assert.equal(previous[0]?.[1], fixture.chain[index - 1]?.id);
+  }
+  assert.notEqual(fixture.chain[1]!.pubkey, fixture.chain[0]!.pubkey);
+  assert.equal(fixture.chain[2]!.pubkey, fixture.chain[0]!.pubkey);
+
+  // Signature validity is intentionally asserted only by each owning adapter,
+  // where the native cryptographic dependency already exists.
+  const parityCase = corpus.cases.find((item) => item.adapterFixture === fixture.name);
+  assert.equal(parityCase?.name, "invalid trace failure");
+  assert.equal(parityCase.input.operation.target.traceId, fixture.chain[0]!.id);
+  assert.equal(parityCase.input.operation.target.headId, fixture.chain[2]!.id);
+  assert.equal(parityCase.input.operation.target.chosenPath, "essay.md");
 });
 
 test("protocol-derived facts independently match every applicable selector input", () => {
