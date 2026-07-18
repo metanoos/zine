@@ -207,11 +207,12 @@ been measured, and what remains unproven. Hosted services, a no-install public
 verifier, and the network layer are sequenced behind evidence, not dates; the
 [roadmap](ROADMAP.md) names the proof that unlocks each phase.
 
-The recursive file/folder ontology is specified, and the current client already
-propagates changed child heads toward Root. It does not yet encode child advance
-separately from membership addition, provide an explicit folder/Root Step, or
-join a recursive cascade under one recoverable operation id. Those are schema-
-cut work, not shipped behavior.
+The recursive file/folder ontology now runs through the shared protocol kernel
+and the client. Existing child heads advance separately from membership adds;
+folder and Root Step flush dirty descendants; one durable operation id groups
+the originating event with derived ancestor checkpoints; and Replay collapses
+those roll-ups without hiding their signed nodes. Fixed cross-runtime folder
+vectors and explicit crash-boundary real-relay fixtures remain hardening work.
 
 What matters most now is two linked proofs: trace-aware assistance improves real
 writing outcomes under a preregistered comparison, and accountable teams value

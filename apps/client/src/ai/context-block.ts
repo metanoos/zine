@@ -104,8 +104,8 @@ export interface DeltaLogEntry {
    *  or left the directory. */
   relativePath: string;
   /** Whether this is a per-file action ('file') or a folder-membership action
-   *  ('folder'). Folder events render with a `+`/`-` prefix and a joined/left
-   *  annotation so the model can distinguish structure changes from edits. */
+   *  ('folder'). Folder events render with a structural marker and annotation
+   *  so the model can distinguish membership, child-head, and explicit Steps. */
   source: 'file' | 'folder';
   prompt: string | null;
   summary: string | null;
@@ -370,11 +370,18 @@ function renderDeltaLine(d: DeltaLogEntry, prevSteppedAt: number | null, stripLa
     stripLabels || prevSteppedAt === null ? '' : formatInterval(d.steppedAt - prevSteppedAt).padStart(5);
   const tsField = interval ? `${ts}${interval}` : `${ts}     `;
   if (d.source === 'folder') {
-    // Membership events: +add / -remove, with a joined/left annotation so the
-    // model reads structure changes distinctly from edits. No char delta —
-    // membership events describe structure, not prose.
-    const sign = d.action === 'remove' ? '-' : '+';
-    const note = d.action === 'remove' ? '(left directory)' : '(joined directory)';
+    const sign = d.action === 'remove' ? '-' : d.action === 'add' ? '+' : '~';
+    const note = d.action === 'remove'
+      ? '(left directory)'
+      : d.action === 'add'
+        ? '(joined directory)'
+        : d.action === 'rename'
+          ? '(renamed in directory)'
+          : d.action === 'advance'
+            ? '(child checkpoint advanced)'
+            : d.action === 'step'
+              ? '(explicit folder Step)'
+              : '(folder metadata changed)';
     const act = `${sign}${d.action}`.padEnd(7);
     return `[#${d.seq}] ${act} ${tsField}   ${d.relativePath}   ${note}`;
   }

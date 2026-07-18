@@ -326,10 +326,13 @@ another editor, model, device, or abandoned lineage.
 
 The pre-product cut proceeds in dependency order:
 
-1. Land the recursive zine ontology, folder checkpoint causes, operation ids,
-   `advance` delta, and conformance fixtures.
-2. Update protocol kernel, desktop/MCP writers, readers, replay, and recovery.
-3. Add explicit folder/Root Step and transactional descendant flushing.
+1. **Landed:** recursive zine ontology, folder checkpoint causes, operation
+   ids, `advance` delta, and kernel conformance tests.
+2. **Landed:** protocol kernel, desktop/MCP writers, client readers, replay,
+   and durable local operation recovery.
+3. **Landed:** explicit folder/Root Step with descendant flushing; fixed
+   cross-runtime folder vectors and crash-boundary real-relay fixtures remain
+   hardening work.
 4. Introduce first-class AI attempt, dispatch, response/effect, and disposition
    records with exact reconstructability.
 5. Preserve `[[…]]`, implement versioned `((…))`, and remove automatic Copy

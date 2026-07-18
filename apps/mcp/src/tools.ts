@@ -37,6 +37,7 @@ import {
   fetchEventById,
   fetchManifest,
   isTraceNodeSent,
+  operationIdFromNode,
   publishHardenedSpan,
   resolveTraceIdentity,
   sendHistoricalStep,
@@ -580,7 +581,7 @@ export function registerTools(
           contentHash: parsed.contentHash ?? "",
         },
         voice.secretKey,
-        { localOnly: true },
+        { localOnly: true, operationId: operationIdFromNode(minted) },
       );
       saveLocalFile(ref.id, localPath, {
         content: phrase,

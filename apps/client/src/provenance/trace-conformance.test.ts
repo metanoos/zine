@@ -60,6 +60,7 @@ async function fileNode(
     content: JSON.stringify({
       snapshot,
       contentHash: options.contentHash ?? await sha256Hex(snapshot),
+      operationId: "ab".repeat(32),
       ...(options.deltas !== undefined ? { deltas: options.deltas } : {}),
       ...(options.kedits === null ? {} : { kedits }),
     }),

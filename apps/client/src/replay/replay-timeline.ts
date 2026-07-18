@@ -18,13 +18,72 @@ import {
 export interface ReplayTimelineStep {
   event: Event;
   relativePath: string;
-  meta: { steppedAtMs: number };
+  meta: {
+    steppedAtMs: number;
+    operationId?: string;
+    folderCheckpoint?: { cause: string; sourceNodeId?: string };
+  };
   runsUpToHere: Run[];
   /** Optional structural label for a membership change on this Step. */
   membership?: unknown;
   /** Folder checkpoints are structural replay state. They never become a
    *  document path or a synthetic tab. */
   folder?: ReplayFolderState;
+  /** Signed automatic roll-ups grouped beneath this visible gesture. They
+   * remain inspectable data and are still applied to structural replay state. */
+  derivedFolderCheckpoints?: ReplayTimelineStep[];
+}
+
+/** Group automatic ancestor roll-ups under the exact checkpoint they advance.
+ * Source links may form a file→folder→ancestor tree, so attachment is recursive.
+ * A lone or out-of-order derived node stays visible: incomplete history is
+ * never silently erased. */
+export function collapseDerivedFolderCheckpoints<T extends ReplayTimelineStep>(
+  steps: readonly T[],
+): T[] {
+  const indexById = new Map(steps.map((step, index) => [step.event.id, index]));
+  const children = new Map<string, T[]>();
+  const attached = new Set<string>();
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index]!;
+    const operationId = step.meta.operationId;
+    const sourceNodeId = step.meta.folderCheckpoint?.sourceNodeId;
+    if (
+      !step.folder ||
+      step.meta.folderCheckpoint?.cause !== "child-advance" ||
+      !operationId ||
+      !sourceNodeId
+    ) continue;
+    const sourceIndex = indexById.get(sourceNodeId);
+    const source = sourceIndex === undefined ? undefined : steps[sourceIndex];
+    if (!source || sourceIndex! >= index || source.meta.operationId !== operationId) continue;
+    const group = children.get(sourceNodeId) ?? [];
+    group.push(step);
+    children.set(sourceNodeId, group);
+    attached.add(step.event.id);
+  }
+
+  const materialize = (step: T): T => {
+    const derived = children.get(step.event.id);
+    if (!derived || derived.length === 0) return step;
+    return {
+      ...step,
+      derivedFolderCheckpoints: derived.map(materialize),
+    } as T;
+  };
+  return steps.filter((step) => !attached.has(step.event.id)).map(materialize);
+}
+
+function flattenGroupedSteps(
+  steps: readonly ReplayTimelineStep[],
+): ReplayTimelineStep[] {
+  const flattened: ReplayTimelineStep[] = [];
+  const visit = (step: ReplayTimelineStep) => {
+    flattened.push(step);
+    for (const derived of step.derivedFolderCheckpoints ?? []) visit(derived);
+  };
+  for (const step of steps) visit(step);
+  return flattened;
 }
 
 export interface PlayFrame {
@@ -315,9 +374,7 @@ export function replayDisplayAt(
   index: number,
 ): ReplayDisplay {
   let display = emptyReplayDisplay();
-  for (let i = 0; i <= index && i < steps.length; i++) {
-    const step = steps[i];
-    if (!step) continue;
+  const applyStep = (step: ReplayTimelineStep) => {
     if (step.folder) {
       display = {
         ...display,
@@ -338,6 +395,12 @@ export function replayDisplayAt(
         },
       };
     }
+    for (const derived of step.derivedFolderCheckpoints ?? []) applyStep(derived);
+  };
+  for (let i = 0; i <= index && i < steps.length; i++) {
+    const step = steps[i];
+    if (!step) continue;
+    applyStep(step);
   }
   return display;
 }
@@ -430,7 +493,14 @@ export function buildReplayTimeline(
   steps: readonly ReplayTimelineStep[],
   chains: Readonly<Record<string, Event[]>>,
 ): PlayFrame[] | null {
-  const stepIndexByEventId = new Map(steps.map((step, index) => [step.event.id, index]));
+  const stepIndexByEventId = new Map<string, number>();
+  const stepByEventId = new Map<string, ReplayTimelineStep>();
+  steps.forEach((step, visibleIndex) => {
+    for (const grouped of flattenGroupedSteps([step])) {
+      stepIndexByEventId.set(grouped.event.id, visibleIndex);
+      stepByEventId.set(grouped.event.id, grouped);
+    }
+  });
   const all: PlayFrame[] = [];
   for (const [path, chain] of Object.entries(chains)) {
     const frames: PlayFrame[] = [];
@@ -438,7 +508,7 @@ export function buildReplayTimeline(
     for (const event of chain) {
       const stepIndex = stepIndexByEventId.get(event.id);
       if (stepIndex === undefined) continue;
-      const step = steps[stepIndex];
+      const step = stepByEventId.get(event.id);
       const stepAt = step?.meta.steppedAtMs ?? event.created_at * 1000;
       if (step?.folder) {
         for (const focus of step.folder.focus) {

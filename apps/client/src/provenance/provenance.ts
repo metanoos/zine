@@ -3,9 +3,13 @@ import type { Event, EventTemplate } from "nostr-tools";
 import type { Filter } from "nostr-tools";
 import { Relay } from "nostr-tools/relay";
 import {
+  createTraceOperationId,
+  isTraceOperationId,
   parseKEditsFromContent,
   synthesizeKEditTransition,
+  traceOperationIdFromEvent,
   validateKEditTransition,
+  type FolderCheckpoint,
   type KEdit,
 } from "@zine/protocol";
 
@@ -360,6 +364,10 @@ export interface PublishEditInput {
    * callers SHOULD pass it so a file TraceHead can be refreshed without a
    * path-keyed chain scan. */
   traceId?: string;
+  /** Causal transaction shared with folder roll-ups from this Step. A caller
+   * may provide one when coordinating a larger gesture; standalone writers
+   * receive a fresh cryptographically random id. */
+  operationId?: string;
   relativePath: string;
   folderId: string;
   deltas: EditorDelta[];
@@ -919,6 +927,10 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   // keychain's manual (pen) key — the posture used by background Steps.
   const signer = input.signer ?? authoringVoice().secretKey;
   const steppedAt = Date.now();
+  const operationId = input.operationId ?? createTraceOperationId();
+  if (!isTraceOperationId(operationId)) {
+    throw new Error("cannot publish a file Step with a malformed operation id");
+  }
 
   const tags: string[][] = [
     // Reification discriminator (protocol §3.1: REQUIRED on every node).
@@ -1050,6 +1062,7 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
       ],
       snapshot: input.snapshot,
       contentHash: input.contentHash,
+      operationId,
       // Explicit discriminator shared by direct and extracted Coins. Readers
       // no longer have to infer "Coin" solely from an extraction edge.
       ...(input.coinOrigin
@@ -1422,6 +1435,7 @@ export async function publishCoin(input: {
   kedits?: KEdit[];
   /** Mint is local speech until Send. Defaults true for the authoring gesture. */
   localOnly?: boolean;
+  operationId?: string;
 }): Promise<Event> {
   if (!input.phrase) throw new Error("A Coin cannot have an empty body.");
   if (input.origin.kind === "extracted") {
@@ -1464,6 +1478,7 @@ export async function publishCoin(input: {
     coinOrigin: input.origin,
     authors: [{ voice: getPublicKey(signer), text: input.phrase }],
     kedits,
+    operationId: input.operationId,
   });
 }
 
@@ -1503,6 +1518,7 @@ export async function publishHardenedSpan(input: {
   signer?: Uint8Array;
   /** Mint is local speech until Send. Defaults true for the authoring gesture. */
   localOnly?: boolean;
+  operationId?: string;
 }): Promise<Event> {
   return publishCoin({
     relativePath: input.relativePath,
@@ -1516,6 +1532,7 @@ export async function publishHardenedSpan(input: {
     },
     signer: input.signer,
     localOnly: input.localOnly ?? true,
+    operationId: input.operationId,
   });
 }
 
@@ -2098,6 +2115,10 @@ export interface EventMeta {
   /** Reification discriminator from the `z` tag (protocol §3.1): `"file"` or
    *  `"folder"`. */
   z?: "file" | "folder";
+  /** Causal gesture id shared by the source checkpoint and derived roll-ups. */
+  operationId?: string;
+  /** Folder-only checkpoint classification used to collapse derived replay. */
+  folderCheckpoint?: FolderCheckpoint;
   citationCount: number;
   /** Every `q` tag's target node id, in declared (tag) order — the traces this
    *  node composes. Mirrors the emission order in `publishEdit`, so the
@@ -2141,9 +2162,34 @@ export function eventMeta(event: Event): EventMeta {
   }
 
   let steppedAtMs = (event.created_at ?? 0) * 1000;
+  let operationId: string | undefined;
+  let folderCheckpoint: FolderCheckpoint | undefined;
   try {
-    const parsed = JSON.parse(event.content) as { steppedAt?: number };
+    const parsed = JSON.parse(event.content) as {
+      steppedAt?: number;
+      operationId?: unknown;
+      folderCheckpoint?: Partial<FolderCheckpoint>;
+    };
     if (typeof parsed.steppedAt === "number") steppedAtMs = parsed.steppedAt;
+    if (isTraceOperationId(parsed.operationId)) operationId = parsed.operationId;
+    const checkpoint = parsed.folderCheckpoint;
+    if (
+      checkpoint?.version === 1 &&
+      (
+        checkpoint.cause === "genesis" ||
+        checkpoint.cause === "explicit-step" ||
+        checkpoint.cause === "structure-change" ||
+        checkpoint.cause === "child-advance" ||
+        checkpoint.cause === "metadata-change"
+      ) &&
+      (checkpoint.sourceNodeId === undefined || typeof checkpoint.sourceNodeId === "string")
+    ) {
+      folderCheckpoint = {
+        version: 1,
+        cause: checkpoint.cause,
+        ...(checkpoint.sourceNodeId ? { sourceNodeId: checkpoint.sourceNodeId } : {}),
+      };
+    }
   } catch {
     // non-JSON or absent content — fall back to created_at resolution
   }
@@ -2153,6 +2199,8 @@ export function eventMeta(event: Event): EventMeta {
     relativePath,
     folderId,
     z,
+    operationId,
+    folderCheckpoint,
     citationCount,
     citationTargets,
     steppedAtMs,
@@ -2382,6 +2430,7 @@ export type FocusSelection =
 export type FolderDelta =
   | { type: "add" | "remove"; kind: "file" | "folder"; relativePath: string; nodeId?: string; timestamp: number }
   | { type: "rename"; kind: "file" | "folder"; fromPath: string; toPath: string; nodeId: string; timestamp: number }
+  | { type: "advance"; kind: "file" | "folder"; relativePath: string; previousNodeId: string; nodeId: string; timestamp: number }
   | { type: "focus"; op: "mount" | "unmount"; selection: FocusSelection; panelIndex: number; timestamp: number };
 
 export function isFocusSelection(value: unknown): value is FocusSelection {
@@ -2534,6 +2583,8 @@ function buildFolderNodeTemplate(
   action: string,
   deltas: FolderDelta[],
   steppedAt: number,
+  operationId: string,
+  folderCheckpoint: FolderCheckpoint,
   opts?: { forkedFrom?: string | null; memberOwners?: string[]; geohashes?: string[] },
 ): EventTemplate {
   const ownerByPath = opts?.memberOwners;
@@ -2581,6 +2632,8 @@ function buildFolderNodeTemplate(
       snapshot,
       ...(deltas.length > 0 ? { deltas } : {}),
       contentHash: "", // filled by caller after hashing the snapshot
+      operationId,
+      folderCheckpoint,
     }),
   };
 }
@@ -2710,6 +2763,8 @@ async function publishFolderNode(
     forkedFrom?: string | null;
     memberOwners?: string[];
     geohashes?: string[];
+    operationId?: string;
+    folderCheckpoint: FolderCheckpoint;
     /** Step the folder manifest only to the home relay. Used when a local
      *  file Step changes membership but has not been Sent. */
     localOnly?: boolean;
@@ -2717,6 +2772,10 @@ async function publishFolderNode(
 ): Promise<Event> {
   const key = opts.signer ?? authoringVoice().secretKey;
   const steppedAt = Date.now();
+  const operationId = opts.operationId ?? createTraceOperationId();
+  if (!isTraceOperationId(operationId)) {
+    throw new Error("cannot publish a folder checkpoint with a malformed operation id");
+  }
   // §8: drain any focus observations buffered since the last folder step and
   // append them to this node's deltas. The structural delta (if any) stays
   // first so directory-log readers that take deltas[0] still see it.
@@ -2731,6 +2790,8 @@ async function publishFolderNode(
     opts.action,
     allDeltas,
     steppedAt,
+    operationId,
+    opts.folderCheckpoint,
     {
       forkedFrom: opts.forkedFrom ?? null,
       memberOwners: opts.memberOwners,
@@ -2871,6 +2932,7 @@ export async function setFolderGeohashes(folderId: string, geohashes: string[]):
     prevEventId: previous?.id ?? null,
     action: previous ? "edit" : "import",
     geohashes: next,
+    folderCheckpoint: { version: 1, cause: "metadata-change" },
   });
 }
 
@@ -2928,6 +2990,7 @@ export async function createFolderGenesis(opts?: {
   members?: ManifestFileEntry[];
   memberOwners?: string[];
   action?: string;
+  operationId?: string;
   /** Keep the new folder identity on the home relay until an explicit Send. */
   localOnly?: boolean;
 }): Promise<string> {
@@ -2938,6 +3001,8 @@ export async function createFolderGenesis(opts?: {
     forkedFrom: opts?.forkedFrom ?? null,
     memberOwners: opts?.memberOwners,
     localOnly: opts?.localOnly,
+    operationId: opts?.operationId,
+    folderCheckpoint: { version: 1, cause: "genesis" },
   });
   return event.id;
 }
@@ -2947,22 +3012,95 @@ export async function createFolderGenesis(opts?: {
  *  Called from every step/import path so the folder chain never drifts from
  *  the actual file-chain heads. For deletes, use `removeManifestEntry` —
  *  spec-clean tombstones drop the member rather than tombstoning it. */
+export function planManifestUpsert(
+  current: readonly ManifestFileEntry[],
+  entry: ManifestFileEntry,
+  timestamp: number,
+):
+  | { unchanged: true }
+  | {
+      unchanged: false;
+      members: ManifestFileEntry[];
+      deltas: FolderDelta[];
+      folderCheckpoint: FolderCheckpoint;
+    } {
+  const existing = current.find((member) => member.relativePath === entry.relativePath);
+  if (
+    existing &&
+    existing.kind === entry.kind &&
+    existing.latestNodeId === entry.latestNodeId &&
+    existing.contentHash === entry.contentHash
+  ) {
+    return { unchanged: true };
+  }
+  const members = existing
+    ? current.map((member) => member.relativePath === entry.relativePath ? entry : member)
+    : [...current, entry];
+  if (existing?.kind === entry.kind) {
+    return {
+      unchanged: false,
+      members,
+      deltas: [{
+        type: "advance",
+        kind: entry.kind,
+        relativePath: entry.relativePath,
+        previousNodeId: existing.latestNodeId,
+        nodeId: entry.latestNodeId,
+        timestamp,
+      }],
+      folderCheckpoint: {
+        version: 1,
+        cause: "child-advance",
+        sourceNodeId: entry.latestNodeId,
+      },
+    };
+  }
+  return {
+    unchanged: false,
+    members,
+    deltas: [
+      ...(existing
+        ? [{
+            type: "remove" as const,
+            kind: existing.kind,
+            relativePath: existing.relativePath,
+            nodeId: existing.latestNodeId,
+            timestamp,
+          }]
+        : []),
+      {
+        type: "add",
+        kind: entry.kind,
+        relativePath: entry.relativePath,
+        nodeId: entry.latestNodeId,
+        timestamp,
+      },
+    ],
+    folderCheckpoint: { version: 1, cause: "structure-change" },
+  };
+}
+
 export async function upsertManifestEntry(
   folderId: string,
   entry: ManifestFileEntry,
   signer?: Uint8Array,
-  opts?: { localOnly?: boolean },
+  opts?: { localOnly?: boolean; operationId?: string },
 ): Promise<Event> {
   const previous = await fetchLatestFolderNode(folderId);
   const current = previous ? membersFromNode(previous) : [];
-  const next = current.filter((f) => f.relativePath !== entry.relativePath);
-  next.push(entry);
-  return publishFolderNode(folderId, next, {
+  const plan = planManifestUpsert(current, entry, Date.now());
+  if (plan.unchanged && previous) return previous;
+  if (plan.unchanged) {
+    throw new Error(`cannot preserve ${entry.relativePath} without a folder head`);
+  }
+  return publishFolderNode(folderId, plan.members, {
     prevEventId: previous?.id ?? null,
     action: previous ? "edit" : "import",
-    deltas: [{ type: "add", kind: entry.kind, relativePath: entry.relativePath, nodeId: entry.latestNodeId, timestamp: Date.now() }],
+    deltas: plan.deltas,
     signer,
     localOnly: opts?.localOnly,
+    operationId: opts?.operationId,
+    folderCheckpoint: plan.folderCheckpoint,
   });
 }
 
@@ -2975,6 +3113,7 @@ export async function removeManifestEntry(
   folderId: string,
   relativePath: string,
   signer?: Uint8Array,
+  opts?: { localOnly?: boolean; operationId?: string },
 ): Promise<Event | null> {
   const previous = await fetchLatestFolderNode(folderId);
   const current = previous ? membersFromNode(previous) : [];
@@ -2986,6 +3125,9 @@ export async function removeManifestEntry(
     action: previous ? "edit" : "import",
     deltas: [{ type: "remove", kind: existing.kind, relativePath, timestamp: Date.now() }],
     signer,
+    localOnly: opts?.localOnly,
+    operationId: opts?.operationId,
+    folderCheckpoint: { version: 1, cause: "structure-change" },
   });
 }
 
@@ -3005,36 +3147,60 @@ export async function renameManifestEntry(
   toPath: string,
   nodeId: string,
   signer?: Uint8Array,
+  opts?: { localOnly?: boolean; operationId?: string },
 ): Promise<Event> {
   const previous = await fetchLatestFolderNode(folderId);
   const current = previous ? membersFromNode(previous) : [];
   // Repoint the renamed member's path; carry over latestNodeId/contentHash.
-  // If the member isn't found (e.g. the rename raced with a concurrent remove),
-  // fall back to upserting the entry at toPath so the chain stays consistent.
+  // Races and target collisions are rejected so the writer cannot emit a node
+  // that the strict folder-chain verifier would reject.
   const existing = current.find((f) => f.relativePath === fromPath);
-  let next: ManifestFileEntry[];
-  if (existing) {
-    // Repoint fromPath → toPath, carrying latestNodeId/contentHash; the caller
-    // already stepped the new file node at toPath, so latestNodeId becomes that.
-    const renamed: ManifestFileEntry = { ...existing, relativePath: toPath, latestNodeId: nodeId };
-    next = current
-      .filter((f) => f.relativePath !== fromPath && f.relativePath !== toPath)
-      .concat(renamed);
-  } else {
-    // Member not found (rename raced a concurrent remove): upsert at toPath so
-    // the chain stays consistent rather than dropping the rename entirely.
-    next = current
-      .filter((f) => f.relativePath !== toPath)
-      .concat({ kind: "file", relativePath: toPath, latestNodeId: nodeId, contentHash: "" });
+  if (!existing) {
+    throw new Error(`cannot rename missing folder member ${fromPath}`);
   }
+  if (fromPath !== toPath && current.some((member) => member.relativePath === toPath)) {
+    throw new Error(`cannot rename folder member ${fromPath}: target ${toPath} already exists`);
+  }
+  const renamed: ManifestFileEntry = { ...existing, relativePath: toPath, latestNodeId: nodeId };
+  const next = current
+    .filter((member) => member.relativePath !== toPath)
+    .map((member) => member.relativePath === fromPath ? renamed : member);
   return publishFolderNode(folderId, next, {
     prevEventId: previous?.id ?? null,
     action: previous ? "edit" : "import",
     // Carry the member's kind onto the rename delta (spec §3.3 — kind mirrors
-    // the member entry). A missing source races a remove and becomes a file.
-    deltas: [{ type: "rename", kind: existing?.kind ?? "file", fromPath, toPath, nodeId, timestamp: Date.now() }],
+    // the member entry).
+    deltas: [{ type: "rename", kind: existing.kind, fromPath, toPath, nodeId, timestamp: Date.now() }],
     signer,
+    localOnly: opts?.localOnly,
+    operationId: opts?.operationId,
+    folderCheckpoint: { version: 1, cause: "structure-change" },
   });
+}
+
+/** Append the deliberate landmark for an already-materialized folder frontier. */
+export async function stepFolderManifest(
+  folderId: string,
+  signer?: Uint8Array,
+  opts?: { localOnly?: boolean; operationId?: string },
+): Promise<Event> {
+  const previous = await fetchLatestFolderNode(folderId);
+  if (!previous) throw new Error(`cannot Step unavailable folder ${folderId}`);
+  return publishFolderNode(folderId, membersFromNode(previous), {
+    prevEventId: previous.id,
+    action: "edit",
+    signer,
+    localOnly: opts?.localOnly,
+    operationId: opts?.operationId,
+    folderCheckpoint: { version: 1, cause: "explicit-step" },
+  });
+}
+
+/** Expose the shared operation id on a signed node to transaction coordinators. */
+export function operationIdFromNode(event: Pick<Event, "content">): string {
+  const operationId = traceOperationIdFromEvent(event as Event);
+  if (!operationId) throw new Error("signed TraceNode is missing its operation id");
+  return operationId;
 }
 
 // --- buffered focus deltas ----------------------------------------------
@@ -3185,7 +3351,7 @@ export async function fetchFolderOwner(folderId: string): Promise<string | null>
  *  is recoverable from the fork node alone. Returns the genesis event. */
 export async function forkFolder(
   sourceFolderId: string,
-  opts?: { signer?: Uint8Array; localOnly?: boolean },
+  opts?: { signer?: Uint8Array; localOnly?: boolean; operationId?: string },
 ): Promise<Event> {
   const sourceNode =
     await fetchLatestFolderNode(sourceFolderId) ??
@@ -3209,6 +3375,8 @@ export async function forkFolder(
     memberOwners,
     signer: opts?.signer,
     localOnly: opts?.localOnly,
+    operationId: opts?.operationId,
+    folderCheckpoint: { version: 1, cause: "genesis" },
   });
 }
 
@@ -3226,7 +3394,7 @@ export async function forkFile(
   sourceFolderId: string,
   relativePath: string,
   destFolderId: string,
-  opts?: { signer?: Uint8Array },
+  opts?: { signer?: Uint8Array; operationId?: string },
 ): Promise<Event> {
   const sourceNodeId = await fetchLatestEventId(sourceFolderId, relativePath);
   if (!sourceNodeId) {
@@ -3259,6 +3427,7 @@ export async function forkFile(
     signer,
     forkedFrom: sourceNodeId,
     kedits: synthesizeKEditTransition("", snapshot, getPublicKey(signer)),
+    operationId: opts?.operationId,
   });
 }
 
@@ -3271,7 +3440,7 @@ export async function forkFileFromNode(
   sourceNodeId: string,
   destFolderId: string,
   destRelativePath: string,
-  opts?: { signer?: Uint8Array; localOnly?: boolean },
+  opts?: { signer?: Uint8Array; localOnly?: boolean; operationId?: string },
 ): Promise<Event> {
   const sourceEvent = await fetchEventById(sourceNodeId);
   if (!sourceEvent) {
@@ -3299,6 +3468,7 @@ export async function forkFileFromNode(
     localOnly: opts?.localOnly,
     forkedFrom: sourceNodeId,
     kedits: synthesizeKEditTransition("", snapshot, getPublicKey(signer)),
+    operationId: opts?.operationId,
   });
 }
 
@@ -4088,6 +4258,7 @@ export async function incorporateMergeCandidate(
       contentHash: await sha256HexLocal(snapshot),
     },
     opts?.signer,
+    { operationId: operationIdFromNode(event) },
   );
 
   return event;

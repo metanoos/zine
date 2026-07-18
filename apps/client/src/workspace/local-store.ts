@@ -53,6 +53,9 @@ export interface LocalFile {
     kind: "move" | "to-oblivion" | "restore";
     fromPath: string;
   };
+  /** Causal id reused across a staged file Step, its folder roll-ups, and any
+   * retry after a partial relay failure. Cleared only after the gesture lands. */
+  pendingOperationId?: string;
   /** ms-precision local write time. The tiebreaker vs the relay. */
   updatedAt: number;
   /** Live per-voice attribution (the editor's run list). Optional on
@@ -113,6 +116,9 @@ export interface LocalFolder {
   /** Paths the user has shielded (excluded from context injection). Stored as an
    *  array because JSON has no Set; folder paths exclude their whole subtree. */
   shieldedPaths?: string[];
+  /** Durable transaction ids for explicit recursive folder Steps that have
+   * started but not yet reached their final explicit folder checkpoint. */
+  pendingFolderSteps?: Record<string, string>;
 }
 
 function key(folderId: string): string {
@@ -137,6 +143,7 @@ export function loadLocalFolder(folderId: string): LocalFolder | null {
       files,
       folderTags: parsed.folderTags,
       shieldedPaths: parsed.shieldedPaths,
+      pendingFolderSteps: parsed.pendingFolderSteps,
     };
   } catch {
     return null;
@@ -188,6 +195,7 @@ export function saveLocalFile(
     pendingForce?: boolean;
     pendingKedits?: KEdit[];
     pendingEmptyGenesis?: boolean;
+    pendingOperationId?: string;
   },
   label?: string,
 ): void {
@@ -215,6 +223,7 @@ export function saveLocalFile(
     ...(data.pendingForce ? { pendingForce: data.pendingForce } : {}),
     ...(data.pendingKedits ? { pendingKedits: data.pendingKedits } : {}),
     ...(data.pendingEmptyGenesis ? { pendingEmptyGenesis: true } : {}),
+    ...(data.pendingOperationId ? { pendingOperationId: data.pendingOperationId } : {}),
   };
   if (label !== undefined) existing.label = label;
   saveLocalFolder(existing);
@@ -234,6 +243,7 @@ export function moveLocalFile(
   oldPath: string,
   newPath: string,
   pendingMove?: LocalFile["pendingMove"],
+  pendingOperationId?: string,
 ): void {
   const existing = loadLocalFolder(folderId);
   if (!existing) return;
@@ -243,6 +253,7 @@ export function moveLocalFile(
   existing.files[newPath] = {
     ...file,
     ...(pendingMove ? { pendingMove } : {}),
+    ...(pendingOperationId ? { pendingOperationId } : {}),
     updatedAt: Date.now(),
   };
   saveLocalFolder(existing);
@@ -272,6 +283,39 @@ export function loadLocalShielded(folderId: string): Set<string> {
 export function saveLocalShielded(folderId: string, paths: Set<string>): void {
   const existing = loadLocalFolder(folderId) ?? { id: folderId, files: {} };
   saveLocalFolder({ ...existing, shieldedPaths: [...paths] });
+}
+
+export function pendingFolderStepOperation(
+  folderId: string,
+  relativePath: string,
+): string | null {
+  return loadLocalFolder(folderId)?.pendingFolderSteps?.[relativePath] ?? null;
+}
+
+export function stageFolderStepOperation(
+  folderId: string,
+  relativePath: string,
+  operationId: string,
+): void {
+  const existing = loadLocalFolder(folderId) ?? { id: folderId, files: {} };
+  saveLocalFolder({
+    ...existing,
+    pendingFolderSteps: {
+      ...existing.pendingFolderSteps,
+      [relativePath]: operationId,
+    },
+  });
+}
+
+export function clearFolderStepOperation(folderId: string, relativePath: string): void {
+  const existing = loadLocalFolder(folderId);
+  if (!existing?.pendingFolderSteps?.[relativePath]) return;
+  const next = { ...existing.pendingFolderSteps };
+  delete next[relativePath];
+  saveLocalFolder({
+    ...existing,
+    ...(Object.keys(next).length > 0 ? { pendingFolderSteps: next } : { pendingFolderSteps: undefined }),
+  });
 }
 
 /** Ensure a folder record exists (for create/remember). */

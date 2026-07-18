@@ -59,8 +59,10 @@ import {
 import { traceProcessFromEvent, type TraceProcessView } from "../provenance/trace-process.js";
 import {
   verifyFileTraceChain,
+  verifyFolderTraceChain,
   type TraceConformanceStatus,
 } from "../provenance/trace-conformance.js";
+import { orderReplayTraceChain } from "../replay/replay-timeline.js";
 
 // Re-export so App.tsx can import the limelight renderer alongside the gather
 // entry point from one module (same pattern as the types below would use).
@@ -71,9 +73,9 @@ const logMemo = new Map<string, DeltaLogEntry[]>();
 const chainMemo = new Map<string, Event[]>();
 
 /** Drop the whole memo — e.g. on folder switch (see the `folder?.id` effect in
- *  App.tsx). Per-directory invalidation is implicit: the memo key includes a
- *  fingerprint of the directory's direct-child nodeIds, so any head advance
- *  refetches on the next gather. */
+ *  App.tsx). Per-directory invalidation is implicit: the memo key includes the
+ *  scoped file heads and fetched folder-node ids, so content changes and
+ *  folder-only checkpoints both refetch on the next gather. */
 export function clearChainMemo(): void {
   logMemo.clear();
   chainMemo.clear();
@@ -500,6 +502,77 @@ export function isShielded(shielded: Set<string>, path: string): boolean {
   return false;
 }
 
+/** Resolve one flattened workspace path to its direct recursive folder trace.
+ * File TraceNodes carry the direct folder id and one-segment structural name,
+ * even though local/UI state addresses them from Root. */
+export function directoryTraceCoordinate(
+  rootFolderId: string,
+  files: Readonly<Record<string, FileState>>,
+  path: string,
+): { folderId: string; relativePath: string } | null {
+  const separator = path.lastIndexOf("/");
+  if (separator === -1) return { folderId: rootFolderId, relativePath: path };
+  const parentPath = path.slice(0, separator);
+  const parent = files[parentPath];
+  const folderId = parent?.kind === "folder" ? parent.traceId ?? parent.nodeId : null;
+  return folderId
+    ? { folderId, relativePath: path.slice(separator + 1) }
+    : null;
+}
+
+export interface FolderLogObservation {
+  steppedAt: number;
+  action: "add" | "remove" | "rename" | "advance" | "step" | "metadata";
+  relativePath: string;
+}
+
+/** Project one verified-shape folder payload into mechanical AI observations.
+ * A kind replacement may carry remove+add, so one checkpoint can yield more
+ * than one row. Cryptographic/chain conformance remains a reader concern. */
+export function folderCheckpointLogObservations(
+  node: Event,
+  folderPath: string,
+): FolderLogObservation[] {
+  let parsed: {
+    steppedAt?: number;
+    deltas?: Array<{
+      type?: string;
+      relativePath?: string;
+      toPath?: string;
+    }>;
+    folderCheckpoint?: { cause?: string };
+  };
+  try {
+    parsed = JSON.parse(node.content) as typeof parsed;
+  } catch {
+    return [];
+  }
+  const steppedAt = typeof parsed.steppedAt === "number"
+    ? parsed.steppedAt
+    : (node.created_at ?? 0) * 1000;
+  const qualify = (path: string) => folderPath ? `${folderPath}/${path}` : path;
+  const structural = (parsed.deltas ?? []).flatMap((delta): FolderLogObservation[] => {
+    if (
+      delta.type !== "add" &&
+      delta.type !== "remove" &&
+      delta.type !== "rename" &&
+      delta.type !== "advance"
+    ) return [];
+    const path = delta.type === "rename" ? delta.toPath : delta.relativePath;
+    return path
+      ? [{ steppedAt, action: delta.type, relativePath: qualify(path) }]
+      : [];
+  });
+  if (structural.length > 0) return structural;
+  if (parsed.folderCheckpoint?.cause === "explicit-step") {
+    return [{ steppedAt, action: "step", relativePath: folderPath }];
+  }
+  if (parsed.folderCheckpoint?.cause === "metadata-change") {
+    return [{ steppedAt, action: "metadata", relativePath: folderPath }];
+  }
+  return [];
+}
+
 /** Build the aggregated directory log for the scope subtree: every descendant
  *  file's chain events (one `fetchChain` per descendant, walked genesis→head so
  *  oldValue is derivable from the prior snapshot) PLUS every directory's folder
@@ -510,8 +583,9 @@ export function isShielded(shielded: Set<string>, path: string): boolean {
  *  This is the recursive generalization of the pre-scope-split behavior, which
  *  gathered only the active file's immediate parent's direct children (1 level
  *  deep). Now a mounted folder brings its whole subtree's content AND its
- *  orchestration (add/remove/rename) into context together — content never
- *  travels without the membership chain that placed it. Version-aware
+ *  orchestration (add/remove/rename/advance/explicit Step) into context
+ *  together — content never travels without the membership chain that placed
+ *  it. Version-aware
  *  memoization via a fingerprint of the subtree's nodeIds. */
 export async function loadDirectoryLog(
   folderId: string,
@@ -525,6 +599,25 @@ export async function loadDirectoryLog(
   const subtree = Object.keys(files).filter(
     (p) => files[p]?.kind !== "folder" && pathInEffectiveScope(scopes, shielded, p),
   );
+  const folderTraces = [
+    { folderId, path: "" },
+    ...Object.entries(files).flatMap(([path, file]) => {
+      if (file.kind !== "folder" || !pathInEffectiveScope(scopes, shielded, path)) return [];
+      const traceId = file.traceId ?? file.nodeId;
+      return traceId ? [{ folderId: traceId, path }] : [];
+    }),
+  ].filter((trace, index, all) =>
+    all.findIndex((candidate) => candidate.folderId === trace.folderId) === index,
+  );
+  // Folder nodes participate in the cache key too. An explicit folder/Root
+  // Step may change no file head, but it is still new process context.
+  const folderNodeSets = await Promise.all(folderTraces.map(async (trace) => {
+    try {
+      return { ...trace, nodes: await fetchFolderNodes(trace.folderId) };
+    } catch {
+      return { ...trace, nodes: [] as Event[] };
+    }
+  }));
   // Fingerprint: sorted (path, nodeId) pairs over the WHOLE subtree. Any step/
   // mint/fork on any descendant advances its nodeId, changing the fingerprint
   // and forcing a refetch. Includes empty-string nodeIds (unstepped-this-
@@ -534,7 +627,12 @@ export async function loadDirectoryLog(
     .sort()
     .map((p) => `${p}:${files[p]?.nodeId ?? ""}`)
     .join("|");
-  const key = `${folderId}|${traceRefsKey(scopes)}|${fingerprint}|${[...shielded].sort().join(",")}`;
+  const folderFingerprint = folderNodeSets
+    .map(({ folderId: traceId, nodes }) =>
+      `${traceId}:${nodes.map((node) => node.id).sort().join(",")}`,
+    )
+    .join("|");
+  const key = `${folderId}|${traceRefsKey(scopes)}|${fingerprint}|${folderFingerprint}|${[...shielded].sort().join(",")}`;
 
   const cached = logMemo.get(key);
   if (cached) return cached;
@@ -562,9 +660,11 @@ export async function loadDirectoryLog(
   // bare action log lacked: with the per-span payload the model can reconstruct
   // any prior state, not just "an edit happened."
   for (const rel of subtree) {
+    const coordinate = directoryTraceCoordinate(folderId, files, rel);
+    if (!coordinate) continue;
     let chain: Event[];
     try {
-      chain = await fetchChain(folderId, rel);
+      chain = await fetchChain(coordinate.folderId, coordinate.relativePath);
     } catch {
       continue; // relay hiccup on this descendant — skip it, others may still land.
     }
@@ -617,38 +717,32 @@ export async function loadDirectoryLog(
     }
   }
 
-  // Folder membership events: every 4292 node whose affected path belongs to
-  // the effective scope. Genesis nodes (no delta) are dropped.
+  // Folder checkpoints whose affected path belongs to the effective scope.
+  // Genesis is dropped; explicit Steps remain visible even without a delta.
   try {
-    const nodes = await fetchFolderNodes(folderId);
-    for (const node of nodes) {
-      let steppedAt = (node.created_at ?? 0) * 1000;
-      let delta: { type: string; relativePath: string } | null = null;
-      try {
-        const parsed = JSON.parse(node.content) as {
-          steppedAt?: number;
-          deltas?: { type: string; relativePath: string }[];
-        };
-        if (typeof parsed.steppedAt === "number") steppedAt = parsed.steppedAt;
-        delta = parsed.deltas?.[0] ?? null;
-      } catch {
-        continue;
-      }
-      if (!delta) continue;
-      if (!pathInEffectiveScope(scopes, shielded, delta.relativePath)) continue;
-      merged.push({
-        steppedAt,
-        action: delta.type, // 'add' | 'remove' | 'rename'
-        relativePath: delta.relativePath,
-        source: "folder",
-        prompt: null,
-        summary: null,
-        deltas: undefined, // membership events have no content payload
-        process: undefined,
-        conformance: undefined,
-        conformanceReason: undefined,
-        nodeId: node.id,
+    for (const folderTrace of folderNodeSets) {
+      const chain = orderReplayTraceChain(folderTrace.nodes, folderTrace.folderId);
+      if (chain.length === 0) continue;
+      const conformance = await verifyFolderTraceChain(chain, {
+        expectedTraceId: folderTrace.folderId,
       });
+      if (conformance.status !== "full") continue;
+      for (const node of chain) {
+        for (const observation of folderCheckpointLogObservations(node, folderTrace.path)) {
+          if (!pathInEffectiveScope(scopes, shielded, observation.relativePath)) continue;
+          merged.push({
+            ...observation,
+            source: "folder",
+            prompt: null,
+            summary: null,
+            deltas: undefined, // folder checkpoints have no prose payload
+            process: undefined,
+            conformance: undefined,
+            conformanceReason: undefined,
+            nodeId: node.id,
+          });
+        }
+      }
     }
   } catch {
     // No folder chain yet — file events alone are fine.

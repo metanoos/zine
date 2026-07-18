@@ -208,11 +208,12 @@ been measured, and what remains unproven. Hosted services, a no-install public
 verifier, and the network layer are sequenced behind evidence, not dates; the
 [roadmap](ROADMAP.md) names the proof that unlocks each phase.
 
-The recursive file/folder ontology is specified, and the current client already
-propagates changed child heads toward Root. It does not yet encode child advance
-separately from membership addition, provide an explicit folder/Root Step, or
-join a recursive cascade under one recoverable operation id. Those are schema-
-cut work, not shipped behavior.
+The recursive file/folder ontology now runs through the shared protocol kernel
+and the client. Existing child heads advance separately from membership adds;
+folder and Root Step flush dirty descendants; one durable operation id groups
+the originating event with derived ancestor checkpoints; and Replay collapses
+those roll-ups without hiding their signed nodes. Fixed cross-runtime folder
+vectors and explicit crash-boundary real-relay fixtures remain hardening work.
 
 What matters most now is two linked proofs: trace-aware assistance improves real
 writing outcomes under a preregistered comparison, and accountable teams value
@@ -704,7 +705,7 @@ hypotheses. Last updated 2026-07-17.
 | Capability | State | How to check |
 |---|---|---|
 | Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke; folder heads carry direct manifests and propagate recursively toward Root |
-| Normative folder checkpoint cause and `advance` semantics | Specified, not implemented | The current client signs recursive parent updates but encodes an existing child-head replacement through `upsertManifestEntry` as `add`; it has no explicit folder/Root Step or shared recursive operation id yet |
+| Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, membership transition, hash, lineage, and operation id; client tests exercise add versus advance, explicit folder/Root Step plumbing, durable retry ids, nested AI context, and Replay roll-up collapse. Fixed cross-runtime folder vectors and explicit crash-boundary real-relay fixtures remain hardening work |
 | Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
 | Step, Send, Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
@@ -895,6 +896,9 @@ Already built:
 - local and hosted relay implementations, with a remaining hosted ACL gap;
 - raw-file Reify with an optional signed-event bundle and report;
 - Stronghold-backed desktop signing and provider secrets;
+- verified recursive folder/Root checkpoint causes, distinct child `advance`,
+  durable operation grouping, explicit folder/Root Step, and derived Replay
+  collapse;
 - prepared direct MODEL operations with approval, stale-result protection,
   current file/folder text, and structured process history; and
 - a preregistered narration study showing a narrow process-description effect.
@@ -902,10 +906,9 @@ Already built:
 Not yet built as one system: a shared trace-context package, task-specific
 selection, inspectable evidence records, corrections, scoped memory, universal
 directive authority, durable result-to-context binding, writing-outcome
-evaluation, or equivalent desktop/MCP rendering. The client already bubbles
-changed child heads through ancestor folders, but it does not yet distinguish a
-child advance from membership addition, expose explicit folder/Root Step, or
-join a recursive checkpoint cascade under one recoverable operation id.
+evaluation, or equivalent desktop/MCP rendering. Fixed cross-runtime folder
+vectors and explicit crash-boundary real-relay recovery fixtures remain
+hardening work for the recursive checkpoint cut.
 
 ## Phase 0: declare and preregister
 
@@ -919,28 +922,23 @@ This phase is active now.
 3. Preregister text-only, bounded-chronological, and selected-trace writing
    conditions under equal byte budgets, including exclusions, missingness,
    privacy, stopping rules, harm gates, and claim-promotion criteria.
-4. Complete the recursive-zine schema cut before durable context commitments:
-   file/folder/Root ontology, explicit versus derived checkpoint cause,
-   `advance` deltas, operation ids, folder/Root Step, move recovery, readers,
-   writers, fixtures, and replay must change together.
+4. Preserve the completed recursive-zine schema cut as the foundation for
+   durable context commitments. Readers, writers, recovery, fixtures, and
+   Replay must continue to change together whenever that schema evolves.
 
 Phase 0 succeeds when the documents, implementation plan, and research design
 describe the same claim without presenting conviction as evidence.
 
-## Phase 1: recursive zine cut and shared deterministic context runtime
+## Phase 1: shared deterministic context runtime
 
-Land the protocol cut first:
+Harden the landed recursive-zine cut while building the shared runtime:
 
-- make `folderCheckpoint` and its cause verifiable in the shared protocol
-  kernel and fixed conformance corpus;
-- distinguish direct membership add/remove/rename from an existing child's
-  `advance`;
-- carry one operation id through structural gestures and derived ancestor
-  checkpoints;
-- implement explicit folder/Root Step with durable descendant flushing and
-  idempotent recovery; and
-- collapse derived roll-ups under their originating gesture in Replay while
-  keeping every signed node inspectable.
+- add fixed cross-runtime folder-chain vectors to the conformance corpus;
+- exercise interrupted and retried recursive checkpoints against a real relay;
+- keep desktop and MCP writers on the same operation-id and `advance` rules;
+  and
+- keep derived roll-ups inspectable even when Replay groups them beneath their
+  originating gesture.
 
 Build a non-normative package used by every press and provider adapter:
 

@@ -57,7 +57,10 @@ test("selected folders contribute structural genesis without becoming document t
 
 test("creating a folder mints the folder genesis that replay uses as Step 0", () => {
   assert.match(workspaceSource, /async createFolder\(relativePath: string\): Promise<string>/);
-  assert.match(workspaceSource, /createFolderGenesis\(\{ signer, localOnly: true \}\)/);
+  assert.match(
+    workspaceSource,
+    /createFolderGenesis\(\{\s*signer,\s*localOnly: true,\s*operationId,\s*\}\)/,
+  );
   assert.match(workspaceSource, /const parent = localFolderCoordinate\(id, relativePath\)/);
   assert.match(workspaceSource, /kind: "folder",\s*relativePath: parent\.relativePath,\s*latestNodeId: genesisId/);
   assert.match(workspaceSource, /await propagateFolderHead\(/);
