@@ -1,15 +1,21 @@
 # Documentation
 
-These five documents explain Zine from product, protocol, evidence, roadmap,
-and company perspectives. They are the shared reader-facing source for this
+These documents explain Zine from product, protocol, evidence, roadmap, and
+company perspectives. They are the shared reader-facing source for this
 repository and the app's About view.
+
+The organizing product thesis is that final text discards information useful
+to both collaborators and reviewers. Zine preserves a trace so an AI can work
+with selected, inspectable process context while people retain portable evidence
+of what happened. The [Evidence](EVIDENCE.md) page distinguishes that
+foundational bet from what the repository has actually demonstrated.
 
 | Document | Question it answers |
 |---|---|
-| [Product](PRODUCT.md) | Who needs Zine, what problem it solves, and where adoption starts |
+| [Product](PRODUCT.md) | How trace-aware writing works, who needs it, and where adoption starts |
 | [Protocol](PROTOCOL.md) | How traces, gestures, attribution, transport, and vetting work |
 | [Evidence](EVIDENCE.md) | What is implemented, measured, asserted, and still unknown |
-| [Roadmap](ROADMAP.md) | What is being built now, and which evidence gates each later phase |
+| [Roadmap](ROADMAP.md) | How the trace-context runtime, evaluation, and later team layers are sequenced |
 | [Company](COMPANY.md) | How an open sovereign protocol can support an optional paid layer |
 
 ## Authority

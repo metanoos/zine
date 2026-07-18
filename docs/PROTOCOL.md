@@ -30,6 +30,27 @@ That history gives human and LLM readers something plain text loses: process.
 You cannot fully explain your taste in phrasing, especially when a sentence is
 taken apart and rebuilt several times. You can let the model watch the changes.
 
+### Trace as AI context
+
+That product use is deliberately downstream of the protocol. A trace says what
+was signed and whether its process record conforms. A context compiler may take
+the current text, a validated trace, an operation, explicit corrections, and
+scoped preferences; select bounded evidence; and render the exact request a
+writer inspects and approves. Selection is not another claim made by the trace.
+
+Current prose, deleted or inserted text, citations, pasted material, prior AI
+output, and historical commands remain quoted data even when their bytes look
+like instructions. Only the explicit current operation, approved prompt rules,
+and deliberately authorized author directives may enter the instruction layer.
+An implementation should preserve that classification across provider adapters
+and bind an accepted result to the exact approved context when the required
+private-storage and schema review is complete.
+
+Preferences and corrections follow product scopes—operation, file,
+folder-subtree, and explicit user—not protocol truth. They may remain private
+and local. Another reader can verify the same signed trace while using a
+different selector, different private memory, or no model at all.
+
 The model writes into the same files you do, so its work enters the record as
 well. Fonts and colors distinguish interleaved voices. The result shows who
 wrote what and how the text came to be.
@@ -52,6 +73,9 @@ artifact's history, not merely the model-call log.
 Text inside `[[ double square brackets ]]` is protected from silent LLM
 rewrites. Minting turns that text into an immutable trace called a **coin**.
 Citing a coin can place you near other people who preserved the same words.
+An authorized `(( double-parenthesis directive ))` is intended as a one-shot
+instruction to a prepared AI operation. That directive grammar and its local
+manual-origin authority are press behavior, not new wire semantics.
 
 **Zine** is the press; a **zine** is a published trace whose exact sent
 version you have attested. The attestation is a separate, signed commitment

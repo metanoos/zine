@@ -15,6 +15,7 @@ hypotheses. Last updated 2026-07-17.
 | Desktop Stronghold storage for signing and provider secrets | Implemented on desktop; browser remains read-only | `secret-store.test.ts`, `secret-migration.test.ts`, key/model store tests, and the Tauri Stronghold shell |
 | Headless MCP press with its own voice key and permanent profile Root | Implemented | Offline stdio smoke proves zero-folder cold start, exact signed-event outbox, raw node reads, and Root/key reuse; isolated real-relay integration flushes a queued event unchanged, preserves optional source forks, and exercises external Send |
 | Prepared desktop MODEL operations and approval gating | Implemented for direct single-shot gestures; not yet enforced on every live model call | `prepared-operation.test.ts`, `context-snapshot.test.ts`, `model-operation-executor.test.ts`, and `llm-prepared.test.ts`; the separate agent loop still uses its own transport, and `preparedRequestHash` is not yet stored in Step metadata |
+| Current text plus structured trace context in desktop prompts | Implemented as a client-local compatibility baseline | Direct operations gather current file/folder text and a chronological process log through `context-block.ts`, `context-snapshot.ts`, and `prepared-operation.ts`; there is no shared task-specific selector, scoped memory, cross-press fixture contract, or durable context binding yet |
 | Per-delta human/model attribution | Implemented | Attribution regression suite; trust status remains asserted unless corroborated through a signed seam |
 | Fork and merge | Implemented for owned recursive destinations and current top-level foreign flows | Nested Scan/adoption/fork tests plus merge and ownership tests; recursive fork-on-write through an already-foreign folder remains deferred |
 | Mutual-peer co-citation and process vet | Implemented and tested | `co-citation.ts`, `vet.ts`, `vet-walker.ts`, and their tests |
@@ -45,6 +46,30 @@ npm run verify         # check + client build + isolated relay smoke
 npm run verify:relay   # real Step/Send/Attest/Mint/Cite flow
 ```
 
+## Foundational product bet
+
+Zine is pivoting around this thesis:
+
+> For at least some writing tasks, an AI given current text plus relevant,
+> inspectable trace evidence will help the writer better than an AI given the
+> current text alone.
+
+This is a founder-conviction product decision and an unproven empirical claim.
+“Better” means outcomes such as counterbalanced writer preference, less editing
+and time before acceptance, stronger preservation of declared intent, fewer
+recurrences of rejected directions, and less later reversion. It does not mean
+that a model can produce a convincing explanation of the trace.
+
+The planned writing study compares text-only, bounded chronological history,
+and selected trace under equal byte budgets. A separate longitudinal comparison
+isolates file memory from selected trace. The preregistration lives at
+[`research/trace-writing-preregistration.md`](../research/trace-writing-preregistration.md)
+and its operational scoring rubric at
+[`research/trace-writing-rubric.md`](../research/trace-writing-rubric.md).
+
+Until those results exist, documentation must describe trace-aware assistance
+as a bet being built and tested, never as a demonstrated writing advantage.
+
 ## What we have measured
 
 The pre-registered narration study asked whether structured edit evidence
@@ -69,9 +94,10 @@ Limits:
 - two source traces; and
 - no customer outcome measured.
 
-This study supports one technical claim: structured process evidence can make
-machine narration of an artifact more faithful. It does not demonstrate
-market demand or a general model-independent effect.
+This study supports one narrow technical claim: in these fixtures, structured
+process evidence made machine narration of an artifact more faithful. It does
+not establish better writing assistance, causal value from the full trace,
+market demand, longitudinal memory value, or a general model-independent effect.
 
 ## What the evidence can and cannot establish
 
@@ -91,6 +117,12 @@ The normative trust posture is in
 
 ## What we have not proven yet
 
+- Trace-aware assistance beating text-only assistance on real writing outcomes.
+- Selected trace beating an equal-budget bounded chronological history.
+- File-local memory adding longitudinal value beyond selected trace alone.
+- Writers reliably understanding, correcting, and trusting selected context.
+- The benefit surviving multiple writing operations and model families without
+  unacceptable latency, token cost, privacy burden, or over-personalization.
 - Named teams returning week after week to multi-AI task and correspondence
   work on real artifacts.
 - A cross-model handoff whose trace answers a consequential question that
