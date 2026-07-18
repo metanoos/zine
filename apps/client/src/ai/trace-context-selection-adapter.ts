@@ -1,35 +1,26 @@
 import {
   summarizeTraceProcess,
+  verifyFileTraceChain,
+  type ProtocolEvent,
+  type TraceConformanceIssue,
+  type TraceConformanceStatus,
   type TraceConformanceStep,
   type TraceConformanceVerdict,
+  type TraceEventVerifier,
   type TraceProcessChange,
   type TraceProcessTransaction,
 } from "@zine/protocol";
-import type {
-  EvidenceCandidateV1,
-  TraceContextPolicyV1,
-  TraceContextSelectionInputV1,
-  TraceContextSelectionLimitsV1,
-  TraceContextSelectionOperationV1,
-  TraceProcessFactV1,
-  Utf16Range,
+import {
+  isUtf16Boundary,
+  type EvidenceCandidateV1,
+  type TraceContextPolicyV1,
+  type TraceContextSelectionInputV1,
+  type TraceContextSelectionLimitsV1,
+  type TraceContextSelectionOperationV1,
+  type TraceProcessFactV1,
+  type TraceProcessStatusV1,
+  type Utf16Range,
 } from "@zine/trace-context";
-
-/**
- * Snapshot projection emitted only after the desktop reader has verified the
- * exact trace ending at `headId`. This adapter intentionally does not fetch or
- * verify the chain itself; live ContextSnapshot wiring is a later phase.
- */
-export interface DesktopVerifiedSnapshotProjectionV1 {
-  version: 1;
-  traceId: string;
-  headId: string;
-  contentHash: string;
-  currentText: string;
-  chosenPath: string;
-  /** Authoritative result returned by the shared protocol verifier. */
-  verdict: TraceConformanceVerdict;
-}
 
 export interface DesktopTraceContextOperationMetadataV1 {
   version: 1;
@@ -41,27 +32,39 @@ export interface DesktopTraceContextOperationMetadataV1 {
 }
 
 /**
- * Exact binding to one fact in a FULL verified Step. Transaction and change
- * indexes are zero-based ordinals in the verified process, not KEdit tx ids.
- * Step summaries use transactionIndex zero and omit changeIndex.
+ * Coordinates for one mechanical fact. The fact body, node identity, trace
+ * identity, and process status are always derived from the stable verified
+ * chain inside the adapter.
  */
-export interface DesktopBoundProcessFactV1 {
-  version: 1;
-  traceId: string;
-  headId: string;
-  nodeId: string;
-  chainDistance: number;
-  transactionIndex: number;
-  changeIndex?: number;
-  fact: TraceProcessFactV1;
-}
+export type DesktopProcessFactRequestV1 =
+  | {
+      version: 1;
+      kind: "step-summary";
+      chainDistance: number;
+    }
+  | {
+      version: 1;
+      kind: "transaction";
+      chainDistance: number;
+      transactionIndex: number;
+    }
+  | {
+      version: 1;
+      kind: "change";
+      chainDistance: number;
+      transactionIndex: number;
+      changeIndex: number;
+    };
 
 export interface DesktopTraceContextSelectionAdapterInputV1 {
   version: 1;
   policy: TraceContextPolicyV1;
   operation: DesktopTraceContextOperationMetadataV1;
-  snapshot: DesktopVerifiedSnapshotProjectionV1;
-  processFacts: readonly DesktopBoundProcessFactV1[];
+  /** Exact fetched genesis-to-head order. Cloned before verification starts. */
+  chain: readonly ProtocolEvent[];
+  /** Trusted cryptographic verifier injected by the native desktop boundary. */
+  verifyEvent: TraceEventVerifier;
+  processFacts: readonly DesktopProcessFactRequestV1[];
   limits?: TraceContextSelectionLimitsV1;
 }
 
@@ -72,104 +75,206 @@ export class DesktopTraceContextSelectionAdapterError extends Error {
   }
 }
 
+interface VerifiedTargetProjection {
+  traceId: string;
+  headId: string;
+  contentHash: string;
+  currentText: string;
+  chosenPath: string;
+}
+
 /**
- * Purely maps one already-validated desktop snapshot and its verified process
- * entries into selector input. It performs no I/O, signing, storage, model
- * calls, inference, or PreparedOperation/App wiring.
+ * Clone, verify, and map one signed file chain into selector input. The clone
+ * is captured before the verifier's first asynchronous digest so caller-side
+ * mutation cannot change the verified projection mid-call.
  */
-export function adaptDesktopTraceContextSelectionV1(
+export async function adaptDesktopTraceContextSelectionV1(
   input: DesktopTraceContextSelectionAdapterInputV1,
-): TraceContextSelectionInputV1 {
+): Promise<TraceContextSelectionInputV1> {
   requireVersion(input.version, "input");
   requirePolicy(input.policy);
   requireOperation(input.operation);
-  requireSnapshot(input.snapshot);
-  const steps = requireFullVerdict(input.snapshot);
+  if (typeof input.verifyEvent !== "function") fail("verifyEvent must be a trusted function");
+  const policy = input.policy;
+  const operation = cloneOperation(input.operation);
+  const processFacts = cloneProcessFactRequests(input.processFacts);
+  const limits = input.limits ? { ...input.limits } : undefined;
+  const verifyEvent = input.verifyEvent;
+  const chain = cloneChain(input.chain);
 
-  const candidates = input.processFacts.map((binding) =>
-    processCandidate(input.snapshot, steps, binding));
+  let verdict: TraceConformanceVerdict;
+  try {
+    verdict = await verifyFileTraceChain(chain, verifyEvent);
+  } catch {
+    fail("trusted file-chain verification failed");
+  }
+  const target = requireVerifiedTarget(chain, verdict.issues);
+  requireOperationRange(operation.range, target.currentText);
+
+  // Text-only projection excludes process candidates before their validation,
+  // byte accounting, hashing, or rendering. Preserve that exact boundary here.
+  const candidates = policy === "text-only-v1"
+    ? []
+    : processFacts.map((request) => processCandidate(target, verdict.steps, request));
   requireDistinctCandidates(candidates);
 
-  return {
+  return deepFreeze({
     version: 1,
-    policy: input.policy,
+    policy,
     operation: {
       version: 1,
-      operation: input.operation.operation,
-      target: {
-        traceId: input.snapshot.traceId,
-        headId: input.snapshot.headId,
-        contentHash: input.snapshot.contentHash,
-        currentText: input.snapshot.currentText,
-        chosenPath: input.snapshot.chosenPath,
-      },
-      ...(input.operation.range ? { range: copyRange(input.operation.range) } : {}),
-      maxContextBytes: input.operation.maxContextBytes,
-      preparedRequestMaxBytes: input.operation.preparedRequestMaxBytes,
-      reservedPromptBytes: input.operation.reservedPromptBytes,
+      operation: operation.operation,
+      target,
+      ...(operation.range ? { range: copyRange(operation.range) } : {}),
+      maxContextBytes: operation.maxContextBytes,
+      preparedRequestMaxBytes: operation.preparedRequestMaxBytes,
+      reservedPromptBytes: operation.reservedPromptBytes,
     },
     candidates,
-    ...(input.limits ? { limits: { ...input.limits } } : {}),
+    ...(limits ? { limits } : {}),
+  });
+}
+
+function cloneOperation(
+  operation: DesktopTraceContextOperationMetadataV1,
+): DesktopTraceContextOperationMetadataV1 {
+  return {
+    version: operation.version,
+    operation: operation.operation,
+    ...(operation.range ? { range: copyRange(operation.range) } : {}),
+    maxContextBytes: operation.maxContextBytes,
+    preparedRequestMaxBytes: operation.preparedRequestMaxBytes,
+    reservedPromptBytes: operation.reservedPromptBytes,
   };
 }
 
-function requireFullVerdict(snapshot: DesktopVerifiedSnapshotProjectionV1): readonly TraceConformanceStep[] {
-  const { verdict } = snapshot;
-  if (verdict.status !== "full") {
-    fail(`authoritative verdict must be full, received ${verdict.status}`);
-  }
-  if (verdict.issues.length !== 0) {
-    fail("a full authoritative verdict cannot carry conformance issues");
-  }
-  if (verdict.steps.length === 0) fail("authoritative verdict has no verified Steps");
-
-  const nodeIds = new Set<string>();
-  for (let index = 0; index < verdict.steps.length; index += 1) {
-    const step = verdict.steps[index]!;
-    if (
-      step.stepIndex !== index
-      || step.status !== "full"
-      || step.process.status !== "complete"
-    ) {
-      fail(`authoritative verdict step ${index} is not a contiguous FULL process Step`);
+function cloneProcessFactRequests(
+  requests: readonly DesktopProcessFactRequestV1[],
+): DesktopProcessFactRequestV1[] {
+  if (!Array.isArray(requests)) fail("process fact requests must be an array");
+  return requests.map((request) => {
+    if (request.kind === "step-summary") {
+      return { version: request.version, kind: request.kind, chainDistance: request.chainDistance };
     }
-    if (nodeIds.has(step.nodeId)) fail(`authoritative verdict repeats node ${step.nodeId}`);
-    nodeIds.add(step.nodeId);
+    if (request.kind === "transaction") {
+      return {
+        version: request.version,
+        kind: request.kind,
+        chainDistance: request.chainDistance,
+        transactionIndex: request.transactionIndex,
+      };
+    }
+    if (request.kind === "change") {
+      return {
+        version: request.version,
+        kind: request.kind,
+        chainDistance: request.chainDistance,
+        transactionIndex: request.transactionIndex,
+        changeIndex: request.changeIndex,
+      };
+    }
+    fail("process fact request kind is unsupported");
+  });
+}
+
+function cloneChain(value: readonly ProtocolEvent[]): ProtocolEvent[] {
+  if (!Array.isArray(value) || value.length === 0) fail("signed file chain is empty");
+  const events = value as readonly ProtocolEvent[];
+  return events.map((event, index) => {
+    if (
+      event === null
+      || typeof event !== "object"
+      || typeof event.id !== "string"
+      || typeof event.pubkey !== "string"
+      || !Number.isSafeInteger(event.created_at)
+      || !Number.isSafeInteger(event.kind)
+      || typeof event.content !== "string"
+      || typeof event.sig !== "string"
+      || !Array.isArray(event.tags)
+      || event.tags.some((tag) => !Array.isArray(tag) || tag.some((part) => typeof part !== "string"))
+    ) {
+      fail(`signed file chain event ${index} is malformed`);
+    }
+    return {
+      id: event.id,
+      pubkey: event.pubkey,
+      created_at: event.created_at,
+      kind: event.kind,
+      tags: event.tags.map((tag) => [...tag]),
+      content: event.content,
+      sig: event.sig,
+    };
+  });
+}
+
+function requireVerifiedTarget(
+  chain: readonly ProtocolEvent[],
+  issues: readonly TraceConformanceIssue[],
+): VerifiedTargetProjection {
+  const headIndex = chain.length - 1;
+  const head = chain[headIndex]!;
+  if (issues.some((issue) => issue.stepIndex === headIndex && issue.code === "invalid-event")) {
+    fail("signed file-chain head has an invalid id or signature");
   }
-  if (verdict.steps[0]!.nodeId !== snapshot.traceId) {
-    fail("snapshot trace id does not bind the verified genesis Step");
+  if (head.kind !== 4290) fail("signed file-chain head is not a TraceNode");
+  const reifications = head.tags.filter((tag) => tag[0] === "z");
+  if (reifications.length !== 1 || reifications[0]?.[1] !== "file") {
+    fail("signed file-chain head is not exactly one file TraceNode");
   }
-  if (verdict.steps[verdict.steps.length - 1]!.nodeId !== snapshot.headId) {
-    fail("snapshot head id does not bind the final verified Step");
+  const paths = head.tags.filter((tag) => tag[0] === "F");
+  const chosenPath = paths[0]?.[1];
+  if (paths.length !== 1 || !chosenPath) fail("signed file-chain head has no exact structural path");
+
+  let payload: { snapshot?: unknown; contentHash?: unknown };
+  try {
+    const parsed = JSON.parse(head.content) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      fail("signed file-chain head payload is not an object");
+    }
+    payload = parsed as typeof payload;
+  } catch (error) {
+    if (error instanceof DesktopTraceContextSelectionAdapterError) throw error;
+    fail("signed file-chain head payload is not valid JSON");
   }
-  return verdict.steps;
+  if (typeof payload.snapshot !== "string") fail("signed file-chain head has no text snapshot");
+  if (typeof payload.contentHash !== "string" || payload.contentHash.length === 0) {
+    fail("signed file-chain head has no content hash");
+  }
+  if (
+    issues.some((issue) =>
+      issue.stepIndex === headIndex
+      && (issue.code === "snapshot-hash-mismatch" || issue.code === "missing-content-hash"))
+  ) {
+    fail("signed file-chain head snapshot does not match its content hash");
+  }
+  return {
+    traceId: chain[0]!.id,
+    headId: head.id,
+    contentHash: payload.contentHash,
+    currentText: payload.snapshot,
+    chosenPath,
+  };
 }
 
 function processCandidate(
-  snapshot: DesktopVerifiedSnapshotProjectionV1,
+  target: VerifiedTargetProjection,
   steps: readonly TraceConformanceStep[],
-  binding: DesktopBoundProcessFactV1,
+  request: DesktopProcessFactRequestV1,
 ): Extract<EvidenceCandidateV1, { kind: "process-fact" }> {
-  requireVersion(binding.version, "process fact binding");
-  if (binding.traceId !== snapshot.traceId || binding.headId !== snapshot.headId) {
-    fail("process fact does not bind the exact snapshot trace and head");
-  }
-  if (!Number.isSafeInteger(binding.chainDistance) || binding.chainDistance < 0) {
+  requireVersion(request.version, "process fact request");
+  if (!Number.isSafeInteger(request.chainDistance) || request.chainDistance < 0) {
     fail("process fact chain distance must be a non-negative safe integer");
   }
-  const stepIndex = steps.length - 1 - binding.chainDistance;
+  const stepIndex = steps.length - 1 - request.chainDistance;
   const step = steps[stepIndex];
-  if (!step || step.nodeId !== binding.nodeId) {
-    fail("process fact node and distance do not bind a verified Step");
-  }
-  if (step.status !== "full" || step.process.status !== "complete") {
-    fail("process fact does not bind a FULL verified process Step");
+  if (!step || step.stepIndex !== stepIndex) {
+    fail("process fact distance does not bind a verified chain Step");
   }
 
-  const authoritative = authoritativeFact(step, binding);
-  requireExactClosedFact(binding.fact, authoritative);
-  const suffix = factSuffix(binding.fact, binding.changeIndex);
-  const ref = `desktop-trace:${snapshot.traceId}:${binding.nodeId}:${suffix}`;
+  const fact = authoritativeFact(step, request);
+  const transactionIndex = fact.kind === "step-summary" ? 0 : fact.transactionIndex;
+  const suffix = factSuffix(fact, request.kind === "change" ? request.changeIndex : undefined);
+  const ref = `desktop-trace:${target.traceId}:${step.nodeId}:${suffix}`;
   return {
     version: 1,
     id: ref,
@@ -179,29 +284,25 @@ function processCandidate(
     source: {
       kind: "trace",
       ref,
-      traceId: snapshot.traceId,
-      headId: snapshot.headId,
-      nodeId: binding.nodeId,
-      processStatus: "full-trace",
-      chainDistance: binding.chainDistance,
-      transactionIndex: binding.transactionIndex,
-      ...(binding.fact.kind === "change" ? { range: copyRange(binding.fact.range) } : {}),
+      traceId: target.traceId,
+      headId: target.headId,
+      nodeId: step.nodeId,
+      processStatus: selectorProcessStatus(step.status),
+      chainDistance: request.chainDistance,
+      transactionIndex,
+      ...(fact.kind === "change" ? { range: copyRange(fact.range) } : {}),
     },
-    reasons: [binding.chainDistance === 0 ? "prepared-head-process" : "recent-target-process"],
-    fact: authoritative,
+    reasons: [request.chainDistance === 0 ? "prepared-head-process" : "recent-target-process"],
+    fact,
   };
 }
 
 function authoritativeFact(
   step: TraceConformanceStep,
-  binding: DesktopBoundProcessFactV1,
+  request: DesktopProcessFactRequestV1,
 ): TraceProcessFactV1 {
-  if (step.process.status !== "complete") fail("verified Step process is not complete");
-  switch (binding.fact.kind) {
+  switch (request.kind) {
     case "step-summary": {
-      if (binding.transactionIndex !== 0 || binding.changeIndex !== undefined) {
-        fail("Step summaries require transaction index zero and no change index");
-      }
       const summary = summarizeTraceProcess(step.process);
       return {
         kind: "step-summary",
@@ -217,18 +318,16 @@ function authoritativeFact(
         redoCount: summary.redo,
       };
     }
-    case "transaction": {
-      if (binding.changeIndex !== undefined) fail("transaction facts cannot carry a change index");
-      return transactionFact(requireTransaction(step, binding.transactionIndex), binding.transactionIndex);
-    }
+    case "transaction":
+      return transactionFact(requireTransaction(step, request.transactionIndex), request.transactionIndex);
     case "change": {
-      const transaction = requireTransaction(step, binding.transactionIndex);
-      if (!Number.isSafeInteger(binding.changeIndex) || (binding.changeIndex ?? -1) < 0) {
+      const transaction = requireTransaction(step, request.transactionIndex);
+      if (!Number.isSafeInteger(request.changeIndex) || request.changeIndex < 0) {
         fail("change facts require a non-negative safe change index");
       }
-      const change = transaction.changes[binding.changeIndex!];
+      const change = transaction.changes[request.changeIndex];
       if (!change) fail("change index does not bind the verified transaction");
-      return changeFact(change, binding.transactionIndex);
+      return changeFact(change, request.transactionIndex);
     }
   }
 }
@@ -240,7 +339,9 @@ function requireTransaction(
   if (!Number.isSafeInteger(transactionIndex) || transactionIndex < 0) {
     fail("transaction index must be a non-negative safe integer");
   }
-  if (step.process.status !== "complete") fail("verified Step process is not complete");
+  if (step.process.status !== "complete") {
+    fail("transaction facts require a complete verified Step process");
+  }
   const transaction = step.process.transactions[transactionIndex];
   if (!transaction) fail("transaction index does not bind the verified Step process");
   return transaction;
@@ -281,56 +382,9 @@ function changeFact(
   };
 }
 
-function requireExactClosedFact(actual: TraceProcessFactV1, expected: TraceProcessFactV1): void {
-  const actualKeys = Object.keys(actual).sort().join("\0");
-  const expectedKeys = Object.keys(expected).sort().join("\0");
-  const rangeKeysMatch = actual.kind !== "change" || expected.kind !== "change"
-    || Object.keys(actual.range).sort().join("\0") === Object.keys(expected.range).sort().join("\0");
-  if (
-    actualKeys !== expectedKeys
-    || !rangeKeysMatch
-    || closedFactIdentity(actual) !== closedFactIdentity(expected)
-  ) {
-    fail("closed process fact does not exactly match its verified Step binding");
-  }
-}
-
-function closedFactIdentity(fact: TraceProcessFactV1): string {
-  switch (fact.kind) {
-    case "step-summary":
-      return JSON.stringify({
-        kind: fact.kind,
-        transactionCount: fact.transactionCount,
-        rangeCount: fact.rangeCount,
-        insertedCodePointCount: fact.insertedCodePointCount,
-        deletedCodePointCount: fact.deletedCodePointCount,
-        firstCapturedAtMs: fact.firstCapturedAtMs,
-        lastCapturedAtMs: fact.lastCapturedAtMs,
-        spanMs: fact.spanMs,
-        longestGapMs: fact.longestGapMs,
-        undoCount: fact.undoCount,
-        redoCount: fact.redoCount,
-      });
-    case "transaction":
-      return JSON.stringify({
-        kind: fact.kind,
-        transactionIndex: fact.transactionIndex,
-        capturedAtMs: fact.capturedAtMs,
-        intent: fact.intent,
-        changeCount: fact.changeCount,
-        voiceIds: fact.voiceIds,
-      });
-    case "change":
-      return JSON.stringify({
-        kind: fact.kind,
-        transactionIndex: fact.transactionIndex,
-        operation: fact.operation,
-        range: fact.range,
-        insertedCodePointCount: fact.insertedCodePointCount,
-        deletedCodePointCount: fact.deletedCodePointCount,
-        voiceId: fact.voiceId,
-      });
-  }
+function selectorProcessStatus(status: TraceConformanceStatus): TraceProcessStatusV1 {
+  if (status === "full") return "full-trace";
+  return status;
 }
 
 function factSuffix(fact: TraceProcessFactV1, changeIndex: number | undefined): string {
@@ -342,7 +396,7 @@ function factSuffix(fact: TraceProcessFactV1, changeIndex: number | undefined): 
 function requireDistinctCandidates(candidates: readonly EvidenceCandidateV1[]): void {
   const ids = new Set<string>();
   for (const candidate of candidates) {
-    if (ids.has(candidate.id)) fail(`duplicate process fact binding ${candidate.id}`);
+    if (ids.has(candidate.id)) fail(`duplicate process fact request ${candidate.id}`);
     ids.add(candidate.id);
   }
 }
@@ -361,31 +415,26 @@ function requireOperation(operation: DesktopTraceContextOperationMetadataV1): vo
   if (operation.operation === "settle" && operation.range === undefined) {
     fail("Settle requires an exact UTF-16 range");
   }
-  if (operation.range) requireRange(operation.range, "operation range");
+  if (operation.range) requireOrderedRange(operation.range, "operation range");
   requirePositiveInteger(operation.maxContextBytes, "maxContextBytes");
   requirePositiveInteger(operation.preparedRequestMaxBytes, "preparedRequestMaxBytes");
   if (!Number.isSafeInteger(operation.reservedPromptBytes) || operation.reservedPromptBytes < 0) {
     fail("reservedPromptBytes must be a non-negative safe integer");
   }
-  if (operation.reservedPromptBytes >= operation.preparedRequestMaxBytes) {
-    fail("reservedPromptBytes must be less than preparedRequestMaxBytes");
+}
+
+function requireOperationRange(range: Utf16Range | undefined, currentText: string): void {
+  if (!range) return;
+  if (
+    range.toUtf16 > currentText.length
+    || !isUtf16Boundary(currentText, range.fromUtf16)
+    || !isUtf16Boundary(currentText, range.toUtf16)
+  ) {
+    fail("operation range must be within the signed current text on UTF-16 code-point boundaries");
   }
 }
 
-function requireSnapshot(snapshot: DesktopVerifiedSnapshotProjectionV1): void {
-  requireVersion(snapshot.version, "snapshot");
-  for (const [name, value] of [
-    ["traceId", snapshot.traceId],
-    ["headId", snapshot.headId],
-    ["contentHash", snapshot.contentHash],
-    ["chosenPath", snapshot.chosenPath],
-  ] as const) {
-    if (value.length === 0) fail(`snapshot ${name} must be non-empty`);
-  }
-  if (typeof snapshot.currentText !== "string") fail("snapshot currentText must be a string");
-}
-
-function requireRange(range: Utf16Range, subject: string): void {
+function requireOrderedRange(range: Utf16Range, subject: string): void {
   if (
     !Number.isSafeInteger(range.fromUtf16)
     || !Number.isSafeInteger(range.toUtf16)
@@ -406,6 +455,14 @@ function requireVersion(version: number, subject: string): void {
 
 function copyRange(range: Utf16Range): Utf16Range {
   return { fromUtf16: range.fromUtf16, toUtf16: range.toUtf16 };
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 function fail(message: string): never {
