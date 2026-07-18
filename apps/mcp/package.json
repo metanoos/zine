@@ -21,7 +21,7 @@
     "start": "node dist/server.js",
     "test": "tsx --test src/*.test.ts && npm run test:package",
     "test:package": "node scripts/package-smoke.mjs",
-    "test:relay": "tsc -p tsconfig.integration.json && tsx integration/relay-smoke.ts"
+    "test:relay": "tsc -p tsconfig.integration.json && tsx integration/relay-smoke.ts && tsx integration/recursive-checkpoint-recovery.ts"
   },
   "devDependencies": {
     "@codemirror/state": "^6.7.1",

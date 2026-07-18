@@ -166,6 +166,7 @@ try {
     ZINE_TEST_EXTERNAL_RELAY_URL: externalUrl,
     ZINE_TEST_CONFIG_PATH: configPath,
     ZINE_TEST_AGENT_PUBKEY: agentPubkey,
+    ZINE_TEST_AGENT_SECRET_HEX: agentSecretHex,
     ZINE_TEST_RELAY_OWNER_PUBKEY: ownerPubkey,
     ZINE_TEST_RELAY_OWNER_SECRET_HEX: ownerSecretHex,
   });

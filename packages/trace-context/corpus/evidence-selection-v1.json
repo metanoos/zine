@@ -1,0 +1,518 @@
+{
+  "version": 1,
+  "contract": "package-local-non-normative-v1",
+  "cases": [
+    {
+      "name": "nil input fails visibly",
+      "input": null,
+      "expected": {
+        "ok": false,
+        "code": "MALFORMED_INPUT",
+        "stage": "validate",
+        "path": "$"
+      }
+    },
+    {
+      "name": "bounded history is a typed unsupported policy",
+      "input": {
+        "version": 1,
+        "policy": "bounded-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "trace",
+            "headId": "head",
+            "contentHash": "hash",
+            "currentText": "Draft"
+          },
+          "maxContextBytes": 1024,
+          "preparedRequestMaxBytes": 2048,
+          "reservedPromptBytes": 128
+        },
+        "candidates": []
+      },
+      "expected": {
+        "ok": false,
+        "code": "UNSUPPORTED_POLICY",
+        "stage": "validate",
+        "receivedPolicy": "bounded-trace-v1"
+      }
+    },
+    {
+      "name": "empty selection renders the exact current target once",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "trace-empty",
+            "headId": "head-empty",
+            "contentHash": "hash-empty",
+            "currentText": "Draft"
+          },
+          "maxContextBytes": 1024,
+          "preparedRequestMaxBytes": 2048,
+          "reservedPromptBytes": 128
+        },
+        "candidates": []
+      },
+      "expected": {
+        "ok": true,
+        "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"Draft\",\"version\":1}]",
+        "selectedIds": [],
+        "effectiveContextBytes": 1024,
+        "preparedRequestAvailableBytes": 1920,
+        "currentTargetTextBytes": 5,
+        "selectionComplete": true
+      }
+    },
+    {
+      "name": "lone surrogate constructor is rejected before UTF-8 rendering",
+      "construct": {
+        "kind": "candidate-text-code-units",
+        "textCodeUnits": [55296],
+        "input": {
+          "version": 1,
+          "policy": "selected-trace-v1",
+          "operation": {
+            "version": 1,
+            "operation": "extend",
+            "target": {
+              "traceId": "trace-unicode",
+              "headId": "head-unicode",
+              "contentHash": "hash-unicode",
+              "currentText": "safe"
+            },
+            "maxContextBytes": 1024,
+            "preparedRequestMaxBytes": 2048,
+            "reservedPromptBytes": 0
+          },
+          "candidates": [
+            {
+              "version": 1,
+              "id": "broken",
+              "dedupeKey": "broken",
+              "kind": "citation",
+              "claimClass": "explicit",
+              "source": {
+                "kind": "citation",
+                "ref": "citation:broken",
+                "nodeId": "node-broken",
+                "approvedOrder": 0
+              },
+              "reasons": ["approved-direct-citation"]
+            }
+          ]
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "MALFORMED_INPUT",
+        "stage": "validate",
+        "path": "$.candidates[0].text"
+      }
+    },
+    {
+      "name": "invalid selected process fails closed",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "trace-invalid",
+            "headId": "head-invalid",
+            "contentHash": "hash-invalid",
+            "currentText": "Draft"
+          },
+          "maxContextBytes": 4096,
+          "preparedRequestMaxBytes": 8192,
+          "reservedPromptBytes": 0
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "invalid",
+            "dedupeKey": "invalid",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:invalid",
+              "traceId": "trace-invalid",
+              "headId": "head-invalid",
+              "nodeId": "head-invalid",
+              "processStatus": "invalid",
+              "chainDistance": 0,
+              "transactionIndex": 0
+            },
+            "reasons": ["prepared-head-process"],
+            "fact": {
+              "kind": "step-summary",
+              "transactionCount": 0,
+              "rangeCount": 0,
+              "insertedCodePointCount": 0,
+              "deletedCodePointCount": 0,
+              "spanMs": 0,
+              "longestGapMs": 0,
+              "undoCount": 0,
+              "redoCount": 0
+            }
+          }
+        ]
+      },
+      "expected": {
+        "ok": false,
+        "code": "INVALID_PROCESS_EVIDENCE",
+        "stage": "select",
+        "candidateId": "invalid"
+      }
+    },
+    {
+      "name": "snapshot-only selected process is explicitly incomplete",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "trace-snapshot",
+            "headId": "head-snapshot",
+            "contentHash": "hash-snapshot",
+            "currentText": "Draft"
+          },
+          "maxContextBytes": 4096,
+          "preparedRequestMaxBytes": 8192,
+          "reservedPromptBytes": 0
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "snapshot",
+            "dedupeKey": "snapshot",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:snapshot",
+              "traceId": "trace-snapshot",
+              "headId": "head-snapshot",
+              "nodeId": "head-snapshot",
+              "processStatus": "snapshot-only",
+              "chainDistance": 0,
+              "transactionIndex": 0
+            },
+            "reasons": ["prepared-head-process"],
+            "fact": {
+              "kind": "step-summary",
+              "transactionCount": 0,
+              "rangeCount": 0,
+              "insertedCodePointCount": 0,
+              "deletedCodePointCount": 0,
+              "spanMs": 0,
+              "longestGapMs": 0,
+              "undoCount": 0,
+              "redoCount": 0
+            }
+          }
+        ]
+      },
+      "expected": {
+        "ok": false,
+        "code": "CONTEXT_INCOMPLETE",
+        "stage": "select",
+        "candidateId": "snapshot",
+        "reason": "snapshot-only-process"
+      }
+    },
+    {
+      "name": "closed transaction fact receives package-owned rendering",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "trace-fact",
+            "headId": "head-fact",
+            "contentHash": "hash-fact",
+            "currentText": "Draft"
+          },
+          "maxContextBytes": 4096,
+          "preparedRequestMaxBytes": 8192,
+          "reservedPromptBytes": 0
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "transaction",
+            "dedupeKey": "transaction",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:tx:0",
+              "traceId": "trace-fact",
+              "headId": "head-fact",
+              "nodeId": "head-fact",
+              "processStatus": "full-trace",
+              "chainDistance": 0,
+              "transactionIndex": 0
+            },
+            "reasons": ["prepared-head-process"],
+            "fact": {
+              "kind": "transaction",
+              "transactionIndex": 0,
+              "capturedAtMs": 100,
+              "intent": "undo",
+              "changeCount": 2,
+              "voiceIds": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+            }
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"Draft\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"transaction\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"head-fact\",\"kind\":\"trace\",\"nodeId\":\"head-fact\",\"processStatus\":\"full-trace\",\"ref\":\"trace:tx:0\",\"traceId\":\"trace-fact\",\"transactionIndex\":0},\"text\":\"tx 0 @ 100 · undo · 2 changes · voices aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"version\":1}]",
+        "selectedIds": ["transaction"],
+        "effectiveContextBytes": 4096,
+        "preparedRequestAvailableBytes": 8192,
+        "currentTargetTextBytes": 5,
+        "selectionComplete": true
+      }
+    },
+    {
+      "name": "cross-trace process source fails target binding",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "target-trace",
+            "headId": "target-head",
+            "contentHash": "hash",
+            "currentText": "Draft"
+          },
+          "maxContextBytes": 4096,
+          "preparedRequestMaxBytes": 8192,
+          "reservedPromptBytes": 0
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "foreign-process",
+            "dedupeKey": "foreign-process",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "foreign:tx",
+              "traceId": "foreign-trace",
+              "headId": "foreign-head",
+              "nodeId": "foreign-head",
+              "processStatus": "full-trace",
+              "chainDistance": 0,
+              "transactionIndex": 0
+            },
+            "reasons": ["caller-selected"],
+            "fact": {
+              "kind": "transaction",
+              "transactionIndex": 0,
+              "capturedAtMs": 100,
+              "changeCount": 1,
+              "voiceIds": ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]
+            }
+          }
+        ]
+      },
+      "expected": {
+        "ok": false,
+        "code": "PROCESS_SOURCE_MISMATCH",
+        "stage": "select",
+        "candidateId": "foreign-process"
+      }
+    },
+    {
+      "name": "text-only projection emits a trace-free citation shape",
+      "input": {
+        "version": 1,
+        "policy": "text-only-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "target-trace",
+            "headId": "target-head",
+            "contentHash": "hash",
+            "currentText": "Draft"
+          },
+          "maxContextBytes": 4096,
+          "preparedRequestMaxBytes": 8192,
+          "reservedPromptBytes": 0
+        },
+        "candidates": [
+          {
+            "kind": "process-fact",
+            "id": "same-id",
+            "dedupeKey": "same-key",
+            "text": "LEAK-PROCESS"
+          },
+          {
+            "kind": "explicit-preference",
+            "id": "same-id",
+            "dedupeKey": "same-key",
+            "text": "LEAK-PREFERENCE"
+          },
+          {
+            "version": 1,
+            "id": "citation",
+            "dedupeKey": "citation",
+            "kind": "citation",
+            "claimClass": "explicit",
+            "source": {
+              "kind": "citation",
+              "ref": "citation:one",
+              "nodeId": "LEAK-NODE",
+              "approvedOrder": 0,
+              "processStatus": "invalid",
+              "traceId": "LEAK-TRACE",
+              "range": { "fromUtf16": 999, "toUtf16": 1 }
+            },
+            "reasons": ["approved-direct-citation"],
+            "text": "Quoted body"
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"Draft\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"explicit\",\"evidenceId\":\"citation\",\"kind\":\"citation\",\"reasons\":[\"approved-direct-citation\"],\"source\":{\"approvedOrder\":0,\"kind\":\"citation\",\"ref\":\"citation:one\"},\"text\":\"Quoted body\",\"version\":1}]",
+        "selectedIds": ["citation"],
+        "effectiveContextBytes": 4096,
+        "preparedRequestAvailableBytes": 8192,
+        "currentTargetTextBytes": 5,
+        "selectionComplete": true,
+        "forbiddenRenderedSubstrings": [
+          "LEAK-PROCESS",
+          "LEAK-PREFERENCE",
+          "LEAK-NODE",
+          "LEAK-TRACE",
+          "processStatus",
+          "traceId"
+        ]
+      }
+    },
+    {
+      "name": "prepared request arithmetic does not subtract reserved bytes twice",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "trace-budget",
+            "headId": "head-budget",
+            "contentHash": "hash-budget",
+            "currentText": "é"
+          },
+          "maxContextBytes": 1000,
+          "preparedRequestMaxBytes": 500,
+          "reservedPromptBytes": 100
+        },
+        "candidates": []
+      },
+      "expected": {
+        "ok": true,
+        "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"é\",\"version\":1}]",
+        "selectedIds": [],
+        "effectiveContextBytes": 400,
+        "preparedRequestAvailableBytes": 400,
+        "currentTargetTextBytes": 2,
+        "selectionComplete": true
+      }
+    },
+    {
+      "name": "mandatory target fails against prepared request remainder",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "trace-budget-fail",
+            "headId": "head-budget-fail",
+            "contentHash": "hash-budget-fail",
+            "currentText": "x"
+          },
+          "maxContextBytes": 1000,
+          "preparedRequestMaxBytes": 50,
+          "reservedPromptBytes": 49
+        },
+        "candidates": []
+      },
+      "expected": {
+        "ok": false,
+        "code": "MANDATORY_BUDGET_EXCEEDED",
+        "stage": "render",
+        "available": 1
+      }
+    },
+    {
+      "name": "per-candidate input bytes fail visibly",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "trace-limit",
+            "headId": "head-limit",
+            "contentHash": "hash-limit",
+            "currentText": "x"
+          },
+          "maxContextBytes": 4096,
+          "preparedRequestMaxBytes": 8192,
+          "reservedPromptBytes": 0
+        },
+        "limits": {
+          "version": 1,
+          "maxCandidateInputBytes": 128
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "large",
+            "dedupeKey": "large",
+            "kind": "citation",
+            "claimClass": "explicit",
+            "source": {
+              "kind": "citation",
+              "ref": "citation:large",
+              "nodeId": "node-large",
+              "approvedOrder": 0
+            },
+            "reasons": ["approved-direct-citation"],
+            "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          }
+        ]
+      },
+      "expected": {
+        "ok": false,
+        "code": "CANDIDATE_INPUT_LIMIT_EXCEEDED",
+        "stage": "validate",
+        "candidateId": "large",
+        "limit": 128
+      }
+    }
+  ]
+}

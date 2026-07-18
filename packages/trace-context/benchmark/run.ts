@@ -87,10 +87,8 @@ if (options.manifest) {
     iterationsPerWarmishCase: options.iterations,
     cases,
     deferred: [
-      "cancellable manifest compilation",
-      "cache-cold and cache-warm manifest selection",
-      "candidate quota and incomplete-manifest behavior",
-      "rendered-context and envelope ceilings",
+      "evidence-selection wall-clock and cache-cold/cache-warm benchmarks",
+      "durable manifest compilation and encrypted envelope ceilings",
     ],
   }, null, 2)}\n`);
 }

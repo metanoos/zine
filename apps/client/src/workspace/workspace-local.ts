@@ -38,6 +38,7 @@ import {
   headCitationIds,
   operationIdFromNode,
   publishEdit,
+  requireAcceptedCurrentFolderCheckpoint,
   resolveTraceChain,
   resolveTraceIdentity,
   reconstructFromChain,
@@ -401,6 +402,7 @@ export async function propagateLocalTreeFolderHead(
   changedHead: import("nostr-tools").Event,
   signer: Uint8Array,
   localOnly?: boolean,
+  verifyAcceptedOperation?: boolean,
 ): Promise<void> {
   if (!isPathInsideTree(tree, changedFolderPath)) {
     throw new Error(
@@ -435,6 +437,13 @@ export async function propagateLocalTreeFolderHead(
       parentSigner,
       { localOnly, operationId },
     );
+    if (verifyAcceptedOperation) {
+      head = await requireAcceptedCurrentFolderCheckpoint(
+        parentId,
+        head,
+        getPublicKey(parentSigner),
+      );
+    }
     folderPath = parentPath;
     folderId = parentId;
     rememberLocalTreeFolderHead(tree, folderPath, folderId, head);
@@ -611,6 +620,11 @@ export function previousStepCitationTargets(
   return eventMeta(chain[chain.length - 1]).citationTargets;
 }
 
+// Multiple Workspace facades can address the same persisted Root in one
+// process. Coalesce at module scope so the complete recursive cascade, not
+// merely the selected folder node, remains one causal operation across them.
+const recursiveFolderStepFlights = new Map<string, Promise<string>>();
+
 export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Workspace {
   let ref: FolderRef | null = null;
   const resolveFileSigner = options.signerForVoice ?? localFileSigner;
@@ -671,6 +685,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     changedHead: import("nostr-tools").Event,
     signer: Uint8Array,
     localOnly?: boolean,
+    verifyAcceptedOperation?: boolean,
   ): Promise<void> {
     await propagateLocalTreeFolderHead(
       { storageRootId: rootId, folderId: rootId, storagePath: "" },
@@ -679,6 +694,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       changedHead,
       signer,
       localOnly,
+      verifyAcceptedOperation,
     );
   }
 
@@ -1547,6 +1563,9 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       requestedOperationId?: string,
     ): Promise<string> {
       const rootId = requireId();
+      const operationId = requestedOperationId ?? createTraceOperationId();
+      const signer = requestedSigner ?? resolveFileSigner(authorVoice());
+      if (!signer) throw new Error(`cannot resolve a local signer for ${relativePath || "Root"}`);
       const folderId = relativePath === ""
         ? rootId
         : (() => {
@@ -1557,34 +1576,50 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
             }
             return id;
           })();
-      const signer = requestedSigner ?? resolveFileSigner(authorVoice());
-      if (!signer) throw new Error(`cannot resolve a local signer for ${relativePath || "Root"}`);
       const folderSigner = folderWriteSigner(await fetchFolderOwner(folderId), signer);
       if (!folderSigner) {
         throw new Error(`cannot Step foreign folder ${relativePath || "Root"}`);
       }
-      const operationId = requestedOperationId ?? createTraceOperationId();
-      const head = await stepFolderManifest(folderId, folderSigner, {
-        localOnly: true,
-        operationId,
-      });
-      if (relativePath !== "") {
-        rememberLocalTreeFolderHead(
-          { storageRootId: rootId, folderId: rootId, storagePath: "" },
-          relativePath,
-          folderId,
-          head,
-        );
-        await propagateFolderHead(
-          rootId,
-          relativePath,
-          folderId,
-          head,
-          folderSigner,
-          true,
-        );
+      // The caller's requested signer is not the folder-chain identity: two
+      // callers can both resolve to the same held owner key. Key the entire
+      // selected-folder + ancestor cascade by its stable persisted identity so
+      // those callers share one flight instead of racing only the ancestors.
+      const flightKey = JSON.stringify([rootId, relativePath, folderId, operationId]);
+      const existing = recursiveFolderStepFlights.get(flightKey);
+      if (existing) return existing;
+
+      const pending = (async () => {
+        const head = await stepFolderManifest(folderId, folderSigner, {
+          localOnly: true,
+          operationId,
+        });
+        if (relativePath !== "") {
+          rememberLocalTreeFolderHead(
+            { storageRootId: rootId, folderId: rootId, storagePath: "" },
+            relativePath,
+            folderId,
+            head,
+          );
+          await propagateFolderHead(
+            rootId,
+            relativePath,
+            folderId,
+            head,
+            folderSigner,
+            true,
+            true,
+          );
+        }
+        return head.id;
+      })();
+      recursiveFolderStepFlights.set(flightKey, pending);
+      try {
+        return await pending;
+      } finally {
+        if (recursiveFolderStepFlights.get(flightKey) === pending) {
+          recursiveFolderStepFlights.delete(flightKey);
+        }
       }
-      return head.id;
     },
 
     async deletePath(relativePath: string, isFolder: boolean): Promise<void> {

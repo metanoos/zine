@@ -8,7 +8,8 @@
   },
   "exports": {
     ".": "./src/index.ts",
-    "./corpus": "./corpus/conformance-v1.json"
+    "./corpus": "./corpus/conformance-v1.json",
+    "./folder-corpus": "./corpus/folder-conformance-v1.json"
   },
   "scripts": {
     "test": "tsc --noEmit && tsx --test src/*.test.ts"
