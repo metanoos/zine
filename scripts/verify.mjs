@@ -20,23 +20,24 @@ if (mode !== "check" && mode !== "verify") {
 }
 
 const checks = [
-  { label: "protocol package tests", command: npm, args: ["test"], cwd: join(repoRoot, "packages", "protocol") },
-  { label: "trace-context package tests", command: npm, args: ["test"], cwd: join(repoRoot, "packages", "trace-context") },
+  { label: "protocol package tests/coverage", command: npm, args: ["run", "test:coverage"], cwd: join(repoRoot, "packages", "protocol") },
+  { label: "trace-context package tests/coverage", command: npm, args: ["run", "test:coverage"], cwd: join(repoRoot, "packages", "trace-context") },
   {
     label: "dev automation tests",
     command: process.execPath,
     args: [
       "--test",
       join(repoRoot, "scripts", "dependency-state.test.mjs"),
+      join(repoRoot, "scripts", "check-go-coverage.test.mjs"),
       join(repoRoot, "scripts", "test-rust.test.mjs"),
     ],
     cwd: repoRoot,
   },
   { label: "dogfood tooling tests", command: process.execPath, args: ["--test", join(repoRoot, "scripts", "dogfood-macos.test.mjs")], cwd: repoRoot },
   { label: "client typecheck", command: npm, args: ["run", "typecheck"], cwd: join(repoRoot, "apps", "client") },
-  { label: "client tests", command: npm, args: ["test"], cwd: join(repoRoot, "apps", "client") },
-  { label: "MCP tests/build/smoke", command: npm, args: ["test"], cwd: join(repoRoot, "apps", "mcp") },
-  { label: "relay tests", command: "go", args: ["test", "./..."], cwd: join(repoRoot, "relay") },
+  { label: "client tests/coverage", command: npm, args: ["run", "test:coverage"], cwd: join(repoRoot, "apps", "client") },
+  { label: "MCP tests/coverage/build/smoke", command: npm, args: ["run", "test:coverage"], cwd: join(repoRoot, "apps", "mcp") },
+  { label: "relay tests/coverage", command: process.execPath, args: [join(repoRoot, "scripts", "check-go-coverage.mjs")], cwd: repoRoot },
   { label: "Rust shell tests", command: process.execPath, args: [join(repoRoot, "scripts", "test-rust.mjs")], cwd: repoRoot },
 ];
 

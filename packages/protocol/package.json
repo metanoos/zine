@@ -12,7 +12,8 @@
     "./folder-corpus": "./corpus/folder-conformance-v1.json"
   },
   "scripts": {
-    "test": "tsc --noEmit && tsx --test src/*.test.ts"
+    "test": "tsc --noEmit && tsx --test src/*.test.ts",
+    "test:coverage": "tsc --noEmit && node --import=tsx --test --experimental-test-coverage --test-coverage-lines=71 --test-coverage-branches=60 --test-coverage-functions=76 --test-coverage-include=src/**/*.ts --test-coverage-exclude=src/**/*.test.ts src/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
