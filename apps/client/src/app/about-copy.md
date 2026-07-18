@@ -24,21 +24,12 @@ direction that was abandoned, the phrase repeatedly repaired, the passage a
 writer protected, the source an agent used, or the proposal the writer
 rejected.
 
-Version history is the closest substitute, and the kinship is deliberate:
-Zine is to authorship provenance what Git is to source history. But a commit
-is the wrong resolution for writing. It records that bytes changed between
-two chosen moments; everything between them collapses into one diff, and the
-diff cannot say which voice — person or model — produced each span, what
-context an agent received, or what was tried and rejected along the way. Git
-answers *what changed*. Evaluating AI-assisted writing needs *how it was
-written*.
-
-The other substitutes answer still narrower questions. Model observability
-records calls, not the artifact versions those calls changed. Final-text
-detectors guess from prose after the fact. A hosted editor may retain more,
-but asks the reviewer to trust the platform holding the history. None joins
-the artifact, the process that changed it, and the exact version later shared
-or endorsed into one portable record.
+The usual substitutes answer different questions. Version history records
+coarse byte changes. Model observability records calls. Final-text detectors
+guess from prose after the fact. A hosted editor may retain more, but asks the
+reviewer to trust the platform holding the history. None joins the artifact,
+the process that changed it, and the exact version later shared or endorsed
+into one portable record.
 
 Zine captures signed process evidence at the point of writing. It offers
 evidence, not a verdict: it does not prove that a writer is human, that a
@@ -91,10 +82,9 @@ preserve. `(( author directive ))` is a one-shot instruction to the selected
 operation: it is removed only after accepted success and cannot grant tools
 or access outside that operation's approved scope. A shared syntax kernel and
 the first desktop operations already enforce exact operation ranges,
-protected bytes, and current-session author authority. Deterministic
-task-specific selection and cross-press projection now share one verified
-runtime; the exclusion and correction surface, scoped memory, and durable
-context binding remain sequenced in the [Roadmap](ROADMAP.md).
+protected bytes, and current-session author authority; the complete selector,
+exclusion and correction surface, scoped memory, and durable context binding
+are sequenced in the [Roadmap](ROADMAP.md).
 
 ## Three deliberate gestures
 
@@ -103,9 +93,9 @@ and keeps it on the home relay. Most Steps remain private working history. A
 folder Step pins one exact recursive frontier; automatic ancestor roll-ups
 stay signed, derived, and beneath the deliberate gesture.
 
-**Publish** makes one exact stepped version reachable for discussion. (The
-wire and today's implementation still spell this gesture `Send` until the
-coordinated schema cut.)
+**Publish** makes one exact stepped version reachable for discussion. On the
+wire and in the current implementation this gesture is still named Send until
+the coordinated schema cut.
 
 **Attest** is an optional, later endorsement of one published version.
 Discussion is common; commitment is rare.
@@ -115,12 +105,6 @@ publishing, and publishing is not endorsement. Forking begins a proposal
 under a new owner's key; merging accepts chosen work into the receiving
 owner's trace. The same seams serve a person revising model output, an agent
 quoting a source, and a collaborator proposing changes across a folder.
-
-Citation is neutral composition. Provenance-aware copy may cite any exact
-stepped source without minting or endorsing it, including a source the writer
-disagrees with. Mint is a separate compound gesture — genesis Step, Publish,
-and same-minter Attest — that creates a Coin and says the passage carries
-salience for the minter.
 
 ## Every writer gets a press
 
@@ -165,12 +149,11 @@ A **coin** is how strangers find each other. When a phrase strikes you as
 worth keeping, you mint it: one deliberate gesture that Steps an immutable,
 single-checkpoint zine under your key, Publishes it, and Attests it. Minting
 claims salience, not authorship or agreement: *these words carry currency for
-me.* When Coins are enabled, Zine indexes published citations to valid Coins
-to answer one question — *which published traces cite these words?* — so two
-writers who share no platform, relay, or peer can surface each other, even
-when their coin bytes differ only in Unicode normalization or whitespace. The
-same valid-Coin match also works, more slowly, through a mutual peer who can
-read both chains.
+me.* When Coins are enabled, Zine indexes published citations to answer one
+question — *which published traces cite these words?* — so two writers who
+share no platform, relay, or peer can surface each other, even when their
+coin bytes differ only in Unicode normalization or whitespace. The same match
+also works, more slowly, through a mutual peer who can read both chains.
 
 The economics are deliberately spam-resistant. A coin everyone holds carries
 no signal, so there is no payoff in squatting the popular phrase; the signal
@@ -182,13 +165,11 @@ If it isn't, swipe left. The vet reads process, not prose: fluent text is
 easy to imitate, while a timestamped revision history is costlier to fake.
 Nothing enters your peer list without that vet and your explicit choice.
 
-Coins are the single user-facing discovery opt-in: enabling them covers Mint,
-valid-Coin Publish-side indexing, and both mutual-peer and global Coin
-rendezvous. Ordinary citation remains available without Coins. Mint,
-valid-Coin mutual-peer matching, Publish-side indexing, hostile-relay
-verification, and the Kademlia routing component are integrated and exercised.
-The routing layer still needs operator-provided super-peers and deployment
-evidence; no public bootstrap network is operated. The
+Coins are the single user-facing opt-in: enabling them covers minting,
+citation, Send-side indexing, and both mutual-peer and global rendezvous.
+Mint, Cite, mutual-peer matching, and the process vet work today; Send-side
+indexing and the Kademlia routing component for global rendezvous remain
+under implementation, and no public bootstrap network is operated. The
 [Protocol](PROTOCOL.md#rendezvous--vetting) carries the exact mechanics and
 limits.
 
@@ -207,15 +188,6 @@ product — trace-aware assistance, replay, and portable proof — with no hoste
 account, organization, or managed service. If adoption compounds, it should
 compound the way Git's did: writers first, organizations following the
 writers.
-
-AI-assisted writing is the product center, and the lasting advantage lives at
-the boundaries. Inside a single editor, any platform can eventually log enough
-to imitate trace-aware context. The moment work crosses a boundary — from one
-model provider to another, from writer to reviewer, from this session to a
-postmortem months later — a proprietary log stops traveling, and a signed,
-portable, provider-neutral record is the only context that survives. That is
-why multi-AI correspondence stays a writing workflow inside Zine rather than
-becoming a separate chat product.
 
 Accountable teams are the initial buyer wedge. Organizations letting agents
 edit durable reports, research, policy, or editorial work have an immediate
@@ -251,12 +223,10 @@ to sell.
 
 The desktop press, headless MCP press, local relay, recursive file and folder
 traces, and the complete gesture set — Step, Publish, Attest, Mint, Cite,
-fork, merge, replay, and Reify export — work today. The shared deterministic
-selector and process projector now bind canonical selected context across the
-desktop and MCP adapters. The first authoring-syntax kernel and prepared
-desktop model operations also exist, but the correction and memory model,
-durable context binding, and complete operation coverage do not yet operate as
-one system.
+fork, merge, replay, and Reify export — work today. The first shared
+authoring-syntax kernel and prepared desktop model operations also exist, but
+the task-specific selector, correction and memory model, durable context
+binding, and cross-press rendering contract do not yet operate as one system.
 
 Three proofs govern what comes next:
 
