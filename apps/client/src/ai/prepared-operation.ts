@@ -108,11 +108,13 @@ function canonical(value: unknown): string {
     .join(",")}}`;
 }
 
-function deepFreeze<T>(value: T): T {
-  if (value && typeof value === "object" && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
+  if (!value || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    deepFreeze(child, seen);
   }
+  if (!Object.isFrozen(value)) Object.freeze(value);
   return value;
 }
 

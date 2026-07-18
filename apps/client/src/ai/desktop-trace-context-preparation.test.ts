@@ -188,6 +188,34 @@ test("text-only remains trace-free even though the signed target is verified", a
   );
 });
 
+test("binds Settle to its exact UTF-16 source range", async () => {
+  const body = "Intro 🧠 revise this ending";
+  const node = await fileNode(body);
+  const fromUtf16 = body.indexOf("revise");
+  const toUtf16 = body.length;
+  const input = preparationInput(node, body);
+  input.operation = "settle";
+  input.operationInputs = {
+    loose: body.slice(fromUtf16, toUtf16),
+    rangeFrom: fromUtf16,
+    rangeTo: toUtf16,
+    sourceFrom: fromUtf16,
+    sourceTo: toUtf16,
+  };
+
+  const prepared = await prepareDesktopTraceContextOperationV1(input, boundary(node));
+
+  assert.equal(prepared.operation, "settle");
+  assert.deepEqual(prepared.traceContextSelection?.manifest.operation.range, {
+    fromUtf16,
+    toUtf16,
+  });
+  assert.deepEqual(
+    adaptPreparedOperationForTraceContextInspector(prepared).targetRevision.operationRange,
+    { fromUtf16, toUtf16 },
+  );
+});
+
 test("fails closed for incomplete selected trace and mandatory context budget failure", async () => {
   const body = "Snapshot only";
   const incomplete = await fileNode(body, true);
@@ -211,6 +239,21 @@ test("fails closed for incomplete selected trace and mandatory context budget fa
     prepareDesktopTraceContextOperationV1(
       preparationInput(complete, body),
       boundary(complete, "selected-trace-v1", 1),
+    ),
+    (error: unknown) => error instanceof DesktopTraceContextPreparationError
+      && error.selectionError?.code === "MANDATORY_BUDGET_EXCEEDED",
+  );
+
+  const reference = await prepareDesktopTraceContextOperationV1(
+    preparationInput(complete, body),
+    boundary(complete, "text-only-v1"),
+  );
+  const requestBound = preparationInput(complete, body);
+  requestBound.maxBytes = reference.budget.totalBytes - 1;
+  await assert.rejects(
+    prepareDesktopTraceContextOperationV1(
+      requestBound,
+      boundary(complete, "text-only-v1"),
     ),
     (error: unknown) => error instanceof DesktopTraceContextPreparationError
       && error.selectionError?.code === "MANDATORY_BUDGET_EXCEEDED",
@@ -259,6 +302,26 @@ test("rejects a target/head mismatch and a mutated selected output", async () =>
     }),
     /rendered bytes do not match their frozen identity/,
   );
+});
+
+test("deep-freezes a valid shallow-frozen selection supplied at the internal boundary", async () => {
+  const body = "Immutable selection";
+  const node = await fileNode(body);
+  const selected = await prepareDesktopTraceContextOperationV1(
+    preparationInput(node, body),
+    boundary(node),
+  );
+  const shallowFrozen = Object.freeze(structuredClone(selected.traceContextSelection!));
+  assert.equal(Object.isFrozen(shallowFrozen.manifest), false);
+
+  const prepared = prepareOperation({
+    ...preparationInput(node, body),
+    traceContextSelection: shallowFrozen,
+  });
+
+  assert.equal(Object.isFrozen(prepared.traceContextSelection?.manifest), true);
+  assert.equal(Object.isFrozen(prepared.traceContextSelection?.manifest.operation.target), true);
+  assert.equal(Object.isFrozen(prepared.traceContextSelection?.decisions), true);
 });
 
 test("controller invalidates approval when only the selection policy identity changes", async () => {
