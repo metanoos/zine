@@ -864,7 +864,8 @@
             "traceId": "3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e",
             "headId": "3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e",
             "contentHash": "9c49e2bceb8eecb24f3135db28c9482f18b3f9ef3473369b0c0ea85e7fb92d8b",
-            "currentText": "readable"
+            "currentText": "readable",
+            "chosenPath": "essay.md"
           },
           "maxContextBytes": 4096,
           "preparedRequestMaxBytes": 8192,
@@ -915,7 +916,6 @@
     },
     {
       "name": "invalid trace failure",
-      "protocolFixture": "invalid-signature",
       "input": {
         "version": 1,
         "policy": "selected-trace-v1",
@@ -923,10 +923,11 @@
           "version": 1,
           "operation": "extend",
           "target": {
-            "traceId": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
-            "headId": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
-            "contentHash": "7743ce348d9284d677a185f33295b92266cc435a5b5f775029b300066d26693a",
-            "currentText": "draft"
+            "traceId": "3eb93d8ab27bac3985e0935c05baaf04fbe30a3520a4978b08317da00bf582d6",
+            "headId": "661f513bea861114e1dfd5353c03a0901cce09f903362ec653b587842637d8b4",
+            "contentHash": "2443630b4620165c8b173e7265e17526fe2787ae594364dd6d839ad58f2fc007",
+            "currentText": "final",
+            "chosenPath": "essay.md"
           },
           "maxContextBytes": 4096,
           "preparedRequestMaxBytes": 8192,
@@ -935,16 +936,16 @@
         "candidates": [
           {
             "version": 1,
-            "id": "trace-process-v1:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary",
-            "dedupeKey": "trace-process-v1:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary",
+            "id": "trace-process-v1:3eb93d8ab27bac3985e0935c05baaf04fbe30a3520a4978b08317da00bf582d6:661f513bea861114e1dfd5353c03a0901cce09f903362ec653b587842637d8b4:summary",
+            "dedupeKey": "trace-process-v1:3eb93d8ab27bac3985e0935c05baaf04fbe30a3520a4978b08317da00bf582d6:661f513bea861114e1dfd5353c03a0901cce09f903362ec653b587842637d8b4:summary",
             "kind": "process-fact",
             "claimClass": "mechanical",
             "source": {
               "kind": "trace",
-              "ref": "trace-process-v1:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary",
-              "traceId": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
-              "headId": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
-              "nodeId": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
+              "ref": "trace-process-v1:3eb93d8ab27bac3985e0935c05baaf04fbe30a3520a4978b08317da00bf582d6:661f513bea861114e1dfd5353c03a0901cce09f903362ec653b587842637d8b4:summary",
+              "traceId": "3eb93d8ab27bac3985e0935c05baaf04fbe30a3520a4978b08317da00bf582d6",
+              "headId": "661f513bea861114e1dfd5353c03a0901cce09f903362ec653b587842637d8b4",
+              "nodeId": "661f513bea861114e1dfd5353c03a0901cce09f903362ec653b587842637d8b4",
               "processStatus": "invalid",
               "chainDistance": 0,
               "transactionIndex": 0
@@ -957,9 +958,9 @@
               "transactionCount": 1,
               "rangeCount": 1,
               "insertedCodePointCount": 5,
-              "deletedCodePointCount": 0,
-              "firstCapturedAtMs": 1700000000000,
-              "lastCapturedAtMs": 1700000000000,
+              "deletedCodePointCount": 6,
+              "firstCapturedAtMs": 1700000002000,
+              "lastCapturedAtMs": 1700000002000,
               "spanMs": 0,
               "longestGapMs": 0,
               "undoCount": 0,
@@ -972,10 +973,11 @@
         "ok": false,
         "code": "INVALID_PROCESS_EVIDENCE",
         "stage": "select",
-        "candidateId": "trace-process-v1:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary",
-        "sourceRef": "trace-process-v1:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary"
+        "candidateId": "trace-process-v1:3eb93d8ab27bac3985e0935c05baaf04fbe30a3520a4978b08317da00bf582d6:661f513bea861114e1dfd5353c03a0901cce09f903362ec653b587842637d8b4:summary",
+        "sourceRef": "trace-process-v1:3eb93d8ab27bac3985e0935c05baaf04fbe30a3520a4978b08317da00bf582d6:661f513bea861114e1dfd5353c03a0901cce09f903362ec653b587842637d8b4:summary"
       },
-      "scope": "process-adapter-projectable"
+      "scope": "process-adapter-projectable",
+      "adapterFixture": "invalid-ancestor-valid-head"
     },
     {
       "name": "trace source mismatch",
@@ -1428,5 +1430,97 @@
       }
     }
   ],
-  "projectorContract": "surface-neutral-process-candidates-v1"
+  "projectorContract": "surface-neutral-process-candidates-v1",
+  "adapterFixtures": [
+    {
+      "name": "invalid-ancestor-valid-head",
+      "provenance": "adapter-owned-static",
+      "cryptographicVerification": "required-in-desktop-and-mcp-adapter-tests",
+      "expectedStatus": "invalid",
+      "expectedIssue": {
+        "code": "owner-changed",
+        "stepIndex": 1
+      },
+      "chain": [
+        {
+          "kind": 4290,
+          "created_at": 1700000000,
+          "tags": [
+            [
+              "z",
+              "file"
+            ],
+            [
+              "f",
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ],
+            [
+              "F",
+              "essay.md"
+            ]
+          ],
+          "content": "{\"snapshot\":\"draft\",\"contentHash\":\"7743ce348d9284d677a185f33295b92266cc435a5b5f775029b300066d26693a\",\"operationId\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"kedits\":[{\"op\":\"ins\",\"from\":0,\"to\":0,\"text\":\"draft\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000000000,\"tx\":7}]}",
+          "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "id": "3eb93d8ab27bac3985e0935c05baaf04fbe30a3520a4978b08317da00bf582d6",
+          "sig": "0361e744618c6e5f5ed486f1f1fb7974ae9b078453bcb48f433c56a5f112a5261f190df492a8afda5abe4dccc379dfa96a2dd4ac5147ac7656c42ee039445873"
+        },
+        {
+          "kind": 4290,
+          "created_at": 1700000001,
+          "tags": [
+            [
+              "z",
+              "file"
+            ],
+            [
+              "f",
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ],
+            [
+              "F",
+              "essay.md"
+            ],
+            [
+              "e",
+              "3eb93d8ab27bac3985e0935c05baaf04fbe30a3520a4978b08317da00bf582d6",
+              "",
+              "prev"
+            ]
+          ],
+          "content": "{\"snapshot\":\"draft!\",\"contentHash\":\"66806108338ce361769545b8d594df43e61b725eadb3b4777e1b02ba409d6286\",\"operationId\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"kedits\":[{\"op\":\"repl\",\"from\":0,\"to\":5,\"text\":\"draft!\",\"voice\":\"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\",\"t\":1700000001000,\"tx\":8}]}",
+          "pubkey": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+          "id": "13b8eb59fba5e57260f492f293924e538caaef495d9813b03d4cf4d6dff41135",
+          "sig": "9e23459cee7a252decafcb603b3dc9c6367fdaadc456426396ce26467b118ca6900608f111de7648cf935eb60066576ce5c887dd79619150482aedb9a6190b8c"
+        },
+        {
+          "kind": 4290,
+          "created_at": 1700000002,
+          "tags": [
+            [
+              "z",
+              "file"
+            ],
+            [
+              "f",
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ],
+            [
+              "F",
+              "essay.md"
+            ],
+            [
+              "e",
+              "13b8eb59fba5e57260f492f293924e538caaef495d9813b03d4cf4d6dff41135",
+              "",
+              "prev"
+            ]
+          ],
+          "content": "{\"snapshot\":\"final\",\"contentHash\":\"2443630b4620165c8b173e7265e17526fe2787ae594364dd6d839ad58f2fc007\",\"operationId\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"kedits\":[{\"op\":\"repl\",\"from\":0,\"to\":6,\"text\":\"final\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000002000,\"tx\":9}]}",
+          "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "id": "661f513bea861114e1dfd5353c03a0901cce09f903362ec653b587842637d8b4",
+          "sig": "441c995bb464735b972fb6eb304f4f5c3590aea9aa69cd2c9030ac2a69b351c53e89ef2a2195e482a49f9fa129501640f0003971f9988645b212b8c477382cac"
+        }
+      ]
+    }
+  ]
 }
