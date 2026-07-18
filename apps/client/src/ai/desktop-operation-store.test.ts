@@ -25,7 +25,10 @@ import {
   DesktopOperationStoreV1,
   type DesktopOperationJournalBackendV1,
 } from "./desktop-operation-store.js";
-import type { PreparedOperation } from "./prepared-operation.js";
+import {
+  computePreparedOperationRequestHashV1,
+  type PreparedOperation,
+} from "./prepared-operation.js";
 
 const BASE_TIME = 10_000;
 const TARGET_TEXT = "draft";
@@ -61,39 +64,46 @@ async function selectedContext(): Promise<TraceContextSelectionSuccessV1> {
 
 async function envelope(suffix = "0001"): Promise<DesktopOperationEnvelopeV1> {
   const selected = await selectedContext();
+  const requestId = `request-${suffix}`;
+  const operationInputs = Object.freeze({
+    seed: TARGET_TEXT,
+    hasSelection: false,
+    rangeFrom: TARGET_TEXT.length,
+    rangeTo: TARGET_TEXT.length,
+    sourceFrom: 0,
+    sourceTo: TARGET_TEXT.length,
+  });
+  const messages = Object.freeze([
+    { role: "system" as const, content: "Continue the document." },
+    { role: "user" as const, content: selected.renderedContext },
+  ]);
+  const providerFingerprint = HASH("provider");
+  const targetRevision = {
+    folderId: HASH("folder"),
+    path: "draft.md",
+    traceId: HASH("trace"),
+    headId: HASH("head"),
+    contentHash: HASH(TARGET_TEXT),
+  };
+  const dependencyFingerprint = HASH("dependency");
+  const createdAt = BASE_TIME;
   const prepared: PreparedOperation = Object.freeze({
     version: 1,
-    requestId: `request-${suffix}`,
+    requestId,
     operation: "extend",
-    operationInputs: Object.freeze({
-      seed: TARGET_TEXT,
-      hasSelection: false,
-      rangeFrom: TARGET_TEXT.length,
-      rangeTo: TARGET_TEXT.length,
-      sourceFrom: 0,
-      sourceTo: TARGET_TEXT.length,
-    }),
+    operationInputs,
     contextSnapshot: {} as PreparedOperation["contextSnapshot"],
     contextFingerprint: HASH("context"),
     traceAuthoring: null,
-    messages: Object.freeze([
-      { role: "system" as const, content: "Continue the document." },
-      { role: "user" as const, content: selected.renderedContext },
-    ]),
+    messages,
     providerId: "provider-0001",
-    providerFingerprint: HASH("provider"),
-    targetRevision: {
-      folderId: HASH("folder"),
-      path: "draft.md",
-      traceId: HASH("trace"),
-      headId: HASH("head"),
-      contentHash: HASH(TARGET_TEXT),
-    },
+    providerFingerprint,
+    targetRevision,
     provenance: Object.freeze({
       modelVoicePubkey: "a".repeat(64),
       lensId: "default" as const,
       voicePromptHash: HASH("voice"),
-      dependencyFingerprint: HASH("dependency"),
+      dependencyFingerprint,
     }),
     budget: Object.freeze({
       maxBytes: 32_768,
@@ -102,8 +112,18 @@ async function envelope(suffix = "0001"): Promise<DesktopOperationEnvelopeV1> {
       contextBytes: 1_024,
       promptLayerBytes: 1_024,
     }),
-    preparedRequestHash: HASH("prepared"),
-    createdAt: BASE_TIME,
+    preparedRequestHash: computePreparedOperationRequestHashV1({
+      requestId,
+      operation: "extend",
+      operationInputs,
+      messages,
+      traceAuthoring: null,
+      providerFingerprint,
+      targetRevision,
+      dependencyFingerprint,
+      createdAt,
+    }),
+    createdAt,
   });
   return createDesktopOperationEnvelopeV1({
     operationId: `operation-${suffix}`,
