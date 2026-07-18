@@ -29,42 +29,63 @@ type ChainVector = {
   issueCodes: string[];
 };
 
+type OperationVector = {
+  name: string;
+  operationId: string;
+  nodeIds: string[];
+  requiredNodeIds: string[];
+  propagation: Array<{
+    nodeId: string;
+    cause: string;
+    sourceNodeId?: string;
+  }>;
+  valid: boolean;
+};
+
 const folderEvents = folderCorpus.events as Record<string, Event>;
 
 function eventsFor(nodeIds: readonly string[]): Event[] {
   return nodeIds.map((nodeId) => {
     const event = folderEvents[nodeId];
     assert.ok(event, `folder corpus is missing ${nodeId}`);
+    assert.equal(event.id, nodeId, `folder corpus key does not match signed id ${nodeId}`);
     return event;
   });
 }
 
-function operationVectorValid(vector: (typeof folderCorpus.operations)[number]): boolean {
+function operationVectorValid(vector: OperationVector): boolean {
   const events = eventsFor(vector.nodeIds);
-  if (new Set(vector.nodeIds).size !== vector.nodeIds.length) return false;
+  const requiredNodeIds = new Set(vector.requiredNodeIds);
+  const exactMembership =
+    new Set(vector.nodeIds).size === vector.nodeIds.length &&
+    requiredNodeIds.size === vector.requiredNodeIds.length &&
+    vector.nodeIds.length === vector.requiredNodeIds.length &&
+    vector.nodeIds.every((nodeId) => requiredNodeIds.has(nodeId));
   if (events.some((event) => !verifyEvent(event))) return false;
   if (events.some((event) => traceOperationIdFromEvent(event) !== vector.operationId)) return false;
-  for (const expected of vector.propagation) {
-    const event = folderEvents[expected.nodeId];
-    if (!event) return false;
+
+  const expectedPropagation = new Map(
+    vector.propagation.map((expected) => [expected.nodeId, expected]),
+  );
+  if (expectedPropagation.size !== vector.propagation.length) return false;
+
+  let folderNodeCount = 0;
+  for (const [index, event] of events.entries()) {
+    const nodeId = vector.nodeIds[index]!;
     const payload = JSON.parse(event.content) as {
       folderCheckpoint?: { cause?: string; sourceNodeId?: string };
     };
-    if (payload.folderCheckpoint?.cause !== expected.cause) return false;
-    if (payload.folderCheckpoint?.sourceNodeId !== expected.sourceNodeId) return false;
+    const expected = expectedPropagation.get(nodeId);
+    if (!payload.folderCheckpoint) {
+      if (expected) return false;
+      continue;
+    }
+    folderNodeCount += 1;
+    if (!expected) return false;
+    if (payload.folderCheckpoint.cause !== expected.cause) return false;
+    if (payload.folderCheckpoint.sourceNodeId !== expected.sourceNodeId) return false;
   }
-  return vector.requiredNodeIds.every((nodeId) => vector.nodeIds.includes(nodeId));
-}
-
-function recoveryState(nodeIds: readonly string[]): "complete" | "incomplete" | "invalid" {
-  const expected = folderCorpus.recovery;
-  const required = new Set(expected.requiredNodeIds);
-  if (
-    new Set(nodeIds).size !== nodeIds.length ||
-    nodeIds.some((nodeId) => !required.has(nodeId)) ||
-    eventsFor(nodeIds).some((event) => traceOperationIdFromEvent(event) !== expected.operationId)
-  ) return "invalid";
-  return nodeIds.length === required.size ? "complete" : "incomplete";
+  return exactMembership && folderNodeCount === expectedPropagation.size;
 }
 
 test("the fixed corpus identifies this kernel version", () => {
@@ -221,16 +242,25 @@ test("fixed folder hashes preserve member order and permitted Unicode path bytes
 });
 
 test("recursive gesture vectors share one operation id and name every immediate advance", () => {
-  for (const vector of folderCorpus.operations) {
+  for (const vector of folderCorpus.operations as OperationVector[]) {
     assert.equal(operationVectorValid(vector), vector.valid, vector.name);
   }
 });
 
-test("recovery prefixes remain incomplete until every required ancestor checkpoint exists", () => {
-  assert.deepEqual(
-    folderCorpus.recovery.prefixes.map((prefix) => recoveryState(prefix)),
-    folderCorpus.recovery.states,
-  );
+test("fixed structural prefixes stop before the complete ancestor checkpoint set", () => {
+  const fixture = folderCorpus.structuralPrefixes;
+  assert.match(fixture.scope, /apps\/mcp\/integration\/recursive-checkpoint-recovery\.ts/);
+
+  const requiredNodeIds = new Set(fixture.requiredNodeIds);
+  assert.equal(requiredNodeIds.size, fixture.requiredNodeIds.length);
+  for (const event of eventsFor(fixture.requiredNodeIds)) {
+    assert.equal(verifyEvent(event), true);
+    assert.equal(traceOperationIdFromEvent(event), fixture.operationId);
+  }
+  for (const prefix of fixture.incompleteNodeIdPrefixes) {
+    assert.ok(prefix.length < fixture.requiredNodeIds.length, fixture.name);
+    assert.deepEqual(prefix, fixture.requiredNodeIds.slice(0, prefix.length), fixture.name);
+  }
 });
 
 test("malformed fixed folder chains fail closed", async () => {

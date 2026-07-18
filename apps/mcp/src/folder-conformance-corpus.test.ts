@@ -19,14 +19,63 @@ type ChainVector = {
   issueCodes: string[];
 };
 
+type OperationVector = {
+  name: string;
+  operationId: string;
+  nodeIds: string[];
+  requiredNodeIds: string[];
+  propagation: Array<{
+    nodeId: string;
+    cause: string;
+    sourceNodeId?: string;
+  }>;
+  valid: boolean;
+};
+
 const events = folderCorpus.events as Record<string, Event>;
 
-function chain(vector: ChainVector): Event[] {
+function chain(vector: { nodeIds: string[] }): Event[] {
   return vector.nodeIds.map((nodeId) => {
     const event = events[nodeId];
     assert.ok(event, `MCP corpus is missing ${nodeId}`);
+    assert.equal(event.id, nodeId, `MCP corpus key does not match signed id ${nodeId}`);
     return event;
   });
+}
+
+function operationVectorValid(vector: OperationVector): boolean {
+  const operationEvents = chain(vector);
+  const requiredNodeIds = new Set(vector.requiredNodeIds);
+  const exactMembership =
+    new Set(vector.nodeIds).size === vector.nodeIds.length &&
+    requiredNodeIds.size === vector.requiredNodeIds.length &&
+    vector.nodeIds.length === vector.requiredNodeIds.length &&
+    vector.nodeIds.every((nodeId) => requiredNodeIds.has(nodeId));
+  if (operationEvents.some((event) => !verifyEvent(event))) return false;
+  if (operationEvents.some((event) => traceOperationIdFromEvent(event) !== vector.operationId)) return false;
+
+  const expectedPropagation = new Map(
+    vector.propagation.map((expected) => [expected.nodeId, expected]),
+  );
+  if (expectedPropagation.size !== vector.propagation.length) return false;
+
+  let folderNodeCount = 0;
+  for (const [index, event] of operationEvents.entries()) {
+    const nodeId = vector.nodeIds[index]!;
+    const payload = JSON.parse(event.content) as {
+      folderCheckpoint?: { cause?: string; sourceNodeId?: string };
+    };
+    const expected = expectedPropagation.get(nodeId);
+    if (!payload.folderCheckpoint) {
+      if (expected) return false;
+      continue;
+    }
+    folderNodeCount += 1;
+    if (!expected) return false;
+    if (payload.folderCheckpoint.cause !== expected.cause) return false;
+    if (payload.folderCheckpoint.sourceNodeId !== expected.sourceNodeId) return false;
+  }
+  return exactMembership && folderNodeCount === expectedPropagation.size;
 }
 
 test("MCP reads the fixed recursive folder corpus through its direct kernel source dependency", async () => {
@@ -44,12 +93,9 @@ test("MCP reads the fixed recursive folder corpus through its direct kernel sour
   }
 });
 
-test("MCP rejects a recursive gesture whose recovery changes operation id", () => {
-  for (const vector of folderCorpus.operations) {
-    const sameOperation = vector.nodeIds.every(
-      (nodeId) => traceOperationIdFromEvent(events[nodeId]!) === vector.operationId,
-    );
-    assert.equal(sameOperation, vector.valid, vector.name);
+test("MCP enforces exact recursive operation membership and propagation", () => {
+  for (const vector of folderCorpus.operations as OperationVector[]) {
+    assert.equal(operationVectorValid(vector), vector.valid, vector.name);
   }
 });
 

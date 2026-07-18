@@ -342,6 +342,36 @@
       "valid": true
     },
     {
+      "name": "same-operation retry rejects a regenerated second explicit folder Step",
+      "operationId": "7777777777777777777777777777777777777777777777777777777777777777",
+      "nodeIds": [
+        "24ecff5b010681f3bd9e3211080b1cc146afc54bda2bea6c1872a4036ba78bfc",
+        "554f7fd7dfa14dd2eec3e69cfd15c8d988acdd7e58be8cb106bc31a39cd6ddb0",
+        "cbbdf4be7073677f02042b9d4e2dcbf1eb59c47aa60d46b7cf39cfe5acfc05b3"
+      ],
+      "requiredNodeIds": [
+        "24ecff5b010681f3bd9e3211080b1cc146afc54bda2bea6c1872a4036ba78bfc",
+        "554f7fd7dfa14dd2eec3e69cfd15c8d988acdd7e58be8cb106bc31a39cd6ddb0"
+      ],
+      "propagation": [
+        {
+          "nodeId": "24ecff5b010681f3bd9e3211080b1cc146afc54bda2bea6c1872a4036ba78bfc",
+          "cause": "explicit-step"
+        },
+        {
+          "nodeId": "554f7fd7dfa14dd2eec3e69cfd15c8d988acdd7e58be8cb106bc31a39cd6ddb0",
+          "cause": "child-advance",
+          "sourceNodeId": "24ecff5b010681f3bd9e3211080b1cc146afc54bda2bea6c1872a4036ba78bfc"
+        },
+        {
+          "nodeId": "cbbdf4be7073677f02042b9d4e2dcbf1eb59c47aa60d46b7cf39cfe5acfc05b3",
+          "cause": "explicit-step"
+        }
+      ],
+      "valid": false,
+      "reasonIncludes": "extra checkpoint"
+    },
+    {
       "name": "recovery rejects a split operation id at the final ancestor",
       "operationId": "6666666666666666666666666666666666666666666666666666666666666666",
       "nodeIds": [
@@ -370,32 +400,23 @@
       "reasonIncludes": "operation id"
     }
   ],
-  "recovery": {
-    "name": "a retried leaf advance is incomplete until every ancestor is present",
+  "structuralPrefixes": {
+    "name": "leaf-advance node prefixes before the complete ancestor set",
+    "scope": "Structural node-presence data only. Executable crash/retry writer recovery is exercised by apps/mcp/integration/recursive-checkpoint-recovery.ts.",
     "operationId": "6666666666666666666666666666666666666666666666666666666666666666",
     "requiredNodeIds": [
       "be2a8fe12a53f94185ce1d9f8292e83d2d99107692071f888f0a8fd39b41e9a7",
       "1d535feebd77219e133266c139bf7e63907892f932e4fdbb6303c626dd724fbc",
       "7f33de61e6e5f481595d980558473c5bd95b1fa776f5f895170e901a065f9345"
     ],
-    "prefixes": [
+    "incompleteNodeIdPrefixes": [
       [
         "be2a8fe12a53f94185ce1d9f8292e83d2d99107692071f888f0a8fd39b41e9a7"
       ],
       [
         "be2a8fe12a53f94185ce1d9f8292e83d2d99107692071f888f0a8fd39b41e9a7",
         "1d535feebd77219e133266c139bf7e63907892f932e4fdbb6303c626dd724fbc"
-      ],
-      [
-        "be2a8fe12a53f94185ce1d9f8292e83d2d99107692071f888f0a8fd39b41e9a7",
-        "1d535feebd77219e133266c139bf7e63907892f932e4fdbb6303c626dd724fbc",
-        "7f33de61e6e5f481595d980558473c5bd95b1fa776f5f895170e901a065f9345"
       ]
-    ],
-    "states": [
-      "incomplete",
-      "incomplete",
-      "complete"
     ]
   },
   "events": {
@@ -1300,6 +1321,46 @@
       "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
       "id": "a8855dada5a73dff9e5822941dd3f79dca2297c62a7803bc82b5f974ec78efd4",
       "sig": "941781525ea95b84cb7fbb5786f34ee759bdf0a9f8dc15baaab69beeed19c8cf09f3c2ed9d4063d664027b7d2ace979aff68956ede1d0b1ccc209b581ec29edf"
+    },
+    "cbbdf4be7073677f02042b9d4e2dcbf1eb59c47aa60d46b7cf39cfe5acfc05b3": {
+      "kind": 4290,
+      "created_at": 1900000027,
+      "tags": [
+        [
+          "z",
+          "folder"
+        ],
+        [
+          "f",
+          "f73ee711ebf4d9589bd24f60a26c431af2df45f689e6ebc35bb572ead6bee256"
+        ],
+        [
+          "q",
+          "be2a8fe12a53f94185ce1d9f8292e83d2d99107692071f888f0a8fd39b41e9a7"
+        ],
+        [
+          "q",
+          "6de1e4e08b250f956b868c60cb91a20d1ae4076b682637be14cb37799b43f7f7"
+        ],
+        [
+          "action",
+          "edit"
+        ],
+        [
+          "e",
+          "24ecff5b010681f3bd9e3211080b1cc146afc54bda2bea6c1872a4036ba78bfc",
+          "",
+          "prev"
+        ],
+        [
+          "x",
+          "942c8137cde391d7aef46b06c6e70c0a628787ed0b5d285879beb8556a35b7aa"
+        ]
+      ],
+      "content": "{\"snapshot\":{\"members\":[{\"kind\":\"file\",\"relativePath\":\"back\\\\slash.md\",\"latestNodeId\":\"be2a8fe12a53f94185ce1d9f8292e83d2d99107692071f888f0a8fd39b41e9a7\",\"contentHash\":\"6171b276b53848b5cfef0d2d58fd30cc403db4d13eb77ac9c4bf003bec08518c\"},{\"kind\":\"file\",\"relativePath\":\"résumé 📝.md\",\"latestNodeId\":\"6de1e4e08b250f956b868c60cb91a20d1ae4076b682637be14cb37799b43f7f7\",\"contentHash\":\"ce0746ee7f6014c245586b8a6149c7965f1141ab5b755101cdf2b5d9830a05fb\"}]},\"contentHash\":\"942c8137cde391d7aef46b06c6e70c0a628787ed0b5d285879beb8556a35b7aa\",\"operationId\":\"7777777777777777777777777777777777777777777777777777777777777777\",\"folderCheckpoint\":{\"version\":1,\"cause\":\"explicit-step\"}}",
+      "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "id": "cbbdf4be7073677f02042b9d4e2dcbf1eb59c47aa60d46b7cf39cfe5acfc05b3",
+      "sig": "08fff9fba45a5765ee7421037fdb9288efe72c55ccb3f56d844060929c0ef5255a0cd98647e8ddfbe551c61be075f8dc8880f134475170684dcfb8df1e682017"
     }
   }
 }
