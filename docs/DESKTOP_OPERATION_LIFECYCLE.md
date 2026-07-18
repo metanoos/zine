@@ -152,10 +152,23 @@ native store removes the entire envelope; Phase 2 keeps no tombstone or retained
 hashes. The native store must keep vaults isolated and must not copy the envelope
 to relay events, logs, crash reports, or analytics.
 
-The current TypeScript envelope describes this policy and emits an expiry
-effect; durable encrypted storage and whole-envelope deletion are owned by the
-later native store lane. Selective portable commitments and disclosure belong
-to Phase 3 after the trust/schema review.
+The desktop now has a native journal substrate for this contract. Each active
+vault owns a separate `press.sqlite3`, never the relay's `relay.sqlite3`. The
+native runtime derives a domain-separated journal key from the workspace key at
+activation, keeps only zeroizing derived key material, and encrypts the whole
+canonical envelope with authenticated encryption before SQLite sees it. A
+keyed opaque record id hides operation and attempt ids; only its CAS revision
+and deletion deadline remain plaintext for coordination and expiry. The
+database uses WAL, full synchronous commits, a busy timeout, serialized native
+mutations, and private directory/database permissions.
+
+The narrow TypeScript adapter validates the strict V1 contract before writes
+and after reads. It exposes create/update CAS, recovery load/list,
+whole-envelope deletion, and expiry deletion. Production construction names the
+native authority explicitly; browser tests may inject a backend, but there is
+no silent local-storage fallback. This is storage substrate only—the app does
+not yet route Extend through it. Selective portable commitments and disclosure
+belong to Phase 3 after the trust/schema review.
 
 ## Not included
 

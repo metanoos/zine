@@ -1,4 +1,5 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+mod desktop_operation_journal;
 mod kademlia;
 mod llm_proxy;
 mod rendezvous_relay;
@@ -72,12 +73,26 @@ struct StrongholdKdfEnvelope {
     passphrase: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 struct ActiveVaultRuntime {
     id: String,
     directory: PathBuf,
     generation: u64,
     closing: bool,
+    journal_key: desktop_operation_journal::JournalKey,
+}
+
+impl std::fmt::Debug for ActiveVaultRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActiveVaultRuntime")
+            .field("id", &self.id)
+            .field("directory", &self.directory)
+            .field("generation", &self.generation)
+            .field("closing", &self.closing)
+            .field("journal_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -699,6 +714,7 @@ fn activate_vault_runtime(
         .map_err(|error| format!("create vault runtime directory: {error}"))?;
     let verified = verify_vault_runtime_key(&directory, &workspace_key);
     verified?;
+    let journal_key = desktop_operation_journal::JournalKey::derive(&workspace_key, &id)?;
 
     let mut active = ACTIVE_VAULT_RUNTIME
         .lock()
@@ -717,6 +733,7 @@ fn activate_vault_runtime(
         directory,
         generation: next_vault_runtime_generation()?,
         closing: false,
+        journal_key,
     });
     Ok(())
 }
@@ -1036,6 +1053,7 @@ async fn factory_reset(
     let active_kademlia_directory = active_vault_binding()?.directory;
     lock_vault_runtime(app.clone()).await?;
     kademlia::reset_runtime(&active_kademlia_directory, &kademlia_runtime).await?;
+    desktop_operation_journal::remove_database_files(&active_kademlia_directory)?;
     let bin = resolve_relay_binary(&app)?;
     run_relay_factory_reset(&bin)?;
     std::thread::sleep(Duration::from_millis(5_250));
@@ -2445,6 +2463,12 @@ pub fn run() {
             kademlia::kademlia_cancel,
             rendezvous_relay::rendezvous_sample_relay,
             rendezvous_relay::rendezvous_cancel_relay_sample,
+            desktop_operation_journal::desktop_operation_journal_create,
+            desktop_operation_journal::desktop_operation_journal_update,
+            desktop_operation_journal::desktop_operation_journal_load,
+            desktop_operation_journal::desktop_operation_journal_list,
+            desktop_operation_journal::desktop_operation_journal_delete,
+            desktop_operation_journal::desktop_operation_journal_delete_expired,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -2734,6 +2758,8 @@ mod tests {
             directory: PathBuf::from("vault-a"),
             generation: 41,
             closing: true,
+            journal_key: desktop_operation_journal::JournalKey::derive(&[0x41; 32], "vault-a")
+                .expect("derive closing test journal key"),
         };
         assert!(usable_vault_runtime(Some(closing))
             .expect_err("closing generation must reject native commands")
@@ -2744,6 +2770,8 @@ mod tests {
             directory: PathBuf::from("vault-a"),
             generation: 42,
             closing: false,
+            journal_key: desktop_operation_journal::JournalKey::derive(&[0x42; 32], "vault-a")
+                .expect("derive open test journal key"),
         };
         assert_eq!(
             usable_vault_runtime(Some(open.clone()))
@@ -2836,12 +2864,16 @@ mod tests {
             directory: dir.join("vault-a"),
             generation: 1,
             closing: false,
+            journal_key: desktop_operation_journal::JournalKey::derive(&[0xa1; 32], "vault-a")
+                .expect("derive vault A test journal key"),
         };
         let vault_b = ActiveVaultRuntime {
             id: "vault-b".into(),
             directory: dir.join("vault-b"),
             generation: 2,
             closing: false,
+            journal_key: desktop_operation_journal::JournalKey::derive(&[0xb2; 32], "vault-b")
+                .expect("derive vault B test journal key"),
         };
         let path_a = peers_json_path(&vault_a);
         let path_b = peers_json_path(&vault_b);
