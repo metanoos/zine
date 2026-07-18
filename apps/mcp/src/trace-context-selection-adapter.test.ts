@@ -2,14 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ProtocolEvent, TraceEventVerifier } from "@zine/protocol";
+import type { Event } from "nostr-tools";
+import { verifyEvent as verifyNostrEvent } from "nostr-tools/pure";
+import parityCorpusJson from "../../../packages/trace-context/corpus/selector-parity-v1.json" with {
+  type: "json",
+};
 import {
   selectTraceContextV1,
+  type EvidenceSelectionDecisionV1,
   type TraceContextSelectionInputV1,
   type TraceProcessFactV1,
 } from "../../../packages/trace-context/src/index.js";
 import {
   adaptVerifiedMcpFileForTraceContextSelectionV1,
-  type McpProcessFactRequestV1,
   type McpTraceContextSelectionAdapterInputV1,
 } from "./trace-context-selection-adapter.js";
 
@@ -20,6 +25,54 @@ const VOICE_ID = "d".repeat(64);
 const ROOT_ID = "e".repeat(64);
 const PATH = "draft.md";
 const CURRENT_TEXT = "Draft revised";
+
+interface CorpusFixture {
+  name: string;
+  chain: ProtocolEvent[];
+}
+
+interface CorpusSuccessExpected {
+  ok: true;
+  renderedContext: string;
+  manifestSha256: string;
+  selectedFacts: TraceProcessFactV1[];
+  decisions: EvidenceSelectionDecisionV1[];
+}
+
+interface CorpusFailureExpected {
+  ok: false;
+  code: string;
+  stage: string;
+  candidateId?: string;
+  sourceRef?: string;
+}
+
+interface ProjectableCorpusCase {
+  name: string;
+  scope: "process-adapter-projectable" | "selector-only";
+  protocolFixture?: string;
+  adapterFixture?: string;
+  input: TraceContextSelectionInputV1;
+  expected: CorpusSuccessExpected | CorpusFailureExpected;
+}
+
+interface RejectionDescriptor {
+  name: string;
+  fixture: string;
+  mutation: {
+    target: string;
+    operation: "replace" | "replace-snapshot-preserve-id-signature";
+    value: unknown;
+  };
+  expected: { accepted: false; reason: string };
+}
+
+const parityCorpus = parityCorpusJson as unknown as {
+  protocolFixtures: CorpusFixture[];
+  adapterFixtures: CorpusFixture[];
+  cases: ProjectableCorpusCase[];
+  adapterRejectionMutations: RejectionDescriptor[];
+};
 
 const ADAPTER_CASES = [
   {
@@ -53,53 +106,114 @@ test("internally verifies one immutable chain and derives exact Extend/Settle se
         ...fixture.input,
         operation: adapterCase.operation,
       });
-      const expected: TraceContextSelectionInputV1 = {
+      assert.deepEqual(adapted.operation, {
         version: 1,
-        policy: "selected-trace-v1",
-        operation: {
-          version: 1,
-          operation: adapterCase.operation.operation,
-          target: {
-            traceId: GENESIS_ID,
-            headId: HEAD_ID,
-            contentHash: fixture.currentHash,
-            currentText: CURRENT_TEXT,
-            chosenPath: PATH,
-          },
-          ...("range" in adapterCase.operation
-            ? { range: { ...adapterCase.operation.range } }
-            : {}),
-          maxContextBytes: adapterCase.operation.maxContextBytes,
-          preparedRequestMaxBytes: adapterCase.operation.preparedRequestMaxBytes,
-          reservedPromptBytes: adapterCase.operation.reservedPromptBytes,
+        operation: adapterCase.operation.operation,
+        target: {
+          traceId: GENESIS_ID,
+          headId: HEAD_ID,
+          contentHash: fixture.currentHash,
+          currentText: CURRENT_TEXT,
+          chosenPath: PATH,
         },
-        candidates: [
-          expectedCandidate(HEAD_ID, 0, 0, "summary", headSummary()),
-          expectedCandidate(CHANGE_ID, 1, 0, "summary", changeSummary()),
-          expectedCandidate(CHANGE_ID, 1, 0, "transaction:0", {
-            kind: "transaction",
-            transactionIndex: 0,
-            capturedAtMs: 200,
-            changeCount: 1,
-            voiceIds: [VOICE_ID],
-          }),
-          expectedCandidate(CHANGE_ID, 1, 0, "transaction:0:change:0", {
-            kind: "change",
-            transactionIndex: 0,
-            operation: "insert",
-            range: { fromUtf16: 5, toUtf16: 5 },
-            insertedCodePointCount: 8,
-            deletedCodePointCount: 0,
-            voiceId: VOICE_ID,
-          }, { fromUtf16: 5, toUtf16: 5 }),
-        ],
-        limits: { version: 1, maxCandidates: 32, maxInputBytes: 128 * 1_024 },
-      };
-      assert.deepEqual(adapted, expected);
+        ...("range" in adapterCase.operation
+          ? { range: { ...adapterCase.operation.range } }
+          : {}),
+        maxContextBytes: adapterCase.operation.maxContextBytes,
+        preparedRequestMaxBytes: adapterCase.operation.preparedRequestMaxBytes,
+        reservedPromptBytes: adapterCase.operation.reservedPromptBytes,
+      });
+      assert.deepEqual(adapted.candidates.map((candidate) => candidate.id), [
+        `trace-process-v1:${GENESIS_ID}:${HEAD_ID}:summary`,
+        `trace-process-v1:${GENESIS_ID}:${HEAD_ID}:transaction:0`,
+        `trace-process-v1:${GENESIS_ID}:${CHANGE_ID}:summary`,
+        `trace-process-v1:${GENESIS_ID}:${CHANGE_ID}:transaction:0`,
+        `trace-process-v1:${GENESIS_ID}:${CHANGE_ID}:transaction:0:change:0`,
+        `trace-process-v1:${GENESIS_ID}:${GENESIS_ID}:summary`,
+        `trace-process-v1:${GENESIS_ID}:${GENESIS_ID}:transaction:0`,
+        `trace-process-v1:${GENESIS_ID}:${GENESIS_ID}:transaction:0:change:0`,
+      ]);
+      assert.equal(adapted.candidates.some((candidate) => candidate.id.startsWith("mcp-trace:")), false);
+      assert.deepEqual(adapted.limits, {
+        version: 1,
+        maxCandidates: 32,
+        maxInputBytes: 128 * 1_024,
+      });
       const selection = await selectTraceContextV1(adapted);
       assert.equal(selection.ok, true, selection.ok ? undefined : selection.error.message);
     });
   }
+});
+
+test("matches every exported process-adapter-projectable input and selector result", async (t) => {
+  const projectable = parityCorpus.cases.filter((fixture) =>
+    fixture.scope === "process-adapter-projectable");
+  assert.deepEqual(projectable.map((fixture) => fixture.name), [
+    "two-step full trace",
+    "snapshot-only failure",
+    "invalid trace failure",
+  ]);
+
+  for (const fixture of projectable) {
+    await t.test(fixture.name, async () => {
+      const signedFixture = corpusFixture(fixture);
+      assert.ok(signedFixture.chain.length > 0);
+      for (const event of signedFixture.chain) {
+        assert.equal(verifyNostrEvent(event as Event), true, `${fixture.name}: ${event.id}`);
+      }
+      const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1({
+        version: 1,
+        policy: fixture.input.policy,
+        operation: {
+          version: 1,
+          operation: fixture.input.operation.operation,
+          ...(fixture.input.operation.range
+            ? { range: { ...fixture.input.operation.range } }
+            : {}),
+          maxContextBytes: fixture.input.operation.maxContextBytes,
+          preparedRequestMaxBytes: fixture.input.operation.preparedRequestMaxBytes,
+          reservedPromptBytes: fixture.input.operation.reservedPromptBytes,
+        },
+        chain: signedFixture.chain,
+        verifyEvent: (event) => verifyNostrEvent(event as Event),
+        ...(fixture.input.limits ? { limits: fixture.input.limits } : {}),
+      });
+      assert.deepEqual(adapted, fixture.input);
+      await assertCorpusSelection(adapted, fixture.expected);
+    });
+  }
+});
+
+test("executes the applicable shared rejection descriptor at the MCP boundary", async () => {
+  const descriptor = parityCorpus.adapterRejectionMutations.find(
+    (item) => item.mutation.target === "chain[1].content",
+  );
+  assert.ok(descriptor);
+  assert.equal(descriptor.expected.accepted, false);
+  assert.equal(descriptor.expected.reason, "verified-chain-drift");
+  const fullCase = parityCorpus.cases.find((fixture) => fixture.name === "two-step full trace");
+  assert.ok(fullCase);
+  const fixture = corpusFixture(fullCase);
+  const chain = structuredClone(fixture.chain);
+  const payload = JSON.parse(chain[1]!.content) as Record<string, unknown>;
+  payload.snapshot = descriptor.mutation.value;
+  chain[1]!.content = JSON.stringify(payload);
+  await assert.rejects(
+    adaptVerifiedMcpFileForTraceContextSelectionV1({
+      version: 1,
+      policy: fullCase.input.policy,
+      operation: {
+        version: 1,
+        operation: fullCase.input.operation.operation,
+        maxContextBytes: fullCase.input.operation.maxContextBytes,
+        preparedRequestMaxBytes: fullCase.input.operation.preparedRequestMaxBytes,
+        reservedPromptBytes: fullCase.input.operation.reservedPromptBytes,
+      },
+      chain,
+      verifyEvent: (event) => verifyNostrEvent(event as Event),
+    }),
+    /head did not pass the injected trusted event verifier/,
+  );
 });
 
 test("binds operation ranges to exact Unicode boundaries in the verified head snapshot", async () => {
@@ -198,7 +312,7 @@ test("captures the chain before caller mutation after the async boundary", async
   const adapted = await pending;
   assert.equal(adapted.operation.target.currentText, CURRENT_TEXT);
   assert.equal(adapted.operation.target.chosenPath, PATH);
-  assert.equal(adapted.candidates.length, fixture.input.processFactRequests.length);
+  assert.equal(adapted.candidates.length, 8);
 });
 
 test("returned selector input is recursively frozen against caller mutation", async () => {
@@ -245,19 +359,19 @@ test("maps snapshot-only status to selector failure while text-only excludes it"
 
 test("text-only drops malformed process requests before coordinate validation", async () => {
   const fixture = await fullFixture();
-  const malformedRequests = [{
-    version: 2,
-    kind: "change",
-    nodeId: "not-a-node-id",
-    chainDistance: -1,
-    transactionIndex: -1,
-    changeIndex: -1,
-  }] as unknown as readonly McpProcessFactRequestV1[];
-  const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1({
+  const adversarial = {
     ...fixture.input,
     policy: "text-only-v1",
-    processFactRequests: malformedRequests,
-  });
+    processFactRequests: [{
+      version: 2,
+      kind: "change",
+      nodeId: "not-a-node-id",
+      chainDistance: -1,
+      transactionIndex: -1,
+      changeIndex: -1,
+    }],
+  } as unknown as McpTraceContextSelectionAdapterInputV1;
+  const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1(adversarial);
   assert.deepEqual(adapted.candidates, []);
   const selected = await selectTraceContextV1(adapted);
   assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
@@ -281,19 +395,16 @@ test("maps invalid ancestry to selector failure when the signed head remains val
   if (!selected.ok) assert.equal(selected.error.code, "INVALID_PROCESS_EVIDENCE");
 });
 
-test("no-op ranges support derived summaries and transactions but not change facts", async () => {
+test("deterministic enumeration keeps no-op summaries and transactions but omits change facts", async () => {
   const fixture = await fullFixture();
-  const summaryAndTransaction = await adaptVerifiedMcpFileForTraceContextSelectionV1({
-    ...fixture.input,
-    processFactRequests: [
-      request(HEAD_ID, 0, "step-summary"),
-      request(HEAD_ID, 0, "transaction", 0),
-    ],
-  });
-  assert.deepEqual(summaryAndTransaction.candidates.map((candidate) => {
-    assert.equal(candidate.kind, "process-fact");
-    return candidate.kind === "process-fact" ? candidate.fact : undefined;
-  }), [
+  const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1(fixture.input);
+  const headFacts = adapted.candidates.flatMap((candidate) =>
+    candidate.kind === "process-fact"
+      && candidate.source.kind === "trace"
+      && candidate.source.nodeId === HEAD_ID
+      ? [candidate.fact]
+      : []);
+  assert.deepEqual(headFacts, [
     headSummary(),
     {
       kind: "transaction",
@@ -303,14 +414,7 @@ test("no-op ranges support derived summaries and transactions but not change fac
       voiceIds: [VOICE_ID],
     },
   ]);
-
-  await assert.rejects(
-    adaptVerifiedMcpFileForTraceContextSelectionV1({
-      ...fixture.input,
-      processFactRequests: [request(HEAD_ID, 0, "change", 0, 0)],
-    }),
-    /no-op range has no selector change-fact shape/,
-  );
+  assert.equal(headFacts.some((fact) => fact.kind === "change"), false);
 });
 
 interface Fixture {
@@ -340,12 +444,6 @@ async function fullFixture(): Promise<Fixture> {
       operation: ADAPTER_CASES[0].operation,
       chain,
       verifyEvent: exactVectorVerifier(chain),
-      processFactRequests: [
-        request(HEAD_ID, 0, "step-summary"),
-        request(CHANGE_ID, 1, "step-summary"),
-        request(CHANGE_ID, 1, "transaction", 0),
-        request(CHANGE_ID, 1, "change", 0, 0),
-      ],
       limits: { version: 1, maxCandidates: 32, maxInputBytes: 128 * 1_024 },
     },
   };
@@ -362,7 +460,6 @@ async function snapshotOnlyFixture(
     operation: ADAPTER_CASES[0].operation,
     chain,
     verifyEvent: exactVectorVerifier(chain),
-    processFactRequests: [request(HEAD_ID, 0, "step-summary")],
   };
 }
 
@@ -390,25 +487,44 @@ function event(
   };
 }
 
-function request(
-  nodeId: string,
-  chainDistance: number,
-  kind: McpProcessFactRequestV1["kind"],
-  transactionIndex?: number,
-  changeIndex?: number,
-): McpProcessFactRequestV1 {
-  if (kind === "step-summary") return { version: 1, kind, nodeId, chainDistance };
-  if (kind === "transaction") {
-    return { version: 1, kind, nodeId, chainDistance, transactionIndex: transactionIndex! };
+function corpusFixture(fixture: ProjectableCorpusCase): CorpusFixture {
+  const name = fixture.protocolFixture ?? fixture.adapterFixture;
+  assert.ok(name, fixture.name);
+  const matches = [...parityCorpus.protocolFixtures, ...parityCorpus.adapterFixtures]
+    .filter((candidate) => candidate.name === name);
+  assert.equal(matches.length, 1, fixture.name);
+  return matches[0]!;
+}
+
+async function assertCorpusSelection(
+  input: TraceContextSelectionInputV1,
+  expected: CorpusSuccessExpected | CorpusFailureExpected,
+): Promise<void> {
+  const result = await selectTraceContextV1(input);
+  assert.equal(result.ok, expected.ok);
+  if (!result.ok || !expected.ok) {
+    assert.equal(result.ok, false);
+    assert.equal(expected.ok, false);
+    if (result.ok || expected.ok) return;
+    assert.equal(result.error.code, expected.code);
+    assert.equal(result.error.stage, expected.stage);
+    assert.equal(
+      "candidateId" in result.error ? result.error.candidateId : undefined,
+      expected.candidateId,
+    );
+    assert.equal(
+      "sourceRef" in result.error ? result.error.sourceRef : undefined,
+      expected.sourceRef,
+    );
+    return;
   }
-  return {
-    version: 1,
-    kind,
-    nodeId,
-    chainDistance,
-    transactionIndex: transactionIndex!,
-    changeIndex: changeIndex!,
-  };
+  assert.equal(result.renderedContext, expected.renderedContext);
+  assert.equal(result.manifestSha256, expected.manifestSha256);
+  assert.deepEqual(result.decisions, expected.decisions);
+  assert.deepEqual(
+    result.manifest.selected.flatMap((item) => item.fact ? [item.fact] : []),
+    expected.selectedFacts,
+  );
 }
 
 function exactVectorVerifier(chain: readonly ProtocolEvent[]): TraceEventVerifier {
@@ -448,58 +564,6 @@ function headSummary(): TraceProcessFactV1 {
     undoCount: 0,
     redoCount: 0,
   };
-}
-
-function changeSummary(): TraceProcessFactV1 {
-  return {
-    kind: "step-summary",
-    transactionCount: 1,
-    rangeCount: 1,
-    insertedCodePointCount: 8,
-    deletedCodePointCount: 0,
-    firstCapturedAtMs: 200,
-    lastCapturedAtMs: 200,
-    spanMs: 0,
-    longestGapMs: 0,
-    undoCount: 0,
-    redoCount: 0,
-  };
-}
-
-function expectedCandidate(
-  nodeId: string,
-  chainDistance: number,
-  transactionIndex: number,
-  suffix: string,
-  fact: TraceProcessFactV1,
-  range?: Utf16Range,
-): TraceContextSelectionInputV1["candidates"][number] {
-  const ref = `mcp-trace:${GENESIS_ID}:${nodeId}:${suffix}`;
-  return {
-    version: 1,
-    id: ref,
-    dedupeKey: ref,
-    kind: "process-fact",
-    claimClass: "mechanical",
-    source: {
-      kind: "trace",
-      ref,
-      traceId: GENESIS_ID,
-      headId: HEAD_ID,
-      nodeId,
-      processStatus: "full-trace",
-      chainDistance,
-      transactionIndex,
-      ...(range ? { range } : {}),
-    },
-    reasons: [chainDistance === 0 ? "prepared-head-process" : "recent-target-process"],
-    fact,
-  };
-}
-
-interface Utf16Range {
-  fromUtf16: number;
-  toUtf16: number;
 }
 
 async function sha256(value: string): Promise<string> {
