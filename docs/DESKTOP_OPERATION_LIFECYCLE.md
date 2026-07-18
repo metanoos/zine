@@ -67,14 +67,16 @@ machine:
 
 ```text
 prepared -> approved -> dispatch-intent -> provider-io
-                                             |   |   +-> unknown -> abandoned
-                                             |   +-----> failed
-                                             +---------> response-completed
-                                                               |    |    |
-                                                               v    v    v
-                                                        accepted  stale  rejected
-                                                            |
-                                                            +------> stale
+                              |                  |   |   +-> unknown -> abandoned
+                              |                  |   +-----> failed
+                              |                  +---------> response-completed
+                              |                                    |    |    |
+                              |                                    v    v    v
+                              |                             accepted  stale  rejected
+                              |                                 |
+                              |                                 +------> stale
+                              |
+                              +-- recovered -----------------> unknown -> abandoned
 ```
 
 Prepared and approved records are known not to have reached a provider. During
