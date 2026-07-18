@@ -1,18 +1,22 @@
 # Product
 
-Zine records how a document was actually made—by people, by models, or both—as
-signed, replayable history. It then uses that trace to help the next act of
-writing, not only the later audit. This page explains the daily loop, the
-initial buyer, and the evidence still required. For how the machinery works,
-read the [Protocol](PROTOCOL.md) tour.
+Zine records how a file or folder was actually made—by people, by models, or
+both—as signed, replayable history. A **zine** is that stably identified file or
+folder together with its trace; the **Root zine** is the topmost folder. Zine
+uses the trace to help the next act of writing, not only the later audit. This
+page explains the daily loop, initial buyer, and evidence still required. The
+accepted migration is collected in
+[Trace-Native Zines](TRACE_NATIVE_ZINES.md); for implemented machinery, read
+the [Protocol](PROTOCOL.md) tour.
 
 ## The problem
 
-Final text is a lossy summary of writing. It preserves what survived, but not
+Current content is a lossy summary of writing. A file preserves the text that
+survived; a folder preserves the current tree. Neither alone preserves
 which direction was abandoned, which phrase was repeatedly repaired, what a
 writer protected, what an AI proposed, or what the writer rejected. Giving an
-AI only that final state asks it to collaborate without evidence of the process
-that shaped the work.
+AI only that final state asks it to collaborate without evidence of the
+process that shaped the work across one file or a whole folder.
 
 Once an AI-assisted document leaves its editor, the process also collapses into
 a final file, coarse version history, and scattered model logs. Those records
@@ -34,7 +38,7 @@ work deserves trust.
 
 ## Who it serves
 
-Three roles meet in every traced document:
+Three roles meet in every zine:
 
 - **The writer**—a person, an agent, or both interleaved—who wants the AI to
   respond to the work's actual trajectory rather than its latest text alone.
@@ -58,11 +62,13 @@ somewhere else.
 ## The trace-aware writing loop
 
 The foundational product bet is straightforward: for at least some writing
-tasks, models given current text plus relevant process evidence will collaborate
-better than models given current text alone. “Better” must be measured through
-writer preference, editing required before acceptance, time to an acceptable
-result, preservation of intent, recurrence of rejected directions, and later
-reversion—not through a persuasive demo.
+tasks, models given the current scoped content plus relevant process evidence
+will collaborate better than models given current content alone. At file scope
+this is text plus trace; at folder or Root scope it is a content tree plus
+trace. “Better” must be measured through writer preference, editing required
+before acceptance, time to an acceptable result, preservation of intent,
+recurrence of rejected directions, and later reversion—not through a
+persuasive demo.
 
 The intended loop is:
 
@@ -79,10 +85,11 @@ The intended loop is:
    of the trace, so later assistance and review can distinguish proposal from
    acceptance.
 
-Context is composed from explicit scopes: user, ancestor folders, nearest
-folder, and file, with more specific choices winning. Operation-only context is
-ephemeral. Nothing promotes itself upward, and incompatible equal-scope
-preferences block preparation instead of being resolved by the model.
+Context is composed from explicit zine scopes: file, nearest folder zine,
+ancestor folder zines, Root, and deliberate user-level context, with more
+specific choices winning. Operation-only context is ephemeral. Nothing
+promotes itself upward, and incompatible equal-scope preferences block
+preparation instead of being resolved by the model.
 
 Two textual forms make local intent legible:
 
@@ -97,6 +104,11 @@ Two textual forms make local intent legible:
 The compiler and memory system are product interpretation, not protocol truth.
 The signed trace remains portable evidence even when a reader uses a different
 selector or no AI at all.
+
+A deliberate Step applies to the selected zine. A file Step checkpoints that
+file. A folder or Root Step first checkpoints dirty descendants and then pins
+one exact recursive frontier. Automatic ancestor checkpoints remain verifiable
+but appear beneath the originating gesture rather than as extra author Steps.
 
 ## Agents write through Zine
 
@@ -153,7 +165,7 @@ to pay is not yet proven.
 
 ## Beyond one agent run
 
-The same trace primitive supports people and models, files and folders,
+The same zine primitive supports people and models, files and folders,
 citations and derivation. That breadth matters because useful work does not
 stay inside one agent run:
 
@@ -172,6 +184,8 @@ required for the first user to benefit.
 - **Evidence, not verdicts.** Preserve checkable claims and state their limits.
 - **Trace is useful during writing.** Process context is a collaboration input,
   not merely an audit attachment.
+- **Files and folders are zines.** Root is the topmost folder zine; replay and
+  publication follow the selected recursive scope.
 - **Inspectable AI context.** Writers see, correct, and approve what Zine sends.
 - **Sovereign by default.** Local authoring works without a hosted account.
 - **Protocol before platform lock-in.** Files and signed events remain usable
@@ -192,6 +206,12 @@ The [evidence ledger](EVIDENCE.md) records exactly what is implemented, what has
 been measured, and what remains unproven. Hosted services, a no-install public
 verifier, and the network layer are sequenced behind evidence, not dates; the
 [roadmap](ROADMAP.md) names the proof that unlocks each phase.
+
+The recursive file/folder ontology is specified, and the current client already
+propagates changed child heads toward Root. It does not yet encode child advance
+separately from membership addition, provide an explicit folder/Root Step, or
+join a recursive cascade under one recoverable operation id. Those are schema-
+cut work, not shipped behavior.
 
 What matters most now is two linked proofs: trace-aware assistance improves real
 writing outcomes under a preregistered comparison, and accountable teams value

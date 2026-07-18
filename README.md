@@ -7,13 +7,17 @@ know how the text got there: what was attempted, removed, restored, protected,
 accepted, or repeatedly revised. Final text is a lossy summary of writing.
 
 Zine's foundational bet is that an AI can help you write better when it receives
-the current text plus a bounded, inspectable account of its trace—not text
-alone. That is a product thesis under active evaluation, not a proven claim.
+the current scoped content plus a bounded, inspectable account of its trace—not
+content alone. At file scope that means text plus trace; at folder or Root scope
+it means a content tree plus trace. This thesis is under active evaluation, not
+a proven claim.
 
-Zine records the process at the point of writing. Each deliberate checkpoint
-is a signed, self-contained **trace** that can be replayed, cited, forked, and
-verified without trusting one editor or hosted account. Human and model voices
-remain visible. Draft checkpoints stay local until their author sends them.
+Zine records the process at the point of writing. A **zine** is one stably
+identified file or folder together with its signed **trace**; the **Root zine**
+is the topmost folder, not a separate project object. File zines replay one
+Markdown history. Folder zines replay the changing descendant tree and the
+interactions across it. Human and model voices remain visible. Draft
+checkpoints stay local until their author sends them.
 
 The same trace serves two jobs. During writing, it can give an AI relevant
 process context that the finished prose no longer contains. Later, it can give
@@ -33,7 +37,7 @@ account or hosted service.
 The daily loop Zine is building is:
 
 ```text
-current text + selected trace evidence
+current scoped content + selected trace evidence
                   |
                   v
         inspect and correct context
@@ -48,10 +52,11 @@ current text + selected trace evidence
           extend the signed trace
 ```
 
-Context must remain bounded, task-specific, and visible before dispatch. A
-writer should be able to see which Step, edit, preference, or correction was
-selected, exclude it for one operation, and correct durable memory. Derived
-preferences are never protocol truth.
+At file scope, content is Markdown text; at folder or Root scope, it is the
+recursive content tree. Context must remain bounded, task-specific, and visible
+before dispatch. A writer should be able to see which Step, edit, preference,
+or correction was selected, exclude it for one operation, and correct durable
+memory. Derived preferences are never protocol truth.
 
 Zine's document grammar makes intent explicit. `[[ protected words ]]` are
 verbatim, inert text that an eligible transformation must preserve.
@@ -98,8 +103,10 @@ Read the [documentation hub](docs/README.md), or go directly to the
 
 ## Three author gestures
 
-**Step** signs a deliberate checkpoint and keeps it on the home relay. Most
-Steps remain private working history.
+**Step** deliberately checkpoints a file, folder, or Root and keeps it on the
+home relay. A folder Step pins an exact recursive frontier. Automatic ancestor
+roll-ups remain signed derived checkpoints, not extra author Steps. Most Steps
+remain private working history.
 
 **Send** makes one exact stepped version reachable for discussion.
 
@@ -119,6 +126,7 @@ work into the receiving owner's chain.
 | Mandatory replay-valid KEdit process log on every file Step | Implemented for editor, AI, import/fork, and MCP write paths |
 | Shared `FULL TRACE` / `SNAPSHOT ONLY` / `INVALID` reader verdict | Implemented in Replay, Analyze, handoff, Reify, and MCP inspection |
 | Step, Send, Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
+| Recursive folder checkpoint propagation | Implemented, but existing-child advancement is still encoded as `add`; explicit folder/Root Step and shared operation ids are schema-cut work |
 | Top-level foreign-file fork-on-write | Implemented; recursive nested-folder fork-on-write is deferred |
 | Mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
 | Raw-file Reify export with an optional signed-event bundle | Implemented on desktop |
@@ -214,6 +222,8 @@ owning specification, the specification wins.
   commercial service without making the press dependent on it.
 - [Protocol specifications](protocol/README.md): normative authority and status
   language for trace provenance, transport, and rendezvous.
+- [Trace-Native Zines](docs/TRACE_NATIVE_ZINES.md): accepted recursive-zine,
+  trace-aware AI, publication, coin, and evidence migration direction.
 - [Client development and releases](apps/client/README.md): frontend, Tauri,
   and per-platform bundle commands.
 - [Headless MCP press](apps/mcp/README.md): tools, installation, and client

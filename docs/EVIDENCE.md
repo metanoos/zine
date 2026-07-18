@@ -8,7 +8,8 @@ hypotheses. Last updated 2026-07-17.
 
 | Capability | State | How to check |
 |---|---|---|
-| Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke |
+| Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke; folder heads carry direct manifests and propagate recursively toward Root |
+| Normative folder checkpoint cause and `advance` semantics | Specified, not implemented | The current client signs recursive parent updates but encodes an existing child-head replacement through `upsertManifestEntry` as `add`; it has no explicit folder/Root Step or shared recursive operation id yet |
 | Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
 | Step, Send, Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
@@ -50,9 +51,12 @@ npm run verify:relay   # real Step/Send/Attest/Mint/Cite flow
 
 Zine is pivoting around this thesis:
 
-> For at least some writing tasks, an AI given current text plus relevant,
-> inspectable trace evidence will help the writer better than an AI given the
-> current text alone.
+> For at least some writing tasks, an AI given current scoped content plus
+> relevant, inspectable trace evidence will help the writer better than an AI
+> given the current content alone.
+
+At file scope, current content is Markdown text. At folder or Root scope, it is
+the recursive content tree pinned by that zine's exact child frontier.
 
 This is a founder-conviction product decision and an unproven empirical claim.
 “Better” means outcomes such as counterbalanced writer preference, less editing
@@ -118,6 +122,8 @@ The normative trust posture is in
 ## What we have not proven yet
 
 - Trace-aware assistance beating text-only assistance on real writing outcomes.
+- Folder- or Root-level content plus trace improving cross-file work over an
+  equal-budget collection of current file text alone.
 - Selected trace beating an equal-budget bounded chronological history.
 - File-local memory adding longitudinal value beyond selected trace alone.
 - Writers reliably understanding, correcting, and trusting selected context.
@@ -133,6 +139,10 @@ The normative trust posture is in
 - A second independent implementation of the wire format.
 - A consented corpus large enough to calibrate timing, revision-shape, and
   fuzzy-match models.
+- Independently minting the same distinctive coin type predicting broader
+  corpus affinity after controlling for topic and popularity.
+- Longitudinal coherence or conditional-compression features adding calibrated
+  vetting value without being mistaken for proof of humanity or identity.
 - Organic co-citation density sufficient to justify global rendezvous work.
 - Clean-machine release installation on every supported desktop platform.
 

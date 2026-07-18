@@ -21,10 +21,11 @@ process is gone. Ordinary version history does not reliably say what a model
 saw, which passages it produced, what a person accepted, or where copied
 material came from. Looking only at the final text is too late.
 
-A **trace** is a file or folder that keeps a high-fidelity edit history. You
-can play it back and see how the work changed, not just where it ended. Each
-deliberate checkpoint is signed and self-contained, so another reader can
-inspect the evidence without trusting one editor account.
+A **zine** is a stably identified file or folder together with its high-
+fidelity **trace**. Root is the topmost folder zine, not a separate project
+object. You can play a file zine or a whole folder subtree and see how the work
+changed, not just where it ended. Each checkpoint is signed and self-contained,
+so another reader can inspect the evidence without trusting one editor account.
 
 That history gives human and LLM readers something plain text loses: process.
 You cannot fully explain your taste in phrasing, especially when a sentence is
@@ -55,10 +56,13 @@ The model writes into the same files you do, so its work enters the record as
 well. Fonts and colors distinguish interleaved voices. The result shows who
 wrote what and how the text came to be.
 
-`Ctrl/Cmd+S` places a **Step** in the trace. Each Step batches the editor-action
-log into a signed checkpoint; no event fires per keystroke. Send later
-publishes that exact checkpoint, including its high-resolution action log, for
-playback and process vetting.
+`Ctrl/Cmd+S` places a **Step** in the selected zine's trace. A file Step batches
+the editor-action log into one signed checkpoint. A folder or Root Step pins an
+exact recursive frontier after dirty descendants are durably checkpointed.
+Automatic child-head roll-ups are signed derived checkpoints, not extra author
+Steps. No event fires per keystroke. Send later publishes the exact checkpoint
+selected by the current protocol, including its high-resolution action log,
+for playback and process vetting.
 
 Zine is to authorship provenance what Git is to source history. The protocol
 and local press are open; each author can keep a private home relay, add a
@@ -77,10 +81,10 @@ An authorized `(( double-parenthesis directive ))` is intended as a one-shot
 instruction to a prepared AI operation. That directive grammar and its local
 manual-origin authority are press behavior, not new wire semantics.
 
-**Zine** is the press; a **zine** is a published trace whose exact sent
-version you have attested. The attestation is a separate, signed commitment
-and may include a note or location. Step history may also carry completed
-Bitcoin time anchors.
+**Zine** is the reference press; a **zine** is any file or folder together with
+its trace, whether local or reachable. Sending changes reachability and
+attestation records a separate signed commitment; neither creates the zine.
+Step history may also carry completed Bitcoin time anchors.
 
 Forking begins a proposal under your key. Merging accepts chosen work into
 your chain. To fork is to propose; to merge is to accept.
@@ -97,9 +101,10 @@ until real usage produces enough citation density to justify it.
 
 ## Model
 
-One primitive: a **trace**, a body carried on an append-only chain of signed
-checkpoints. Its body is either file text or an ordered folder membership
-list. Files and folders are both traces.
+One primitive: a **zine**, whose file or folder body is carried with an append-
+only trace of signed checkpoints. A file body is Markdown text. A folder body
+is an ordered direct-membership list whose pinned child heads recursively
+define the exact subtree frontier. Root is an ordinary top-level folder zine.
 
 Each checkpoint is a **node** (Nostr kind `4290`, a signed event). Two things
 make a node unlike an ordinary revision:
@@ -130,11 +135,10 @@ words can find each other (`#x`) without being mistaken for one citing the
 other. The contentHash is addressing; the genesis id is identity. Never
 confuse them.
 
-A **coin** is an immutable, single-node file trace struck from a passage. It
+A **coin** is an immutable, single-node file zine struck from a passage. It
 can be exported as plain text. Editing it creates a mutable fork and leaves the
 coin untouched. A **press** is the editor, not a server. A **relay** stores the
-press's Nostr events, locally on `127.0.0.1` or remotely. A **zine** is a
-published trace, usually a folder.
+press's Nostr events, locally on `127.0.0.1` or remotely.
 
 > Run your own press = write in your own copy of the interface. It is
 > sovereign by default, because it already steps to a relay of its own.
@@ -149,11 +153,20 @@ genesis.
 
 Three words define the author-facing protocol.
 
-**Step.** `Cmd+S` signs one checkpoint and writes it to the local relay. A Step
-is frequent, deliberate, and local. Every explicit Step creates exactly one
-checkpoint, even when the body is unchanged. Background observations may join
-it, but no event fires per keystroke. This bounded cadence makes full snapshots
-affordable. The protocol uses *Step*, not *save*, to keep it distinct from Send.
+**Step.** `Cmd+S` deliberately checkpoints the selected zine and writes the
+result to the local relay. A file Step creates one explicit checkpoint, even
+when its body is unchanged. A folder or Root Step checkpoints dirty descendants
+and then creates exactly one explicit checkpoint on the selected folder.
+Signed `child-advance` checkpoints propagate changed child heads through
+ancestors, but Replay collapses those derived nodes beneath the one originating
+gesture. Background observations may join a checkpoint, but no event fires per
+keystroke. This bounded cadence makes full snapshots affordable. The protocol
+uses *Step*, not *save*, to keep it distinct from Send.
+
+Direct membership changes are structural checkpoints. An existing child's new
+head is an `advance`, never another `add`. Cross-parent moves share one operation
+id across source removal, target addition, and ancestor propagation so readers
+can recognize and recover an incomplete multi-event gesture.
 
 **Send.** Open the current state for discussion. If the buffer has changed,
 Send first Steps it; otherwise it reuses the latest Step. It then fans that

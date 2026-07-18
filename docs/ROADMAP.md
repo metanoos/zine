@@ -55,7 +55,10 @@ Already built:
 Not yet built as one system: a shared trace-context package, task-specific
 selection, inspectable evidence records, corrections, scoped memory, universal
 directive authority, durable result-to-context binding, writing-outcome
-evaluation, or equivalent desktop/MCP rendering.
+evaluation, or equivalent desktop/MCP rendering. The client already bubbles
+changed child heads through ancestor folders, but it does not yet distinguish a
+child advance from membership addition, expose explicit folder/Root Step, or
+join a recursive checkpoint cascade under one recoverable operation id.
 
 ## Phase 0: declare and preregister
 
@@ -69,13 +72,28 @@ This phase is active now.
 3. Preregister text-only, bounded-chronological, and selected-trace writing
    conditions under equal byte budgets, including exclusions, missingness,
    privacy, stopping rules, harm gates, and claim-promotion criteria.
-4. Complete the minimal schema/trust review before durable context commitments
-   or private-store formats are frozen.
+4. Complete the recursive-zine schema cut before durable context commitments:
+   file/folder/Root ontology, explicit versus derived checkpoint cause,
+   `advance` deltas, operation ids, folder/Root Step, move recovery, readers,
+   writers, fixtures, and replay must change together.
 
 Phase 0 succeeds when the documents, implementation plan, and research design
 describe the same claim without presenting conviction as evidence.
 
-## Phase 1: shared deterministic context runtime
+## Phase 1: recursive zine cut and shared deterministic context runtime
+
+Land the protocol cut first:
+
+- make `folderCheckpoint` and its cause verifiable in the shared protocol
+  kernel and fixed conformance corpus;
+- distinguish direct membership add/remove/rename from an existing child's
+  `advance`;
+- carry one operation id through structural gestures and derived ancestor
+  checkpoints;
+- implement explicit folder/Root Step with durable descendant flushing and
+  idempotent recovery; and
+- collapse derived roll-ups under their originating gesture in Replay while
+  keeping every signed node inspectable.
 
 Build a non-normative package used by every press and provider adapter:
 
@@ -95,8 +113,9 @@ The protocol package must not import the context package. Derived evidence,
 preferences, and selector output are product interpretation, never signed
 protocol truth.
 
-Phase 1 succeeds when desktop and MCP readers produce identical selected claims
-and rendered bytes from the same fixtures, including nil, empty, malformed,
+Phase 1 succeeds when recursive checkpoints pass protocol and real-relay
+fixtures, and desktop and MCP readers produce identical selected claims and
+rendered bytes from the same context fixtures, including nil, empty, malformed,
 oversized, Unicode, cancelled, and invalid-trace cases.
 
 ## Phase 2: one complete desktop vertical slice
