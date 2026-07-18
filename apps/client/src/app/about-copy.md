@@ -132,7 +132,7 @@ MCP harness
 agent voice key
     |
     v
-Step local versions ---> Send one version ---> optional Attest
+Step local versions ---> Publish one version ---> optional Attest
     |                         |                      |
     v                         v                      v
 signed history          review/discussion      commitment
@@ -148,12 +148,14 @@ The flow:
 3. The agent Steps file states under its own key. Each exact signed event lands
    in a durable local outbox before relay delivery, so an unavailable home
    relay does not lose or reject the Step.
-4. It Sends one exact stepped file node when the work is ready for someone
-   else to fetch; earlier private Steps need not leave the machine.
+4. It Publishes one exact stepped file node when the work is ready for
+   someone else to fetch; earlier private Steps need not leave the machine.
+   The tool, like the wire gesture, is still named `zine_send` until the
+   schema cut.
 5. The handoff includes a portable locator. An LLM can consume the canonical
    raw signed node directly, while the desktop verifies and renders the
    nucleus plus any reachable history for a human.
-6. The author may later Attest a sent version to stand behind it.
+6. The author may later Attest a published version to stand behind it.
 
 The desktop press is the human interpretation surface; the raw signed trace is
 the portable machine evidence. Native model operations already gather file and
@@ -182,7 +184,7 @@ stay inside one agent run:
 - An agent quotes a source passage.
 - A collaborator forks a file and proposes changes.
 - An owner selectively merges the proposal.
-- A reviewer checks the exact version that was sent or endorsed.
+- A reviewer checks the exact version that was published or endorsed.
 
 Agent provenance delivers value to a single press on day one; team and
 network layers grow out of the same records later. No global network is
@@ -201,7 +203,7 @@ required for the first user to benefit.
   outside one service.
 - **One owner per trace.** Cross-author work joins through explicit fork and
   merge seams.
-- **Private work stays private by default.** Step is local; Send changes
+- **Private work stays private by default.** Step is local; Publish changes
   reachability; Attest is a separate commitment.
 - **Progressive disclosure.** Users should understand the action before they
   need to learn Nostr tags, key roles, or relay policy.
@@ -209,7 +211,7 @@ required for the first user to benefit.
 ## Where Zine is today
 
 The desktop press, the MCP press, the local relay, and the full gesture set —
-Step, Send, Attest, Mint, Cite, fork, and merge — plus raw-file Reify export
+Step, Publish, Attest, Mint, Cite, fork, and merge — plus raw-file Reify export
 work today.
 The [evidence ledger](EVIDENCE.md) records exactly what is implemented, what has
 been measured, and what remains unproven. Hosted services, a no-install public
@@ -293,9 +295,10 @@ the editor-action log into one signed checkpoint. A folder Step — up to the
 topmost Root — pins an exact recursive frontier after dirty descendants are
 durably checkpointed.
 Automatic child-head roll-ups are signed derived checkpoints, not extra author
-Steps. No event fires per keystroke. Send later publishes one exact
-checkpoint, including its high-resolution action log, for playback and
-process vetting.
+Steps. No event fires per keystroke. Publish — still named Send on the wire
+and in the current implementation until the schema cut — later makes one
+exact checkpoint reachable, including its high-resolution action log, for
+playback and process vetting.
 
 Zine is to authorship provenance what Git is to source history. The protocol
 and local press are open; each author can keep a private home relay, add a
@@ -315,7 +318,7 @@ instruction to a prepared AI operation. That directive grammar and its local
 manual-origin authority are press behavior, not new wire semantics.
 
 **Zine** is the reference press; a **zine** is any file or folder together with
-its trace, whether local or reachable. Sending changes reachability and
+its trace, whether local or reachable. Publishing changes reachability and
 attestation records a separate signed commitment; neither creates the zine.
 Step history may also carry completed Bitcoin time anchors.
 
@@ -395,23 +398,23 @@ Signed `child-advance` checkpoints propagate changed child heads through
 ancestors, but Replay collapses those derived nodes beneath the one originating
 gesture. Background observations may join a checkpoint, but no event fires per
 keystroke. This bounded cadence makes full snapshots affordable. The protocol
-uses *Step*, not *save*, to keep it distinct from Send.
+uses *Step*, not *save*, to keep it distinct from Publish.
 
 Direct membership changes are structural checkpoints. An existing child's new
 head is an `advance`, never another `add`. Cross-parent moves share one operation
 id across source removal, target addition, and ancestor propagation so readers
 can recognize and recover an incomplete multi-event gesture.
 
-**Send.** Open the current state for discussion. If the buffer has changed,
-Send first Steps it; otherwise it reuses the latest Step. It then fans that
-node out to write-enabled external relays. Most Steps are never Sent, so
-drafts, experiments, and dead ends remain local. Send publishes everything the
-checkpoint carries, including its high-resolution editor-action log when
+**Publish.** Open the current state for discussion. If the buffer has changed,
+Publish first Steps it; otherwise it reuses the latest Step. It then fans that
+node out to write-enabled external relays. Most Steps are never published, so
+drafts, experiments, and dead ends remain local. Publish discloses everything
+the checkpoint carries, including its high-resolution editor-action log when
 present. That log enables typo-level playback and process vetting, while its
-timing rhythm can also fingerprint an author. Send is therefore a content and
-identity disclosure.
+timing rhythm can also fingerprint an author. Publish is therefore a content
+and identity disclosure.
 
-**Attest.** Mark one *sent* node as a position you stand behind. Attestation is
+**Attest.** Mark one *published* node as a position you stand behind. Attestation is
 optional and later: discussion is common; commitment is rare. A local-only
 node cannot be attested because readers could not fetch the claimed position.
 On the wire, Attest creates an append-only `TraceAttestation`. It targets the
@@ -419,13 +422,13 @@ exact node without advancing that node's chain.
 
 ```
 Step → local checkpoint
-Send → Step the present state + make it reachable for discussion
-Sent node ── optional, later ──→ Attest (stand behind this version)
+Publish → Step the present state + make it reachable for discussion
+Published node ── optional, later ──→ Attest (stand behind this version)
 ```
 
-Send may create a Step; Attest targets a previously Sent node. This is a
-partial order, not a funnel where every Step becomes Sent and every Send
-becomes Attested.
+Publish may create a Step; Attest targets a previously published node. This
+is a partial order, not a funnel where every Step becomes published and every
+published node becomes attested.
 
 **Distributed anteriority: experimental Step anchors.** A Step may submit its
 node id to OpenTimestamps without blocking. The pending receipt stays local.
@@ -519,8 +522,8 @@ misrepresented as physical typing.
 The snapshot remains the self-contained materialized body, so a node can still
 be read in one fetch. But a missing, malformed, or replay-mismatched KEdit log
 is not a valid Full Trace: readers may show the signed body only with the
-process record marked nonconforming. A Step keeps this record local; Send
-publishes it, including intermediate text and timing that may be identifying.
+process record marked nonconforming. A Step keeps this record local; Publish
+discloses it, including intermediate text and timing that may be identifying.
 
 **Per-delta attribution (primary).** A body-edit delta may carry an `author`
 index into the node's local `voices` table. Without it, the delta belongs to
@@ -625,7 +628,7 @@ the spec keeps non-normative on purpose.
 ## Rendezvous & vetting
 
 Two people who have never met, share no peer, and share no relay may find each
-other because their Sent traces cite coins with the same content. The
+other because their published traces cite coins with the same content. The
 recipient then evaluates the other signer's process evidence before deciding
 whether to admit that key.
 
@@ -637,7 +640,8 @@ target. `H` clusters independent mints; it is an index coordinate, not another
 citation type.
 
 **The planned DHT carries event pointers, not content or private addresses.** A
-Kademlia DHT would answer one question: *which Sent events cite content `H`?*
+Kademlia DHT would answer one question: *which published events cite content
+`H`?*
 Each value is `{eventId, relayUrl}` for a signed carrying node on a
 stranger-readable relay. A querier fetches and verifies the carrying event,
 its `q`, and the target's `x` or body hash before evaluating the candidate.
@@ -646,9 +650,9 @@ designed but not implemented.
 
 Two paths can produce a match. In the trust-bounded v1, a mutual peer who can
 read both chains sees the co-citation and brokers an introduction. The planned
-global DHT is an accelerator: Sending a carrying node to a stranger-readable
-relay would publish its pointer under each verified target's `H`. Citation
-records the relation; Send controls its reachability.
+global DHT is an accelerator: publishing a carrying node to a
+stranger-readable relay would place its pointer under each verified target's
+`H`. Citation records the relation; Publish controls its reachability.
 
 **The vet — process, not prose.** Fluent prose is easy to imitate, so the vet
 looks instead at the timestamped revision graph: anchors, edit timing, and the
@@ -681,8 +685,8 @@ The pipeline uses distinct verbs because the commitments are distinct:
 | stage | gesture | claim |
 |---|---|---|
 | cite | mint if needed, then cite a trace | "this trace is in relation to mine" |
-| discuss | send the carrying node | "make this fetchable" |
-| publish | attest a sent node | "this is my position" |
+| discuss | publish the carrying node | "make this fetchable" |
+| commit | attest a published node | "this is my position" |
 | admission | add a peer locally | "this key may read my relay" |
 
 ---
@@ -716,7 +720,7 @@ hypotheses. Last updated 2026-07-17.
 | Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke; folder heads carry direct manifests and propagate recursively toward Root |
 | Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, membership transition, hash, lineage, and operation id; client tests exercise add versus advance, explicit folder/Root Step plumbing, durable retry ids, nested AI context, and Replay roll-up collapse. Fixed cross-runtime folder vectors and explicit crash-boundary real-relay fixtures remain hardening work |
 | Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
-| Step, Send, Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
+| Step, Publish (wire name Send), Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
 | Desktop Stronghold storage for signing and provider secrets | Implemented on desktop; browser remains read-only | `secret-store.test.ts`, `secret-migration.test.ts`, key/model store tests, and the Tauri Stronghold shell |
 | Headless MCP press with its own voice key and permanent profile Root | Implemented | Offline stdio smoke proves zero-folder cold start, exact signed-event outbox, raw node reads, and Root/key reuse; isolated real-relay integration flushes a queued event unchanged, preserves optional source forks, and exercises external Send |
@@ -900,7 +904,7 @@ Already built:
 
 - desktop and MCP presses;
 - signed file and folder trace chains;
-- Step, Send, Attest, Mint, Cite, fork, merge, and replay;
+- Step, Publish (wire name Send), Attest, Mint, Cite, fork, merge, and replay;
 - mandatory replay-valid KEdit process logs and shared `FULL TRACE` /
   `SNAPSHOT ONLY` / `INVALID` reader verdicts;
 - distinct human, model, and agent voice keys with per-delta attribution;
@@ -1091,7 +1095,7 @@ continues to carry evidence and never promotes a model score into proof of
 humanness.
 
 Global rendezvous remains frozen beyond maintenance and security fixes until
-real sent citations produce organic co-citation matches, users ask to meet
+real published citations produce organic co-citation matches, users ask to meet
 unknown co-citers, and the value outweighs privacy and abuse costs.
 
 ## Not on the roadmap
@@ -1173,7 +1177,7 @@ personal and are never escrowed.
 | Local trace-context compiler, inspection, and BYOK model use | Organization context policy, retention, and review administration |
 | Local desktop and MCP presses | Organization onboarding, support, and policy controls |
 | Self-hosted compatible relays | Team key, writer, peer, and ACL management |
-| Step, Send, Attest, Mint, Cite, fork, and merge | Hosted anchoring cadence and proof retention |
+| Step, Publish, Attest, Mint, Cite, fork, and merge | Hosted anchoring cadence and proof retention |
 | Reader-side verification algorithms | No-install verification portal and exportable reports |
 | Self-hosted process evidence | Opt-in calibration service over a consented corpus |
 | Future open rendezvous wire | Operated bootstrap infrastructure, if usage justifies it |

@@ -49,7 +49,7 @@ personal and are never escrowed.
 | Local trace-context compiler, inspection, and BYOK model use | Organization context policy, retention, and review administration |
 | Local desktop and MCP presses | Organization onboarding, support, and policy controls |
 | Self-hosted compatible relays | Team key, writer, peer, and ACL management |
-| Step, Send, Attest, Mint, Cite, fork, and merge | Hosted anchoring cadence and proof retention |
+| Step, Publish, Attest, Mint, Cite, fork, and merge | Hosted anchoring cadence and proof retention |
 | Reader-side verification algorithms | No-install verification portal and exportable reports |
 | Self-hosted process evidence | Opt-in calibration service over a consented corpus |
 | Future open rendezvous wire | Operated bootstrap infrastructure, if usage justifies it |

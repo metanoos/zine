@@ -131,7 +131,7 @@ MCP harness
 agent voice key
     |
     v
-Step local versions ---> Send one version ---> optional Attest
+Step local versions ---> Publish one version ---> optional Attest
     |                         |                      |
     v                         v                      v
 signed history          review/discussion      commitment
@@ -147,12 +147,14 @@ The flow:
 3. The agent Steps file states under its own key. Each exact signed event lands
    in a durable local outbox before relay delivery, so an unavailable home
    relay does not lose or reject the Step.
-4. It Sends one exact stepped file node when the work is ready for someone
-   else to fetch; earlier private Steps need not leave the machine.
+4. It Publishes one exact stepped file node when the work is ready for
+   someone else to fetch; earlier private Steps need not leave the machine.
+   The tool, like the wire gesture, is still named `zine_send` until the
+   schema cut.
 5. The handoff includes a portable locator. An LLM can consume the canonical
    raw signed node directly, while the desktop verifies and renders the
    nucleus plus any reachable history for a human.
-6. The author may later Attest a sent version to stand behind it.
+6. The author may later Attest a published version to stand behind it.
 
 The desktop press is the human interpretation surface; the raw signed trace is
 the portable machine evidence. Native model operations already gather file and
@@ -181,7 +183,7 @@ stay inside one agent run:
 - An agent quotes a source passage.
 - A collaborator forks a file and proposes changes.
 - An owner selectively merges the proposal.
-- A reviewer checks the exact version that was sent or endorsed.
+- A reviewer checks the exact version that was published or endorsed.
 
 Agent provenance delivers value to a single press on day one; team and
 network layers grow out of the same records later. No global network is
@@ -200,7 +202,7 @@ required for the first user to benefit.
   outside one service.
 - **One owner per trace.** Cross-author work joins through explicit fork and
   merge seams.
-- **Private work stays private by default.** Step is local; Send changes
+- **Private work stays private by default.** Step is local; Publish changes
   reachability; Attest is a separate commitment.
 - **Progressive disclosure.** Users should understand the action before they
   need to learn Nostr tags, key roles, or relay policy.
@@ -208,7 +210,7 @@ required for the first user to benefit.
 ## Where Zine is today
 
 The desktop press, the MCP press, the local relay, and the full gesture set —
-Step, Send, Attest, Mint, Cite, fork, and merge — plus raw-file Reify export
+Step, Publish, Attest, Mint, Cite, fork, and merge — plus raw-file Reify export
 work today.
 The [evidence ledger](EVIDENCE.md) records exactly what is implemented, what has
 been measured, and what remains unproven. Hosted services, a no-install public

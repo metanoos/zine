@@ -59,8 +59,8 @@ describes only part of that activity.
   visible derived checkpoints and must not masquerade as additional Steps.
 - An **edition** is an immutable publication at one exact Step. **Publish** is
   the disclosure/reachability gesture; **Attest** is the separate commitment
-  to stand behind that edition. Product language migrates from Send to Publish
-  with the accepted schema cut.
+  to stand behind that edition. Publish is the product term now; the wire and
+  implementation keep the name Send until the coordinated schema cut.
 
 Folder replay reconstructs the descendant tree and interactions across it, not
 just a list of current names. Rename and move preserve zine identity. An
@@ -166,7 +166,7 @@ review is an ordinary file or folder zine that:
 - records the reviewers' own back-and-forth in its trace;
 - cites exact source text or trace spans through the ordinary citation
   machinery;
-- can be replayed, stepped, sent, and reviewed like other zines.
+- can be replayed, stepped, published, and reviewed like other zines.
 
 Do not introduce reviewer-only composition language when ordinary quotation
 and citation controls suffice. Quoting does not require coining. An inline
@@ -338,7 +338,7 @@ an unsigned/provisional state appear accepted.
 4. **AI inference remains inspectable.** An AI may use trace patterns to infer
    needs and preferences; the human–AI team must be able to review the exact
    selected evidence, correct or forget it, and compose a response in Zine.
-5. **Local-first state is legible.** Show whether work is local, stepped, sent,
+5. **Local-first state is legible.** Show whether work is local, stepped, published,
    reachable, or synchronized without turning networking details into the
    primary writing experience.
 6. **Progressive disclosure beats simplification.** Keep the clean lines and
@@ -375,3 +375,4 @@ an unsigned/provisional state appear accepted.
 | 2026-07-17 | Separate Steps from derived checkpoints | A deliberate file/folder/Root Step is one author gesture even when signed child-head roll-ups propagate through ancestors. |
 | 2026-07-17 | Present in-session voices by ID, not key | In-session co-authorship is asserted attribution; key language implies an independent verification that only cross-key seams provide. |
 | 2026-07-17 | Frame review as "evaluate the writer, not just the writing" | As finished prose grows more uniform, the writer's judgment survives in the trace; review surfaces should foreground process evidence over prose judgment. |
+| 2026-07-17 | Adopt Publish as the product term ahead of the wire cut | Publish names the disclosure gesture on every reader-facing surface; Send remains the wire and implementation identifier until the coordinated schema cut renames it. |

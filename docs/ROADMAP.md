@@ -42,7 +42,7 @@ Already built:
 
 - desktop and MCP presses;
 - signed file and folder trace chains;
-- Step, Send, Attest, Mint, Cite, fork, merge, and replay;
+- Step, Publish (wire name Send), Attest, Mint, Cite, fork, merge, and replay;
 - mandatory replay-valid KEdit process logs and shared `FULL TRACE` /
   `SNAPSHOT ONLY` / `INVALID` reader verdicts;
 - distinct human, model, and agent voice keys with per-delta attribution;
@@ -233,7 +233,7 @@ continues to carry evidence and never promotes a model score into proof of
 humanness.
 
 Global rendezvous remains frozen beyond maintenance and security fixes until
-real sent citations produce organic co-citation matches, users ask to meet
+real published citations produce organic co-citation matches, users ask to meet
 unknown co-citers, and the value outweighs privacy and abuse costs.
 
 ## Not on the roadmap

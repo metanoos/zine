@@ -48,7 +48,7 @@ other Zine-controlled variables constant.
 | **Checkpoint** | Any signed durable `TraceNode`, whether explicit or derived. |
 | **Step** | A deliberate checkpoint gesture. “Signed checkpoint” is its explanatory gloss; the product term remains Step, not Save. |
 | **Sign** | Cryptographic authentication of a record, not a user-facing publication gesture. |
-| **Publish** | Accepted migration term for making an immutable edition and its complete trace prefix publicly reachable. It replaces **Send** at the coordinated schema cut. |
+| **Publish** | Make an immutable edition and its complete trace prefix publicly reachable. The product term today; the wire and implementation retain the name **Send** until the coordinated schema cut. |
 | **Edition** | One immutable publication pinned to an exact file, folder, or Root Step and recursive trace frontier. |
 | **Attest** | Append a signed stance meaning “I stand behind this exact edition or coin.” It does not change the target. |
 | **Withdraw** | Append a signed change of stance without erasing an earlier attestation. |

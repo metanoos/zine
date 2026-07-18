@@ -101,8 +101,9 @@ the reference authoring and review experience.
 
 Each named headless profile owns one permanent Root, its topmost folder zine;
 no source folder or live relay is required. Offline Steps persist as exact
-signed events and synchronize to the loopback home later. LLMs consume the raw trace directly, while a Send
-can return a locator for the desktop to verify and render for a human.
+signed events and synchronize to the loopback home later. LLMs consume the
+raw trace directly, while a Publish can return a locator for the desktop to
+verify and render for a human.
 
 Read the [documentation hub](docs/README.md), or go directly to the
 [product](docs/PRODUCT.md), [protocol tour](docs/PROTOCOL.md),
@@ -116,10 +117,12 @@ home relay. A folder Step pins an exact recursive frontier. Automatic ancestor
 roll-ups remain signed derived checkpoints, not extra author Steps. Most Steps
 remain private working history.
 
-**Send** makes one exact stepped version reachable for discussion.
+**Publish** makes one exact stepped version reachable for discussion. On the
+wire and in the current implementation this gesture is still named Send; the
+product term is Publish until the schema cut renames both.
 
-**Attest** is an optional, later endorsement of one sent version. Discussion
-is common; commitment is rare.
+**Attest** is an optional, later endorsement of one published version.
+Discussion is common; commitment is rare.
 
 Copied passages can be minted as immutable **coins** and cited by exact node
 id. Forking starts a proposal under a new owner's key; merging accepts chosen
@@ -158,7 +161,7 @@ design. The [transport](protocol/transport.md) and
 | Headless MCP press with a distinct agent voice | Implemented |
 | Mandatory replay-valid KEdit process log on every file Step | Implemented for editor, AI, import/fork, and MCP write paths |
 | Shared `FULL TRACE` / `SNAPSHOT ONLY` / `INVALID` reader verdict | Implemented in Replay, Analyze, handoff, Reify, and MCP inspection |
-| Step, Send, Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
+| Step, Publish (wire name Send), Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
 | Recursive folder checkpoint propagation | Implemented with verified checkpoint causes, distinct `advance` deltas, explicit folder/Root Step, durable operation ids, and collapsed derived roll-ups in Replay |
 | Top-level foreign-file fork-on-write | Implemented; recursive nested-folder fork-on-write is deferred |
 | Mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
