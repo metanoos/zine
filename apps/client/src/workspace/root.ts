@@ -83,16 +83,46 @@ export function rootAuthorSigner(): Uint8Array {
   return signer;
 }
 
-/** Mint the install root: publish its genesis node, persist the returned event
- *  id to `zine.root`, and return it. Idempotent within an install lifecycle —
+export interface RootMintOperations {
+  existing(): string | null;
+  create(): Promise<string>;
+  persist(id: string): void;
+}
+
+/** Coalesce every first-Root caller onto one genesis publication. React
+ * StrictMode intentionally replays mount effects in development, and both
+ * calls can observe empty storage before the first network await completes. */
+export function createRootMinter(operations: RootMintOperations): () => Promise<string> {
+  let pending: Promise<string> | null = null;
+  return async () => {
+    const existing = operations.existing();
+    if (existing) return existing;
+    if (pending) return pending;
+
+    pending = operations.create()
+      .then((id) => {
+        operations.persist(id);
+        return id;
+      })
+      .finally(() => {
+        pending = null;
+      });
+    return pending;
+  };
+}
+
+const mintActiveVaultRoot = createRootMinter({
+  existing: getRootId,
+  create: () => createFolderGenesis({ signer: rootAuthorSigner() }),
+  persist: (id) => localStorage.setItem(ROOT_KEY, JSON.stringify({ id })),
+});
+
+/** Mint the vault Root: publish its genesis node, persist the returned event
+ *  id to `zine.root`, and return it. Idempotent within a vault lifecycle —
  *  if a root already exists, returns the existing id without minting again
  *  (guards against a double-mint racing two boot paths). */
 export async function mintRoot(): Promise<string> {
-  const existing = getRootId();
-  if (existing) return existing;
-  const id = await createFolderGenesis({ signer: rootAuthorSigner() });
-  localStorage.setItem(ROOT_KEY, JSON.stringify({ id }));
-  return id;
+  return mintActiveVaultRoot();
 }
 
 /** The dedicated Mint folder mounted beside an install root. Mint is a real

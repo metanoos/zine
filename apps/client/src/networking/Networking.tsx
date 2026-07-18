@@ -420,7 +420,10 @@ function NodeSection() {
     expected: string,
   ): Promise<string> {
     const { seedBase64 } = onionAddressForSecret(secret);
-    const reported = (await invoke("setup_onion", { seedBase64 })) as string;
+    const reported = (await invoke("setup_onion", {
+      seedBase64,
+      expectedAddress: expected,
+    })) as string;
     if (reported !== expected) {
       throw new Error(
         `Tor reported ${reported} but the key derives ${expected}. Seed may be corrupted.`,
@@ -478,6 +481,10 @@ function NodeSection() {
     setError(null);
     setTorStatus({ kind: "starting" });
     try {
+      const peers = await listPeers();
+      if (!peers.networkedMode || peers.owner !== nodeVoice()) {
+        await setOwner(nodeVoice());
+      }
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke<string>("spawn_tor");
       const ownerKey = getNodeKey();

@@ -28,6 +28,10 @@ export async function startVaultRelay(): Promise<void> {
   await invoke("spawn_relay");
 }
 
+export async function recoverWebviewReload(): Promise<boolean> {
+  return invoke<boolean>("recover_webview_reload");
+}
+
 export async function lockVaultRuntime(): Promise<void> {
   await invoke("lock_vault_runtime");
 }

@@ -33,6 +33,8 @@ func main() {
 	port := flag.Int("port", 4869, "port to listen on")
 	dbPath := flag.String("db", defaultDbPath(), "sqlite database path")
 	reset := flag.Bool("reset", false, "delete every local event and reset the desktop access policy, then exit")
+	readyFile := flag.String("ready-file", "", "optional desktop parent readiness file")
+	readyToken := flag.String("ready-token", "", "token written after the listener is owned")
 	flag.Parse()
 	if *reset {
 		deleted, err := resetLocalState(*dbPath)
@@ -79,6 +81,10 @@ func main() {
 	// again. In local mode the limiter stays too — it's a no-op in practice
 	// (only localhost connects) and uniform policy is simpler than branching.
 	relay.RejectConnection = append(relay.RejectConnection,
+		// The desktop may activate networked mode immediately before exposing
+		// an onion. Refresh synchronously so the first remote connection sees
+		// the owner ACL instead of the prior local-mode snapshot.
+		refreshPolicyOnConnection(policy),
 		policies.ConnectionRateLimiter(2, 5*time.Minute, 100),
 	)
 	relay.RejectEvent = append(relay.RejectEvent,
@@ -146,10 +152,56 @@ func main() {
 	relay.ReplaceEvent = append(relay.ReplaceEvent, db.ReplaceEvent)
 
 	addr := fmt.Sprintf("%s:%d", *host, *port)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("could not bind zine relay on %s: %v", addr, err)
+	}
+	defer listener.Close()
+	if err := writeReadyFile(*readyFile, *readyToken); err != nil {
+		log.Fatalf("could not publish relay readiness: %v", err)
+	}
+	if *readyFile != "" {
+		defer os.Remove(*readyFile)
+	}
 	log.Printf("zine relay listening on ws://%s  (db: %s)", addr, *dbPath)
-	if err := http.ListenAndServe(addr, relay); err != nil {
+	if err := http.Serve(listener, relay); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func refreshPolicyOnConnection(policy *AccessPolicy) func(*http.Request) bool {
+	return func(_ *http.Request) bool {
+		policy.Poll()
+		return false
+	}
+}
+
+func writeReadyFile(path, token string) error {
+	if path == "" && token == "" {
+		return nil
+	}
+	if path == "" || token == "" {
+		return fmt.Errorf("ready-file and ready-token must be provided together")
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := file.WriteString(token); err != nil {
+		file.Close()
+		os.Remove(path)
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		os.Remove(path)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 // authorizeEvent contains the local relay's NIP-42 write decision independently

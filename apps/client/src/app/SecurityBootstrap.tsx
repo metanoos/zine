@@ -16,6 +16,10 @@ import {
 } from "../storage/vault-storage.js";
 import { VaultSessionContext, type VaultSession } from "./vault-session.js";
 import {
+  prepareVaultSelection,
+  type VaultTransitionIntent,
+} from "./vault-bootstrap.js";
+import {
   closeVaultSession,
   openVaultSession,
   shouldMigrateLegacyWorkspace,
@@ -28,6 +32,7 @@ import {
   discardEmptyVaultRecord,
   listVaults,
   lockVaultRuntime,
+  recoverWebviewReload,
   startVaultRelay,
   type VaultSummary,
 } from "./vaults.js";
@@ -43,6 +48,7 @@ type BootstrapState =
       message?: string;
     }
   | { kind: "opening"; label: string }
+  | { kind: "startup-error"; message: string }
   | { kind: "ready"; activeVault: VaultSummary; vaults: VaultSummary[] }
   | {
       kind: "locking";
@@ -52,12 +58,6 @@ type BootstrapState =
       retryCleanup?: () => Promise<void>;
       message?: string;
     };
-
-interface VaultTransitionIntent {
-  selectedId?: string;
-  creating?: boolean;
-  message?: string;
-}
 
 const VAULT_TRANSITION_KEY = "zine.vault-transition";
 
@@ -118,27 +118,18 @@ export function SecurityBootstrap({ children }: { children: ReactNode }) {
         return;
       }
       try {
-        const vaults = await listVaults();
-        const intent = consumeTransitionIntent();
-        const selectedId = intent.selectedId && vaults.some((vault) => vault.id === intent.selectedId)
-          ? intent.selectedId
-          : null;
-        if (!cancelled) {
-          setState({
-            kind: "selecting",
-            vaults,
-            selectedId,
-            creating: vaults.length === 0 || intent.creating === true,
-            ...(intent.message ? { message: intent.message } : {}),
-          });
+        const selection = await prepareVaultSelection({
+          recoverWebviewReload,
+          listVaults,
+          consumeTransitionIntent,
+        }, () => cancelled);
+        if (selection && !cancelled) {
+          setState({ kind: "selecting", ...selection });
         }
       } catch (error) {
         if (!cancelled) {
           setState({
-            kind: "selecting",
-            vaults: [],
-            selectedId: null,
-            creating: false,
+            kind: "startup-error",
             message: errorMessage(error),
           });
         }
@@ -346,6 +337,18 @@ export function SecurityBootstrap({ children }: { children: ReactNode }) {
   }
   if (state.kind === "checking") {
     return <main className="security-bootstrap"><p>Checking secure vaults…</p></main>;
+  }
+  if (state.kind === "startup-error") {
+    return (
+      <main className="security-bootstrap">
+        <section className="security-bootstrap-card">
+          <h1>Vaults could not be prepared</h1>
+          <p className="security-bootstrap-error" role="alert">{state.message}</p>
+          <p>Zine will not open another vault until native vault state is safely closed.</p>
+          <button type="button" onClick={() => window.location.reload()}>Retry</button>
+        </section>
+      </main>
+    );
   }
   if (state.kind === "opening") {
     return <main className="security-bootstrap"><p>Opening {state.label}…</p></main>;

@@ -1,5 +1,5 @@
-import test from "node:test";
 import assert from "node:assert/strict";
+import test from "node:test";
 
 // @ts-expect-error minimal localStorage shim for Root and onboarding demo state
 globalThis.localStorage = {
@@ -22,12 +22,54 @@ import { loadLocalFolder, saveLocalFile } from "./local-store.js";
 import { buildDirectoryTree } from "./tree-model.js";
 import { authorVoice, getModelKeyId, loadKeys } from "../identity/keys-store.js";
 import { getPublicKey } from "nostr-tools/pure";
-import { getScanFolderId, rootAuthorSigner } from "./root.js";
+import { createRootMinter, getScanFolderId, rootAuthorSigner } from "./root.js";
 import {
   loadOnboardingDemo,
   ONBOARDING_DEMO_FILE_CONTENT,
   ONBOARDING_DEMO_FILE_PATH,
 } from "../app/onboarding-demo.js";
+
+test("concurrent first-Root callers share one genesis publication", async () => {
+  let creates = 0;
+  let stored: string | null = null;
+  let resolveGenesis!: (id: string) => void;
+  const genesis = new Promise<string>((resolve) => { resolveGenesis = resolve; });
+  const mint = createRootMinter({
+    existing: () => stored,
+    async create() {
+      creates += 1;
+      return genesis;
+    },
+    persist(id) { stored = id; },
+  });
+
+  const first = mint();
+  const strictModeReplay = mint();
+  assert.equal(creates, 1);
+  resolveGenesis("root-genesis");
+  assert.equal(await first, "root-genesis");
+  assert.equal(await strictModeReplay, "root-genesis");
+  assert.equal(stored, "root-genesis");
+  assert.equal(await mint(), "root-genesis");
+  assert.equal(creates, 1);
+});
+
+test("failed Root creation clears the pending attempt for retry", async () => {
+  let attempts = 0;
+  const mint = createRootMinter({
+    existing: () => null,
+    async create() {
+      attempts += 1;
+      if (attempts === 1) throw new Error("relay unavailable");
+      return "root-after-retry";
+    },
+    persist() {},
+  });
+
+  await assert.rejects(mint(), /relay unavailable/);
+  assert.equal(await mint(), "root-after-retry");
+  assert.equal(attempts, 2);
+});
 
 test("a fresh Root genesis uses the AUTHOR signing key", () => {
   localStorage.clear();

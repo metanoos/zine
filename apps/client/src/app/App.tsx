@@ -12139,8 +12139,19 @@ function App() {
       // First-ever boot (no root minted yet): mint the permanent root and set
       // it as the folder. The re-attach body below then opens it. Subsequent
       // boots find the root via getRootId() (folder state seed) and skip this.
-      void mintRoot().then((id) => setFolder({ id }));
-      return;
+      let cancelled = false;
+      void mintRoot().then(
+        (id) => {
+          if (!cancelled) setFolder({ id });
+        },
+        (error) => {
+          if (!cancelled) {
+            setBootError(error instanceof Error ? error.message : String(error));
+            setBootState("missing");
+          }
+        },
+      );
+      return () => { cancelled = true; };
     }
     let cancelled = false;
     (async () => {

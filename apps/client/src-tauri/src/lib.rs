@@ -20,6 +20,7 @@ use zeroize::{Zeroize, Zeroizing};
 static RELAY_SPAWNED: AtomicBool = AtomicBool::new(false);
 static RELAY_CHILD: Mutex<Option<Child>> = Mutex::new(None);
 static VAULT_RUNTIME_GATE: Mutex<()> = Mutex::new(());
+static WEBVIEW_RESTART_PENDING: AtomicBool = AtomicBool::new(false);
 const SECRET_VAULT_FILENAME: &str = "zine-secrets.hold";
 const SECRET_SALT_FILENAME: &str = "zine-secrets.salt";
 const SECRET_VAULTS_DIRNAME: &str = "vaults";
@@ -29,6 +30,7 @@ const VAULT_RELAY_FILENAME: &str = "relay.sqlite3";
 const VAULT_PEERS_FILENAME: &str = "peers.json";
 const VAULT_RUNTIME_VERIFIER_FILENAME: &str = "runtime.keycheck";
 const SECRET_VAULT_REGISTRY_FILENAME: &str = "zine-vaults.json";
+const ACTIVE_ONION_MARKER_PREFIX: &str = ".zine-active-onion-";
 const LEGACY_VAULT_ID: &str = "legacy";
 const VAULT_REGISTRY_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const VAULT_REGISTRY_STALE_LOCK_AGE: Duration = Duration::from_secs(30);
@@ -88,6 +90,29 @@ fn ensure_private_directory(path: &Path) -> Result<(), String> {
         let permissions = fs::Permissions::from_mode(0o700);
         fs::set_permissions(path, permissions)
             .map_err(|error| format!("protect {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Make directory-entry updates durable after rename or removal. Syncing a
+/// file persists its payload, but not the parent directory entry that names it.
+fn sync_directory(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        fs::File::open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("sync directory {}: {error}", path.display()))?;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("sync directory {}: {error}", path.display()))?;
     }
     Ok(())
 }
@@ -340,6 +365,7 @@ fn write_vault_registry_unlocked(
         fs::File::open(&backup)
             .and_then(|file| file.sync_all())
             .map_err(|error| format!("sync secure-vault registry backup: {error}"))?;
+        sync_directory(data_dir)?;
     }
 
     #[cfg(windows)]
@@ -349,7 +375,15 @@ fn write_vault_registry_unlocked(
     }
     fs::rename(&temporary, &registry)
         .map_err(|error| format!("install secure-vault registry: {error}"))?;
-    let _ = fs::remove_file(backup);
+    sync_directory(data_dir)?;
+    match fs::remove_file(&backup) {
+        Ok(()) => sync_directory(data_dir)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        // The live registry is already installed and durable. A stale recovery
+        // copy is safe to overwrite on the next transaction; reporting failure
+        // here would falsely tell the caller that its committed write failed.
+        Err(_) => {}
+    }
     Ok(())
 }
 
@@ -679,7 +713,8 @@ const IGNORED_SEGMENTS: &[&str] = &[
 ///
 /// Then connects to ws://127.0.0.1:4869. A listener not owned by this process
 /// is rejected because it may be serving another vault. Otherwise spawn the
-/// active vault's relay and poll the port until it is listening (or timeout).
+/// active vault's relay and wait for a child-owned readiness token written
+/// only after that child has bound the port.
 ///
 /// Uses std::process::Command rather than tauri-plugin-shell's sidecar
 /// declaration: the resource is bundled via `bundle.resources` in
@@ -722,6 +757,13 @@ fn spawn_relay(app: tauri::AppHandle) -> Result<String, String> {
     let bin = resolve_relay_binary(&app)?;
     let runtime = active_vault_runtime()?;
     let database = runtime.directory.join(VAULT_RELAY_FILENAME);
+    let mut ready_nonce = [0u8; 32];
+    getrandom::fill(&mut ready_nonce)
+        .map_err(|error| format!("generate relay readiness nonce: {error}"))?;
+    let ready_token = hex::encode(ready_nonce);
+    let ready_path = runtime
+        .directory
+        .join(format!(".relay-ready-{}-{ready_token}", std::process::id()));
 
     // The bundled resource may not be executable on disk (resource_dir copy
     // preserves mode on some platforms, not others). Make sure the owner can
@@ -745,22 +787,89 @@ fn spawn_relay(app: tauri::AppHandle) -> Result<String, String> {
         .arg("4869")
         .arg("--db")
         .arg(&database)
+        .arg("--ready-file")
+        .arg(&ready_path)
+        .arg("--ready-token")
+        .arg(&ready_token)
         .spawn()
         .map_err(|e| format!("failed to spawn relay binary at {}: {}", bin, e))?;
     *RELAY_CHILD
         .lock()
         .map_err(|_| "relay process lock is poisoned".to_string())? = Some(child);
 
-    // Wait for the port to accept connections.
+    // The relay writes the nonce only after its own net.Listen succeeds. A
+    // competing process may win the port race, but it cannot make this child
+    // appear ready; the child exit below is surfaced instead.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if Instant::now() > deadline {
             let _ = stop_owned_relay();
+            let _ = fs::remove_file(&ready_path);
             return Err("relay spawned but did not start listening within 5s".into());
         }
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
-            RELAY_SPAWNED.store(true, Ordering::SeqCst);
-            return Ok("spawned".into());
+
+        let exited = {
+            let mut owned = RELAY_CHILD
+                .lock()
+                .map_err(|_| "relay process lock is poisoned".to_string())?;
+            let child = owned
+                .as_mut()
+                .ok_or_else(|| "relay process disappeared before readiness".to_string())?;
+            match child.try_wait() {
+                Ok(None) => None,
+                Ok(Some(status)) => {
+                    *owned = None;
+                    Some(status)
+                }
+                Err(error) => return Err(format!("inspect starting vault relay: {error}")),
+            }
+        };
+        if let Some(status) = exited {
+            RELAY_SPAWNED.store(false, Ordering::SeqCst);
+            let _ = fs::remove_file(&ready_path);
+            return Err(format!("vault relay exited before readiness: {status}"));
+        }
+
+        match fs::read_to_string(&ready_path) {
+            Ok(token) if token == ready_token => {
+                if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+                    let child_still_running = {
+                        let mut owned = RELAY_CHILD
+                            .lock()
+                            .map_err(|_| "relay process lock is poisoned".to_string())?;
+                        let child = owned.as_mut().ok_or_else(|| {
+                            "relay process disappeared after readiness".to_string()
+                        })?;
+                        match child.try_wait() {
+                            Ok(None) => true,
+                            Ok(Some(_)) => {
+                                *owned = None;
+                                false
+                            }
+                            Err(error) => return Err(format!("verify ready vault relay: {error}")),
+                        }
+                    };
+                    if child_still_running {
+                        let _ = fs::remove_file(&ready_path);
+                        RELAY_SPAWNED.store(true, Ordering::SeqCst);
+                        return Ok("spawned".into());
+                    }
+                    RELAY_SPAWNED.store(false, Ordering::SeqCst);
+                    let _ = fs::remove_file(&ready_path);
+                    return Err("vault relay exited after publishing readiness".into());
+                }
+            }
+            Ok(_) => {
+                let _ = stop_owned_relay();
+                let _ = fs::remove_file(&ready_path);
+                return Err("vault relay wrote an invalid readiness token".into());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let _ = stop_owned_relay();
+                let _ = fs::remove_file(&ready_path);
+                return Err(format!("read vault relay readiness: {error}"));
+            }
         }
         std::thread::sleep(Duration::from_millis(150));
     }
@@ -927,7 +1036,19 @@ fn remove_secret_vaults(data_dir: &Path) -> Result<(), String> {
 
 #[tauri::command]
 fn factory_reset_vault(app: tauri::AppHandle) -> Result<(), String> {
-    remove_secret_vaults(&secret_data_dir(&app)?)
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    if ACTIVE_VAULT_RUNTIME
+        .lock()
+        .map_err(|_| "active vault runtime lock is poisoned".to_string())?
+        .is_some()
+    {
+        return Err("Lock the active vault before factory reset".into());
+    }
+    let data_dir = secret_data_dir(&app)?;
+    let _registry_lock = VaultRegistryLock::acquire(&data_dir)?;
+    remove_secret_vaults(&data_dir)
 }
 
 // --- native scan/reify substrate -----------------------------------------
@@ -1316,9 +1437,11 @@ struct PeersFile {
     writers: Vec<String>,
 }
 
-/// Resolve the active vault's peers.json beside its isolated relay database.
-fn peers_json_path() -> Result<PathBuf, String> {
-    Ok(active_vault_runtime()?.directory.join(VAULT_PEERS_FILENAME))
+/// Resolve peers.json from one captured runtime. Callers hold
+/// VAULT_RUNTIME_GATE while capturing the runtime and completing the full
+/// lock/read/write transaction, so a vault switch cannot change the path.
+fn peers_json_path(runtime: &ActiveVaultRuntime) -> PathBuf {
+    runtime.directory.join(VAULT_PEERS_FILENAME)
 }
 
 const PEERS_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1387,8 +1510,7 @@ impl Drop for PeersFileLock {
     }
 }
 
-fn peers_lock_path() -> Result<PathBuf, String> {
-    let peers_path = peers_json_path()?;
+fn peers_lock_path(peers_path: &Path) -> Result<PathBuf, String> {
     let file_name = peers_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1396,16 +1518,15 @@ fn peers_lock_path() -> Result<PathBuf, String> {
     Ok(peers_path.with_file_name(format!("{file_name}.lock")))
 }
 
-fn acquire_peers_file_lock() -> Result<PeersFileLock, String> {
-    PeersFileLock::acquire(&peers_lock_path()?, PEERS_LOCK_TIMEOUT)
+fn acquire_peers_file_lock(peers_path: &Path) -> Result<PeersFileLock, String> {
+    PeersFileLock::acquire(&peers_lock_path(peers_path)?, PEERS_LOCK_TIMEOUT)
 }
 
 /// Read peers.json. Returns a default (empty owner, no peers) if the file
 /// doesn't exist yet — that's the local-mode state.
-fn read_peers_file_unlocked() -> Result<PeersFile, String> {
-    let path = peers_json_path()?;
+fn read_peers_file_unlocked(path: &Path) -> Result<PeersFile, String> {
     let candidates = [
-        path.clone(),
+        path.to_path_buf(),
         path.with_extension("json.tmp"),
         path.with_extension("json.bak"),
     ];
@@ -1438,15 +1559,18 @@ fn read_peers_file_unlocked() -> Result<PeersFile, String> {
 }
 
 fn read_peers_file() -> Result<PeersFile, String> {
-    let _lock = acquire_peers_file_lock()?;
-    read_peers_file_unlocked()
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let path = peers_json_path(&active_vault_runtime()?);
+    let _lock = acquire_peers_file_lock(&path)?;
+    read_peers_file_unlocked(&path)
 }
 
 /// Write peers.json atomically (temp + rename), mirroring operator.go's
 /// persistence pattern. Writes to a sibling temp file then renames, so a crash
 /// mid-write never leaves a corrupt file.
-fn write_peers_file_unlocked(data: &PeersFile) -> Result<(), String> {
-    let path = peers_json_path()?;
+fn write_peers_file_unlocked(path: &Path, data: &PeersFile) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         ensure_private_directory(parent)?;
     }
@@ -1468,13 +1592,13 @@ fn write_peers_file_unlocked(data: &PeersFile) -> Result<(), String> {
         .map_err(|error| format!("sync {}: {error}", tmp.display()))?;
     drop(staged);
     if path.is_file() {
-        fs::copy(&path, &backup).map_err(|error| format!("back up {}: {error}", path.display()))?;
+        fs::copy(path, &backup).map_err(|error| format!("back up {}: {error}", path.display()))?;
     }
     #[cfg(windows)]
     if path.exists() {
         fs::remove_file(&path).map_err(|error| format!("replace {}: {error}", path.display()))?;
     }
-    fs::rename(&tmp, &path)
+    fs::rename(&tmp, path)
         .map_err(|e| format!("rename {} -> {}: {}", tmp.display(), path.display(), e))?;
     let _ = fs::remove_file(backup);
     Ok(())
@@ -1527,10 +1651,14 @@ fn set_owner(pubkey: String) -> Result<PeersState, String> {
             pubkey
         ));
     }
-    let _lock = acquire_peers_file_lock()?;
-    let mut pf = read_peers_file_unlocked()?;
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let path = peers_json_path(&active_vault_runtime()?);
+    let _lock = acquire_peers_file_lock(&path)?;
+    let mut pf = read_peers_file_unlocked(&path)?;
     pf.owner = pubkey;
-    write_peers_file_unlocked(&pf)?;
+    write_peers_file_unlocked(&path, &pf)?;
     Ok(peers_state(pf))
 }
 
@@ -1545,14 +1673,18 @@ fn add_peer(pubkey: String) -> Result<PeersState, String> {
             pubkey
         ));
     }
-    let _lock = acquire_peers_file_lock()?;
-    let mut pf = read_peers_file_unlocked()?;
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let path = peers_json_path(&active_vault_runtime()?);
+    let _lock = acquire_peers_file_lock(&path)?;
+    let mut pf = read_peers_file_unlocked(&path)?;
     if pf.owner == pubkey {
         return Err("that pubkey is the owner (owners have write access, not peer access)".into());
     }
     if !pf.peers.contains(&pubkey) {
         pf.peers.push(pubkey);
-        write_peers_file_unlocked(&pf)?;
+        write_peers_file_unlocked(&path, &pf)?;
     }
     Ok(peers_state(pf))
 }
@@ -1560,10 +1692,14 @@ fn add_peer(pubkey: String) -> Result<PeersState, String> {
 /// Remove a peer pubkey.
 #[tauri::command]
 fn remove_peer(pubkey: String) -> Result<PeersState, String> {
-    let _lock = acquire_peers_file_lock()?;
-    let mut pf = read_peers_file_unlocked()?;
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let path = peers_json_path(&active_vault_runtime()?);
+    let _lock = acquire_peers_file_lock(&path)?;
+    let mut pf = read_peers_file_unlocked(&path)?;
     pf.peers.retain(|p| p != &pubkey);
-    write_peers_file_unlocked(&pf)?;
+    write_peers_file_unlocked(&path, &pf)?;
     Ok(peers_state(pf))
 }
 
@@ -1579,8 +1715,12 @@ fn add_writer(pubkey: String) -> Result<PeersState, String> {
             pubkey
         ));
     }
-    let _lock = acquire_peers_file_lock()?;
-    let mut pf = read_peers_file_unlocked()?;
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let path = peers_json_path(&active_vault_runtime()?);
+    let _lock = acquire_peers_file_lock(&path)?;
+    let mut pf = read_peers_file_unlocked(&path)?;
     if pf.owner == pubkey {
         return Err("that pubkey is the owner (owners have full write access)".into());
     }
@@ -1589,7 +1729,7 @@ fn add_writer(pubkey: String) -> Result<PeersState, String> {
     }
     if !pf.writers.contains(&pubkey) {
         pf.writers.push(pubkey);
-        write_peers_file_unlocked(&pf)?;
+        write_peers_file_unlocked(&path, &pf)?;
     }
     Ok(peers_state(pf))
 }
@@ -1597,10 +1737,14 @@ fn add_writer(pubkey: String) -> Result<PeersState, String> {
 /// Remove a writer pubkey.
 #[tauri::command]
 fn remove_writer(pubkey: String) -> Result<PeersState, String> {
-    let _lock = acquire_peers_file_lock()?;
-    let mut pf = read_peers_file_unlocked()?;
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    let path = peers_json_path(&active_vault_runtime()?);
+    let _lock = acquire_peers_file_lock(&path)?;
+    let mut pf = read_peers_file_unlocked(&path)?;
     pf.writers.retain(|p| p != &pubkey);
-    write_peers_file_unlocked(&pf)?;
+    write_peers_file_unlocked(&path, &pf)?;
     Ok(peers_state(pf))
 }
 
@@ -1619,6 +1763,89 @@ fn remove_writer(pubkey: String) -> Result<PeersState, String> {
 static TOR_SPAWNED: AtomicBool = AtomicBool::new(false);
 static TOR_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
 static ACTIVE_ONION_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn valid_onion_service_id(id: &str) -> bool {
+    id.len() == 56
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte))
+}
+
+fn active_onion_marker_path(data_dir: &Path, id: &str) -> PathBuf {
+    data_dir.join(format!("{ACTIVE_ONION_MARKER_PREFIX}{id}"))
+}
+
+/// Detached Tor services survive a process crash, so persist their public
+/// service IDs before ADD_ONION. One create-new marker per ID avoids a JSON
+/// rewrite window where the cleanup registry itself could be lost.
+fn remember_active_onion(data_dir: &Path, id: &str) -> Result<(), String> {
+    if !valid_onion_service_id(id) {
+        return Err("The onion service id is invalid".into());
+    }
+    ensure_private_directory(data_dir)?;
+    let marker = active_onion_marker_path(data_dir, id);
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(mut file) => {
+            file.write_all(id.as_bytes())
+                .map_err(|error| format!("write onion cleanup marker: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("sync onion cleanup marker: {error}"))?;
+            sync_directory(data_dir)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(format!("create onion cleanup marker: {error}")),
+    }
+    let mut ids = ACTIVE_ONION_IDS
+        .lock()
+        .map_err(|_| "active onion registry lock is poisoned".to_string())?;
+    if !ids.iter().any(|candidate| candidate == id) {
+        ids.push(id.to_string());
+    }
+    Ok(())
+}
+
+fn forget_active_onion(data_dir: &Path, id: &str) -> Result<(), String> {
+    let marker = active_onion_marker_path(data_dir, id);
+    match fs::remove_file(&marker) {
+        Ok(()) => sync_directory(data_dir)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("remove onion cleanup marker: {error}")),
+    }
+    ACTIVE_ONION_IDS
+        .lock()
+        .map_err(|_| "active onion registry lock is poisoned".to_string())?
+        .retain(|candidate| candidate != id);
+    Ok(())
+}
+
+fn persisted_onion_ids(data_dir: &Path) -> Result<Vec<String>, String> {
+    let mut ids = Vec::new();
+    let entries = match fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(ids),
+        Err(error) => return Err(format!("read onion cleanup markers: {error}")),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read onion cleanup marker: {error}"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(id) = name.strip_prefix(ACTIVE_ONION_MARKER_PREFIX) else {
+            continue;
+        };
+        if !valid_onion_service_id(id) {
+            return Err(format!("invalid onion cleanup marker: {name}"));
+        }
+        ids.push(id.to_string());
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
 
 fn stop_owned_tor() -> Result<(), String> {
     let mut owned = TOR_CHILD
@@ -1678,40 +1905,72 @@ fn authenticated_tor_control(
 }
 
 fn remove_active_onions(app: &tauri::AppHandle) -> Result<(), String> {
-    let mut ids = ACTIVE_ONION_IDS
+    let data_dir = secret_data_dir(app)?;
+    for id in persisted_onion_ids(&data_dir)? {
+        remember_active_onion(&data_dir, &id)?;
+    }
+    let has_ids = !ACTIVE_ONION_IDS
         .lock()
-        .map_err(|_| "active onion registry lock is poisoned".to_string())?;
-    if ids.is_empty() {
+        .map_err(|_| "active onion registry lock is poisoned".to_string())?
+        .is_empty();
+    if !has_ids {
         return Ok(());
     }
     let (mut stream, mut reader) = match authenticated_tor_control(app) {
         Ok(control) => control,
-        Err(error) => {
-            let socks: SocketAddr = "127.0.0.1:9050"
-                .parse()
-                .map_err(|parse: std::net::AddrParseError| parse.to_string())?;
-            if TcpStream::connect_timeout(&socks, Duration::from_millis(200)).is_err() {
-                ids.clear();
-                return Ok(());
-            }
-            return Err(error);
-        }
+        // Port unreachability is not proof that the prior Tor process is gone:
+        // it may still be starting after an app crash. Retain the durable IDs
+        // until an authenticated control connection confirms DEL_ONION/552.
+        Err(error) => return Err(error),
     };
-    while let Some(id) = ids.last().cloned() {
+    loop {
+        let id = ACTIVE_ONION_IDS
+            .lock()
+            .map_err(|_| "active onion registry lock is poisoned".to_string())?
+            .last()
+            .cloned();
+        let Some(id) = id else {
+            break;
+        };
         stream
             .write_all(format!("DEL_ONION {id}\r\n").as_bytes())
             .map_err(|error| format!("control write DEL_ONION: {error}"))?;
         match read_control_reply(&mut reader, "DEL_ONION") {
-            Ok(_) => {
-                ids.pop();
-            }
-            Err(error) if error.contains("552") => {
-                ids.pop();
-            }
+            Ok(_) => forget_active_onion(&data_dir, &id)?,
+            Err(error) if error.contains("552") => forget_active_onion(&data_dir, &id)?,
             Err(error) => return Err(error),
         }
     }
     Ok(())
+}
+
+/// Resolve persisted detached services before the first vault can bind the
+/// shared relay port. If the old Tor process is gone, starting our configured
+/// Tor gives us an authenticated control connection where DEL_ONION returning
+/// 552 definitively retires each stale marker.
+fn cleanup_persisted_onions_on_startup(app: &tauri::AppHandle) -> Result<(), String> {
+    let data_dir = secret_data_dir(app)?;
+    if persisted_onion_ids(&data_dir)?.is_empty() {
+        return Ok(());
+    }
+    if remove_active_onions(app).is_ok() {
+        return Ok(());
+    }
+
+    let start_result = spawn_tor(app.clone())
+        .map_err(|error| format!("could not recover detached onion cleanup ownership: {error}"))?;
+    let cleanup_result = remove_active_onions(app);
+    let stop_result = if start_result == "spawned" {
+        stop_owned_tor()
+    } else {
+        Ok(())
+    };
+    match (cleanup_result, stop_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(cleanup), Ok(())) => Err(cleanup),
+        (Ok(()), Err(stop)) => Err(stop),
+        (Err(cleanup), Err(stop)) => Err(format!("{cleanup}; additionally, {stop}")),
+    }
 }
 
 #[tauri::command]
@@ -1720,17 +1979,15 @@ fn remove_onion(app: tauri::AppHandle, address: String) -> Result<(), String> {
         .lock()
         .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
     let id = address.strip_suffix(".onion").unwrap_or(&address);
-    if id.len() != 56
-        || !id
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte))
-    {
+    if !valid_onion_service_id(id) {
         return Err("The onion address is invalid".into());
     }
-    let mut ids = ACTIVE_ONION_IDS
+    let is_active = ACTIVE_ONION_IDS
         .lock()
-        .map_err(|_| "active onion registry lock is poisoned".to_string())?;
-    if !ids.iter().any(|candidate| candidate == id) {
+        .map_err(|_| "active onion registry lock is poisoned".to_string())?
+        .iter()
+        .any(|candidate| candidate == id);
+    if !is_active {
         return Ok(());
     }
     let (mut stream, mut reader) = authenticated_tor_control(&app)?;
@@ -1742,8 +1999,7 @@ fn remove_onion(app: tauri::AppHandle, address: String) -> Result<(), String> {
         Err(error) if error.contains("552") => {}
         Err(error) => return Err(error),
     }
-    ids.retain(|candidate| candidate != id);
-    Ok(())
+    forget_active_onion(&secret_data_dir(&app)?, id)
 }
 
 /// End vault-owned reachability before the webview releases its secret
@@ -1760,6 +2016,27 @@ fn lock_vault_runtime(app: tauri::AppHandle) -> Result<(), String> {
         .lock()
         .map_err(|_| "active vault runtime lock is poisoned".to_string())? = None;
     Ok(())
+}
+
+/// A webview reload does not reset native plugin or sidecar state. If the new
+/// renderer finds an already-active vault, close its native reachability and
+/// restart the process so Stronghold is unloaded before any selector appears.
+#[tauri::command]
+fn recover_webview_reload(app: tauri::AppHandle) -> Result<bool, String> {
+    if WEBVIEW_RESTART_PENDING.load(Ordering::SeqCst) {
+        return Ok(true);
+    }
+    let active = ACTIVE_VAULT_RUNTIME
+        .lock()
+        .map_err(|_| "active vault runtime lock is poisoned".to_string())?
+        .is_some();
+    if !active {
+        return Ok(false);
+    }
+    lock_vault_runtime(app.clone())?;
+    WEBVIEW_RESTART_PENDING.store(true, Ordering::SeqCst);
+    app.request_restart();
+    Ok(true)
 }
 
 /// Spawn the Tor daemon if it isn't already up. Mirrors spawn_relay: locate the
@@ -1888,15 +2165,37 @@ fn resolve_tor_binary(app: &tauri::AppHandle) -> Result<String, String> {
 /// relay at 127.0.0.1:4869. The seed is the 32-byte ed25519 key derived from
 /// the Nostr secret (see onion-key.ts), passed as base64. Returns the .onion
 /// address Tor reports — which MUST match the address the press computed
-/// independently (pure crypto, no Tor). A mismatch means the seed was corrupted
-/// in transit; the caller should treat it as an error.
+/// independently (pure crypto, no Tor). The expected address is persisted
+/// before registration so a crash cannot lose cleanup ownership of a detached
+/// service. A mismatch means the seed was corrupted in transit.
 #[tauri::command]
-fn setup_onion(app: tauri::AppHandle, seed_base64: String) -> Result<String, String> {
+fn setup_onion(
+    app: tauri::AppHandle,
+    seed_base64: String,
+    expected_address: String,
+) -> Result<String, String> {
     let _gate = VAULT_RUNTIME_GATE
         .lock()
         .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
-    let _ = active_vault_runtime()?;
+    let runtime = active_vault_runtime()?;
+    let peers_path = peers_json_path(&runtime);
+    let peers = {
+        let _peers_lock = acquire_peers_file_lock(&peers_path)?;
+        read_peers_file_unlocked(&peers_path)?
+    };
+    if !is_valid_pubkey(&peers.owner) {
+        return Err("Activate networked mode before making this vault reachable".into());
+    }
+
+    let expected_id = expected_address
+        .strip_suffix(".onion")
+        .unwrap_or(&expected_address);
+    if !valid_onion_service_id(expected_id) {
+        return Err("The expected onion address is invalid".into());
+    }
     let (mut stream, mut reader) = authenticated_tor_control(&app)?;
+    let data_dir = secret_data_dir(&app)?;
+    remember_active_onion(&data_dir, expected_id)?;
 
     // ADD_ONION with the derived key. Port=80,127.0.0.1:4869 means inbound
     // onion port 80 forwards to the relay's localhost port. The key is passed
@@ -1909,15 +2208,30 @@ fn setup_onion(app: tauri::AppHandle, seed_base64: String) -> Result<String, Str
         .write_all(add_cmd.as_bytes())
         .map_err(|e| format!("control write ADD_ONION: {e}"))?;
 
-    // The reply contains a line like: 250-ServiceID=<address-without-.onion>
+    // The reply contains a line like: 250-ServiceID=<address-without-.onion>.
+    // Keep the expected marker on ambiguous control failures; the next normal
+    // lock or app startup will issue a harmless DEL_ONION retry.
     let reply = read_control_reply(&mut reader, "ADD_ONION")?;
     for line in &reply {
         if let Some(rest) = line.strip_prefix("ServiceID=") {
-            let mut ids = ACTIVE_ONION_IDS
-                .lock()
-                .map_err(|_| "active onion registry lock is poisoned".to_string())?;
-            if !ids.iter().any(|id| id == rest) {
-                ids.push(rest.to_string());
+            if rest != expected_id {
+                if valid_onion_service_id(rest) {
+                    remember_active_onion(&data_dir, rest)?;
+                    stream
+                        .write_all(format!("DEL_ONION {rest}\r\n").as_bytes())
+                        .map_err(|error| format!("control write mismatched DEL_ONION: {error}"))?;
+                    match read_control_reply(&mut reader, "DEL_ONION") {
+                        Ok(_) => forget_active_onion(&data_dir, rest)?,
+                        Err(error) if error.contains("552") => {
+                            forget_active_onion(&data_dir, rest)?
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                forget_active_onion(&data_dir, expected_id)?;
+                return Err(format!(
+                    "Tor reported {rest}.onion but the selected key derives {expected_address}"
+                ));
             }
             return Ok(format!("{}.onion", rest));
         }
@@ -1963,12 +2277,26 @@ fn read_control_reply<R: BufRead>(reader: &mut R, label: &str) -> Result<Vec<Str
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        // Must be the first plugin: a second process must exit before it can
+        // open Stronghold or a decrypted workspace cache.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
+            }
+        }));
+    }
+    let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = secret_data_dir(app.handle()).map_err(std::io::Error::other)?;
             ensure_private_directory(&data_dir).map_err(std::io::Error::other)?;
+            // A prior crash may have left detached onion services alive. Drain
+            // their durable IDs before any vault can bind the shared relay port.
+            cleanup_persisted_onions_on_startup(app.handle()).map_err(std::io::Error::other)?;
             app.handle().plugin(
                 tauri_plugin_stronghold::Builder::new(move |password| {
                     derive_stronghold_key(&data_dir, password)
@@ -1984,6 +2312,7 @@ pub fn run() {
             discard_empty_secret_vault,
             activate_vault_runtime,
             lock_vault_runtime,
+            recover_webview_reload,
             spawn_relay,
             factory_reset,
             factory_reset_vault,
@@ -2345,6 +2674,87 @@ mod tests {
             .expect("lock should be reusable after release");
         drop(second);
         fs::remove_dir_all(dir).expect("remove lock test directory");
+    }
+
+    #[test]
+    fn peers_transaction_keeps_the_captured_vault_path() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "zine-peers-captured-path-{}-{nonce}",
+            std::process::id()
+        ));
+        let vault_a = ActiveVaultRuntime {
+            id: "vault-a".into(),
+            directory: dir.join("vault-a"),
+        };
+        let vault_b = ActiveVaultRuntime {
+            id: "vault-b".into(),
+            directory: dir.join("vault-b"),
+        };
+        let path_a = peers_json_path(&vault_a);
+        let path_b = peers_json_path(&vault_b);
+        let owner = "a".repeat(64);
+        {
+            let _lock = acquire_peers_file_lock(&path_a).expect("lock captured vault ACL");
+            write_peers_file_unlocked(
+                &path_a,
+                &PeersFile {
+                    owner: owner.clone(),
+                    peers: Vec::new(),
+                    writers: Vec::new(),
+                },
+            )
+            .expect("write captured vault ACL");
+        }
+
+        assert_eq!(
+            read_peers_file_unlocked(&path_a)
+                .expect("read captured vault ACL")
+                .owner,
+            owner
+        );
+        assert!(!path_b.exists(), "another vault path must remain untouched");
+        fs::remove_dir_all(dir).expect("remove captured path test directory");
+    }
+
+    #[test]
+    fn detached_onion_cleanup_ids_survive_process_memory_loss() {
+        let _gate = VAULT_RUNTIME_GATE
+            .lock()
+            .expect("vault runtime operation lock");
+        ACTIVE_ONION_IDS
+            .lock()
+            .expect("active onion registry")
+            .clear();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("zine-onion-cleanup-{}-{nonce}", std::process::id()));
+        let id = "a".repeat(56);
+
+        remember_active_onion(&dir, &id).expect("persist detached onion id");
+        ACTIVE_ONION_IDS
+            .lock()
+            .expect("active onion registry")
+            .clear();
+        let persisted = persisted_onion_ids(&dir).expect("recover marker");
+        assert_eq!(persisted.as_slice(), std::slice::from_ref(&id));
+
+        remember_active_onion(&dir, &id).expect("reload detached onion id");
+        forget_active_onion(&dir, &id).expect("retire detached onion id");
+        assert!(persisted_onion_ids(&dir)
+            .expect("read retired markers")
+            .is_empty());
+        assert!(ACTIVE_ONION_IDS
+            .lock()
+            .expect("active onion registry")
+            .is_empty());
+        fs::remove_dir_all(dir).expect("remove onion cleanup test directory");
     }
 
     #[test]

@@ -25,8 +25,8 @@ import (
 //     but rejected. This is the "actual server" posture — see
 //     protocol/transport.md §5.
 //
-// Mode is chosen at startup and re-evaluated on file change (polled every 5s,
-// zero-dep — matching the relay's simplicity). The policy is a private local
+// Mode is chosen at startup and re-evaluated on file change before every new
+// connection as well as on a 5s background poll. The policy is a private local
 // security boundary, never published as a Nostr event (transport.md §2).
 type AccessPolicy struct {
 	mu       sync.RWMutex
@@ -65,10 +65,10 @@ func NewAccessPolicy(path string) *AccessPolicy {
 }
 
 // reload reads the JSON file if it has changed (by mtime). Called once at
-// construction and then every poll interval. A missing file transitions to
-// local mode. An unreadable or corrupt update preserves the last known-good
-// policy and is retried on the next poll. A file with an empty owner is local
-// mode — the owner field is what activates networked mode.
+// construction and then on connection/poll refresh. A missing file transitions
+// to local mode. An unreadable or corrupt update preserves the last known-good
+// policy and is retried on the next refresh. A file with an empty owner is
+// local mode — the owner field is what activates networked mode.
 func (a *AccessPolicy) reload() {
 	info, err := os.Stat(a.path)
 	if err != nil {
