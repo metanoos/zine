@@ -5,6 +5,7 @@ import test from "node:test";
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const contextGather = readFileSync(new URL("../ai/context-gather.ts", import.meta.url), "utf8");
 const inspector = readFileSync(new URL("../ai/PromptInspectorModal.tsx", import.meta.url), "utf8");
+const desktopRuntime = readFileSync(new URL("../ai/desktop-operation-runtime.ts", import.meta.url), "utf8");
 
 function functionBody(name: string, next: string): string {
   const start = app.indexOf(`function ${name}`);
@@ -155,6 +156,8 @@ test("recovery errors stay generic and saved operations navigate exact bounded c
   assert.match(app, /result\.failureCount > 0/);
   assert.match(app, /saved AI operation\(s\) need recovery attention/);
   assert.doesNotMatch(app, /failureSamples\[/);
+  assert.match(app, /result\.failureCount > 0[\s\S]*setDesktopOperationEnvelopes\(\[\]\)[\s\S]*setDesktopOperationPageLineageHeads\(\[\]\)[\s\S]*setDesktopOperationPageCursor\(null\)[\s\S]*setDesktopOperationNextCursor\(null\)[\s\S]*setDesktopOperationPreviousCursors\(\[\]\)[\s\S]*return;/);
+  assert.match(app, /Saved AI history recovered\. Review the current page and use Previous \/ More \/ Next when available\./);
   assert.match(refresh, /repository\.listPage\(cursor, 16\)/);
   assert.match(refresh, /resolveDesktopOperationPageLineageV1\(/);
   assert.match(refresh, /page\.records,[\s\S]*pageSize: 16, isCancelled: cancelled/);
@@ -169,9 +172,22 @@ test("recovery errors stay generic and saved operations navigate exact bounded c
   assert.doesNotMatch(refresh, /\.\.\.current|slice\(-64\)/);
   assert.match(refresh, /setDesktopOperationEnvelopes\(\[\]\)[\s\S]*setDesktopOperationPageLineageHeads\(\[\]\)/);
   assert.match(refresh, /desktopOperationStoreRef\.current !== repository/);
-  assert.match(app, /mergeDesktopOperationPinnedHeadsV1\(current, \[envelope\], 16\)/);
+  assert.match(app, /createDesktopOperationPinnedLineageFenceV1\(\)/);
+  assert.match(app, /mergeDesktopOperationPinnedHeadsV1\([\s\S]*current,[\s\S]*\[envelope\],[\s\S]*16,[\s\S]*desktopOperationPinnedLineageFenceRef\.current/);
   assert.match(app, />Previous<\/button>/);
   assert.match(app, /"More \/ Next"/);
+});
+
+test("recovery never publishes partial pins and cancellation or vault replacement fences archive state", () => {
+  const recoverStart = desktopRuntime.indexOf("private async recoverEnvelope");
+  const recoverEnd = desktopRuntime.indexOf("private async requireEnvelope", recoverStart);
+  assert.ok(recoverStart >= 0 && recoverEnd > recoverStart);
+  assert.doesNotMatch(desktopRuntime.slice(recoverStart, recoverEnd), /this\.present\(/);
+  assert.match(app, /if \(cancelled\) return;/);
+  assert.match(app, /desktopOperationRefreshSequenceRef\.current \+= 1;[\s\S]*setDesktopOperationEnvelopes\(\[\]\)[\s\S]*setDesktopOperationPageLineageHeads\(\[\]\)[\s\S]*desktopOperationRuntimeRef\.current!\.recover\(\)/);
+  assert.match(app, /sequence !== desktopOperationRefreshSequenceRef\.current/);
+  assert.match(app, /desktopOperationStoreRef\.current !== repository/);
+  assert.match(app, /return \(\) => \{[\s\S]*desktopOperationRefreshSequenceRef\.current \+= 1;[\s\S]*desktopOperationRuntimeRef\.current = null;[\s\S]*desktopOperationStoreRef\.current = null;/);
 });
 
 test("stale re-prepare opens only the original workspace path and trace", () => {

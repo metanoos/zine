@@ -253,6 +253,7 @@ import {
 } from "../ai/desktop-operation-store.js";
 import type { DesktopOperationEnvelopeV1 } from "../ai/desktop-operation-envelope.js";
 import {
+  createDesktopOperationPinnedLineageFenceV1,
   desktopOperationReviewQueueV1,
   mergeDesktopOperationPinnedHeadsV1,
   resolveDesktopOperationPageLineageV1,
@@ -5958,6 +5959,7 @@ function DesktopExtendReviewStrip({
   items,
   busyKey,
   error,
+  notice,
   hasPrevious,
   hasMore,
   loadingMore,
@@ -5968,6 +5970,7 @@ function DesktopExtendReviewStrip({
   items: readonly DesktopOperationReviewItemV1[];
   busyKey: string | null;
   error: string | null;
+  notice: string | null;
   hasPrevious: boolean;
   hasMore: boolean;
   loadingMore: boolean;
@@ -5978,10 +5981,11 @@ function DesktopExtendReviewStrip({
   onPrevious: () => void;
   onMore: () => void;
 }) {
-  if (items.length === 0 && !error && !hasPrevious && !hasMore) return null;
+  if (items.length === 0 && !error && !notice && !hasPrevious && !hasMore) return null;
   return (
     <section className="desktop-extend-review" aria-label="Local AI draft review">
       {error && <p className="desktop-extend-review-error">{error}</p>}
+      {notice && <p>{notice}</p>}
       {items.map((item) => {
         const key = `${item.key.operationId}\0${item.key.attemptId}`;
         const busy = key === busyKey;
@@ -10323,7 +10327,11 @@ function App() {
   const [desktopOperationLoadingMore, setDesktopOperationLoadingMore] = useState(false);
   const [desktopOperationBusyKey, setDesktopOperationBusyKey] = useState<string | null>(null);
   const [desktopOperationError, setDesktopOperationError] = useState<string | null>(null);
+  const [desktopOperationRecoveryNotice, setDesktopOperationRecoveryNotice] = useState<string | null>(null);
   const desktopOperationRefreshSequenceRef = useRef(0);
+  const desktopOperationPinnedLineageFenceRef = useRef(
+    createDesktopOperationPinnedLineageFenceV1(),
+  );
   const desktopReprepareKeyRef = useRef<DesktopOperationKeyV1 | null>(null);
   // Directive authority is deliberately non-durable. Only attempts created or
   // linked from an authorized attempt during this App activation may consume
@@ -10387,13 +10395,32 @@ function App() {
   useEffect(() => {
     if (!isTauri() || !desktopRuntimeReady || bootState !== "ready" || !folder) return;
     let cancelled = false;
+    desktopOperationRefreshSequenceRef.current += 1;
     setDesktopOperationError(null);
+    setDesktopOperationRecoveryNotice(null);
+    setDesktopOperationEnvelopes([]);
+    setDesktopOperationPageLineageHeads([]);
+    setDesktopOperationPageCursor(null);
+    setDesktopOperationNextCursor(null);
+    setDesktopOperationPreviousCursors([]);
     void desktopOperationRuntimeRef.current!.recover()
       .then((result) => {
-        if (!cancelled && result.failureCount > 0) {
+        if (cancelled) return;
+        if (result.failureCount > 0) {
           const shown = Math.min(result.failureCount, 99);
           setDesktopOperationError(
             `${shown}${result.failureCount > shown ? "+" : ""} saved AI operation(s) need recovery attention.`,
+          );
+          setDesktopOperationEnvelopes([]);
+          setDesktopOperationPageLineageHeads([]);
+          setDesktopOperationPageCursor(null);
+          setDesktopOperationNextCursor(null);
+          setDesktopOperationPreviousCursors([]);
+          return;
+        }
+        if (result.recoveredCount > 0) {
+          setDesktopOperationRecoveryNotice(
+            "Saved AI history recovered. Review the current page and use Previous / More / Next when available.",
           );
         }
         return refreshDesktopOperationEnvelopes(null, []);
@@ -10401,6 +10428,12 @@ function App() {
       .catch(() => {
         if (!cancelled) {
           setDesktopOperationError("Saved AI operation recovery could not finish.");
+          setDesktopOperationRecoveryNotice(null);
+          setDesktopOperationEnvelopes([]);
+          setDesktopOperationPageLineageHeads([]);
+          setDesktopOperationPageCursor(null);
+          setDesktopOperationNextCursor(null);
+          setDesktopOperationPreviousCursors([]);
         }
       });
     return () => { cancelled = true; };
@@ -10409,7 +10442,12 @@ function App() {
 
   function upsertDesktopOperationEnvelope(envelope: DesktopOperationEnvelopeV1): void {
     setDesktopOperationPinnedHeads((current) => [
-      ...mergeDesktopOperationPinnedHeadsV1(current, [envelope], 16),
+      ...mergeDesktopOperationPinnedHeadsV1(
+        current,
+        [envelope],
+        16,
+        desktopOperationPinnedLineageFenceRef.current,
+      ),
     ]);
     setDesktopOperationEnvelopes((current) => {
       const existing = current.findIndex((candidate) => (
@@ -10457,6 +10495,9 @@ function App() {
       // attempt actionable from the previously rendered page.
       setDesktopOperationEnvelopes([]);
       setDesktopOperationPageLineageHeads([]);
+      setDesktopOperationPageCursor(null);
+      setDesktopOperationNextCursor(null);
+      setDesktopOperationPreviousCursors([]);
       throw error;
     }
   }
@@ -17275,6 +17316,7 @@ function App() {
                 items={desktopOperationQueue}
                 busyKey={desktopOperationBusyKey}
                 error={desktopOperationError}
+                notice={desktopOperationRecoveryNotice}
                 hasPrevious={desktopOperationPreviousCursors.length > 0}
                 hasMore={desktopOperationNextCursor !== null}
                 loadingMore={desktopOperationLoadingMore}

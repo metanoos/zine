@@ -240,6 +240,15 @@ export function desktopCredentialFreeTransportConfigSha256V1(
   });
 }
 
+export function desktopOperationRetryAttemptIdV1(
+  parent: DesktopOperationKeyV1,
+): string {
+  return `retry:${hashCanonicalV1("zine.desktop-operation.retry-child.v1", {
+    operationId: parent.operationId,
+    parentAttemptId: parent.attemptId,
+  })}`;
+}
+
 /**
  * Freeze one approved exact-context Extend request into the private envelope.
  * Approval itself remains owned by `PreparedOperationApproval`; this boundary
@@ -439,9 +448,14 @@ export class DesktopOperationRuntimeV1 {
       if (!ambiguous && command.possibleDuplicateAcknowledged === true) {
         fail("duplicate-risk acknowledgement is allowed only for an ambiguous attempt");
       }
+      const retryAttemptId = desktopOperationRetryAttemptIdV1(keyFor(prior));
+      if (command.attemptId !== undefined && command.attemptId !== retryAttemptId) {
+        fail("retry attempt id must match the deterministic parent claim");
+      }
       const next = createDesktopOperationRetryV1(prior, {
-        attemptId: command.attemptId ?? this.dependencies.ids.next("attempt"),
-        createdAtMs: command.createdAtMs ?? this.atOrAfter(prior),
+        attemptId: retryAttemptId,
+        createdAtMs: command.createdAtMs
+          ?? Math.max(this.now(), prior.updatedAtMs + 1),
         ...(command.retainForMs === undefined ? {} : { retainForMs: command.retainForMs }),
         ...(command.possibleDuplicateAcknowledged === undefined
           ? {}
@@ -457,21 +471,72 @@ export class DesktopOperationRuntimeV1 {
       if (this.now() >= next.retention.deleteByMs) {
         fail("cannot persist a retry after its privacy deadline");
       }
+      const priorChild = await this.findDurableRetryChild(prior);
+      if (priorChild) return this.convergeRetryChild(priorChild, next);
       const result = await this.dependencies.repository.create(next);
       if (result === "created") {
         await this.assertLive(next);
         return next;
       }
       const existing = await this.dependencies.repository.load(keyFor(next));
-      if (
-        existing
-        && hashDesktopOperationEnvelopeV1(existing) === hashDesktopOperationEnvelopeV1(next)
-      ) {
-        await this.assertLive(existing);
-        return existing;
-      }
-      fail(`retry attempt ${next.attempt.attemptId} already exists with different bytes`);
+      if (existing) return this.convergeRetryChild(existing, next);
+      fail(`retry attempt ${next.attempt.attemptId} exists but cannot be loaded`);
     });
+  }
+
+  private async findDurableRetryChild(
+    parent: DesktopOperationEnvelopeV1,
+  ): Promise<DesktopOperationEnvelopeV1 | null> {
+    let found: DesktopOperationEnvelopeV1 | null = null;
+    let cursor: string | null = null;
+    while (true) {
+      const page = await this.dependencies.repository.listPage(cursor, RECOVERY_PAGE_LIMIT);
+      if (page.records.length > RECOVERY_PAGE_LIMIT) {
+        fail("operation repository returned an oversized retry-claim page");
+      }
+      if (page.nextCursor !== null && page.records.length === 0) {
+        fail("operation repository made no progress while checking retry claims");
+      }
+      if (page.nextCursor !== null && page.nextCursor === cursor) {
+        fail("operation repository repeated a retry-claim cursor");
+      }
+      for (const envelope of page.records) {
+        if (
+          envelope.operationId !== parent.operationId
+          || envelope.attempt.retryOfAttemptId !== parent.attempt.attemptId
+        ) continue;
+        if (
+          found
+          && found.attempt.attemptId !== envelope.attempt.attemptId
+        ) {
+          fail("retry parent already has multiple durable children");
+        }
+        found = envelope;
+      }
+      if (page.nextCursor === null) return found;
+      cursor = page.nextCursor;
+    }
+  }
+
+  private async convergeRetryChild(
+    existing: DesktopOperationEnvelopeV1,
+    requested: DesktopOperationEnvelopeV1,
+  ): Promise<DesktopOperationEnvelopeV1> {
+    const existingRetention = existing.retention.deleteByMs - existing.retention.startedAtMs;
+    const requestedRetention = requested.retention.deleteByMs - requested.retention.startedAtMs;
+    if (
+      existing.operationId !== requested.operationId
+      || existing.attempt.retryOfAttemptId !== requested.attempt.retryOfAttemptId
+      || existing.prepared.requestSha256 !== requested.prepared.requestSha256
+      || existing.selectedContext.manifestSha256 !== requested.selectedContext.manifestSha256
+      || (existing.attempt.possibleDuplicateAcknowledgedAtMs !== null)
+        !== (requested.attempt.possibleDuplicateAcknowledgedAtMs !== null)
+      || existingRetention !== requestedRetention
+    ) {
+      fail("retry parent already has a different durable child");
+    }
+    await this.assertLive(existing);
+    return existing;
   }
 
   /**
@@ -785,31 +850,24 @@ export class DesktopOperationRuntimeV1 {
       (current.lifecycle.status === "prepared" || current.lifecycle.status === "approved")
       && !this.isAuthorized(current)
     ) {
-      const stale = await this.reconcileUnauthorizedPreDispatch(current);
-      await this.present(stale, "recovery");
+      await this.reconcileUnauthorizedPreDispatch(current);
       return;
     }
     switch (current.lifecycle.status) {
       case "dispatch-intent":
       case "provider-io": {
-        const unknown = await this.commit(current, this.transition("mark-dispatch-unknown", current, {}, {
+        await this.commit(current, this.transition("mark-dispatch-unknown", current, {}, {
           diagnosticRef: this.diagnosticRef(),
         }));
-        await this.present(unknown.envelope, "recovery");
         return;
       }
       case "response-completed":
-        await this.present(current, "recovery");
         return;
       case "accepted": {
-        const recovered = current.artifactReceipt
-          ? current
-          : (await this.applyAcceptedIntent(current)).envelope;
-        await this.present(recovered, "recovery");
+        if (!current.artifactReceipt) await this.applyAcceptedIntent(current);
         return;
       }
       case "stale":
-        await this.present(current, "recovery");
         return;
       case "prepared":
       case "approved":
@@ -818,7 +876,6 @@ export class DesktopOperationRuntimeV1 {
       case "unknown":
       case "rejected":
       case "abandoned":
-        await this.present(current, "recovery");
         return;
     }
   }

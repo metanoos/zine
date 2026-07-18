@@ -9,6 +9,7 @@ import {
 import { contentFingerprint } from "./context-snapshot.js";
 import {
   hashDesktopOperationEnvelopeV1,
+  hashCanonicalV1,
   type DesktopOperationEnvelopeV1,
 } from "./desktop-operation-envelope.js";
 import {
@@ -20,6 +21,7 @@ import {
   DesktopOperationTransportFailureV1,
   createApprovedDesktopExtendEnvelopeV1,
   desktopCredentialFreeTransportConfigSha256V1,
+  desktopOperationRetryAttemptIdV1,
   type DesktopArtifactApplierV1,
   type DesktopOperationKeyV1,
   type DesktopOperationRepositoryV1,
@@ -476,6 +478,32 @@ test("the real approved-request transport satisfies the reconstructible runtime 
   assert.equal(transport, completePrepared);
 });
 
+test("retry child identity has a fixed domain-separated canonical vector", () => {
+  const parent = {
+    operationId: "operation-vector-0001",
+    attemptId: "attempt-parent-0001",
+  };
+  assert.equal(
+    desktopOperationRetryAttemptIdV1(parent),
+    "retry:4ad4be1f7e5dbfed64999fe83248c81ebd592d4ea2eb9665d30c8c9662642c11",
+  );
+  assert.notEqual(
+    desktopOperationRetryAttemptIdV1(parent),
+    desktopOperationRetryAttemptIdV1({ ...parent, operationId: "operation-vector-0002" }),
+  );
+  assert.notEqual(
+    desktopOperationRetryAttemptIdV1(parent),
+    desktopOperationRetryAttemptIdV1({ ...parent, attemptId: "attempt-parent-0002" }),
+  );
+  assert.notEqual(
+    desktopOperationRetryAttemptIdV1(parent),
+    `retry:${hashCanonicalV1("zine.desktop-operation.retry-child.v0", {
+      operationId: parent.operationId,
+      parentAttemptId: parent.attemptId,
+    })}`,
+  );
+});
+
 test("factory binds the approved selector, unique user-message placement, and credential-free provider config", async () => {
   const providerFixture = provider();
   const prepared = await preparedFor(target(), providerFixture);
@@ -705,7 +733,7 @@ test("reconstruction handles every durable crash window without replaying provid
   assert.equal((await recoveredRuntime.load(keyFor(acceptedBase)))!.artifactReceipt !== null, true);
   assert.equal(transportCalls, 0, "recovery may never resume a persisted dispatch handshake");
   assert.equal(applyCalls, 1);
-  assert.ok(presentations.includes(responseCopy.attempt.attemptId));
+  assert.deepEqual(presentations, [], "recovery must not incrementally publish review pins");
 });
 
 test("expired directive authority is durably stopped before every provider boundary", async () => {
@@ -1277,7 +1305,6 @@ test("focus-only stale retry requires fresh preparation while preserving byte-id
   };
   await assert.rejects(
     () => runtime.retry(keyFor(stale.envelope), {
-      attemptId: "attempt-focus-only-cosmetic-relabel",
       createdAtMs: freshCreatedAt,
       freshPreparation: {
         prepared: cosmeticallyRelabeled,
@@ -1292,7 +1319,6 @@ test("focus-only stale retry requires fresh preparation while preserving byte-id
     createdAt: freshCreatedAt,
   });
   const retry = await runtime.retry(keyFor(stale.envelope), {
-    attemptId: "attempt-focus-only-stale-retry-new",
     createdAtMs: freshCreatedAt,
     freshPreparation: {
       prepared: freshPrepared,
@@ -1345,11 +1371,12 @@ test("a stale compare-and-set becomes a durable reviewable state and never reapp
   const recovery = await reconstructed.recover();
   assert.equal(recovery.failureCount, 0);
   assert.equal(applyCalls, 1, "stale recovery must not retry the artifact mutation");
-  assert.deepEqual(presentations.at(-1), { status: "stale", reason: "recovery" });
+  assert.deepEqual(presentations, [
+    { status: "response-completed", reason: "response-recorded" },
+    { status: "stale", reason: "stale-target" },
+  ]);
   await assert.rejects(
-    () => reconstructed.retry(keyFor(ready), {
-      attemptId: "attempt-stale-missing-preparation",
-    }),
+    () => reconstructed.retry(keyFor(ready)),
     /stale retry requires a fresh prepared operation/,
   );
   const freshCreatedAt = accepted.envelope.updatedAtMs + 1;
@@ -1358,7 +1385,6 @@ test("a stale compare-and-set becomes a durable reviewable state and never reapp
     createdAt: freshCreatedAt,
   });
   const retry = await reconstructed.retry(keyFor(ready), {
-    attemptId: "attempt-stale-safe-retry",
     createdAtMs: freshCreatedAt,
     freshPreparation: {
       prepared: freshPrepared,
@@ -1381,11 +1407,10 @@ test("linked retry requires acknowledgement only when the prior dispatch is ambi
   const unknown = await responseOrFailure(runtime, "ambiguous-retry");
   assert.equal(unknown.lifecycle.status, "unknown");
   await assert.rejects(
-    () => runtime.retry(keyFor(unknown), { attemptId: "attempt-retry-no-ack" }),
+    () => runtime.retry(keyFor(unknown)),
     /explicit operator confirmation/,
   );
   const retry = await runtime.retry(keyFor(unknown), {
-    attemptId: "attempt-retry-with-ack",
     possibleDuplicateAcknowledged: true,
   });
   assert.equal(retry.operationId, unknown.operationId);
@@ -1396,7 +1421,7 @@ test("linked retry requires acknowledgement only when the prior dispatch is ambi
   assert.equal(abandoned.lifecycle.executionCertainty, "may-have-dispatched");
   assert.equal(abandoned.fault!.code, "DISPATCH_OUTCOME_UNKNOWN");
   await assert.rejects(
-    () => runtime.retry(keyFor(abandoned), { attemptId: "attempt-after-abandon" }),
+    () => runtime.retry(keyFor(abandoned)),
     /abandoned is not retryable/,
   );
 
@@ -1410,14 +1435,11 @@ test("linked retry requires acknowledgement only when the prior dispatch is ambi
   const cancelled = await safeRuntime.cancel(keyFor(prepared));
   await assert.rejects(
     () => safeRuntime.retry(keyFor(cancelled), {
-      attemptId: "attempt-safe-retry-ack",
       possibleDuplicateAcknowledged: true,
     }),
     /allowed only for an ambiguous attempt/,
   );
-  const safeRetry = await safeRuntime.retry(keyFor(cancelled), {
-    attemptId: "attempt-safe-retry-new",
-  });
+  const safeRetry = await safeRuntime.retry(keyFor(cancelled));
   assert.equal(safeRetry.attempt.possibleDuplicateAcknowledgedAtMs, null);
 
   const rejectedReady = await responseReady(
@@ -1428,11 +1450,132 @@ test("linked retry requires acknowledgement only when the prior dispatch is ambi
   );
   const rejected = await safeRuntime.reject(keyFor(rejectedReady));
   assert.equal(rejected.lifecycle.retryPolicy, "safe-new-attempt");
-  const rejectedRetry = await safeRuntime.retry(keyFor(rejected), {
-    attemptId: "attempt-rejected-retry-new",
-  });
+  const rejectedRetry = await safeRuntime.retry(keyFor(rejected));
   assert.equal(rejectedRetry.attempt.retryOfAttemptId, rejected.attempt.attemptId);
   assert.equal(rejectedRetry.attempt.possibleDuplicateAcknowledgedAtMs, null);
+});
+
+test("a deterministic retry child converges across runtimes, restarts, and one provider claim", async () => {
+  const repository = new MemoryRepository();
+  let transportCalls = 0;
+  let releaseTransport!: () => void;
+  let transportEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { transportEntered = resolve; });
+  const heldResponse = new Promise<string>((resolve) => {
+    releaseTransport = () => resolve("one deterministic response");
+  });
+  const completePreparedOnce = async () => {
+    transportCalls += 1;
+    transportEntered();
+    return heldResponse;
+  };
+  const firstRuntime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    completePrepared: completePreparedOnce,
+  }));
+  const secondRuntime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    completePrepared: completePreparedOnce,
+  }));
+  const parent = await firstRuntime.cancel(keyFor(await persist(
+    firstRuntime,
+    target("deterministic-retry"),
+    provider(),
+    {
+      operationId: "operation-deterministic-retry",
+      attemptId: "attempt-deterministic-parent",
+    },
+  )));
+  const expectedAttemptId = desktopOperationRetryAttemptIdV1(keyFor(parent));
+
+  await assert.rejects(
+    () => firstRuntime.retry(keyFor(parent), { attemptId: "caller-selected-retry-id" }),
+    /deterministic parent claim/,
+  );
+  const [firstChild, secondChild] = await Promise.all([
+    firstRuntime.retry(keyFor(parent)),
+    secondRuntime.retry(keyFor(parent)),
+  ]);
+  assert.equal(firstChild.attempt.attemptId, expectedAttemptId);
+  assert.equal(secondChild.attempt.attemptId, expectedAttemptId);
+  assert.equal(repository.records.size, 2, "one parent has exactly one durable child");
+
+  const approvedChild = await firstRuntime.approve(keyFor(firstChild));
+  const dispatchIntent = await replaceWithTransition(
+    repository,
+    approvedChild,
+    transition("record-dispatch-intent", approvedChild),
+  );
+  const dispatches = [
+    firstRuntime.dispatch(keyFor(dispatchIntent)),
+    secondRuntime.dispatch(keyFor(dispatchIntent)),
+  ];
+  await entered;
+  await Promise.resolve();
+  assert.equal(transportCalls, 1, "provider I/O begins only after one durable CAS claim");
+  releaseTransport();
+  await Promise.allSettled(dispatches);
+  assert.equal(transportCalls, 1);
+  assert.equal((await firstRuntime.load(keyFor(firstChild)))?.lifecycle.status, "response-completed");
+
+  const afterRestart = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not redispatch";
+    },
+  }));
+  const recoveredChild = await afterRestart.retry(keyFor(parent));
+  assert.equal(recoveredChild.attempt.attemptId, expectedAttemptId);
+  assert.equal(recoveredChild.lifecycle.status, "response-completed");
+  assert.equal(repository.records.size, 2);
+  assert.equal(transportCalls, 1);
+});
+
+test("concurrent retries with different fresh preparations cannot fork one parent", async () => {
+  const repository = new MemoryRepository();
+  const parentRuntime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    completePrepared: async () => { throw new Error("ambiguous provider boundary"); },
+  }));
+  const parentTarget = target("different-retry-preparation");
+  const parent = await responseOrFailure(parentRuntime, "different-retry-preparation");
+  assert.equal(parent.lifecycle.status, "unknown");
+  const createdAt = parent.updatedAtMs + 1;
+  const freshA = await preparedFor(parentTarget, provider(), undefined, {
+    requestId: "request-different-retry-a",
+    createdAt,
+  });
+  const freshB = await preparedFor(parentTarget, provider(), undefined, {
+    requestId: "request-different-retry-b",
+    createdAt,
+  });
+  const runtimeA = new DesktopOperationRuntimeV1(runtimeDependencies({ repository }));
+  const runtimeB = new DesktopOperationRuntimeV1(runtimeDependencies({ repository }));
+  const results = await Promise.allSettled([
+    runtimeA.retry(keyFor(parent), {
+      createdAtMs: createdAt,
+      possibleDuplicateAcknowledged: true,
+      freshPreparation: { prepared: freshA, provider: provider(), maxOutputTokens: 1_024 },
+    }),
+    runtimeB.retry(keyFor(parent), {
+      createdAtMs: createdAt,
+      possibleDuplicateAcknowledged: true,
+      freshPreparation: { prepared: freshB, provider: provider(), maxOutputTokens: 1_024 },
+    }),
+  ]);
+  assert.deepEqual(results.map(({ status }) => status).sort(), ["fulfilled", "rejected"]);
+  const rejection = results.find((result) => result.status === "rejected");
+  assert.equal(rejection?.status, "rejected");
+  if (rejection?.status === "rejected") {
+    assert.match(String(rejection.reason), /different durable child/);
+  }
+  assert.equal(repository.records.size, 2);
+  const child = [...repository.records.values()].find(
+    ({ attempt }) => attempt.retryOfAttemptId === parent.attempt.attemptId,
+  );
+  assert.ok(child);
+  assert.equal(child.attempt.attemptId, desktopOperationRetryAttemptIdV1(keyFor(parent)));
 });
 
 test("recovery deletes every expired envelope before any surviving side effect", async () => {
@@ -1476,7 +1619,7 @@ test("recovery deletes every expired envelope before any surviving side effect",
   assert.equal(transportCalls, 0);
   assert.equal(result.deletedCount, 1);
   assert.equal(events[0], `delete:${expired.attempt.attemptId}`);
-  assert.ok(events.indexOf("present") > events.indexOf(`delete:${expired.attempt.attemptId}`));
+  assert.equal(events.includes("present"), false);
 });
 
 test("recovery processes more than one repository page without accumulating envelope snapshots", async () => {
@@ -1500,6 +1643,32 @@ test("recovery processes more than one repository page without accumulating enve
   assert.equal(recovery.failureCount, 0);
   assert.equal(repository.listPageCalls, 3);
   assert.equal(repository.maxPageRecordsReturned, 8);
+});
+
+test("a corrupt later recovery page cannot incrementally publish an earlier page", async () => {
+  const repository = new MemoryRepository();
+  const setup = new DesktopOperationRuntimeV1(runtimeDependencies({ repository }));
+  for (let index = 0; index < 9; index += 1) {
+    await responseReady(setup, target(`partial-recovery-${index}`), provider(), {
+      operationId: `operation-partial-recovery-${index}`,
+      attemptId: `attempt-partial-recovery-${index}`,
+    });
+  }
+  const originalListPage = repository.listPage.bind(repository);
+  let calls = 0;
+  repository.listPage = async (cursor, limit) => {
+    calls += 1;
+    if (calls === 2) throw new Error("corrupt later recovery page");
+    return originalListPage(cursor, limit);
+  };
+  const presentations: string[] = [];
+  const recovering = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    presentResult: (envelope) => { presentations.push(envelope.attempt.attemptId); },
+  }));
+
+  await assert.rejects(() => recovering.recover(), /corrupt later recovery page/);
+  assert.deepEqual(presentations, []);
 });
 
 test("privacy deadlines delete and block direct dispatch and acceptance", async () => {

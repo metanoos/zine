@@ -477,8 +477,8 @@ export function createDesktopOperationRetryV1(
   ) {
     fail("safe retry must not acknowledge a possible duplicate");
   }
-  if (!Number.isSafeInteger(input.createdAtMs) || input.createdAtMs < prior.updatedAtMs) {
-    fail("retry time must be monotonic");
+  if (!Number.isSafeInteger(input.createdAtMs) || input.createdAtMs <= prior.updatedAtMs) {
+    fail("retry time must advance past the parent attempt");
   }
   const retainForMs = input.retainForMs
     ?? (prior.retention.deleteByMs - prior.retention.startedAtMs);

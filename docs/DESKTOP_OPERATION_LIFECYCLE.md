@@ -38,7 +38,15 @@ boundary.
 An operation has a stable `operationId`. Every provider attempt has a distinct
 `attemptId`; a retry retains the operation id and points to its predecessor with
 `retryOfAttemptId`. An ambiguous retry additionally records when the operator
-acknowledged possible duplicate dispatch.
+acknowledged possible duplicate dispatch. A retry child id is not caller-
+selected: it is the domain-separated canonical hash of the operation id and
+parent attempt id. The encrypted native `create` is therefore the durable
+cross-runtime claim for exactly one child per parent. A restart also scans for
+legacy linked children before creating the deterministic id; compatible callers
+converge on the existing child, while a different preparation,
+acknowledgement, retention duration, explicit id, or second legacy child fails
+closed. Retry time must strictly advance beyond the parent attempt's last
+durable update.
 
 The envelope retains, as private local data:
 
@@ -205,6 +213,16 @@ generic count/error; it never displays diagnostic samples or raw provider
 exceptions. Raw `dispatch-intent` and `provider-io` projections expose no
 operator actions while recovery reconciles them to durable `unknown`. Only
 durable `unknown` offers the explicit duplicate-risk retry or abandon choices.
+The runtime does not call the result presenter while walking recovery records:
+durable reconciliation is separate from UI publication. Only after recovery
+and a complete lineage scan both succeed does the App replace the visible
+archive page. A later corrupt page, record failure, cancelled refresh, or vault-
+session replacement clears recovery-derived archive actions instead of leaving
+an incrementally recovered pin. Proven current-activation pins are a separate
+overlay and may remain; recovery never adds to it. The success notice directs
+the operator through the bounded **Previous** and **More / Next** archive
+controls so recovered actionable heads remain reachable without pretending a
+partial scan succeeded.
 
 ## Private retention
 
@@ -244,9 +262,19 @@ in bounded pages and retains lineage heads only for the operations on the
 visible page. Superseded attempts therefore never regain actions when a linked
 head lands on another page. A separate bounded 16-operation current-head
 overlay keeps newly completed work visible regardless of record-id order and
-deduplicates it against the archive head. Scan failure or vault-session change
-clears archive actions rather than projecting a partial lineage. No operation
-id, attempt id, or timing field is added to plaintext native metadata.
+deduplicates it against the archive head. Lineage keys are the composite
+operation-plus-attempt identity, so identical attempt ids in different
+operations cannot collide. Reduction uses retry-parent edges rather than
+timestamps or opaque ids, accepts only the newest durable snapshot of one
+attempt, and requires exactly one unambiguous head. Disconnected attempts,
+siblings, cycles, or equal-version byte conflicts are archive-only and fail
+closed. A malformed current-session lineage reserves only its operation id in a
+bounded activation fence; it consumes none of the 16 visible pins and a later
+partial callback cannot resurrect it. Fence overflow hides the entire overlay.
+Scan failure or vault-session change clears archive actions rather than
+projecting a partial lineage. The deterministic retry claim reuses the existing
+encrypted envelope and opaque keyed row id; no operation id, attempt id,
+parent id, or timing field is added to plaintext native metadata.
 Selective portable commitments and
 disclosure belong to Phase 3 after the trust/schema review.
 

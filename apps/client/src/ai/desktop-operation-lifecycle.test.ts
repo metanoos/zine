@@ -1454,6 +1454,10 @@ test("recovery re-presents completed responses and replays only pending local ar
 
 test("retries keep operation identity, create a linked attempt, and require ambiguity acknowledgement", async () => {
   const cancelled = await atStatus("cancelled");
+  assert.throws(() => createDesktopOperationRetryV1(cancelled, {
+    attemptId: "attempt-retry-equal-time",
+    createdAtMs: cancelled.updatedAtMs,
+  }), /advance past the parent attempt/);
   const safeRetry = createDesktopOperationRetryV1(cancelled, {
     attemptId: "attempt-retry-0001",
     createdAtMs: cancelled.updatedAtMs + 1,
