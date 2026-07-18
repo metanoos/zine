@@ -14,6 +14,10 @@
   collaboration, AI workbenches, and signed process provenance.
 - **Project type:** A dense desktop authoring application with a read-only web
   surface and headless interoperability through MCP.
+- **Defensible slice:** AI-assisted writing is the product center; the durable
+  advantage is provider-neutral boundary crossing across model handoffs, team
+  review, and later postmortem. Multi-AI correspondence stays authored inside
+  Write rather than becoming a separate chat product.
 - **Memorable quality:** Zine should feel like an instrument for text: exact
   enough for serious provenance, expressive enough that the process itself can
   become art.
@@ -376,3 +380,5 @@ an unsigned/provisional state appear accepted.
 | 2026-07-17 | Present in-session voices by ID, not key | In-session co-authorship is asserted attribution; key language implies an independent verification that only cross-key seams provide. |
 | 2026-07-17 | Frame review as "evaluate the writer, not just the writing" | As finished prose grows more uniform, the writer's judgment survives in the trace; review surfaces should foreground process evidence over prose judgment. |
 | 2026-07-17 | Adopt Publish as the product term ahead of the wire cut | Publish names the disclosure gesture on every reader-facing surface; Send remains the wire and implementation identifier until the coordinated schema cut renames it. |
+| 2026-07-18 | Keep AI-assisted writing as the product center | Provider-neutral cross-model, cross-team, and cross-time handoffs are the defensible slice within writing, not a separate multi-AI platform. |
+| 2026-07-18 | Keep citation neutral and Mint explicit | Provenance-aware paste may cite any stepped source without endorsement; only genesis Step + Publish + same-minter Attest creates a Coin. |

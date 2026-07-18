@@ -1,10 +1,10 @@
 # TODOS
 
-This is the deferred-work register relative to the 2026-07-17 decision to
-build the local-first multi-AI task and correspondence platform while customer
-discovery runs in parallel. These items are not prerequisites for the current
-Foundation + GLM slice or its current-machine macOS dogfood bundle unless new
-evidence promotes a dependency.
+This is the deferred-work register for work outside the current desktop
+trace-aware writing loop. AI-assisted writing is the product center; one narrow
+provider-neutral handoff follows the reliable single-provider desktop slice,
+while a broad multi-AI platform, mobile, hosted authoring, and public
+distribution remain later programs unless new evidence promotes a dependency.
 
 ## Hosted authoring
 
@@ -81,6 +81,7 @@ outrun demand.
 **Context:** If interviews support the use case, the first audition remains
 concierge. Setup and MODEL onboarding happen before the 24-hour clock; Zine
 evaluates process evidence and never emits an automated employment verdict.
+This is a validation method, not the product center or a roadmap dependency.
 
 **Pros:** Makes repeat pilots easier to administer; clarifies candidate rights
 and deadlines; creates a coherent commercial workflow around Zine evidence.
@@ -107,12 +108,11 @@ environment.
 maintenance that typed provider adapters cannot anticipate, without weakening
 the typed adapter supervisor.
 
-**Context:** The accepted task-correspondence architecture uses a typed Rust
-adapter supervisor that validates manifests and constructs allowlisted commands
-itself. A future shell must be a visibly separate dangerous capability, never
-an escape hatch inside that supervisor. Its design must distinguish authored
-changes, observed agent tool use, and ambient filesystem mutations in
-provenance and consent UI.
+**Context:** Current and planned provider adapters are typed, bounded, and
+explicitly approved. A future shell must be a visibly separate dangerous
+capability, never an escape hatch inside those adapters. Its design must
+distinguish authored changes, observed agent tool use, and ambient filesystem
+mutations in provenance and consent UI.
 
 **Pros:** Supports advanced local-agent workflows, workspace maintenance, and
 user-installed tools beyond Zine's registered model actions.
@@ -137,11 +137,11 @@ matrix.
 **Why:** Business users need trustworthy installation and updates beyond the
 first current-machine macOS dogfood bundle.
 
-**Context:** Foundation + GLM intentionally targets an installable bundle on
-the current macOS development machine. Public distribution remains outside
-that executable slice so platform packaging and certificate operations do not
-destabilize the core task-correspondence runtime, but it must be completed
-before broad external distribution.
+**Context:** The current desktop program intentionally targets a reliable
+installable bundle on the current macOS development machine. Public
+distribution remains outside that slice so platform packaging and certificate
+operations do not destabilize the core writing and provenance runtime, but it
+must be completed before broad external distribution.
 
 **Pros:** Makes open-source commercial distribution credible, lowers
 installation friction, and verifies that native adapter and storage assumptions
@@ -171,14 +171,17 @@ single-signer desktop proof. Moving desktop keys to the phone would create the
 wrong security boundary; inventing the multi-device wire model inside the
 desktop slice would make it difficult to revise.
 
-**Context:** The desktop schema keeps an explicit extension seam: the proof
-requires `ownerId === signerPubkey`, while a later unequal relation must carry
-exact authorization evidence understood by the reader. The mobile program
-owns root manifests, device grants, separate signing/encryption capabilities,
+**Context:** Mobile is explicitly postponed until the desktop writing,
+provenance, AI-operation, durability, and recovery loops are reliable. The
+desktop schema keeps an extension seam: the current proof requires
+`ownerId === signerPubkey`, while a later unequal relation must carry exact
+authorization evidence understood by the reader. A later mobile program owns
+root manifests, device grants, separate signing/encryption capabilities,
 revocation, recovery epochs, contested offline siblings, native phone storage,
 direct/LAN/hole-punched/circuit-relayed delivery, and encrypted
 store-and-forward fallback. The detailed RFC remains in the project planning
-archive until that program is promoted into repository scope.
+archive until desktop gates are met and that program is separately promoted
+into repository scope.
 
 **Pros:** Preserves mobile note-taking and local-first ownership without moving
 private keys between devices; gives the high-risk trust model an explicit
@@ -189,7 +192,7 @@ proven; the full program adds cryptography, recovery UX, networking, native
 storage, conflict review, and substantial support burden.
 
 **Effort:** XL
-**Priority:** P2 after desktop proof
+**Priority:** P3 after desktop reliability gates
 **Deferred:** 2026-07-17
 **Depends on:** Stable schema-2 desktop events, `press.sqlite3`, purpose-specific
 native capabilities, fixed cross-language conformance corpus, real demand

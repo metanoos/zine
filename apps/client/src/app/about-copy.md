@@ -24,12 +24,21 @@ direction that was abandoned, the phrase repeatedly repaired, the passage a
 writer protected, the source an agent used, or the proposal the writer
 rejected.
 
-The usual substitutes answer different questions. Version history records
-coarse byte changes. Model observability records calls. Final-text detectors
-guess from prose after the fact. A hosted editor may retain more, but asks the
-reviewer to trust the platform holding the history. None joins the artifact,
-the process that changed it, and the exact version later shared or endorsed
-into one portable record.
+Version history is the closest substitute, and the kinship is deliberate:
+Zine is to authorship provenance what Git is to source history. But a commit
+is the wrong resolution for writing. It records that bytes changed between
+two chosen moments; everything between them collapses into one diff, and the
+diff cannot say which voice — person or model — produced each span, what
+context an agent received, or what was tried and rejected along the way. Git
+answers *what changed*. Evaluating AI-assisted writing needs *how it was
+written*.
+
+The other substitutes answer still narrower questions. Model observability
+records calls, not the artifact versions those calls changed. Final-text
+detectors guess from prose after the fact. A hosted editor may retain more,
+but asks the reviewer to trust the platform holding the history. None joins
+the artifact, the process that changed it, and the exact version later shared
+or endorsed into one portable record.
 
 Zine captures signed process evidence at the point of writing. It offers
 evidence, not a verdict: it does not prove that a writer is human, that a
@@ -93,9 +102,9 @@ and keeps it on the home relay. Most Steps remain private working history. A
 folder Step pins one exact recursive frontier; automatic ancestor roll-ups
 stay signed, derived, and beneath the deliberate gesture.
 
-**Publish** makes one exact stepped version reachable for discussion. On the
-wire and in the current implementation this gesture is still named Send until
-the coordinated schema cut.
+**Publish** makes one exact stepped version reachable for discussion. (The
+wire and today's implementation still spell this gesture `Send` until the
+coordinated schema cut.)
 
 **Attest** is an optional, later endorsement of one published version.
 Discussion is common; commitment is rare.
@@ -105,6 +114,12 @@ publishing, and publishing is not endorsement. Forking begins a proposal
 under a new owner's key; merging accepts chosen work into the receiving
 owner's trace. The same seams serve a person revising model output, an agent
 quoting a source, and a collaborator proposing changes across a folder.
+
+Citation is neutral composition. Provenance-aware copy may cite any exact
+stepped source without minting or endorsing it, including a source the writer
+disagrees with. Mint is a separate compound gesture — genesis Step, Publish,
+and same-minter Attest — that creates a Coin and says the passage carries
+salience for the minter.
 
 ## Every writer gets a press
 
@@ -149,11 +164,12 @@ A **coin** is how strangers find each other. When a phrase strikes you as
 worth keeping, you mint it: one deliberate gesture that Steps an immutable,
 single-checkpoint zine under your key, Publishes it, and Attests it. Minting
 claims salience, not authorship or agreement: *these words carry currency for
-me.* When Coins are enabled, Zine indexes published citations to answer one
-question — *which published traces cite these words?* — so two writers who
-share no platform, relay, or peer can surface each other, even when their
-coin bytes differ only in Unicode normalization or whitespace. The same match
-also works, more slowly, through a mutual peer who can read both chains.
+me.* When Coins are enabled, Zine indexes published citations to valid Coins
+to answer one question — *which published traces cite these words?* — so two
+writers who share no platform, relay, or peer can surface each other, even
+when their coin bytes differ only in Unicode normalization or whitespace. The
+same valid-Coin match also works, more slowly, through a mutual peer who can
+read both chains.
 
 The economics are deliberately spam-resistant. A coin everyone holds carries
 no signal, so there is no payoff in squatting the popular phrase; the signal
@@ -165,13 +181,14 @@ If it isn't, swipe left. The vet reads process, not prose: fluent text is
 easy to imitate, while a timestamped revision history is costlier to fake.
 Nothing enters your peer list without that vet and your explicit choice.
 
-Coins are the single user-facing opt-in: enabling them covers minting,
-citation, Send-side indexing, and both mutual-peer and global rendezvous.
-Mint, Cite, mutual-peer matching, and the process vet work today; Send-side
-indexing and the Kademlia routing component for global rendezvous remain
-under implementation, and no public bootstrap network is operated. The
-[Protocol](PROTOCOL.md#rendezvous--vetting) carries the exact mechanics and
-limits.
+Coins are the single user-facing discovery opt-in: enabling them covers Mint,
+valid-Coin Publish-side indexing, and both mutual-peer and global Coin
+rendezvous. Ordinary citation remains available without Coins. Mint and the
+process vet work today. Publish-side indexing is being implemented, mutual-peer
+matching must still be narrowed to valid Coins, the Kademlia routing component
+for global rendezvous remains under implementation, and no public bootstrap
+network is operated. The [Protocol](PROTOCOL.md#rendezvous--vetting) carries
+the exact mechanics and limits.
 
 ## One trace, three readers
 
@@ -188,6 +205,15 @@ product — trace-aware assistance, replay, and portable proof — with no hoste
 account, organization, or managed service. If adoption compounds, it should
 compound the way Git's did: writers first, organizations following the
 writers.
+
+AI-assisted writing is the product center, and the lasting advantage lives at
+the boundaries. Inside a single editor, any platform can eventually log enough
+to imitate trace-aware context. The moment work crosses a boundary — from one
+model provider to another, from writer to reviewer, from this session to a
+postmortem months later — a proprietary log stops traveling, and a signed,
+portable, provider-neutral record is the only context that survives. That is
+why multi-AI correspondence stays a writing workflow inside Zine rather than
+becoming a separate chat product.
 
 Accountable teams are the initial buyer wedge. Organizations letting agents
 edit durable reports, research, policy, or editorial work have an immediate
@@ -636,9 +662,8 @@ trade is always reachability or privacy, never identity.
 A **super-peer** is an always-online relay holding a replica of *your published corpus*.
 It keeps cited traces reachable while your laptop is closed; it is not a
 discovery platform. Any NIP-01+NIP-33 relay suffices. OTS calendar hosting
-remains planned. The Coins package validates Kademlia bootstrap protocol
-compatibility and commits configuration transactionally, but no bootstrap
-network is operated.
+remains planned. Bootstrap configuration for the Coins package's Kademlia
+component is under implementation, and no bootstrap network is operated.
 
 Any NIP-01 relay that also implements parameterized-replaceable handling
 (NIP-33) is sufficient. There is no special relay class. For removal, the
@@ -671,17 +696,17 @@ and same-minter attestation verify. `H` clusters independent mints; it is an
 index coordinate, not another citation type.
 
 **The DHT carries event pointers, not content or private addresses.** The
-integrated Kademlia component answers one question: *which
+Kademlia component is being implemented to answer one question: *which
 published events cite content `H`?* Each value is `{eventId, relayUrl}` for a
 signed carrying node on a stranger-readable relay. A querier fetches and
 verifies the carrying event, its `q`, the Coin target, and the same-minter
 attestation before evaluating the candidate. Private admission details are
-exchanged only after vetting. The routing layer still needs
+exchanged only after vetting. The in-progress implementation still needs
 operator-provided super-peer bootstrap addresses.
 Its current configuration path is transactional: an unusable replacement is
 never left persisted with the prior node stopped.
 
-**The index is bounded and merge-safe.** The native component caps
+**The index is bounded and merge-safe.** The in-progress native component caps
 records at 12 KiB and 64 pointers. It validates remote keys, schemas,
 coordinates, and URLs before storage, keeps a disposable 1,024-record remote
 cache separate from capacity reserved for locally owned coordinates, and never
@@ -692,7 +717,7 @@ first Get and merge valid replicas; stale libp2p auto-publication is disabled.
 
 Two paths can produce a match. In the trust-bounded v1, a mutual peer who can
 read both chains sees the shared valid-Coin citation and brokers an
-introduction. With Coins enabled, the Kademlia path accelerates
+introduction. With Coins enabled, the in-progress Kademlia path accelerates
 non-mutual discovery: publishing a carrying node to a stranger-readable relay
 places its pointer under each verified Coin target's `H`. Every ordinary
 social `q` is inspected in bounded batches rather than a fixed first-N slice;
@@ -703,7 +728,7 @@ relation; Publish controls its reachability, and an indexing failure never
 rolls Publish back.
 
 Relay verification is also bounded because a DHT pointer chooses an untrusted
-host. The native reader requests exact ids, rejects unsolicited and
+host. The in-progress reader requests exact ids, rejects unsolicited and
 oversized events, caps parallelism and total bytes, closes subscriptions and
 late WebSocket handshakes, and obeys caller cancellation plus a hard discovery
 deadline. Only events that still pass signature, citation, and Coin-hash
@@ -773,21 +798,21 @@ hypotheses. Last updated 2026-07-18.
 | Capability | State | How to check |
 |---|---|---|
 | Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke; folder heads carry direct manifests and propagate recursively toward Root |
-| Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, membership transition, hash, lineage, and operation id; client and MCP tests share fixed cross-runtime folder vectors, and the real-relay smoke exercises interrupted and retried recursive checkpoints. Client tests also cover add versus advance, explicit folder/Root Step plumbing, durable retry ids, nested AI context, and Replay roll-up collapse |
+| Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, membership transition, hash, lineage, and operation id; client tests exercise add versus advance, explicit folder/Root Step plumbing, durable retry ids, nested AI context, and Replay roll-up collapse. Fixed cross-runtime folder vectors and explicit crash-boundary real-relay fixtures remain hardening work |
 | Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
 | Step, Publish (wire name Send), Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
-| Passphrase-gated desktop vault sessions with independent Roots, encrypted webview workspaces, relay databases, ACLs, signing keys, and provider secrets | Implemented on desktop; browser remains read-only | Vault lifecycle and encrypted-storage tests, registry recovery tests, key/model store tests, and the Tauri Stronghold shell |
+| Desktop Stronghold storage for signing and provider secrets | Implemented on desktop; browser remains read-only | `secret-store.test.ts`, `secret-migration.test.ts`, key/model store tests, and the Tauri Stronghold shell |
 | Headless MCP press with its own voice key and permanent profile Root | Implemented | Offline stdio smoke proves zero-folder cold start, exact signed-event outbox, raw node reads, and Root/key reuse; isolated real-relay integration flushes a queued event unchanged, preserves optional source forks, and exercises external Publish |
-| Prepared desktop MODEL operations and approval gating | Implemented for direct single-shot gestures; durable for desktop Extend | Canonical selected context, exact prepared identity, explicit approval, cancellation, and stale-result recovery are exercised across the five direct operations. Desktop Extend additionally persists before provider I/O, requires explicit provisional-result review, and recovers idempotent local application through the encrypted native journal. Active directive consumption is fail-closed; the separate agent loop still uses its own transport, and `preparedRequestHash` is not yet stored in Step metadata |
-| Current text plus structured trace context in desktop prompts | Shared deterministic selection and cross-press projection implemented | Desktop and MCP adapters share selection corpora, bounds, cancellation, and projection invariants. Durable context binding in signed Step metadata and scoped memory remain deferred |
-| Shared authoring-syntax kernel and desktop adapters for Extend (continuation) and Settle (revision) | Initial deterministic slice implemented; authority is current-editor-session-only | `packages/trace-context` pins UTF-16 parsing, protected precedence, exact operation clipping, authority failures, directive markers, local excerpts, malformed syntax, and generated 0/100/1,000/10,000-candidate scale fixtures. Settle retains atomic accepted-success cleanup. Plain desktop Extend has durable request/result/application recovery, while active Extend directives fail closed until their deletion plan is part of the private envelope. Persisted authority, promotion, recoverable directive consumption, other operations, and MCP authoring-syntax enforcement remain deferred |
+| Prepared desktop MODEL operations and approval gating | Implemented for direct single-shot gestures; not yet enforced on every live model call | `prepared-operation.test.ts`, `context-snapshot.test.ts`, `model-operation-executor.test.ts`, and `llm-prepared.test.ts`; the separate agent loop still uses its own transport, and `preparedRequestHash` is not yet stored in Step metadata |
+| Current text plus structured trace context in desktop prompts | Implemented as a client-local compatibility baseline | Direct operations gather current file/folder text and a chronological process log through `context-block.ts`, `context-snapshot.ts`, and `prepared-operation.ts`; there is no shared task-specific selector, scoped memory, cross-press fixture contract, or durable context binding yet |
+| Shared authoring-syntax kernel and a desktop adapter for the Extend (continuation) and Settle (revision) operations | Initial deterministic slice implemented; authority is current-editor-session-only | `packages/trace-context` pins UTF-16 parsing, protected precedence, exact operation clipping, authority failures, directive markers, local excerpts, malformed syntax, and generated 0/100/1,000/10,000-candidate scale fixtures. Desktop tests cover manual versus paste/drop/MODEL/undo/reload authority, exact prepared identity, protected-output rejection, atomic accepted-success cleanup, and inert legacy behavior. Persisted authority, promotion, durable consumption receipts, crash recovery, other operations, and MCP parity remain deferred |
 | Per-delta human/model attribution | Implemented | Attribution regression suite; trust status remains asserted unless corroborated through a signed seam |
 | Fork and merge | Implemented for owned recursive destinations and current top-level foreign flows | Nested Scan/adoption/fork tests plus merge and ownership tests; recursive fork-on-write through an already-foreign folder remains deferred |
-| Valid-Coin mutual-peer co-citation and process vet | Implemented and tested | Signed TraceHeads are author-bound and resolved through verified chains; only cryptographically completed Coins survive intersection. `vet.ts`, `vet-walker.ts`, and their tests cover the process vet |
+| Mutual-peer co-citation and process vet | Implemented with a Coin-eligibility gap | `co-citation.ts` currently intersects ordinary social `q` targets; the revised protocol requires valid-Coin verification before a match. `vet.ts`, `vet-walker.ts`, and their tests cover the process vet |
 | Exact and fuzzy quote matching | Implemented with uncalibrated defaults | SHA-256 coordinate plus MinHash/LSH client layer |
 | Raw-file Reify with optional trace bundle and report | Implemented on desktop | `reify.ts` materializes signed snapshots and keeps raw events under `.zine/` |
-| Coins package: Publish-side indexing and Kademlia rendezvous | Integrated and exercised inside the single Coins discovery opt-in | Ordinary Cite is core composition outside the opt-in. Native tests cover bounded records, strict peer compatibility, deterministic replica ranking, reserved owned capacity, merge-before-republish, cancellation, listener readiness, and persistent owned pointers. Client tests cover valid-Coin gating, hostile-relay verification, the durable outbox, transactional configuration, recovery, and privacy fences. There is no operated bootstrap network, eight-node deployment result, or density evidence |
+| Coins package: Publish-side indexing and Kademlia rendezvous | Under implementation inside the single Coins discovery opt-in | Mint and the process vet are exercised separately above; ordinary Cite is a core composition gesture outside the opt-in. Attestation-gated Publish-side indexing is being implemented, and mutual-peer matching still needs the valid-Coin eligibility filter. Native tests cover bounded records, reserved owned capacity, full-attempt peer selection, merge-before-republish, listener readiness, and persistent owned pointers; connection limits are enforced by the native runtime but do not yet have a dedicated regression. Client tests cover batched valid-Coin `q` indexing, bounded hostile-relay verification, the durable outbox, and transactional configuration. A two-node test exercises the wire, but the integrated package is not complete and there is no operated bootstrap network, eight-node deployment result, or density evidence |
 | No-install public verifier | Not implemented | On the [roadmap](ROADMAP.md) |
 | Managed organization service | Not implemented | Hosted relay code exists; no paid service or SLA is claimed |
 
@@ -795,12 +820,7 @@ Desktop vault caveat: Stronghold's password and snapshot KDFs are
 intentionally expensive. A fully unoptimized development build can appear to
 stall for minutes; the current development profile optimizes only the
 cryptographic hot paths. Release KDF parameters and the application security
-contract are unchanged. New vaults use independent KDF salts, authenticated
-encrypted webview state, relay databases, and ACLs. Relay databases are
-physically partitioned and bound only after unlock, but canonical signed
-protocol events are not additionally encrypted by the vault passphrase at
-rest. The adopted legacy vault keeps its existing Stronghold and `~/.tracer`
-paths so its passphrase and relay history continue to work.
+contract are unchanged.
 
 Reify writes each chosen Step's authoritative `snapshot` to its ordinary file
 path. It never substitutes the live unstepped editor buffer and never embeds
@@ -913,8 +933,7 @@ The normative trust posture is in
   corpus affinity after controlling for topic and popularity.
 - Longitudinal coherence or conditional-compression features adding calibrated
   vetting value without being mistaken for proof of humanity or identity.
-- Organic co-citation density sufficient to justify operating or expanding
-  global rendezvous.
+- Organic co-citation density sufficient to justify global rendezvous work.
 - Clean-machine release installation on every supported desktop platform.
 
 These gaps are roadmap gates, not details to hide. A claim moves off this
@@ -932,8 +951,8 @@ The execution posture is therefore conviction with gates. Build the complete
 trace-aware loop, keep text-only and bounded-history comparisons inside the
 architecture, and promote claims only when measured outcomes support them.
 Individual writers remain the first audience; accountable teams remain the
-initial paid wedge. Managed services and operation or expansion of a global
-network remain downstream of actual retained use.
+initial paid wedge. Managed services and global network work remain downstream
+of actual retained use.
 
 AI-assisted writing remains the product center. The defensible slice is the
 portable boundary crossing that proprietary single-editor logs cannot provide:
@@ -968,7 +987,7 @@ supported operation breadth        optional paid team layer
 scoped longitudinal memory, only if independently beneficial
           |
           v
-calibration or operated network layers, only when real density requires them
+calibration or network layers, only when real density requires them
 ```
 
 ## Current foundation
@@ -983,8 +1002,7 @@ Already built:
 - distinct human, model, and agent voice keys with per-delta attribution;
 - local and hosted relay implementations, with a remaining hosted ACL gap;
 - raw-file Reify with an optional signed-event bundle and report;
-- passphrase-gated desktop vault sessions with independent Roots, encrypted
-  webview state, relay databases, ACLs, signing keys, and provider secrets;
+- Stronghold-backed desktop signing and provider secrets;
 - verified recursive folder/Root checkpoint causes, distinct child `advance`,
   durable operation grouping, explicit folder/Root Step, and derived Replay
   collapse;
@@ -995,22 +1013,17 @@ Already built:
 - a desktop adapter for the Extend (continuation) and Settle (revision)
   operations with exact current-session manual-origin authority,
   protected-output validation, and accepted-success cleanup;
-- deterministic task-specific trace selection, byte budgeting, process
-  projection, cancellation, and fixed desktop/MCP parity corpora;
-- canonical selected context bound into prepared desktop requests;
-- fixed cross-runtime folder-chain vectors and interrupted/retried recursive
-  checkpoint recovery exercised against a real relay;
-- the single Coins discovery opt-in with valid-Coin co-citation, durable
-  Publish-side indexing, hostile-relay verification, and native Kademlia
-  routing; no bootstrap network is operated;
 - a read-only trace-context Inspector presentation for prepared operations;
 - a preregistered writing-outcome study and operational scoring rubric; and
 - a preregistered narration study showing a narrow process-description effect.
 
-Not yet built as one system: Inspector exclusions/corrections/promotion,
+Not yet built as one system: task-specific evidence selection and rendering,
+cross-press manifest parity, Inspector exclusions/corrections/promotion,
 persisted directive authority and durable consumption receipts, scoped memory,
-durable result-to-context binding in signed Step metadata, writing-outcome
-evaluation, or complete desktop/MCP operation coverage.
+durable result-to-context binding, writing-outcome evaluation, or complete
+desktop/MCP operation coverage. Fixed cross-runtime folder vectors and explicit
+crash-boundary real-relay recovery fixtures remain hardening work for the
+recursive checkpoint cut.
 
 ## Phase 0: declare and preregister
 
@@ -1035,22 +1048,21 @@ describe the same claim without presenting conviction as evidence.
 
 ## Phase 1: shared deterministic context runtime
 
-This phase is in progress. The authoring-syntax kernel, deterministic evidence
-selector and renderer, compatibility baseline, cancellation and quota bounds,
-golden cases, scale corpus, and desktop/MCP process-projection parity exist.
-Correction/preference stores, complete Inspector contracts, and a reviewed
-private-store capability do not.
+This phase is in progress. The authoring-syntax kernel, compatibility baseline,
+golden cases, and scale corpus exist; the task-specific evidence selector,
+rendered manifest contract, correction/preference stores, cancellation and
+quota boundaries, and desktop/MCP parity do not.
 
-The landed recursive-zine and shared-runtime floor now includes:
+Harden the landed recursive-zine cut while building the shared runtime:
 
-- fixed cross-runtime folder-chain vectors in the conformance corpus;
-- interrupted and retried recursive checkpoints against a real relay;
+- add fixed cross-runtime folder-chain vectors to the conformance corpus;
+- exercise interrupted and retried recursive checkpoints against a real relay;
 - keep desktop and MCP writers on the same operation-id and `advance` rules;
   and
 - keep derived roll-ups inspectable even when Replay groups them beneath their
   originating gesture.
 
-Continue the non-normative package used by every press and provider adapter:
+Build a non-normative package used by every press and provider adapter:
 
 - closed operation, evidence, correction, preference, directive, error, and
   Inspector contracts;
@@ -1068,22 +1080,18 @@ The protocol package must not import the context package. Derived evidence,
 preferences, and selector output are product interpretation, never signed
 protocol truth.
 
-The recursive checkpoint and deterministic cross-press projection criteria now
-pass protocol, parity, and real-relay fixtures, including nil, empty, malformed,
-oversized, Unicode, cancelled, and invalid-trace cases. Phase 1 remains open
-until the correction/preference, Inspector, and private-store contracts above
-are closed without weakening those boundaries.
+Phase 1 succeeds when recursive checkpoints pass protocol and real-relay
+fixtures, and desktop and MCP readers produce identical selected claims and
+rendered bytes from the same context fixtures, including nil, empty, malformed,
+oversized, Unicode, cancelled, and invalid-trace cases.
 
 ## Phase 2: one complete desktop vertical slice
 
-This phase now has one durable desktop Extend path: Prompt Inspector freezes the
-selected signed-chain boundary, the encrypted native journal persists before
-provider I/O, a private strip presents provisional results, and acceptance
-writes an idempotent local crash-pad receipt before one editor transaction.
-Active directive consumption remains fail-closed until the private envelope
-carries its exact deletion plan. Exclusion, correction, explicit promotion,
-persisted authority, signed Step linkage, and Settle lifecycle reuse are still
-required before the broader vertical slice is complete.
+This phase has an initial read-only dogfood slice: Extend and Settle prepare
+through the shared syntax kernel, and Prompt Inspector can present the frozen
+boundary. Exclusion, correction, explicit promotion, persisted authority,
+durable receipts, and crash recovery are still required before the vertical
+slice is complete.
 
 Integrate Extend and Settle first because continuation and revision expose
 different ways trace may help. Preserve today's Stir behavior through the new
@@ -1187,9 +1195,8 @@ humanness.
 
 Coins remain one user-facing discovery opt-in covering Mint, valid-Coin
 indexing, and rendezvous; ordinary citation remains part of core composition.
-The core package, including its under-the-hood Kademlia component, is integrated
-and exercised. Continue its security hardening without creating a second
-Kademlia product surface.
+Complete and harden that package, including its under-the-hood Kademlia
+component, without creating a second Kademlia product surface.
 Operating or expanding global rendezvous remains gated until real published
 citations produce organic co-citation matches, users ask to meet unknown
 co-citers, and the value outweighs privacy and abuse costs.
@@ -1292,7 +1299,7 @@ workflow, and calibrated interpretation around commodity storage.
 | A super-peer keeps a published corpus reachable | Managed remote, backup, retention policy, and SLA | Hosted relay code exists; no paid service or SLA is claimed |
 | Self-hosted OTS calendar is the target, not current behavior | Managed anchoring with declared cadence and proof availability | Current prototype can use a public calendar |
 | Peer-list portability across devices is unsettled | Organization key and ACL control plane | Not implemented |
-| The Coins package needs operator-provided rendezvous super-peers | Operated Coins bootstrap | Bounded storage, hostile-relay verification, durable indexing, and transactional Kademlia configuration are integrated and exercised inside Coins; no network is operated and no deployment or density evidence exists |
+| The Coins package needs operator-provided rendezvous super-peers | Operated Coins bootstrap | The Kademlia component has bounded storage, verification, and transactional configuration slices but remains under implementation inside Coins; no network is operated |
 | Verification is bounded and reader-side | Public verifier and exportable evidence report | Local bundle/report implemented; public verifier is not |
 | Timing and graph models need real calibration | Opt-in research corpus and calibrated policy models | Defaults exist; calibration does not |
 | Press-signed model-call records are operator assertions | Independent witness: transparency-log inclusion proofs and attested open-weight inference | Not implemented; the operation records reserve the countersignature seam |

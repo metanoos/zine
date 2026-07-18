@@ -164,16 +164,17 @@ behind it — and decide whether the resonance is real. If it isn't, swipe
 left; nothing enters your `peers.json` without the process-evidence vet and
 your explicit choice.
 
-Mint, ordinary Cite, valid-Coin mutual-peer matching, and process vetting are
-implemented and tested. Publish-side indexing and the Kademlia routing
-component are integrated and exercised as part of the same Coins discovery
-package; Kademlia is not a separate opt-in. The code filters bounded records,
+Mint, Cite, mutual-peer matching, and process vetting are implemented and
+tested, but mutual-peer matching still accepts ordinary `q` targets and must
+be narrowed to valid Coins. Publish-side indexing and the Kademlia routing
+component are being implemented as part of the same Coins package; Kademlia
+is not a separate opt-in. The current code already filters bounded records,
 reserves owned capacity, merges replicas before publication and republish,
-verifies hostile relays under deadlines and cancellation, inspects every
-ordinary `q` citation while indexing only valid Coins, and persists incomplete
-indexing in a durable outbox. It still needs operator-provided super-peers and
-real deployment evidence; this repository does not claim an operated public
-network or meaningful citation density. The [transport](protocol/transport.md) and
+verifies hostile relays under deadlines and cancellation, batches valid-Coin
+`q` citations, and persists incomplete indexing in a durable outbox. It still
+needs complete package integration and operator-provided super-peers; this
+repository does not claim an operated public network or meaningful citation
+density. The [transport](protocol/transport.md) and
 [rendezvous](protocol/rendezvous.md) specifications carry the exact rules.
 
 ## What exists today
@@ -187,13 +188,13 @@ network or meaningful citation density. The [transport](protocol/transport.md) a
 | Step, Publish, Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
 | Recursive folder checkpoint propagation | Implemented with verified checkpoint causes, distinct `advance` deltas, explicit folder/Root Step, durable operation ids, and collapsed derived roll-ups in Replay |
 | Top-level foreign-file fork-on-write | Implemented; recursive nested-folder fork-on-write is deferred |
-| Valid-Coin mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
+| Mutual-peer co-citation and process-evidence vet | Implemented and tested, but the matcher still accepts ordinary `q` targets and must be narrowed to valid Coins; calibration needs real corpora |
 | Raw-file Reify export with an optional signed-event bundle | Implemented on desktop |
-| Multiple desktop vaults with independent passphrases, Roots, encrypted webview state, Stronghold secrets, relay databases, ACLs, and KDF salts | Implemented on desktop; the browser remains read-only |
-| Shared trace-context runtime | Deterministic task-specific selection, byte budgets, process projection, and desktop/MCP parity are implemented with fixed corpora; `[[…]]` / `((…))` authoring-syntax enforcement remains an initial desktop Extend/Settle slice |
-| Prepared desktop MODEL operations with explicit approval | All five direct single-shot gestures use canonical selected trace context and stale-safe approval. Desktop Extend now persists its exact approved request before provider I/O, presents provisional results for explicit local review, and recovers idempotent crash-pad application through the encrypted native journal. Active directive consumption is fail-closed until the private envelope carries its deletion plan; signed Step linkage and the separate agent loop remain deferred |
+| Stronghold storage for signing and provider secrets | Implemented on desktop; the browser remains read-only |
+| Shared trace-context authoring-syntax kernel | Initial deterministic `[[…]]` / `((…))` scanner and compiler implemented with golden and generated scale corpora; task-specific evidence selection and cross-press rendering are not yet implemented |
+| Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures; Extend (continuation) and Settle (revision) now use the shared syntax kernel, exact current-session authority spans, protected-output validation, and accepted-success directive cleanup, while the other operations, durable receipts, and context binding remain deferred |
 | Hosted relay | Implemented; an operator ACL equivalent to the local relay policy remains a gap |
-| Coins package: Mint, Coin indexing, and rendezvous | Integrated and exercised as one user-facing discovery opt-in. Ordinary Cite remains core composition outside it. No bootstrap network is operated, and deployment/density evidence remains absent |
+| Coins package: Mint, Coin indexing, and rendezvous | Under implementation as one user-facing discovery opt-in. Mint and the process vet work; ordinary Cite is a core composition gesture outside the opt-in. Attestation-gated Publish-side indexing is being implemented, mutual-peer matching still needs the valid-Coin eligibility filter, the Kademlia routing component is incomplete, and no bootstrap network is operated |
 | Managed remote, organization control plane, and no-install public verifier | Commercial product hypotheses, not shipping services |
 
 The complete evidence and limitation record lives in
@@ -304,17 +305,10 @@ enough for provenance, storage, or networking changes.
 
 ```sh
 npm run doctor         # prerequisites and local artifact diagnostics
-npm run check          # dev scripts, types, tests, and Node/Go coverage floors
+npm run check          # dev scripts, client types/tests, MCP, relay, and Rust
 npm run verify         # check + client build + isolated real-relay smoke
 npm run verify:relay   # Step/Publish/Attest/Mint/Cite against temporary relays
 ```
-
-`check` enforces conservative coverage floors for the TypeScript modules loaded
-by each suite and for both Go relay packages. These floors prevent silent
-regression from the current baseline; they are not a claim that every source
-file is loaded or that browser interactions have end-to-end coverage. Package
-directories retain plain `npm test` commands for a quieter local loop and expose
-the enforced run as `npm run test:coverage`.
 
 `verify:relay` uses temporary ACL-protected relay databases and random ports.
 It does not touch `~/.tracer`, checked-in `data/`, or a running desktop

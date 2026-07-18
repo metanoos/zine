@@ -9,8 +9,8 @@ The execution posture is therefore conviction with gates. Build the complete
 trace-aware loop, keep text-only and bounded-history comparisons inside the
 architecture, and promote claims only when measured outcomes support them.
 Individual writers remain the first audience; accountable teams remain the
-initial paid wedge. Managed services and operation or expansion of a global
-network remain downstream of actual retained use.
+initial paid wedge. Managed services and global network work remain downstream
+of actual retained use.
 
 AI-assisted writing remains the product center. The defensible slice is the
 portable boundary crossing that proprietary single-editor logs cannot provide:
@@ -45,7 +45,7 @@ supported operation breadth        optional paid team layer
 scoped longitudinal memory, only if independently beneficial
           |
           v
-calibration or operated network layers, only when real density requires them
+calibration or network layers, only when real density requires them
 ```
 
 ## Current foundation
@@ -60,8 +60,7 @@ Already built:
 - distinct human, model, and agent voice keys with per-delta attribution;
 - local and hosted relay implementations, with a remaining hosted ACL gap;
 - raw-file Reify with an optional signed-event bundle and report;
-- passphrase-gated desktop vault sessions with independent Roots, encrypted
-  webview state, relay databases, ACLs, signing keys, and provider secrets;
+- Stronghold-backed desktop signing and provider secrets;
 - verified recursive folder/Root checkpoint causes, distinct child `advance`,
   durable operation grouping, explicit folder/Root Step, and derived Replay
   collapse;
@@ -72,22 +71,17 @@ Already built:
 - a desktop adapter for the Extend (continuation) and Settle (revision)
   operations with exact current-session manual-origin authority,
   protected-output validation, and accepted-success cleanup;
-- deterministic task-specific trace selection, byte budgeting, process
-  projection, cancellation, and fixed desktop/MCP parity corpora;
-- canonical selected context bound into prepared desktop requests;
-- fixed cross-runtime folder-chain vectors and interrupted/retried recursive
-  checkpoint recovery exercised against a real relay;
-- the single Coins discovery opt-in with valid-Coin co-citation, durable
-  Publish-side indexing, hostile-relay verification, and native Kademlia
-  routing; no bootstrap network is operated;
 - a read-only trace-context Inspector presentation for prepared operations;
 - a preregistered writing-outcome study and operational scoring rubric; and
 - a preregistered narration study showing a narrow process-description effect.
 
-Not yet built as one system: Inspector exclusions/corrections/promotion,
+Not yet built as one system: task-specific evidence selection and rendering,
+cross-press manifest parity, Inspector exclusions/corrections/promotion,
 persisted directive authority and durable consumption receipts, scoped memory,
-durable result-to-context binding in signed Step metadata, writing-outcome
-evaluation, or complete desktop/MCP operation coverage.
+durable result-to-context binding, writing-outcome evaluation, or complete
+desktop/MCP operation coverage. Fixed cross-runtime folder vectors and explicit
+crash-boundary real-relay recovery fixtures remain hardening work for the
+recursive checkpoint cut.
 
 ## Phase 0: declare and preregister
 
@@ -112,22 +106,21 @@ describe the same claim without presenting conviction as evidence.
 
 ## Phase 1: shared deterministic context runtime
 
-This phase is in progress. The authoring-syntax kernel, deterministic evidence
-selector and renderer, compatibility baseline, cancellation and quota bounds,
-golden cases, scale corpus, and desktop/MCP process-projection parity exist.
-Correction/preference stores, complete Inspector contracts, and a reviewed
-private-store capability do not.
+This phase is in progress. The authoring-syntax kernel, compatibility baseline,
+golden cases, and scale corpus exist; the task-specific evidence selector,
+rendered manifest contract, correction/preference stores, cancellation and
+quota boundaries, and desktop/MCP parity do not.
 
-The landed recursive-zine and shared-runtime floor now includes:
+Harden the landed recursive-zine cut while building the shared runtime:
 
-- fixed cross-runtime folder-chain vectors in the conformance corpus;
-- interrupted and retried recursive checkpoints against a real relay;
+- add fixed cross-runtime folder-chain vectors to the conformance corpus;
+- exercise interrupted and retried recursive checkpoints against a real relay;
 - keep desktop and MCP writers on the same operation-id and `advance` rules;
   and
 - keep derived roll-ups inspectable even when Replay groups them beneath their
   originating gesture.
 
-Continue the non-normative package used by every press and provider adapter:
+Build a non-normative package used by every press and provider adapter:
 
 - closed operation, evidence, correction, preference, directive, error, and
   Inspector contracts;
@@ -145,22 +138,18 @@ The protocol package must not import the context package. Derived evidence,
 preferences, and selector output are product interpretation, never signed
 protocol truth.
 
-The recursive checkpoint and deterministic cross-press projection criteria now
-pass protocol, parity, and real-relay fixtures, including nil, empty, malformed,
-oversized, Unicode, cancelled, and invalid-trace cases. Phase 1 remains open
-until the correction/preference, Inspector, and private-store contracts above
-are closed without weakening those boundaries.
+Phase 1 succeeds when recursive checkpoints pass protocol and real-relay
+fixtures, and desktop and MCP readers produce identical selected claims and
+rendered bytes from the same context fixtures, including nil, empty, malformed,
+oversized, Unicode, cancelled, and invalid-trace cases.
 
 ## Phase 2: one complete desktop vertical slice
 
-This phase now has one durable desktop Extend path: Prompt Inspector freezes the
-selected signed-chain boundary, the encrypted native journal persists before
-provider I/O, a private strip presents provisional results, and acceptance
-writes an idempotent local crash-pad receipt before one editor transaction.
-Active directive consumption remains fail-closed until the private envelope
-carries its exact deletion plan. Exclusion, correction, explicit promotion,
-persisted authority, signed Step linkage, and Settle lifecycle reuse are still
-required before the broader vertical slice is complete.
+This phase has an initial read-only dogfood slice: Extend and Settle prepare
+through the shared syntax kernel, and Prompt Inspector can present the frozen
+boundary. Exclusion, correction, explicit promotion, persisted authority,
+durable receipts, and crash recovery are still required before the vertical
+slice is complete.
 
 Integrate Extend and Settle first because continuation and revision expose
 different ways trace may help. Preserve today's Stir behavior through the new
@@ -264,9 +253,8 @@ humanness.
 
 Coins remain one user-facing discovery opt-in covering Mint, valid-Coin
 indexing, and rendezvous; ordinary citation remains part of core composition.
-The core package, including its under-the-hood Kademlia component, is integrated
-and exercised. Continue its security hardening without creating a second
-Kademlia product surface.
+Complete and harden that package, including its under-the-hood Kademlia
+component, without creating a second Kademlia product surface.
 Operating or expanding global rendezvous remains gated until real published
 citations produce organic co-citation matches, users ask to meet unknown
 co-citers, and the value outweighs privacy and abuse costs.
