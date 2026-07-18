@@ -9,6 +9,7 @@ import type { PreparedOperation, PreparedTargetRevision } from "./prepared-opera
 const encoder = new TextEncoder();
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
+const DIAGNOSTIC_REF_PATTERN = /^diag:[0-9a-f]{64}$/;
 
 export const DESKTOP_OPERATION_ENVELOPE_VERSION = 1;
 export const DESKTOP_OPERATION_MAX_ENVELOPE_BYTES = 2 * 1_024 * 1_024;
@@ -51,7 +52,7 @@ export type OperationFaultCodeV1 =
   | "TARGET_STALE"
   | "OPERATOR_CANCELLED"
   | "DISPATCH_OUTCOME_UNKNOWN"
-  | "PRIVATE_PAYLOAD_EXPIRED";
+  | "PRIVATE_ENVELOPE_EXPIRED";
 
 export type OperationFaultStageV1 =
   | "prepare"
@@ -108,6 +109,12 @@ export interface DesktopSelectedContextV1 {
   /** Exact private rendered bytes selected for this request. */
   renderedContext: string;
   renderedContextSha256: string;
+  /** Exact UTF-16 locus occupied by `renderedContext` in the prepared messages. */
+  placement: {
+    messageIndex: number;
+    fromUtf16: number;
+    toUtf16: number;
+  };
 }
 
 export interface DesktopPrivateRetentionV1 {
@@ -116,7 +123,7 @@ export interface DesktopPrivateRetentionV1 {
   startedAtMs: number;
   deleteByMs: number;
   /** Privacy deadline wins even if an operation remains incomplete. */
-  deadlineBehavior: "delete-exact-payloads-keep-hashes";
+  deadlineBehavior: "delete-entire-private-envelope";
   deleteAfterTerminal: true;
 }
 
@@ -171,6 +178,8 @@ export type DesktopOperationTransitionTypeV1 =
 export interface AppliedOperationTransitionV1 {
   transitionId: string;
   transitionType: DesktopOperationTransitionTypeV1;
+  fromStatus: DesktopOperationStatusV1;
+  toStatus: DesktopOperationStatusV1;
   actionSha256: string;
   appliedAtMs: number;
 }
@@ -205,6 +214,7 @@ export interface CreateDesktopOperationEnvelopeV1Input {
     manifest: SelectedTraceContextManifestV1;
     manifestSha256: string;
     renderedContext: string;
+    placement: DesktopSelectedContextV1["placement"];
   };
   maxOutputTokens: number;
   createdAtMs: number;
@@ -224,6 +234,7 @@ export function createDesktopOperationEnvelopeV1(
   requireId(input.operationId, "operationId");
   requireId(input.attemptId, "attemptId");
   requireTimestamp(input.createdAtMs, "createdAtMs");
+  if (input.prepared.version !== 1) fail("prepared operation version is unsupported");
   if (input.prepared.operation !== "extend") {
     fail("the first durable desktop contract supports Extend only");
   }
@@ -237,11 +248,16 @@ export function createDesktopOperationEnvelopeV1(
   if (!Number.isSafeInteger(input.maxOutputTokens) || input.maxOutputTokens <= 0) {
     fail("maxOutputTokens must be a positive safe integer");
   }
-  requireExtendRange(input.prepared.operationInputs, input.selectedContext.manifest.operation.target.currentText);
   validateSelectedContext(input.prepared, input.selectedContext);
-  if (!input.prepared.messages.some((message) => message.content.includes(input.selectedContext.renderedContext))) {
-    fail("exact selected context is absent from the prepared request messages");
-  }
+  validateExtendOperationInputs(
+    input.prepared.operationInputs,
+    input.selectedContext.manifest.operation.target.currentText,
+  );
+  validateSelectedContextPlacement(
+    input.prepared.messages,
+    input.selectedContext.renderedContext,
+    input.selectedContext.placement,
+  );
 
   const provider: DesktopProviderIdentityV1 = {
     version: 1,
@@ -295,6 +311,7 @@ export function createDesktopOperationEnvelopeV1(
       manifestSha256: input.selectedContext.manifestSha256,
       renderedContext: input.selectedContext.renderedContext,
       renderedContextSha256,
+      placement: { ...input.selectedContext.placement },
     },
     lifecycle: {
       status: "prepared",
@@ -310,7 +327,7 @@ export function createDesktopOperationEnvelopeV1(
       classification: "vault-local-private",
       startedAtMs: input.createdAtMs,
       deleteByMs: input.createdAtMs + retainForMs,
-      deadlineBehavior: "delete-exact-payloads-keep-hashes",
+      deadlineBehavior: "delete-entire-private-envelope",
       deleteAfterTerminal: true,
     },
     appliedTransitions: [],
@@ -363,9 +380,13 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   ], "attempt");
   requireId(attempt.attemptId, "attempt.attemptId");
   if (attempt.retryOfAttemptId !== null) requireId(attempt.retryOfAttemptId, "attempt.retryOfAttemptId");
+  if (attempt.retryOfAttemptId === attempt.attemptId) fail("attempt cannot retry itself");
   requireTimestamp(attempt.createdAtMs, "attempt.createdAtMs");
   if (attempt.possibleDuplicateAcknowledgedAtMs !== null) {
     requireTimestamp(attempt.possibleDuplicateAcknowledgedAtMs, "attempt.possibleDuplicateAcknowledgedAtMs");
+  }
+  if (attempt.retryOfAttemptId === null && attempt.possibleDuplicateAcknowledgedAtMs !== null) {
+    fail("an initial attempt cannot acknowledge a possible duplicate");
   }
 
   const prepared = requireRecord(envelope.prepared, "prepared");
@@ -391,9 +412,6 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   }
   const target = requireTargetRevision(prepared.targetRevision, "prepared.targetRevision");
   const operationInputs = requireRecord(prepared.operationInputs, "prepared.operationInputs");
-  requireExactKeys(operationInputs, [
-    "seed", "hasSelection", "rangeFrom", "rangeTo", "sourceFrom", "sourceTo",
-  ], "prepared.operationInputs");
 
   const provider = requireRecord(prepared.provider, "prepared.provider");
   requireExactKeys(provider, [
@@ -413,7 +431,7 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
 
   const selected = requireRecord(envelope.selectedContext, "selectedContext");
   requireExactKeys(selected, [
-    "version", "manifest", "manifestSha256", "renderedContext", "renderedContextSha256",
+    "version", "manifest", "manifestSha256", "renderedContext", "renderedContextSha256", "placement",
   ], "selectedContext");
   if (selected.version !== 1) fail("selectedContext version is unsupported");
   requireHash(selected.manifestSha256, "selectedContext.manifestSha256");
@@ -437,6 +455,7 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   }
   const manifestOperation = requireRecord(manifest.operation, "selectedContext.manifest.operation");
   if (manifestOperation.operation !== "extend") fail("selected context is not for Extend");
+  validateSelectedOperationRange(manifestOperation.range, operationInputs);
   const manifestTarget = requireRecord(manifestOperation.target, "selectedContext.manifest.operation.target");
   const manifestHashes = requireRecord(manifest.hashes, "selectedContext.manifest.hashes");
   requireHash(manifestHashes.frozenInputsSha256, "selectedContext.manifest.hashes.frozenInputsSha256");
@@ -455,12 +474,16 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   ) {
     fail("selected context target does not match the prepared target");
   }
-  if (!(prepared.messages as Array<Record<string, unknown>>).some(
-    (message) => (message.content as string).includes(selected.renderedContext as string),
-  )) {
-    fail("exact selected context is absent from the prepared request messages");
+  validateSelectedContextPlacement(
+    prepared.messages as Array<{ role: ChatMessage["role"]; content: string }>,
+    selected.renderedContext as string,
+    selected.placement,
+  );
+  const manifestCurrentText = requireText(manifestTarget.currentText, "manifest target currentText");
+  if (contentFingerprint(manifestCurrentText) !== target.contentHash) {
+    fail("selected current text does not match the prepared target content hash");
   }
-  requireExtendRange(operationInputs, requireText(manifestTarget.currentText, "manifest target currentText"));
+  validateExtendOperationInputs(operationInputs, manifestCurrentText);
 
   const lifecycle = requireRecord(envelope.lifecycle, "lifecycle");
   requireExactKeys(lifecycle, ["status", "executionCertainty", "retryPolicy"], "lifecycle");
@@ -492,7 +515,7 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   if (
     retention.version !== 1
     || retention.classification !== "vault-local-private"
-    || retention.deadlineBehavior !== "delete-exact-payloads-keep-hashes"
+    || retention.deadlineBehavior !== "delete-entire-private-envelope"
     || retention.deleteAfterTerminal !== true
   ) {
     fail("retention policy is unsupported");
@@ -508,11 +531,13 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   if (!Array.isArray(envelope.appliedTransitions)) fail("appliedTransitions must be an array");
   if (envelope.appliedTransitions.length > DESKTOP_OPERATION_MAX_TRANSITIONS) fail("too many applied transitions");
   const transitionIds = new Set<string>();
+  let receiptStatus: DesktopOperationStatusV1 = "prepared";
+  let receiptTime = attempt.createdAtMs as number;
   for (const [index, raw] of envelope.appliedTransitions.entries()) {
     const transition = requireRecord(raw, `appliedTransitions[${index}]`);
     requireExactKeys(
       transition,
-      ["transitionId", "transitionType", "actionSha256", "appliedAtMs"],
+      ["transitionId", "transitionType", "fromStatus", "toStatus", "actionSha256", "appliedAtMs"],
       `appliedTransitions[${index}]`,
     );
     const id = requireId(transition.transitionId, `appliedTransitions[${index}].transitionId`);
@@ -521,10 +546,30 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
     if (!TRANSITION_TYPES.has(transition.transitionType as DesktopOperationTransitionTypeV1)) {
       fail(`appliedTransitions[${index}].transitionType is unsupported`);
     }
+    const fromStatus = requireStatus(transition.fromStatus);
+    const toStatus = requireStatus(transition.toStatus);
+    if (fromStatus !== receiptStatus) {
+      fail(`appliedTransitions[${index}] does not continue from ${receiptStatus}`);
+    }
+    const expectedToStatus = transitionTargetStatus(
+      transition.transitionType as DesktopOperationTransitionTypeV1,
+      fromStatus,
+    );
+    if (toStatus !== expectedToStatus) {
+      fail(`appliedTransitions[${index}] must transition to ${expectedToStatus}`);
+    }
     requireHash(transition.actionSha256, `appliedTransitions[${index}].actionSha256`);
-    requireTimestamp(transition.appliedAtMs, `appliedTransitions[${index}].appliedAtMs`);
+    const appliedAtMs = requireTimestamp(
+      transition.appliedAtMs,
+      `appliedTransitions[${index}].appliedAtMs`,
+    );
+    if (appliedAtMs < receiptTime) fail("applied transition times must be monotonic");
+    receiptStatus = toStatus;
+    receiptTime = appliedAtMs;
   }
-  requireTimestamp(envelope.updatedAtMs, "updatedAtMs");
+  const updatedAtMs = requireTimestamp(envelope.updatedAtMs, "updatedAtMs");
+  if (receiptStatus !== status) fail("applied transition chain does not reach the lifecycle status");
+  if (updatedAtMs !== receiptTime) fail("updatedAtMs does not match the applied transition chain");
   canonicalJsonV1(envelope);
   const size = encoder.encode(canonicalJsonV1(envelope)).length;
   if (size > DESKTOP_OPERATION_MAX_ENVELOPE_BYTES) fail("envelope exceeds its byte limit");
@@ -537,7 +582,7 @@ export function validateOperationFaultV1(value: unknown): asserts value is Opera
   }
   if (!FAULT_STAGES.has(fault.stage as OperationFaultStageV1)) fail("fault stage is unsupported");
   requireTimestamp(fault.observedAtMs, "fault.observedAtMs");
-  if (fault.diagnosticRef !== undefined) requireId(fault.diagnosticRef, "fault.diagnosticRef");
+  if (fault.diagnosticRef !== undefined) requireDiagnosticRef(fault.diagnosticRef);
   const allowed = new Set(["version", "code", "stage", "observedAtMs", "diagnosticRef"]);
   for (const key of Object.keys(fault)) {
     if (!allowed.has(key)) fail(`fault field ${key} could contain unredacted diagnostics`);
@@ -550,11 +595,13 @@ export function canonicalJsonV1(value: unknown): string {
 
 export function hashCanonicalV1(domain: string, value: unknown): string {
   requireNonEmptyText(domain, "hash domain", 256);
+  if (domain.includes("\0")) fail("hash domain cannot contain the domain separator");
   return contentFingerprint(`${domain}\0${canonicalJsonV1(value)}`);
 }
 
 export function hashTextV1(domain: string, value: string): string {
   requireNonEmptyText(domain, "hash domain", 256);
+  if (domain.includes("\0")) fail("hash domain cannot contain the domain separator");
   requireText(value, "hashed text");
   return contentFingerprint(`${domain}\0${value}`);
 }
@@ -594,6 +641,49 @@ function validateSelectedContext(
     || (target.chosenPath !== undefined && target.chosenPath !== prepared.targetRevision.path)
   ) {
     fail("selected context is not bound to the exact prepared Extend target");
+  }
+  if (contentFingerprint(target.currentText) !== prepared.targetRevision.contentHash) {
+    fail("selected current text does not match the prepared target content hash");
+  }
+  validateSelectedOperationRange(selected.manifest.operation.range, prepared.operationInputs);
+}
+
+function validateSelectedOperationRange(
+  value: unknown,
+  operationInputs: Record<string, unknown>,
+): void {
+  const range = requireRecord(value, "selectedContext.manifest.operation.range");
+  requireExactKeys(range, ["fromUtf16", "toUtf16"], "selectedContext.manifest.operation.range");
+  requireRange(range.fromUtf16, range.toUtf16, "selectedContext.manifest.operation.range");
+  if (
+    range.fromUtf16 !== operationInputs.rangeFrom
+    || range.toUtf16 !== operationInputs.rangeTo
+  ) {
+    fail("selected operation range does not match the prepared Extend apply range");
+  }
+}
+
+function validateSelectedContextPlacement(
+  messages: readonly ChatMessage[],
+  renderedContext: string,
+  value: unknown,
+): void {
+  const placement = requireRecord(value, "selectedContext.placement");
+  requireExactKeys(placement, ["messageIndex", "fromUtf16", "toUtf16"], "selectedContext.placement");
+  if (!Number.isSafeInteger(placement.messageIndex) || (placement.messageIndex as number) < 0) {
+    fail("selectedContext.placement.messageIndex must be a non-negative safe integer");
+  }
+  const message = messages[placement.messageIndex as number];
+  if (!message) fail("selectedContext.placement.messageIndex is outside the prepared messages");
+  requireRange(placement.fromUtf16, placement.toUtf16, "selectedContext.placement range");
+  const from = placement.fromUtf16 as number;
+  const to = placement.toUtf16 as number;
+  if (to > message.content.length) fail("selectedContext.placement range is outside its prepared message");
+  if (!isUtf16Boundary(message.content, from) || !isUtf16Boundary(message.content, to)) {
+    fail("selectedContext.placement range splits a Unicode scalar value");
+  }
+  if (message.content.slice(from, to) !== renderedContext) {
+    fail("selectedContext.placement does not identify the exact rendered context");
   }
 }
 
@@ -692,6 +782,33 @@ function requireExtendRange(inputs: Record<string, unknown>, currentText: string
   }
 }
 
+function validateExtendOperationInputs(value: unknown, currentText: string): void {
+  const inputs = requireRecord(value, "prepared.operationInputs");
+  requireExactKeys(inputs, [
+    "seed", "hasSelection", "rangeFrom", "rangeTo", "sourceFrom", "sourceTo",
+  ], "prepared.operationInputs");
+  if (inputs.seed !== undefined) requireText(inputs.seed, "prepared.operationInputs.seed");
+  if (inputs.hasSelection !== undefined && typeof inputs.hasSelection !== "boolean") {
+    fail("prepared.operationInputs.hasSelection must be a boolean");
+  }
+  requireExtendRange(inputs, currentText);
+  const hasSourceFrom = inputs.sourceFrom !== undefined;
+  const hasSourceTo = inputs.sourceTo !== undefined;
+  if (hasSourceFrom !== hasSourceTo) fail("prepared.operationInputs source range must be complete");
+  if (hasSourceFrom) {
+    requireRange(inputs.sourceFrom, inputs.sourceTo, "prepared.operationInputs source range");
+    if ((inputs.sourceTo as number) > currentText.length) {
+      fail("Extend source range is outside the selected current text");
+    }
+    if (
+      !isUtf16Boundary(currentText, inputs.sourceFrom as number)
+      || !isUtf16Boundary(currentText, inputs.sourceTo as number)
+    ) {
+      fail("Extend source range splits a Unicode scalar value");
+    }
+  }
+}
+
 function requireRange(from: unknown, to: unknown, subject: string): void {
   if (
     !Number.isSafeInteger(from)
@@ -706,9 +823,11 @@ function requireRange(from: unknown, to: unknown, subject: string): void {
 function requireTargetRevision(value: unknown, subject: string): PreparedTargetRevision {
   const target = requireRecord(value, subject);
   requireExactKeys(target, ["folderId", "path", "traceId", "headId", "contentHash"], subject);
-  for (const key of ["folderId", "path", "traceId", "headId", "contentHash"] as const) {
-    requireNonEmptyText(target[key], `${subject}.${key}`, 4_096);
-  }
+  requireHash(target.folderId, `${subject}.folderId`);
+  requireNonEmptyText(target.path, `${subject}.path`, 4_096);
+  requireHash(target.traceId, `${subject}.traceId`);
+  requireHash(target.headId, `${subject}.headId`);
+  requireHash(target.contentHash, `${subject}.contentHash`);
   return target as unknown as PreparedTargetRevision;
 }
 
@@ -822,6 +941,14 @@ function requireHash(value: unknown, subject: string): string {
   return hash;
 }
 
+function requireDiagnosticRef(value: unknown): string {
+  const ref = requireText(value, "fault.diagnosticRef");
+  if (!DIAGNOSTIC_REF_PATTERN.test(ref)) {
+    fail("fault.diagnosticRef must be an opaque diag-prefixed local identifier");
+  }
+  return ref;
+}
+
 function requireTimestamp(value: unknown, subject: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) fail(`${subject} must be a non-negative safe integer`);
   return value as number;
@@ -840,6 +967,48 @@ function requireCertainty(value: unknown): OperationExecutionCertaintyV1 {
 function requireRetryPolicy(value: unknown): OperationRetryPolicyV1 {
   if (!RETRY_POLICIES.has(value as OperationRetryPolicyV1)) fail("retry policy is unsupported");
   return value as OperationRetryPolicyV1;
+}
+
+function transitionTargetStatus(
+  type: DesktopOperationTransitionTypeV1,
+  fromStatus: DesktopOperationStatusV1,
+): DesktopOperationStatusV1 {
+  switch (type) {
+    case "approve":
+      if (fromStatus === "prepared") return "approved";
+      break;
+    case "record-dispatch-intent":
+      if (fromStatus === "approved") return "dispatch-intent";
+      break;
+    case "record-provider-io-may-have-started":
+      if (fromStatus === "dispatch-intent") return "provider-io";
+      break;
+    case "record-response":
+      if (fromStatus === "provider-io") return "response-completed";
+      break;
+    case "record-failure":
+      if (["approved", "dispatch-intent", "provider-io"].includes(fromStatus)) return "failed";
+      break;
+    case "cancel":
+      if (["prepared", "approved", "dispatch-intent"].includes(fromStatus)) return "cancelled";
+      break;
+    case "mark-dispatch-unknown":
+      if (fromStatus === "provider-io") return "unknown";
+      break;
+    case "accept-result":
+      if (fromStatus === "response-completed") return "accepted";
+      break;
+    case "reject-result":
+      if (fromStatus === "response-completed") return "rejected";
+      break;
+    case "abandon":
+      if (["prepared", "approved", "dispatch-intent"].includes(fromStatus)) return "abandoned";
+      break;
+    case "record-artifact-applied":
+      if (fromStatus === "accepted") return "accepted";
+      break;
+  }
+  fail(`${type} is illegal from ${fromStatus} in the applied transition chain`);
 }
 
 function fail(message: string): never {
@@ -867,7 +1036,7 @@ const RETRY_POLICIES = new Set<OperationRetryPolicyV1>([
 const FAULT_CODES = new Set<OperationFaultCodeV1>([
   "PREPARATION_INVALID", "APPROVAL_INVALID", "LOCAL_PERSISTENCE_FAILED", "PROVIDER_REJECTED",
   "PROVIDER_UNAVAILABLE", "PROVIDER_RESPONSE_INVALID", "TARGET_STALE", "OPERATOR_CANCELLED",
-  "DISPATCH_OUTCOME_UNKNOWN", "PRIVATE_PAYLOAD_EXPIRED",
+  "DISPATCH_OUTCOME_UNKNOWN", "PRIVATE_ENVELOPE_EXPIRED",
 ]);
 const FAULT_STAGES = new Set<OperationFaultStageV1>([
   "prepare", "approve", "persist", "dispatch", "response", "review", "apply", "retention",

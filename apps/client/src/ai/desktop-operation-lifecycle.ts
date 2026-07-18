@@ -78,10 +78,9 @@ export type DesktopOperationEffectV1 =
     }
   | {
       version: 1;
-      kind: "delete-expired-private-payloads";
+      kind: "delete-expired-private-envelope";
       operationId: string;
       attemptId: string;
-      keepHashes: true;
     };
 
 export interface DesktopOperationReductionV1 {
@@ -109,6 +108,7 @@ export function reduceDesktopOperationV1(
   envelope: DesktopOperationEnvelopeV1,
   transition: DesktopOperationTransitionV1,
 ): DesktopOperationReductionV1 {
+  if (transition.version !== 1) fail("transition version is unsupported");
   const actionSha256 = hashCanonicalV1("zine.desktop-operation.transition.v1", transition);
   const applied = envelope.appliedTransitions.find(
     (candidate) => candidate.transitionId === transition.transitionId,
@@ -299,6 +299,8 @@ export function reduceDesktopOperationV1(
         },
       });
       break;
+    default:
+      fail(`transition type ${(transition as { type?: unknown }).type ?? "<missing>"} is unsupported`);
   }
   return reduction(next, effects, false);
 }
@@ -317,7 +319,7 @@ export interface DesktopOperationRecoveryProjectionV1 {
     | "confirm-possible-duplicate-or-stop"
     | "none";
   mayAutomaticallyDispatch: boolean;
-  privatePayloadDeletionDue: boolean;
+  privateEnvelopeDeletionDue: boolean;
 }
 
 /**
@@ -389,14 +391,13 @@ export function projectDesktopOperationRecoveryV1(
     case "abandoned":
       break;
   }
-  const privatePayloadDeletionDue = nowMs >= envelope.retention.deleteByMs;
-  if (privatePayloadDeletionDue) {
+  const privateEnvelopeDeletionDue = nowMs >= envelope.retention.deleteByMs;
+  if (privateEnvelopeDeletionDue) {
     automaticEffects.push({
       version: 1,
-      kind: "delete-expired-private-payloads",
+      kind: "delete-expired-private-envelope",
       operationId: envelope.operationId,
       attemptId: envelope.attempt.attemptId,
-      keepHashes: true,
     });
   }
   return Object.freeze({
@@ -405,10 +406,10 @@ export function projectDesktopOperationRecoveryV1(
     attemptId: envelope.attempt.attemptId,
     status: envelope.lifecycle.status,
     retryPolicy: envelope.lifecycle.retryPolicy,
-    automaticEffects: Object.freeze(automaticEffects),
+    automaticEffects: freezeEffects(automaticEffects),
     operatorAction,
     mayAutomaticallyDispatch: false,
-    privatePayloadDeletionDue,
+    privateEnvelopeDeletionDue,
   });
 }
 
@@ -425,6 +426,7 @@ export function createDesktopOperationRetryV1(
   input: CreateDesktopOperationRetryV1Input,
 ): DesktopOperationEnvelopeV1 {
   if (prior.lifecycle.retryPolicy === "not-eligible") fail(`${prior.lifecycle.status} is not retryable`);
+  if (input.attemptId === prior.attempt.attemptId) fail("retry must use a new attempt id");
   if (
     prior.lifecycle.retryPolicy === "operator-confirmation-required"
     && input.possibleDuplicateAcknowledged !== true
@@ -488,6 +490,8 @@ function withLifecycle(
       {
         transitionId: transition.transitionId,
         transitionType: transition.type as DesktopOperationTransitionTypeV1,
+        fromStatus: envelope.lifecycle.status,
+        toStatus: lifecycle.status,
         actionSha256,
         appliedAtMs: transition.atMs,
       },
@@ -525,10 +529,17 @@ function reduction(
   return Object.freeze({
     version: 1,
     envelope,
-    effects: Object.freeze([...effects]),
+    effects: freezeEffects(effects),
     replayed,
     mustPersistBeforeEffects: true,
   });
+}
+
+function freezeEffects(
+  effects: readonly DesktopOperationEffectV1[],
+): readonly DesktopOperationEffectV1[] {
+  for (const effect of effects) Object.freeze(effect);
+  return Object.freeze([...effects]);
 }
 
 function fail(message: string): never {

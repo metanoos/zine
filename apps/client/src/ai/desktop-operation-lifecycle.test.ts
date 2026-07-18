@@ -12,7 +12,9 @@ import {
   DesktopOperationEnvelopeError,
   canonicalJsonV1,
   createDesktopOperationEnvelopeV1,
+  hashCanonicalV1,
   hashDesktopOperationEnvelopeV1,
+  hashTextV1,
   parseDesktopOperationEnvelopeV1,
   serializeDesktopOperationEnvelopeV1,
   type DesktopOperationEnvelopeV1,
@@ -30,6 +32,10 @@ import type { PreparedOperation } from "./prepared-operation.js";
 const TARGET_TEXT = "draft";
 const BASE_TIME = 1_000;
 const HASH = (label: string) => contentFingerprint(label);
+const FOLDER_ID = HASH("folder-1");
+const TRACE_ID = HASH("trace-1");
+const HEAD_ID = HASH("head-1");
+const CONTENT_HASH = HASH(TARGET_TEXT);
 let selectionPromise: Promise<TraceContextSelectionSuccessV1> | null = null;
 
 async function selection(): Promise<TraceContextSelectionSuccessV1> {
@@ -40,9 +46,9 @@ async function selection(): Promise<TraceContextSelectionSuccessV1> {
       version: 1,
       operation: "extend",
       target: {
-        traceId: "trace-1",
-        headId: "head-1",
-        contentHash: "content-1",
+        traceId: TRACE_ID,
+        headId: HEAD_ID,
+        contentHash: CONTENT_HASH,
         currentText: TARGET_TEXT,
         chosenPath: "draft.md",
       },
@@ -84,11 +90,11 @@ function prepared(renderedContext: string): PreparedOperation {
     providerId: "provider-0001",
     providerFingerprint: HASH("provider"),
     targetRevision: {
-      folderId: "folder-1",
+      folderId: FOLDER_ID,
       path: "draft.md",
-      traceId: "trace-1",
-      headId: "head-1",
-      contentHash: "content-1",
+      traceId: TRACE_ID,
+      headId: HEAD_ID,
+      contentHash: CONTENT_HASH,
     },
     provenance: Object.freeze({
       modelVoicePubkey: "a".repeat(64),
@@ -119,11 +125,22 @@ async function envelope(suffix = "0001"): Promise<DesktopOperationEnvelopeV1> {
       modelId: "model-1",
       transportConfigSha256: HASH("redacted-transport-config"),
     },
-    selectedContext: selected,
+    selectedContext: withPlacement(selected),
     maxOutputTokens: 1_024,
     createdAtMs: BASE_TIME,
     retainForMs: 60_000,
   });
+}
+
+function withPlacement(selected: TraceContextSelectionSuccessV1) {
+  return {
+    ...selected,
+    placement: {
+      messageIndex: 1,
+      fromUtf16: 0,
+      toUtf16: selected.renderedContext.length,
+    },
+  };
 }
 
 function fault(
@@ -135,7 +152,7 @@ function fault(
     code,
     stage: "dispatch",
     observedAtMs,
-    diagnosticRef: "diagnostic-0001",
+    diagnosticRef: `diag:${"d".repeat(64)}`,
   };
 }
 
@@ -210,7 +227,7 @@ test("creates a frozen private envelope bound to exact request and selected-cont
   const subject = await envelope();
   assert.equal(subject.lifecycle.status, "prepared");
   assert.equal(subject.prepared.operation, "extend");
-  assert.equal(subject.selectedContext.manifest.operation.target.headId, "head-1");
+  assert.equal(subject.selectedContext.manifest.operation.target.headId, HEAD_ID);
   assert.equal(subject.selectedContext.renderedContext, subject.prepared.messages[1]!.content);
   assert.equal(Object.isFrozen(subject), true);
   assert.equal(Object.isFrozen(subject.selectedContext.manifest), true);
@@ -232,6 +249,7 @@ test("canonical bytes are deterministic, I-JSON safe, and round-trip with integr
   assert.throws(() => canonicalJsonV1({ bad: 1.5 }), /safe I-JSON integer/);
   assert.throws(() => canonicalJsonV1({ bad: undefined }), /undefined/);
   assert.throws(() => canonicalJsonV1({ bad: "\ud800" }), /unpaired high surrogate/);
+  assert.throws(() => hashTextV1("domain\0suffix", "value"), /domain separator/);
 
   const corrupted = JSON.parse(serialized) as {
     prepared: { messages: Array<{ role: string; content: string }> };
@@ -240,6 +258,49 @@ test("canonical bytes are deterministic, I-JSON safe, and round-trip with integr
   assert.throws(
     () => parseDesktopOperationEnvelopeV1(JSON.stringify(corrupted)),
     /prepared request hash does not match/,
+  );
+
+  const malformedInputs = JSON.parse(serialized) as {
+    prepared: { operationInputs: Record<string, unknown>; requestSha256: string };
+  };
+  malformedInputs.prepared.operationInputs.seed = 17;
+  const requestWithoutHash = { ...malformedInputs.prepared };
+  delete (requestWithoutHash as Partial<typeof requestWithoutHash>).requestSha256;
+  malformedInputs.prepared.requestSha256 = hashCanonicalV1(
+    "zine.desktop-operation.request.v1",
+    requestWithoutHash,
+  );
+  assert.throws(
+    () => parseDesktopOperationEnvelopeV1(JSON.stringify(malformedInputs)),
+    /operationInputs.seed must be a string/,
+  );
+
+  const splitPlacement = JSON.parse(serialized) as {
+    prepared: {
+      messages: Array<{ role: string; content: string }>;
+      requestSha256: string;
+    };
+    selectedContext: {
+      renderedContext: string;
+      placement: { messageIndex: number; fromUtf16: number; toUtf16: number };
+    };
+  };
+  const originalMessage = splitPlacement.prepared.messages[1]!.content;
+  splitPlacement.prepared.messages[1]!.content = `😀${originalMessage}`;
+  splitPlacement.selectedContext.placement = {
+    messageIndex: 1,
+    fromUtf16: 1,
+    toUtf16: 2 + originalMessage.length,
+  };
+  const splitRequestWithoutHash = { ...splitPlacement.prepared };
+  delete (splitRequestWithoutHash as Partial<typeof splitRequestWithoutHash>).requestSha256;
+  splitPlacement.prepared.requestSha256 = hashCanonicalV1(
+    "zine.desktop-operation.request.v1",
+    splitRequestWithoutHash,
+  );
+  assert.throws(
+    () => parseDesktopOperationEnvelopeV1(JSON.stringify(splitPlacement)),
+    /placement range splits a Unicode scalar value/,
   );
 });
 
@@ -254,18 +315,45 @@ test("creation rejects mismatched context identity, non-Extend operations, split
       modelId: "model-1",
       transportConfigSha256: HASH("config"),
     },
-    selectedContext: selected,
+    selectedContext: withPlacement(selected),
     maxOutputTokens: 100,
     createdAtMs: BASE_TIME,
   };
   assert.throws(() => createDesktopOperationEnvelopeV1({
     ...base,
-    selectedContext: { ...selected, renderedContext: `${selected.renderedContext}x` },
+    selectedContext: { ...withPlacement(selected), renderedContext: `${selected.renderedContext}x` },
   }), /rendered-context identity/);
+  assert.throws(() => createDesktopOperationEnvelopeV1({
+    ...base,
+    selectedContext: {
+      ...withPlacement(selected),
+      placement: { messageIndex: 1, fromUtf16: 1, toUtf16: selected.renderedContext.length },
+    },
+  }), /does not identify the exact rendered context/);
+  const wrongRangeManifest = JSON.parse(JSON.stringify(selected.manifest)) as typeof selected.manifest;
+  (wrongRangeManifest.operation as { range: { fromUtf16: number; toUtf16: number } }).range = {
+    fromUtf16: 0,
+    toUtf16: 0,
+  };
+  assert.throws(() => createDesktopOperationEnvelopeV1({
+    ...base,
+    selectedContext: {
+      ...withPlacement(selected),
+      manifest: wrongRangeManifest,
+      manifestSha256: hashCanonicalV1(
+        "zine.trace-context.package-manifest.v1",
+        wrongRangeManifest,
+      ),
+    },
+  }), /selected operation range does not match/);
   assert.throws(() => createDesktopOperationEnvelopeV1({
     ...base,
     prepared: { ...base.prepared, operation: "settle" },
   }), /supports Extend only/);
+  assert.throws(() => createDesktopOperationEnvelopeV1({
+    ...base,
+    prepared: { ...base.prepared, version: 2 } as never,
+  }), /prepared operation version is unsupported/);
   assert.throws(() => createDesktopOperationEnvelopeV1({
     ...base,
     retainForMs: 31 * 24 * 60 * 60 * 1_000,
@@ -282,7 +370,7 @@ test("creation rejects mismatched context identity, non-Extend operations, split
       version: 1,
       operation: "extend",
       target: {
-        traceId: "trace-1", headId: "head-1", contentHash: "content-1",
+        traceId: TRACE_ID, headId: HEAD_ID, contentHash: HASH("😀"),
         currentText: "😀", chosenPath: "draft.md",
       },
       range: { fromUtf16: 0, toUtf16: 0 },
@@ -293,10 +381,39 @@ test("creation rejects mismatched context identity, non-Extend operations, split
     candidates: [],
   });
   assert.equal(selectedEmoji.ok, true);
+  const emojiSelection = selectedEmoji as TraceContextSelectionSuccessV1;
+  const splitEmojiManifest = JSON.parse(JSON.stringify(emojiSelection.manifest)) as typeof emojiSelection.manifest;
+  (splitEmojiManifest.operation as { range: { fromUtf16: number; toUtf16: number } }).range = {
+    fromUtf16: 1,
+    toUtf16: 1,
+  };
+  const emojiPrepared = {
+    ...badPrepared,
+    operationInputs: {
+      ...badPrepared.operationInputs,
+      seed: "😀",
+      rangeFrom: 1,
+      rangeTo: 1,
+      sourceFrom: 0,
+      sourceTo: 2,
+    },
+    messages: [
+      badPrepared.messages[0]!,
+      { role: "user" as const, content: emojiSelection.renderedContext },
+    ],
+    targetRevision: { ...badPrepared.targetRevision, contentHash: HASH("😀") },
+  };
   assert.throws(() => createDesktopOperationEnvelopeV1({
     ...base,
-    prepared: badPrepared,
-    selectedContext: selectedEmoji as TraceContextSelectionSuccessV1,
+    prepared: emojiPrepared,
+    selectedContext: {
+      ...withPlacement(emojiSelection),
+      manifest: splitEmojiManifest,
+      manifestSha256: hashCanonicalV1(
+        "zine.trace-context.package-manifest.v1",
+        splitEmojiManifest,
+      ),
+    },
   }), /splits a Unicode scalar/);
 });
 
@@ -308,6 +425,7 @@ test("the complete live path emits one dispatch, review, and accepted-only artif
   const io = reduceDesktopOperationV1(current, ioAction);
   current = io.envelope;
   assert.deepEqual(io.effects.map((effect) => effect.kind), ["dispatch-provider-request"]);
+  assert.equal(Object.isFrozen(io.effects[0]), true);
   assert.equal(io.mustPersistBeforeEffects, true);
   assert.deepEqual(
     current.appliedTransitions.map((entry) => entry.transitionType),
@@ -403,6 +521,45 @@ test("a reused transition id with different action bytes is rejected", async () 
     () => reduceDesktopOperationV1(approved, { ...first, atMs: 1_002 }),
     /reused with different bytes/,
   );
+  assert.throws(
+    () => reduceDesktopOperationV1(current, { ...first, version: 2 } as never),
+    /transition version is unsupported/,
+  );
+});
+
+test("serialized receipts must form one legal monotonic chain to the recorded lifecycle", async () => {
+  let current = await envelope("receipt0");
+  current = apply(current, transition("approve", 1_001, {}));
+  current = apply(current, transition("record-dispatch-intent", 1_002, {}));
+  const serialized = serializeDesktopOperationEnvelopeV1(current);
+
+  const nonContiguous = JSON.parse(serialized) as DesktopOperationEnvelopeV1;
+  (nonContiguous.appliedTransitions[0] as { fromStatus: string }).fromStatus = "approved";
+  assert.throws(
+    () => parseDesktopOperationEnvelopeV1(JSON.stringify(nonContiguous)),
+    /does not continue from prepared/,
+  );
+
+  const nonMonotonic = JSON.parse(serialized) as DesktopOperationEnvelopeV1;
+  (nonMonotonic.appliedTransitions[1] as { appliedAtMs: number }).appliedAtMs = 1_000;
+  assert.throws(
+    () => parseDesktopOperationEnvelopeV1(JSON.stringify(nonMonotonic)),
+    /transition times must be monotonic/,
+  );
+
+  const wrongFinal = JSON.parse(serialized) as DesktopOperationEnvelopeV1;
+  (wrongFinal.lifecycle as { status: string }).status = "approved";
+  assert.throws(
+    () => parseDesktopOperationEnvelopeV1(JSON.stringify(wrongFinal)),
+    /chain does not reach the lifecycle status/,
+  );
+
+  const wrongUpdatedAt = JSON.parse(serialized) as DesktopOperationEnvelopeV1;
+  (wrongUpdatedAt as { updatedAtMs: number }).updatedAtMs += 1;
+  assert.throws(
+    () => parseDesktopOperationEnvelopeV1(JSON.stringify(wrongUpdatedAt)),
+    /updatedAtMs does not match/,
+  );
 });
 
 test("post-marker ambiguity becomes unknown and recovery never automatically redispatches", async () => {
@@ -468,6 +625,10 @@ test("retries keep operation identity, create a linked attempt, and require ambi
   assert.equal(safeRetry.attempt.possibleDuplicateAcknowledgedAtMs, null);
   assert.equal(safeRetry.prepared.requestSha256, cancelled.prepared.requestSha256);
   assert.equal(safeRetry.lifecycle.status, "prepared");
+  assert.throws(() => createDesktopOperationRetryV1(cancelled, {
+    attemptId: cancelled.attempt.attemptId,
+    createdAtMs: cancelled.updatedAtMs + 1,
+  }), /new attempt id/);
 
   const unknown = await atStatus("unknown");
   assert.throws(() => createDesktopOperationRetryV1(unknown, {
@@ -505,6 +666,10 @@ test("faults are structured and reject unredacted exception fields", async () =>
   assert.equal(failed.lifecycle.status, "failed");
   assert.equal(failed.lifecycle.retryPolicy, "safe-new-attempt");
   assert.equal("message" in failed.fault!, false);
+  assert.throws(() => reduceDesktopOperationV1(approved, transition("record-failure", approved.updatedAtMs + 1, {
+    certainty: "known-not-dispatched",
+    fault: { ...fault(), diagnosticRef: "sk-proj-secret-material" },
+  })), /opaque diag-prefixed local identifier/);
 });
 
 test("response and retention limits fail before persistence and signal bounded deletion", async () => {
@@ -513,8 +678,10 @@ test("response and retention limits fail before persistence and signal bounded d
     responseText: "x".repeat(DESKTOP_OPERATION_MAX_RESPONSE_BYTES + 1),
   })), /response exceeds/);
   const due = projectDesktopOperationRecoveryV1(io, io.retention.deleteByMs);
-  assert.equal(due.privatePayloadDeletionDue, true);
-  assert.equal(due.automaticEffects.at(-1)?.kind, "delete-expired-private-payloads");
+  assert.equal(due.privateEnvelopeDeletionDue, true);
+  assert.equal(io.retention.deadlineBehavior, "delete-entire-private-envelope");
+  assert.equal(due.automaticEffects.at(-1)?.kind, "delete-expired-private-envelope");
+  assert.equal("keepHashes" in due.automaticEffects.at(-1)!, false);
 });
 
 function actionFor(

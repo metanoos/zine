@@ -45,18 +45,20 @@ The envelope retains, as private local data:
 - the exact ordered provider-neutral messages and operation inputs;
 - the exact prepared target revision and apply range;
 - generation limits and credential-free provider identity;
-- the exact selected-context manifest and rendered context;
-- the exact completed response, if one exists; and
-- an ordered receipt of transition type, stable id, timestamp, and action hash;
-  and
+- the exact selected-context manifest and operation range, rendered context,
+  and its message index plus UTF-16 range in the prepared request;
+- the exact completed response, if one exists;
+- an ordered receipt of transition type, from/to status, stable id, timestamp,
+  and action hash; and
 - domain-separated SHA-256 identities for the request, selected context,
   response, and complete envelope.
 
 Serialization uses deterministic UTF-8 key ordering, finite safe I-JSON
 integers, and exact strings. Unpaired UTF-16 surrogates, undefined values,
-cycles, invalid hashes, inconsistent targets, oversized responses, and
-oversized envelopes fail closed. Strings are not normalized because prompt and
-result identity is byte-exact.
+cycles, invalid hashes, inconsistent targets, invalid context placement,
+impossible transition histories, oversized responses, and oversized envelopes
+fail closed. Strings are not normalized because prompt and result identity is
+byte-exact.
 
 ## Lifecycle and dispatch certainty
 
@@ -106,24 +108,25 @@ The recovery projection gives native and UI integrations closed effects for:
 - converting a may-have-started attempt to unknown;
 - presenting a completed result for review;
 - replaying an accepted but unreceipted local artifact intent; and
-- deleting expired private payloads while preserving identities.
+- deleting the expired private operation envelope.
 
 Every reduction returns `mustPersistBeforeEffects: true`. An interpreter that
 executes an effect before committing the new envelope violates this contract.
 
 ## Private retention
 
-Exact requests, selected context, and responses are classified
-`vault-local-private`. Each attempt carries a deletion deadline: seven days by
-default and never more than thirty days in this version. Terminal records are
-eligible for earlier deletion. At the deadline, exact payloads are deleted and
-only hashes and minimal lifecycle metadata remain. The native store must keep
-vaults isolated and must not copy these payloads to relay events, logs, crash
-reports, or analytics.
+Exact requests, selected context, responses, hashes, and lifecycle metadata are
+one disposable `vault-local-private` envelope in Phase 2. Each attempt carries a
+deletion deadline: seven days by default and never more than thirty days in this
+version. Terminal records are eligible for earlier deletion. At deletion, the
+native store removes the entire envelope; Phase 2 keeps no tombstone or retained
+hashes. The native store must keep vaults isolated and must not copy the envelope
+to relay events, logs, crash reports, or analytics.
 
 The current TypeScript envelope describes this policy and emits an expiry
-effect; durable encrypted storage and deletion are owned by the later native
-store lane.
+effect; durable encrypted storage and whole-envelope deletion are owned by the
+later native store lane. Selective portable commitments and disclosure belong
+to Phase 3 after the trust/schema review.
 
 ## Not included
 
