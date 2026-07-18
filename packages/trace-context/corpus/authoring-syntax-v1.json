@@ -1,0 +1,404 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "unicode directive uses exact UTF-16 offsets",
+      "input": {
+        "text": "😀 Intro ((révise 🧠)) fin.",
+        "operation": "settle",
+        "actingAuthorId": "author-a",
+        "authoritySpans": [
+          {
+            "id": "manual-1",
+            "actorId": "author-a",
+            "origin": "manual",
+            "instructionEligible": true,
+            "fromUtf16": 9,
+            "toUtf16": 22
+          }
+        ],
+        "sourceRevision": {
+          "traceId": "trace-a",
+          "headId": "head-a",
+          "path": "draft.md"
+        }
+      },
+      "expected": {
+        "ok": true,
+        "errors": [],
+        "protectedRanges": [],
+        "candidates": [
+          {
+            "id": "directive-v1:0001:9:22",
+            "range": [9, 22],
+            "instructionRange": [11, 20],
+            "instruction": "révise 🧠"
+          }
+        ],
+        "decisions": ["authorized"],
+        "directives": [
+          {
+            "id": "directive-v1:0001:9:22",
+            "marker": "⟪ZINE_DIRECTIVE_V1_0001_9_22⟫",
+            "range": [9, 22],
+            "excerptId": "excerpt-v1:0001"
+          }
+        ],
+        "excerpts": [
+          {
+            "id": "excerpt-v1:0001",
+            "sourceRange": [0, 27],
+            "text": "😀 Intro ⟪ZINE_DIRECTIVE_V1_0001_9_22⟫ fin.",
+            "byteLength": 49,
+            "mode": "complete-block"
+          }
+        ],
+        "renderedText": "😀 Intro ⟪ZINE_DIRECTIVE_V1_0001_9_22⟫ fin."
+      }
+    },
+    {
+      "name": "operation range cannot split a surrogate pair",
+      "input": {
+        "text": "😀 ((go))",
+        "operation": "analyze",
+        "actingAuthorId": "author-a",
+        "operationRange": { "fromUtf16": 1, "toUtf16": 9 },
+        "authoritySpans": []
+      },
+      "expected": {
+        "ok": false,
+        "errors": ["RANGE_SPLITS_SURROGATE_PAIR"],
+        "protectedRanges": [],
+        "candidates": [
+          {
+            "id": "directive-v1:0001:3:9",
+            "range": [3, 9],
+            "instructionRange": [5, 7],
+            "instruction": "go"
+          }
+        ],
+        "decisions": ["blocked-by-errors"],
+        "directives": [],
+        "excerpts": [],
+        "renderedText": "😀 ((go))"
+      }
+    },
+    {
+      "name": "missing authority fails closed",
+      "input": {
+        "text": "((tighten this))",
+        "operation": "stir",
+        "actingAuthorId": "author-a"
+      },
+      "expected": {
+        "ok": true,
+        "errors": [],
+        "protectedRanges": [],
+        "candidates": [
+          {
+            "id": "directive-v1:0001:0:16",
+            "range": [0, 16],
+            "instructionRange": [2, 14],
+            "instruction": "tighten this"
+          }
+        ],
+        "decisions": ["missing-authority"],
+        "directives": [],
+        "excerpts": [],
+        "renderedText": "((tighten this))"
+      }
+    },
+    {
+      "name": "empty authority fails closed",
+      "input": {
+        "text": "((tighten this))",
+        "operation": "reply",
+        "actingAuthorId": "author-a",
+        "authoritySpans": []
+      },
+      "expected": {
+        "ok": true,
+        "errors": [],
+        "protectedRanges": [],
+        "candidates": [
+          {
+            "id": "directive-v1:0001:0:16",
+            "range": [0, 16],
+            "instructionRange": [2, 14],
+            "instruction": "tighten this"
+          }
+        ],
+        "decisions": ["missing-authority"],
+        "directives": [],
+        "excerpts": [],
+        "renderedText": "((tighten this))"
+      }
+    },
+    {
+      "name": "mixed origin is inert",
+      "input": {
+        "text": "((tighten this))",
+        "operation": "run",
+        "actingAuthorId": "author-a",
+        "authoritySpans": [
+          {
+            "id": "manual-1",
+            "actorId": "author-a",
+            "origin": "manual",
+            "instructionEligible": true,
+            "fromUtf16": 0,
+            "toUtf16": 8
+          },
+          {
+            "id": "paste-1",
+            "actorId": "author-a",
+            "origin": "paste",
+            "instructionEligible": false,
+            "fromUtf16": 8,
+            "toUtf16": 16
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "errors": [],
+        "protectedRanges": [],
+        "candidates": [
+          {
+            "id": "directive-v1:0001:0:16",
+            "range": [0, 16],
+            "instructionRange": [2, 14],
+            "instruction": "tighten this"
+          }
+        ],
+        "decisions": ["mixed-authority"],
+        "directives": [],
+        "excerpts": [],
+        "renderedText": "((tighten this))"
+      }
+    },
+    {
+      "name": "directives in one block share a deduplicated excerpt",
+      "input": {
+        "text": "First ((tighten)) and ((keep tone)) sentence.",
+        "operation": "settle",
+        "actingAuthorId": "author-a",
+        "authoritySpans": [
+          {
+            "id": "manual-1",
+            "actorId": "author-a",
+            "origin": "manual",
+            "instructionEligible": true,
+            "fromUtf16": 0,
+            "toUtf16": 45
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "errors": [],
+        "protectedRanges": [],
+        "candidates": [
+          {
+            "id": "directive-v1:0001:6:17",
+            "range": [6, 17],
+            "instructionRange": [8, 15],
+            "instruction": "tighten"
+          },
+          {
+            "id": "directive-v1:0002:22:35",
+            "range": [22, 35],
+            "instructionRange": [24, 33],
+            "instruction": "keep tone"
+          }
+        ],
+        "decisions": ["authorized", "authorized"],
+        "directives": [
+          {
+            "id": "directive-v1:0001:6:17",
+            "marker": "⟪ZINE_DIRECTIVE_V1_0001_6_17⟫",
+            "range": [6, 17],
+            "excerptId": "excerpt-v1:0001"
+          },
+          {
+            "id": "directive-v1:0002:22:35",
+            "marker": "⟪ZINE_DIRECTIVE_V1_0002_22_35⟫",
+            "range": [22, 35],
+            "excerptId": "excerpt-v1:0001"
+          }
+        ],
+        "excerpts": [
+          {
+            "id": "excerpt-v1:0001",
+            "sourceRange": [0, 45],
+            "text": "First ⟪ZINE_DIRECTIVE_V1_0001_6_17⟫ and ⟪ZINE_DIRECTIVE_V1_0002_22_35⟫ sentence.",
+            "byteLength": 88,
+            "mode": "complete-block"
+          }
+        ],
+        "renderedText": "First ⟪ZINE_DIRECTIVE_V1_0001_6_17⟫ and ⟪ZINE_DIRECTIVE_V1_0002_22_35⟫ sentence."
+      }
+    },
+    {
+      "name": "protected range makes nested directive bytes inert",
+      "input": {
+        "text": "Keep [[ exact ((ignore me)) quote ]] here.",
+        "operation": "settle",
+        "actingAuthorId": "author-a",
+        "authoritySpans": [
+          {
+            "id": "manual-1",
+            "actorId": "author-a",
+            "origin": "manual",
+            "instructionEligible": true,
+            "fromUtf16": 0,
+            "toUtf16": 42
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "errors": [],
+        "protectedRanges": [
+          { "id": "protected-v1:0001:5:36", "range": [5, 36] }
+        ],
+        "candidates": [],
+        "decisions": [],
+        "directives": [],
+        "excerpts": [],
+        "renderedText": "Keep [[ exact ((ignore me)) quote ]] here."
+      }
+    },
+    {
+      "name": "operation range activates only fully contained directive",
+      "input": {
+        "text": "Before ((outside)) target ((inside)) end",
+        "operation": "analyze",
+        "actingAuthorId": "author-a",
+        "operationRange": { "fromUtf16": 19, "toUtf16": 36 },
+        "authoritySpans": [
+          {
+            "id": "manual-1",
+            "actorId": "author-a",
+            "origin": "manual",
+            "instructionEligible": true,
+            "fromUtf16": 0,
+            "toUtf16": 40
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "errors": [],
+        "protectedRanges": [],
+        "candidates": [
+          {
+            "id": "directive-v1:0001:7:18",
+            "range": [7, 18],
+            "instructionRange": [9, 16],
+            "instruction": "outside"
+          },
+          {
+            "id": "directive-v1:0002:26:36",
+            "range": [26, 36],
+            "instructionRange": [28, 34],
+            "instruction": "inside"
+          }
+        ],
+        "decisions": ["outside-operation-range", "authorized"],
+        "directives": [
+          {
+            "id": "directive-v1:0002:26:36",
+            "marker": "⟪ZINE_DIRECTIVE_V1_0002_26_36⟫",
+            "range": [26, 36],
+            "excerptId": "excerpt-v1:0001"
+          }
+        ],
+        "excerpts": [
+          {
+            "id": "excerpt-v1:0001",
+            "sourceRange": [19, 36],
+            "text": "target ⟪ZINE_DIRECTIVE_V1_0002_26_36⟫",
+            "byteLength": 41,
+            "mode": "complete-block"
+          }
+        ],
+        "renderedText": "Before ((outside)) target ⟪ZINE_DIRECTIVE_V1_0002_26_36⟫ end"
+      }
+    },
+    {
+      "name": "directive crossing operation boundary remains inert",
+      "input": {
+        "text": "aa ((cross)) zz",
+        "operation": "reply",
+        "actingAuthorId": "author-a",
+        "operationRange": { "fromUtf16": 5, "toUtf16": 15 },
+        "authoritySpans": [
+          {
+            "id": "manual-1",
+            "actorId": "author-a",
+            "origin": "manual",
+            "instructionEligible": true,
+            "fromUtf16": 0,
+            "toUtf16": 15
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "errors": [],
+        "protectedRanges": [],
+        "candidates": [
+          {
+            "id": "directive-v1:0001:3:12",
+            "range": [3, 12],
+            "instructionRange": [5, 10],
+            "instruction": "cross"
+          }
+        ],
+        "decisions": ["crosses-operation-range"],
+        "directives": [],
+        "excerpts": [],
+        "renderedText": "aa ((cross)) zz"
+      }
+    },
+    {
+      "name": "unterminated directive is a typed syntax error",
+      "input": {
+        "text": "Start ((broken",
+        "operation": "extend",
+        "actingAuthorId": "author-a",
+        "authoritySpans": []
+      },
+      "expected": {
+        "ok": false,
+        "errors": ["UNTERMINATED_DIRECTIVE"],
+        "protectedRanges": [],
+        "candidates": [],
+        "decisions": [],
+        "directives": [],
+        "excerpts": [],
+        "renderedText": "Start ((broken"
+      }
+    },
+    {
+      "name": "active directive cannot cross protected syntax",
+      "input": {
+        "text": "((change [[ protected ))",
+        "operation": "settle",
+        "actingAuthorId": "author-a",
+        "authoritySpans": []
+      },
+      "expected": {
+        "ok": false,
+        "errors": ["CROSS_NESTED_SYNTAX"],
+        "protectedRanges": [],
+        "candidates": [],
+        "decisions": [],
+        "directives": [],
+        "excerpts": [],
+        "renderedText": "((change [[ protected ))"
+      }
+    }
+  ]
+}
