@@ -517,6 +517,22 @@ function normalizeOperation(
   if (value.operation === "settle" && !rangeResult.value) {
     return malformed("$.operation.range", "Settle requires an exact UTF-16 range");
   }
+  if (rangeResult.value) {
+    const currentText = value.target.currentText as string;
+    if (rangeResult.value.toUtf16 > currentText.length) {
+      return malformed(
+        "$.operation.range",
+        "Operation range must be within the current target text",
+      );
+    }
+    if (!isUtf16Boundary(currentText, rangeResult.value.fromUtf16)
+      || !isUtf16Boundary(currentText, rangeResult.value.toUtf16)) {
+      return malformed(
+        "$.operation.range",
+        "Operation range endpoints must be UTF-16 code-point boundaries",
+      );
+    }
+  }
   for (const key of ["maxContextBytes", "preparedRequestMaxBytes"] as const) {
     if (!isPositiveSafeInteger(value[key])) {
       return malformed(`$.operation.${key}`, `${key} must be a positive safe integer`);
