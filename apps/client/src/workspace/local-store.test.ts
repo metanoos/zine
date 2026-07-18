@@ -11,10 +11,14 @@ import {
 } from "./local-store.js";
 
 const values = new Map<string, string>();
+let failWrites = false;
 // @ts-expect-error minimal storage surface for pure persistence tests
 globalThis.localStorage = {
   getItem: (key: string) => values.get(key) ?? null,
-  setItem: (key: string, value: string) => values.set(key, value),
+  setItem: (key: string, value: string) => {
+    if (failWrites) throw new Error("storage unavailable");
+    values.set(key, value);
+  },
   removeItem: (key: string) => values.delete(key),
   clear: () => values.clear(),
 };
@@ -38,6 +42,21 @@ test("local writes persist the current file discriminator", () => {
     nodeId: "",
   });
   assert.equal(loadLocalFolder("root")?.files["draft.md"]?.kind, "file");
+});
+
+test("local writes report storage failure to transaction coordinators", () => {
+  values.clear();
+  failWrites = true;
+  try {
+    assert.equal(saveLocalFile("root", "coin.md", {
+      content: "coin",
+      tags: [],
+      nodeId: "coin-id",
+    }), false);
+    assert.equal(loadLocalFolder("root"), null);
+  } finally {
+    failWrites = false;
+  }
 });
 
 test("crash pads reject records without the current kind discriminator", () => {

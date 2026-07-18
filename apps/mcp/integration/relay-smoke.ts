@@ -76,6 +76,7 @@ async function main(): Promise<void> {
   const {
     attestNode,
     coinOriginFromEvent,
+    completeCoinMint,
     diffToDeltas,
     eventMeta,
     fetchAttestationCounts,
@@ -341,6 +342,8 @@ async function main(): Promise<void> {
   assert.equal(firstManifest[0]?.latestNodeId, first.id);
 
   let attestationId: string | null = null;
+  let mcpMintNodeId: string | null = null;
+  let mcpMintAttestationId: string | null = null;
   if (externalRelay) {
     await assert.rejects(
       () => attestNode(first.id, voice.publicKey, { signer: voice.secretKey }),
@@ -402,6 +405,14 @@ async function main(): Promise<void> {
   assert.equal(verifyEvent(coin), true, "Mint signature is invalid");
   assert.ok(coin.tags.some((tag) => tag[0] === "x"), "Mint is missing its body hash");
   assert.ok(coin.tags.some((tag) => tag[0] === "e" && tag[1] === second.id && tag[3] === "extracted-from"));
+  const coinAttestation = await completeCoinMint(coin, voice.secretKey);
+  assert.equal(verifyEvent(coinAttestation), true, "Mint attestation signature is invalid");
+  assert.ok(
+    coinAttestation.tags.some(
+      (tag) => tag[0] === "e" && tag[1] === coin.id && tag[3] === "target",
+    ),
+    "Mint attestation does not target the Coin genesis",
+  );
 
   const directPhrase = "written directly in Mint";
   const directCoin = await publishDirectCoin({
@@ -428,7 +439,12 @@ async function main(): Promise<void> {
     false,
     "direct Coin must not claim an extraction source",
   );
-  await sendStep(directCoin, voice.secretKey);
+  const directCoinAttestation = await completeCoinMint(directCoin, voice.secretKey);
+  assert.equal(
+    verifyEvent(directCoinAttestation),
+    true,
+    "direct Mint attestation signature is invalid",
+  );
   assert.equal((await fetchEventById(directCoin.id))?.id, directCoin.id);
 
   const thirdText = `${secondText}\n\n[[ signed relay | ${coin.id} ]]`;
@@ -584,6 +600,42 @@ async function main(): Promise<void> {
       }));
       assert.equal(resent.nodeId, sent.nodeId, "unchanged Send must reuse the selected Step");
 
+      const minted = jsonToolResult(await client.callTool({
+        name: "zine_mint_span",
+        arguments: {
+          originPath: exactPath,
+          phrase: "selected public",
+          originNodeId: sent.nodeId,
+          sourceStart: 0,
+        },
+      }));
+      mcpMintNodeId = String(minted.mintedNodeId);
+      mcpMintAttestationId = String(minted.attestationId);
+      assert.match(mcpMintNodeId, /^[0-9a-f]{64}$/);
+      assert.match(mcpMintAttestationId, /^[0-9a-f]{64}$/);
+      assert.equal(minted.published, true);
+
+      const publicMint = await queryRelay(
+        externalRelay,
+        { ids: [mcpMintNodeId, mcpMintAttestationId] },
+        voice.secretKey,
+      );
+      const publicMintById = new Map(publicMint.map((event) => [event.id, event]));
+      assert.equal(
+        publicMintById.get(mcpMintNodeId)?.kind,
+        4290,
+        "MCP Mint did not publish its Coin genesis",
+      );
+      assert.ok(
+        publicMintById.get(mcpMintAttestationId)?.tags.some(
+          (tag) =>
+            tag[0] === "e" &&
+            tag[1] === mcpMintNodeId &&
+            tag[3] === "target",
+        ),
+        "MCP Mint did not publish its minter attestation",
+      );
+
       const history = jsonToolResult(await client.callTool({
         name: "zine_get_history",
         arguments: { relativePath: exactPath },
@@ -666,8 +718,18 @@ async function main(): Promise<void> {
       await transport.close();
     }
 
-    const counts = await fetchAttestationCounts([first.id]);
+    const counts = await fetchAttestationCounts([
+      first.id,
+      coin.id,
+      directCoin.id,
+      ...(mcpMintNodeId ? [mcpMintNodeId] : []),
+    ]);
     assert.equal(counts.get(first.id), 1, "Attest was not durably queryable");
+    assert.equal(counts.get(coin.id), 1, "extracted Mint attestation was not queryable");
+    assert.equal(counts.get(directCoin.id), 1, "direct Mint attestation was not queryable");
+    if (mcpMintNodeId) {
+      assert.equal(counts.get(mcpMintNodeId), 1, "MCP Mint attestation was not queryable");
+    }
   }
 
   process.stdout.write(`${JSON.stringify({
@@ -679,7 +741,11 @@ async function main(): Promise<void> {
     steps: chain.length,
     attestationId,
     coinId: coin.id,
+    coinAttestationId: coinAttestation.id,
     directCoinId: directCoin.id,
+    directCoinAttestationId: directCoinAttestation.id,
+    mcpMintNodeId,
+    mcpMintAttestationId,
     externalRelayExercised: Boolean(externalRelay),
   })}\n`);
 }

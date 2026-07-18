@@ -163,13 +163,16 @@ function isLocalFile(value: unknown): value is LocalFile {
   );
 }
 
-/** Persist a whole folder (overwrites). */
-function saveLocalFolder(folder: LocalFolder): void {
+/** Persist a whole folder (overwrites). Returns false when browser storage
+ * rejects the write so transaction coordinators can keep their retry journal. */
+function saveLocalFolder(folder: LocalFolder): boolean {
   try {
     localStorage.setItem(key(folder.id), JSON.stringify(folder));
+    return true;
   } catch {
     // Quota exceeded or disabled storage — the editor still works in-memory
     // for this session; persistence just won't survive a reload. Non-fatal.
+    return false;
   }
 }
 
@@ -198,7 +201,7 @@ export function saveLocalFile(
     pendingOperationId?: string;
   },
   label?: string,
-): void {
+): boolean {
   const existing = loadLocalFolder(folderId) ?? { id: folderId, label, files: {} };
   existing.files[relativePath] = {
     kind: data.kind ?? existing.files[relativePath]?.kind ?? "file",
@@ -226,7 +229,7 @@ export function saveLocalFile(
     ...(data.pendingOperationId ? { pendingOperationId: data.pendingOperationId } : {}),
   };
   if (label !== undefined) existing.label = label;
-  saveLocalFolder(existing);
+  return saveLocalFolder(existing);
 }
 
 /** Remove a file from a local folder (tombstone). Synchronous. */

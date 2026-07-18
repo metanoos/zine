@@ -55,6 +55,83 @@ test("newly minted Coins activate the same tab flow", () => {
   assert.match(appSource, /commitUiFocus\(locateFocus\([\s\S]*?coin\.path/);
 });
 
+test("an open Coin tab reacts immediately when the Coins opt-in changes", () => {
+  const coinView = modalSource.match(
+    /export function CoinView[\s\S]*?(?=export interface DirectCoinComposerViewProps)/,
+  )?.[0];
+  assert.ok(coinView);
+  assert.match(
+    coinView,
+    /useSyncExternalStore\([\s\S]*?subscribeKademliaConfig[\s\S]*?kademliaEnabledSnapshot/,
+  );
+  assert.match(coinView, /const rendezvousEnabled = isTauri\(\) && coinsEnabled/);
+  assert.doesNotMatch(coinView, /loadKademliaConfig\(\)\.enabled/);
+  assert.match(coinView, /\[phrase, rendezvousEnabled\]/);
+});
+
+test("the Coins opt-in gates Mint and Cite mutations without hiding existing Coins", () => {
+  assert.match(
+    appSource,
+    /const coinsEnabled = useSyncExternalStore\([\s\S]*?subscribeKademliaConfig[\s\S]*?kademliaEnabledSnapshot/,
+  );
+  const mint = appSource.match(
+    /async function mintCoinTrace\([\s\S]*?(?=\/\*\* Mint the text entered)/,
+  )?.[0];
+  assert.ok(mint);
+  assert.match(mint, /if \(!kademliaEnabledSnapshot\(\)\)[\s\S]*?Enable Coins in Networking/);
+  assert.match(
+    appSource,
+    /isRoot && node\.systemKind === "mint"[\s\S]*?disabled=\{!coinsEnabled\}/,
+  );
+  assert.match(
+    appSource,
+    /const enabled =[\s\S]*?\(!hasMintablePassage \|\| coinsEnabled\)/,
+  );
+  assert.match(
+    appSource,
+    /pickerDisabled=\{[\s\S]*?!coinsEnabled \|\|[\s\S]*?onAddCitation=\{\(nodeId\) => \{[\s\S]*?!kademliaEnabledSnapshot\(\)/,
+  );
+  assert.match(
+    appSource,
+    /function copySelectionWithCoin\([\s\S]*?if \(!kademliaEnabledSnapshot\(\)\) return false/,
+  );
+  assert.match(
+    appSource,
+    /function pasteSelectionWithCoin\([\s\S]*?if \(!kademliaEnabledSnapshot\(\)\) return false/,
+  );
+  assert.match(modalSource, /const canMint = enabled && phrase\.trim\(\)\.length > 0 && !busy/);
+  assert.match(
+    appSource,
+    /: coinActive \? \([\s\S]*?<CoinView[\s\S]*?phrase=\{flatten\(file\.runs\)\}/,
+    "existing Coin inspection stays available while authoring is disabled",
+  );
+});
+
+test("Mint completes Step, Publish, and minter-Attest before success", () => {
+  const mint = appSource.match(
+    /async function mintCoinTrace\([\s\S]*?(?=\/\*\* Mint the text entered)/,
+  )?.[0];
+  assert.ok(mint);
+  assert.match(mint, /publish(?:DirectCoin|HardenedSpan)\(/);
+  assert.match(mint, /const attestation = await completePendingCoinMintTransaction\(pending/);
+  assert.match(mint, /publishPair: \(coin\) => completeCoinMint\(coin, signer\)/);
+  assert.match(mint, /attestationId: attestation\.id/);
+  assert.ok(
+    mint.indexOf("completePendingCoinMintTransaction(pending") <
+      mint.indexOf("attestationId: attestation.id"),
+    "unfinished Mint attempts must not report a successful attestation",
+  );
+});
+
+test("copy carries only an existing resolved Coin and never mints", () => {
+  const copy = appSource.match(
+    /function copiedCoinCitation\([\s\S]*?(?=\/\*\* Resolve a clipboard ticket)/,
+  )?.[0];
+  assert.ok(copy);
+  assert.match(copy, /findResolvedBrackets\(docText\)/);
+  assert.doesNotMatch(copy, /mintCoinTrace|publishHardenedSpan|flushEditorLocally/);
+});
+
 test("Coin surfaces use the green Coin color token in both themes", () => {
   assert.match(
     cssSource,

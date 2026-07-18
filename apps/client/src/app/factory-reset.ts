@@ -1,10 +1,12 @@
 import { isTauri } from "../identity/identity.js";
 import { closeSecretSession } from "../identity/secret-store.js";
+import { clearRendezvousOutbox } from "../provenance/rendezvous-outbox.js";
 
 export interface FactoryResetActions {
   resetDesktopState?: () => Promise<void>;
   closeSecrets?: () => Promise<void>;
   deleteDesktopVault?: () => Promise<void>;
+  clearDurableBrowserState?: () => Promise<void>;
   clearBrowserState: () => void;
   reload: () => void;
 }
@@ -15,6 +17,7 @@ export interface FactoryResetActions {
  * a released secret backend. */
 export async function runFactoryReset(actions: FactoryResetActions): Promise<void> {
   if (!actions.resetDesktopState) {
+    await actions.clearDurableBrowserState?.();
     actions.clearBrowserState();
     actions.reload();
     return;
@@ -26,6 +29,7 @@ export async function runFactoryReset(actions: FactoryResetActions): Promise<voi
   await actions.resetDesktopState();
   await actions.closeSecrets();
   try {
+    await actions.clearDurableBrowserState?.();
     actions.clearBrowserState();
     await actions.deleteDesktopVault();
   } catch (error) {
@@ -38,6 +42,7 @@ export async function runFactoryReset(actions: FactoryResetActions): Promise<voi
 export async function resetLocalApp(): Promise<void> {
   if (!isTauri()) {
     await runFactoryReset({
+      clearDurableBrowserState: clearRendezvousOutbox,
       clearBrowserState: () => localStorage.clear(),
       reload: () => window.location.reload(),
     });
@@ -49,6 +54,7 @@ export async function resetLocalApp(): Promise<void> {
     resetDesktopState: () => invoke("factory_reset"),
     closeSecrets: closeSecretSession,
     deleteDesktopVault: () => invoke("factory_reset_vault"),
+    clearDurableBrowserState: clearRendezvousOutbox,
     clearBrowserState: () => localStorage.clear(),
     reload: () => window.location.reload(),
   });

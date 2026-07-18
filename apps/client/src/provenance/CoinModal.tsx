@@ -4,6 +4,7 @@ import {
   useId,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 
 import {
@@ -11,6 +12,15 @@ import {
   fetchEventById,
   type CoinOrigin,
 } from "./provenance.js";
+import {
+  discoverCoinCitations,
+  type VerifiedRendezvousCandidate,
+} from "./rendezvous.js";
+import {
+  kademliaEnabledSnapshot,
+  subscribeKademliaConfig,
+} from "../networking/kademlia.js";
+import { isTauri } from "../identity/identity.js";
 
 export interface CoinViewProps {
   name: string;
@@ -23,6 +33,16 @@ export function CoinView({ name, phrase, nodeId }: CoinViewProps) {
   const titleId = useId();
   const descriptionId = useId();
   const [origin, setOrigin] = useState<CoinOrigin | null | undefined>(undefined);
+  const coinsEnabled = useSyncExternalStore(
+    subscribeKademliaConfig,
+    kademliaEnabledSnapshot,
+    () => false,
+  );
+  const rendezvousEnabled = isTauri() && coinsEnabled;
+  const [candidates, setCandidates] = useState<VerifiedRendezvousCandidate[]>([]);
+  const [rendezvousState, setRendezvousState] = useState<"off" | "loading" | "done" | "error">(
+    rendezvousEnabled ? "loading" : "off",
+  );
 
   useEffect(() => {
     if (!nodeId) {
@@ -42,6 +62,34 @@ export function CoinView({ name, phrase, nodeId }: CoinViewProps) {
       cancelled = true;
     };
   }, [nodeId]);
+
+  useEffect(() => {
+    if (!rendezvousEnabled || !phrase) {
+      setCandidates([]);
+      setRendezvousState("off");
+      return;
+    }
+    let cancelled = false;
+    const controller = new AbortController();
+    setRendezvousState("loading");
+    void discoverCoinCitations(phrase, { signal: controller.signal })
+      .then((next) => {
+        if (!cancelled) {
+          setCandidates(next);
+          setRendezvousState("done");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCandidates([]);
+          setRendezvousState("error");
+        }
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [phrase, rendezvousEnabled]);
 
   const originLabel = origin === undefined
     ? "Loading…"
@@ -100,10 +148,35 @@ export function CoinView({ name, phrase, nodeId }: CoinViewProps) {
             <dt>Signed node</dt>
             <dd><code>{nodeId}</code></dd>
           </div>
+          <div>
+            <dt>Rendezvous</dt>
+            <dd>
+              {rendezvousState === "off"
+                ? "Off"
+                : rendezvousState === "loading"
+                  ? "Searching…"
+                  : rendezvousState === "error"
+                    ? "Unavailable"
+                    : `${candidates.length} verified ${candidates.length === 1 ? "candidate" : "candidates"}`}
+            </dd>
+          </div>
         </dl>
+
+        {candidates.length > 0 && (
+          <ul className="coin-rendezvous-list" aria-label="Verified global citation candidates">
+            {candidates.map((candidate) => (
+              <li key={`${candidate.eventId}:${candidate.relayUrl}`}>
+                <code title={candidate.signerPubkey}>{candidate.signerPubkey.slice(0, 12)}…</code>
+                <span>cited this Coin via</span>
+                <code title={candidate.relayUrl}>{candidate.relayUrl}</code>
+              </li>
+            ))}
+          </ul>
+        )}
 
         <p className="coin-modal-hint">
           Coins are read-only. Drag this Coin from Mint into Root to fork an editable copy.
+          {rendezvousEnabled && " Rendezvous candidates are discovery pointers, not Coin supply, trust, or reputation."}
         </p>
       </div>
     </article>
@@ -112,6 +185,7 @@ export function CoinView({ name, phrase, nodeId }: CoinViewProps) {
 
 export interface DirectCoinComposerViewProps {
   phrase: string;
+  enabled: boolean;
   busy: boolean;
   error: string | null;
   onPhraseChange: (phrase: string) => void;
@@ -122,6 +196,7 @@ export interface DirectCoinComposerViewProps {
 /** Session-owned direct-Coin draft rendered inside a normal panel tab. */
 export function DirectCoinComposerView({
   phrase,
+  enabled,
   busy,
   error,
   onPhraseChange,
@@ -131,7 +206,7 @@ export function DirectCoinComposerView({
   const titleId = useId();
   const hintId = useId();
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const canMint = phrase.trim().length > 0 && !busy;
+  const canMint = enabled && phrase.trim().length > 0 && !busy;
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -160,7 +235,7 @@ export function DirectCoinComposerView({
             value={phrase}
             placeholder="Write the exact passage to mint…"
             rows={7}
-            disabled={busy}
+            disabled={busy || !enabled}
             aria-label="Coin text"
             aria-invalid={!!error}
             onChange={(event) => onPhraseChange(event.target.value)}
@@ -172,7 +247,9 @@ export function DirectCoinComposerView({
             }}
           />
           <p id={hintId} className="coin-modal-hint">
-            This mints the text as one immutable Coin signed by the active pen. It makes no source-trace claim.
+            {enabled
+              ? "This mints the text as one immutable Coin signed by the active pen. It makes no source-trace claim."
+              : "Enable Coins in Networking to mint this passage."}
           </p>
           {error && <p className="create-error" role="alert">{error}</p>}
           <div className="coin-modal-actions">

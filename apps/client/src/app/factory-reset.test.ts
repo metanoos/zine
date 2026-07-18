@@ -19,11 +19,12 @@ test("desktop factory reset unloads and deletes the vault before reloading", asy
     resetDesktopState: async () => { calls.push("desktop"); },
     closeSecrets: async () => { calls.push("close"); },
     deleteDesktopVault: async () => { calls.push("vault"); },
+    clearDurableBrowserState: async () => { calls.push("indexeddb"); },
     clearBrowserState: () => { calls.push("browser"); },
     reload: () => { calls.push("reload"); },
   });
 
-  assert.deepEqual(calls, ["desktop", "close", "browser", "vault", "reload"]);
+  assert.deepEqual(calls, ["desktop", "close", "indexeddb", "browser", "vault", "reload"]);
 });
 
 test("browser factory reset clears browser state without desktop actions", async () => {

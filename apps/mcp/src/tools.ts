@@ -32,6 +32,7 @@ import { verifyEvent } from "nostr-tools/pure";
 
 import {
   attestNode,
+  completeCoinMint,
   eventMeta,
   fetchChain,
   fetchEventById,
@@ -64,6 +65,11 @@ import { getOrCreateMintFolder } from "../../client/src/workspace/root.js";
 import { MINT, mintedPath } from "../../client/src/workspace/generated-paths.js";
 import { saveLocalFile } from "../../client/src/workspace/local-store.js";
 import { pendingLocalEventCount } from "../../client/src/provenance/event-outbox.js";
+import {
+  coinMintOperationKey,
+  completePendingCoinMint as completePendingCoinMintTransaction,
+  preparePendingCoinMint,
+} from "../../client/src/provenance/coin-mint-journal.js";
 
 /** The headless press's signing key. Seeded on first call, persisted via the
  *  localStorage shim into the selected profile. Distinct from the desktop app's
@@ -514,11 +520,13 @@ export function registerTools(
 
   server.tool(
     "zine_mint_span",
-    "Mint (spec §3.8): strike an immutable, addressable kind-4290 node from a " +
-      "span of text, frozen at exactly this version. Minted spans are the " +
+    "Mint (spec §3.8): Step, Publish, and Attest an immutable, addressable " +
+      "kind-4290 Coin from a span of text, frozen at exactly this version. " +
+      "Minted spans are the " +
       "protocol's addressable unit for citations — 'quote this passage' first " +
-      "mints it, then cites the minted id. Returns the minted node id and its " +
-      "synthetic path.",
+      "mints it, then cites the minted id. The tool succeeds only after both " +
+      "the Coin and its minter attestation are public. Returns both event ids " +
+      "and the Coin's synthetic path.",
     {
       originPath: z.string().describe("relative path of the document the span came from"),
       phrase: z.string().describe("the exact span text to freeze as an immutable trace"),
@@ -556,40 +564,78 @@ export function registerTools(
         throw new Error("the phrase occurs more than once; provide sourceStart to identify the exact span");
       }
       const sourceContentHash = await sha256HexLocal(sourceSnapshot);
-      const mintFolderId = await getOrCreateMintFolder(ref.id, voice.secretKey);
-      const manifest = await fetchManifest(mintFolderId);
-      const occupied = new Set(manifest.map((entry) => `${MINT}/${entry.relativePath}`));
-      const localPath = mintedPath(phrase, new Date(), occupied);
-      const memberName = localPath.slice(`${MINT}/`.length);
-      const minted = await publishHardenedSpan({
-        folderId: mintFolderId,
-        relativePath: memberName,
-        phrase,
-        originNodeId,
+      const origin = {
+        kind: "extracted" as const,
+        sourceNodeId: originNodeId,
         sourceContentHash,
-        sourceRange: { start: resolvedStart, end: resolvedStart + phrase.length },
-        signer: voice.secretKey,
-        localOnly: true,
+        range: { start: resolvedStart, end: resolvedStart + phrase.length },
+      };
+      const operationKey = coinMintOperationKey({
+        sourceFolderId: ref.id,
+        signerPubkey: voice.publicKey,
+        phrase,
+        origin,
       });
-      const parsed = JSON.parse(minted.content) as { contentHash?: string };
-      await upsertManifestEntry(
-        mintFolderId,
-        {
-          kind: "file",
+      const pending = await preparePendingCoinMint(operationKey, async () => {
+        const mintFolderId = await getOrCreateMintFolder(ref.id, voice.secretKey);
+        const manifest = await fetchManifest(mintFolderId);
+        const occupied = new Set(manifest.map((entry) => `${MINT}/${entry.relativePath}`));
+        const localPath = mintedPath(phrase, new Date(), occupied);
+        const memberName = localPath.slice(`${MINT}/`.length);
+        const coin = await publishHardenedSpan({
+          folderId: mintFolderId,
           relativePath: memberName,
-          latestNodeId: minted.id,
-          contentHash: parsed.contentHash ?? "",
-        },
-        voice.secretKey,
-        { localOnly: true, operationId: operationIdFromNode(minted) },
-      );
-      saveLocalFile(ref.id, localPath, {
-        content: phrase,
-        tags: [],
-        nodeId: minted.id,
-        runs: [{ voice: voice.publicKey, text: phrase }],
+          phrase,
+          originNodeId,
+          sourceContentHash,
+          sourceRange: origin.range,
+          signer: voice.secretKey,
+          localOnly: true,
+        });
+        return {
+          sourceFolderId: ref.id,
+          mintFolderId,
+          localPath,
+          memberName,
+          phrase,
+          coin,
+        };
       });
-      return jsonResult({ mintedNodeId: minted.id, path: localPath, originPath });
+      const attestation = await completePendingCoinMintTransaction(pending, {
+        publishPair: (coin) => completeCoinMint(coin, voice.secretKey),
+        persistMembership: async (record) => {
+          const parsed = JSON.parse(record.coin.content) as { contentHash?: string };
+          await upsertManifestEntry(
+            record.mintFolderId,
+            {
+              kind: "file",
+              relativePath: record.memberName,
+              latestNodeId: record.coin.id,
+              contentHash: parsed.contentHash ?? "",
+            },
+            voice.secretKey,
+            { localOnly: true, operationId: operationIdFromNode(record.coin) },
+          );
+        },
+        persistLocal: (record) => {
+          const persisted = saveLocalFile(record.sourceFolderId, record.localPath, {
+            content: record.phrase,
+            tags: [],
+            nodeId: record.coin.id,
+            runs: [{ voice: voice.publicKey, text: record.phrase }],
+          });
+          if (!persisted) {
+            throw new Error("Mint is public but its local inventory could not be persisted");
+          }
+        },
+      });
+      return jsonResult({
+        mintedNodeId: pending.coin.id,
+        attestationId: attestation.id,
+        published: true,
+        path: pending.localPath,
+        originPath,
+      });
     },
   );
 

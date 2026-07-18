@@ -10,8 +10,8 @@ const SCOPES: Array<{ value: SocialScope; label: string }> = [
 ];
 
 /** One persistent bound shared by Stacks, Times, and Spaces. It deliberately
- * says "read relays", not "network": Kademlia global discovery is planned but
- * not implemented, so every aggregate is a partial view of reachable events. */
+ * says "read relays", not "network": Kademlia discovers candidate pointers
+ * for one exact Coin coordinate; it does not compute these global aggregates. */
 export function SocialQueryBar({
   query,
   onChange,
@@ -66,11 +66,10 @@ export function SocialQueryBar({
 
       <span
         className="social-query-partial"
-        title="Partial aggregate: only events reachable from your configured read relays. The planned Kademlia layer will discover event pointers, not compute global counts."
+        title="Partial aggregate: only events reachable from your configured read relays. Kademlia discovers exact-coordinate event pointers; it does not compute global counts."
       >
         partial · read relays
       </span>
     </section>
   );
 }
-

@@ -100,16 +100,6 @@ export const onSelectSpanFacet = Facet.define<SelectSpanHandler, SelectSpanHandl
   combine: (v) => v[0] ?? (() => {}),
 });
 
-/** Click the copy button on a citation chip. App.tsx supplies a closure over
- *  its `copySpan`, which writes the citation to the clipboard *and* appends the
- *  span to the palette (curating it for reuse). The chip still does its own
- *  clipboard write + check-flash here, so a missing handler degrades to plain
- *  copy; this callback is the "also curate" side effect. Default no-op. */
-export type CopySpanHandler = (nodeId: string, phrase: string) => void;
-export const onCopySpanFacet = Facet.define<CopySpanHandler, CopySpanHandler>({
-  combine: (v) => v[0] ?? (() => {}),
-});
-
 /** Canonical resolved-citation markup used by copy and drag-to-insert flows. */
 export function resolvedBracketMarkup(phrase: string, nodeId: string): string {
   const body = phrase.trim();
@@ -162,7 +152,6 @@ class CitationWidget extends WidgetType {
     readonly focusedVoice: string,
     readonly selected: boolean,
     readonly onSelect: SelectSpanHandler | null,
-    readonly onCopy: CopySpanHandler | null,
   ) {
     super();
   }
@@ -175,8 +164,7 @@ class CitationWidget extends WidgetType {
       other.voice === this.voice &&
       other.focusedVoice === this.focusedVoice &&
       other.selected === this.selected &&
-      !!other.onSelect === !!this.onSelect &&
-      !!other.onCopy === !!this.onCopy
+      !!other.onSelect === !!this.onSelect
     );
   }
   toDOM(): HTMLElement {
@@ -186,9 +174,9 @@ class CitationWidget extends WidgetType {
     cite.dataset.bracketFrom = String(this.matchStart);
     cite.dataset.bracketTo = String(this.matchEnd);
     // Clicking the chip (anywhere but the copy button) selects this minted
-    // span as the active trace — accent-soft outline in the palette. ignoreEvent still
-    // lets the copy button keep its own click; a chip without a nodeId can't be
-    // selected (nothing to bind to) so it stays click-to-cursor only.
+    // span as the active trace — accent-soft outline in the action palette.
+    // ignoreEvent still lets the copy button keep its own click; a chip without
+    // a nodeId can't be selected, so it stays click-to-cursor only.
     if (this.nodeId && this.onSelect) {
       cite.addEventListener("click", (e) => {
         if (e.target instanceof Element && e.target.closest(".md-cite-copy")) return;
@@ -258,10 +246,6 @@ class CitationWidget extends WidgetType {
         }, () => {
           /* clipboard unavailable — no-op, mirrors KeysView's copy handler */
         });
-        // Also curate: append the span to the palette (idempotent — re-copying
-        // an already-saved span is a no-op). Runs alongside the clipboard write
-        // above, so copy = "pasteable citation" + "saved for reuse".
-        this.onCopy?.(this.nodeId, this.phrase);
       });
 
       cite.append(sep, nodeSpan, copyBtn);
@@ -443,7 +427,6 @@ function buildBracketDecorations(view: EditorView): DecorationSet {
   const selectedNodeId = view.state.facet(selectedNodeIdFacet);
   const focusedVoice = view.state.facet(focusedVoiceFacet);
   const onSelect = view.state.facet(onSelectSpanFacet);
-  const onCopy = view.state.facet(onCopySpanFacet);
   const decos: Range<Decoration>[] = [];
   for (const b of iterBrackets(text)) {
     if (b.matchEnd <= b.matchStart) continue;
@@ -466,7 +449,6 @@ function buildBracketDecorations(view: EditorView): DecorationSet {
             focusedVoice,
             selected,
             onSelect ?? null,
-            onCopy ?? null,
           ),
         }).range(b.matchStart, b.matchEnd),
       );

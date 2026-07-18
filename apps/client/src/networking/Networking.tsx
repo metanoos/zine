@@ -41,8 +41,16 @@ import {
 import { detectCoCitations, type CoCitation } from "../provenance/co-citation.js";
 import { addFollow, loadFollows, removeFollow, type FollowEntry } from "./follows-store.js";
 import { PubkeyDisplay } from "../identity/PubkeyDisplay.js";
+import {
+  applyKademliaConfig,
+  kademliaStatus,
+  loadKademliaConfig,
+  subscribeKademliaConfig,
+  type KademliaConfig,
+  type KademliaStatus,
+} from "./kademlia.js";
 
-type NetworkCategory = "node" | "seeds" | "following" | "peers" | "co-citations";
+type NetworkCategory = "node" | "seeds" | "coins" | "following" | "peers" | "co-citations";
 
 const NETWORK_CATEGORIES: Array<{
   id: NetworkCategory;
@@ -51,6 +59,7 @@ const NETWORK_CATEGORIES: Array<{
 }> = [
   { id: "node", label: "Node", description: "This press and its doors" },
   { id: "seeds", label: "Seeds", description: "Durable relay copies" },
+  { id: "coins", label: "Coins", description: "Mint, cite, and discover" },
   { id: "following", label: "Following", description: "Whose work you read" },
   { id: "peers", label: "Peers", description: "Trusted access" },
   {
@@ -63,7 +72,7 @@ const NETWORK_CATEGORIES: Array<{
 /**
  * The networking view — one surface for how this machine talks to the network.
  *
- * Five categories, one selected at a time:
+ * Six categories, one selected at a time:
  *
  *   - Node: this machine and every way to reach it. The owner-key picker
  *     (which keychain key owns the relay — signs NIP-42 AUTH, is the `owner`
@@ -75,6 +84,9 @@ const NETWORK_CATEGORIES: Array<{
  *     independent read/write toggles. The Node is primary; seeds are durability
  *     backups — durable, always-online services peers can read when your
  *     desktop is offline.
+ *
+ *   - Coins: the one product opt-in for Mint, Cite, indexing, and rendezvous.
+ *     Listen/bootstrap fields remain an advanced operator configuration.
  *
  *   - Peers (desktop only): who can reach your node — the networked-mode gate
  *     and the pubkey allowlist. On the webapp this is desktop-only, so the
@@ -248,6 +260,15 @@ export function NetworkingView() {
           </div>
 
           <div
+            id="network-panel-coins"
+            role="region"
+            aria-labelledby="network-category-coins"
+            hidden={activeCategory !== "coins"}
+          >
+            <CoinsSection />
+          </div>
+
+          <div
             id="network-panel-following"
             role="region"
             aria-labelledby="network-category-following"
@@ -278,6 +299,152 @@ export function NetworkingView() {
         </div>
       </div>
     </section>
+  );
+}
+
+function CoinsSection() {
+  const desktop = isTauri();
+  const [draft, setDraft] = useState<KademliaConfig>(() => loadKademliaConfig());
+  const [bootstrapText, setBootstrapText] = useState(() => draft.bootstrapPeers.join("\n"));
+  const [status, setStatus] = useState<KademliaStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => subscribeKademliaConfig(() => {
+    const committed = loadKademliaConfig();
+    setDraft(committed);
+    setBootstrapText(committed.bootstrapPeers.join("\n"));
+  }), []);
+
+  useEffect(() => {
+    if (!desktop) return;
+    let cancelled = false;
+    const refresh = () => {
+      void kademliaStatus()
+        .then((next) => {
+          if (!cancelled) setStatus(next);
+        })
+        .catch((cause) => {
+          if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+        });
+    };
+    refresh();
+    const interval = window.setInterval(refresh, 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [desktop]);
+
+  async function applyConfig() {
+    const candidate = {
+      ...draft,
+      bootstrapPeers: bootstrapText.split(/\r?\n/),
+    };
+    setBusy(true);
+    setError(null);
+    try {
+      const applied = await applyKademliaConfig(candidate);
+      setDraft(applied.config);
+      setBootstrapText(applied.config.bootstrapPeers.join("\n"));
+      setStatus(applied.status);
+      if (applied.config.enabled) {
+        void import("../provenance/provenance.js")
+          .then(({ flushRendezvousPublicationOutbox }) =>
+            flushRendezvousPublicationOutbox())
+          .catch((cause) => {
+            console.warn("[rendezvous] indexing outbox retry failed after enable:", cause);
+          });
+      }
+    } catch (cause) {
+      const restored = loadKademliaConfig();
+      setDraft(restored);
+      setBootstrapText(restored.bootstrapPeers.join("\n"));
+      try {
+        setStatus(await kademliaStatus());
+      } catch {
+        // Keep the original apply failure actionable; polling will retry status.
+      }
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!desktop) {
+    return (
+      <div className="networking-section">
+        <h2 className="networking-section-title">Coins</h2>
+        <p className="networking-section-sub">
+          Coins are a desktop opt-in. This browser surface remains relay-only
+          and does not join the rendezvous network.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="networking-section">
+      <h2 className="networking-section-title">Coins</h2>
+      <p className="networking-section-sub">
+        One opt-in covers Mint, Cite, Send-side indexing, and rendezvous. The
+        rendezvous index never carries Coin text, private onions, supply, or
+        reputation, and every result is verified against its relay.
+      </p>
+
+      <label className="relay-toggle kademlia-enabled">
+        <input
+          type="checkbox"
+          checked={draft.enabled}
+          onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}
+        />
+        <span>Enable Coins</span>
+      </label>
+
+      <details className="networking-subsection">
+        <summary>Advanced rendezvous configuration</summary>
+        <label className="kademlia-field">
+          <span>Listen multiaddr</span>
+          <input
+            className="relay-add-input"
+            type="text"
+            value={draft.listenAddress}
+            onChange={(event) => setDraft({ ...draft, listenAddress: event.target.value })}
+            spellCheck={false}
+          />
+        </label>
+
+        <label className="kademlia-field">
+          <span>Super-peer bootstrap multiaddrs · one per line</span>
+          <textarea
+            className="relay-add-input kademlia-bootstrap"
+            value={bootstrapText}
+            placeholder="/dns4/seed.example/tcp/4001/p2p/12D3KooW…"
+            onChange={(event) => setBootstrapText(event.target.value)}
+            spellCheck={false}
+            rows={4}
+          />
+        </label>
+      </details>
+
+      <button type="button" className="settings-add-btn" disabled={busy} onClick={applyConfig}>
+        {busy ? "Applying…" : "Apply Coins settings"}
+      </button>
+
+      {error && <p className="peers-error" role="alert">{error}</p>}
+      {status && (
+        <dl className="coin-modal-meta kademlia-status">
+          <div><dt>State</dt><dd>{status.running ? "running" : "stopped"}</dd></div>
+          {status.peerId && <div><dt>Peer ID</dt><dd><code>{status.peerId}</code></dd></div>}
+          <div><dt>Peers</dt><dd>{status.connectedPeers} connected · {status.routingPeers} routed</dd></div>
+          <div><dt>Owned coordinates</dt><dd>{status.storedCoordinates}</dd></div>
+          {status.listeners.map((listener) => (
+            <div key={listener}><dt>Listening</dt><dd><code>{listener}</code></dd></div>
+          ))}
+          {status.lastError && <div><dt>Last network error</dt><dd>{status.lastError}</dd></div>}
+        </dl>
+      )}
+    </div>
   );
 }
 

@@ -2321,6 +2321,35 @@ html[data-theme="light"] .rail-brand-wordmark {
   margin: 0;
 }
 
+.kademlia-enabled {
+  align-self: flex-start;
+  margin: 0.25rem 0;
+}
+
+.kademlia-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--ink-dim);
+}
+
+.kademlia-bootstrap {
+  width: 100%;
+  min-height: 6rem;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.kademlia-status {
+  margin-top: 0.5rem;
+}
+
+.kademlia-status code {
+  overflow-wrap: anywhere;
+}
+
 .networking-subsection-title {
   margin: 0.65rem 0 0;
   font-family: var(--font-mono);
@@ -6334,6 +6363,34 @@ html[data-theme="light"] .editor-host {
   margin: 0;
   color: var(--ink);
   overflow-wrap: anywhere;
+}
+
+.coin-rendezvous-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+
+.coin-rendezvous-list li {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  color: var(--ink-dim);
+}
+
+.coin-rendezvous-list code:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .coin-modal-hint {

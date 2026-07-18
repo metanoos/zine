@@ -1,4 +1,4 @@
-import { Component, Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Component, Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, MutableRefObject, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { createTraceOperationId, isTraceOperationId } from "@zine/protocol";
@@ -27,8 +27,6 @@ import { RefCountedStepGate } from "../editor/ref-counted-step-gate.js";
 import {
   sampleRelays,
   hitToDocument,
-  appendToPalette,
-  fetchPalette,
   rankSampleHits,
   upsertManifestEntry,
   resolveTagCandidates,
@@ -39,6 +37,7 @@ import {
   fetchFolderOwner,
   fetchEventById,
   diffToDeltas,
+  completeCoinMint,
   publishEdit,
   publishDirectCoin,
   publishHardenedSpan,
@@ -46,6 +45,7 @@ import {
   sha256HexLocal,
   sendHistoricalStep,
   sendStep,
+  flushRendezvousPublicationOutbox,
   reconstructUpTo,
   reconstructRunsUpTo,
   auditAttribution,
@@ -63,7 +63,6 @@ import {
   incorporateMergeCandidate,
   loadMergeSides,
   mergeFile,
-  type PaletteItem,
   type TagCandidate,
   type EventMeta,
   type FocusSelection,
@@ -88,6 +87,11 @@ import { MergePreviewModal } from "../workspace/MergePreviewModal.js";
 import { threeWayMerge, autoMergedText } from "../workspace/three-way-merge.js";
 import { AttestModal } from "../provenance/AttestModal.js";
 import { CoinView, DirectCoinComposerView } from "../provenance/CoinModal.js";
+import {
+  coinMintOperationKey,
+  completePendingCoinMint as completePendingCoinMintTransaction,
+  preparePendingCoinMint,
+} from "../provenance/coin-mint-journal.js";
 import { OblivionModal } from "../workspace/OblivionModal.js";
 import { RunModal } from "../ai/RunModal.js";
 import { PromptInspectorModal } from "../ai/PromptInspectorModal.js";
@@ -137,7 +141,6 @@ import {
   modeCompartment,
   modeFacet,
   onSelectSpanFacet,
-  onCopySpanFacet,
   resolveBracket,
   resolvedBracketMarkup,
   selectedNodeIdFacet,
@@ -156,10 +159,13 @@ import {
 } from "../editor/palette.js";
 import {
   COIN_CLIPBOARD_MIME,
-  canCoinText,
   parseCoinClipboardEnvelope,
   serializeCoinClipboardEnvelope,
 } from "../provenance/coin-clipboard.js";
+import {
+  listMintCoins,
+  renderMintCoinReferences,
+} from "../workspace/mint-inventory.js";
 
 import { DownloadView } from "../networking/Download.js";
 import { AboutView } from "./About.js";
@@ -177,6 +183,10 @@ import {
 } from "./onboarding-state.js";
 import { aboutHashTarget } from "./about-documents.js";
 import { NetworkingView } from "../networking/Networking.js";
+import {
+  kademliaEnabledSnapshot,
+  subscribeKademliaConfig,
+} from "../networking/kademlia.js";
 import { ModelsView } from "../ai/ModelsView.js";
 import { KeysView } from "../identity/KeysView.js";
 import { GlobeView } from "../networking/Globe.js";
@@ -540,7 +550,7 @@ interface CoinClipboardCitation {
 
 interface CoinClipboardTicket {
   phrase: string;
-  citation: Promise<CoinClipboardCitation>;
+  citation: CoinClipboardCitation;
 }
 
 // One step in a folder-wide replay timeline. `contentUpToHere` is the file's
@@ -610,7 +620,7 @@ function readTheme(): Theme {
   return stored === "light" || stored === "dark" ? stored : "auto";
 }
 
-// Horizontal resize of the press: how wide the collection/palette sidebar is.
+// Horizontal resize of the press: how wide the directory sidebar is.
 // Persisted per-browser (zine.press.sidebarWidth); clamped to MIN..MAX on read.
 const SIDEBAR_WIDTH_KEY = "zine.press.sidebarWidth";
 const SIDEBAR_WIDTH_DEFAULT = 220;
@@ -1293,6 +1303,7 @@ function TreeItem({
   onRowActivate,
   onCreateStart,
   onMintCoin,
+  coinsEnabled,
   onScan,
   creating,
   createDraft,
@@ -1341,6 +1352,7 @@ function TreeItem({
   onCreateStart: (kind: "file" | "folder") => void;
   /** Open the direct-Coin composer from the Mint region header. */
   onMintCoin: () => void;
+  coinsEnabled: boolean;
   /** Acquire a filesystem snapshot from the Scan region header. */
   onScan: (kind: "file" | "folder") => void;
   /** Active inline creation (null unless a New button/context-menu entry was
@@ -1591,8 +1603,9 @@ function TreeItem({
               <button
                 className="icon-btn"
                 type="button"
-                title="Mint a direct Coin"
+                title={coinsEnabled ? "Mint a direct Coin" : "Enable Coins in Networking to Mint"}
                 aria-label="Mint a direct Coin"
+                disabled={!coinsEnabled}
                 onClick={onMintCoin}
               >
                 <CircleDollarSign size={14} aria-hidden="true" />
@@ -1666,6 +1679,7 @@ function TreeItem({
                 onRowActivate={onRowActivate}
                 onCreateStart={onCreateStart}
                 onMintCoin={onMintCoin}
+                coinsEnabled={coinsEnabled}
                 onScan={onScan}
                 creating={creating}
                 createDraft={createDraft}
@@ -1828,6 +1842,7 @@ function Sidebar({
   onActivateFolder,
   onOpenFolder,
   onMintCoin,
+  coinsEnabled,
   onScan,
   onReify,
   onStepFolder,
@@ -1884,6 +1899,7 @@ function Sidebar({
   onOpenFolder: (path: string) => void;
   /** Open the direct-Coin composer from the Mint region header. */
   onMintCoin: () => void;
+  coinsEnabled: boolean;
   /** Acquire a file or folder from the Scan region header. */
   onScan: (kind: "file" | "folder") => void;
   /** Reify one explicitly chosen tree file or folder to the filesystem. */
@@ -2339,6 +2355,7 @@ function Sidebar({
               onRowActivate={onRowActivate}
               onCreateStart={(kind) => onCreateStart(kind, createParent())}
               onMintCoin={onMintCoin}
+              coinsEnabled={coinsEnabled}
               onScan={onScan}
               creating={creating}
               createDraft={createDraft}
@@ -2508,6 +2525,8 @@ function Sidebar({
                     <button
                       type="button"
                       className="ctx-menu-item"
+                      disabled={!coinsEnabled}
+                      title={coinsEnabled ? "Mint a direct Coin" : "Enable Coins in Networking to Mint"}
                       onClick={() => {
                         setCtxMenu(null);
                         onMintCoin();
@@ -2962,7 +2981,7 @@ function replayActionLabel(
 //
 // Replaces the editor surface in the panel when the active tab's mode is
 // "diff" (the third surface alongside Preview/Markdown). The editor
-// (FileEditor) stays mounted underneath — LLM ops, palette citations, and
+// (FileEditor) stays mounted underneath — LLM ops, citation chips, and
 // Cmd+S step all hold its view ref regardless of which surface is showing —
 // this pane is just an absolute overlay that covers it visually. Reuses the
 // same jsdiff + steps-diff-add/-remove/-same spans MergePreviewModal uses.
@@ -3985,7 +4004,6 @@ const focusedVoiceCompartment = new Compartment();
  *  the editor. Reconfigured live from FileEditor when `selection` moves. */
 const selectedNodeIdCompartment = new Compartment();
 const onSelectSpanCompartment = new Compartment();
-const onCopySpanCompartment = new Compartment();
 /** Holds the replay read-only gate so it can be reconfigured live (entering/
  *  leaving a frozen replay step) without rebuilding the editor. While armed it
  *  drops user keystrokes (a frozen historical view can't be edited) but flashes
@@ -4426,7 +4444,6 @@ function buildExtensions(
   onSelection: (sel: { from: number; to: number } | null) => void,
   selectedNodeId: string,
   onSelectSpan: (nodeId: string, phrase: string) => void,
-  onCopySpan: (nodeId: string, phrase: string) => void,
   onCopySelection: (view: EditorView, event: ClipboardEvent) => boolean,
   onPasteSelection: (view: EditorView, event: ClipboardEvent) => boolean,
   readOnly: boolean,
@@ -4503,12 +4520,11 @@ function buildExtensions(
     // compartment is needed — the resolver closure is stateless and the field
     // it reads updates synchronously with each transaction.
     bracketVoiceResolverFacet.of(voiceAtOffset),
-    // Selected-span ring + chip-click/chip-copy handlers, each reconfigurable
+    // Selected-span ring + chip-click handler, each reconfigurable
     // live so a selection move re-rings the right `[[ span ]]` (and a chip
     // click/copy reports to App) without rebuilding the editor.
     selectedNodeIdCompartment.of(selectedNodeIdFacet.of(selectedNodeId)),
     onSelectSpanCompartment.of(onSelectSpanFacet.of(onSelectSpan)),
-    onCopySpanCompartment.of(onCopySpanFacet.of(onCopySpan)),
     // Replay read-only gate, reconfigured live via readOnlyCompartment (see
     // FileEditor). While frozen on a historical replay step (or mid-playback)
     // user keystrokes are dropped and pulse the reject flash; programmatic
@@ -4568,7 +4584,6 @@ function FileEditor({
   scrollTarget,
   readOnly,
   onSelectSpan,
-  onCopySpan,
   onCopySelection,
   onPasteSelection,
   onReplayEditAttempt,
@@ -4612,13 +4627,8 @@ function FileEditor({
   readOnly: boolean;
   /** Clicking a citation chip selects that coin as the active trace. */
   onSelectSpan: (nodeId: string, phrase: string) => void;
-  /** Clicking a citation chip's copy button curates the span (clipboard +
-   *  palette append). Mirrors onSelectSpan's ref-indirection so the chip's
-   *  copy widget stays current without rebuilding the editor. */
-  onCopySpan: (nodeId: string, phrase: string) => void;
-  /** Copy/paste hooks that upgrade an intra-press text transfer into a
-   * coin-backed resolved citation. Returning false preserves native clipboard
-   * behavior for external/plain text. */
+  /** Copy/paste hooks that preserve an existing resolved Coin citation.
+   * Returning false preserves native clipboard behavior for ordinary text. */
   onCopySelection: (view: EditorView, event: ClipboardEvent) => boolean;
   onPasteSelection: (view: EditorView, event: ClipboardEvent) => boolean;
   /** Fired when the user tries to edit while replay-frozen (a keystroke the
@@ -4665,9 +4675,6 @@ function FileEditor({
   // right widget, but indirection keeps it cheap (no rebuild on selection move).
   const onSelectSpanRef = useRef(onSelectSpan);
   onSelectSpanRef.current = onSelectSpan;
-  // Same indirection for the chip's copy-curates side effect.
-  const onCopySpanRef = useRef(onCopySpan);
-  onCopySpanRef.current = onCopySpan;
   const onCopySelectionRef = useRef(onCopySelection);
   onCopySelectionRef.current = onCopySelection;
   const onPasteSelectionRef = useRef(onPasteSelection);
@@ -4714,7 +4721,6 @@ function FileEditor({
       (has) => onSelectionRef.current?.(has),
       selectedNodeId,
       (nodeId, phrase) => onSelectSpanRef.current(nodeId, phrase),
-      (nodeId, phrase) => onCopySpanRef.current(nodeId, phrase),
       (view, event) => onCopySelectionRef.current(view, event),
       (view, event) => onPasteSelectionRef.current(view, event),
       readOnly,
@@ -5318,12 +5324,14 @@ function CitationPicker({
   candidates,
   alreadyCited,
   disabled,
+  disabledTitle,
   onActivate,
   onPick,
 }: {
   candidates: TraceCandidate[];
   alreadyCited: string[];
   disabled: boolean;
+  disabledTitle?: string;
   onActivate: () => void;
   onPick: (nodeId: string) => void;
 }) {
@@ -5353,7 +5361,7 @@ function CitationPicker({
       <button
         type="button"
         className="panel-cite-add"
-        title={disabled ? "Step this file before inserting citations" : "Insert citation"}
+        title={disabled ? disabledTitle ?? "Step this file before inserting citations" : "Insert citation"}
         aria-expanded={!disabled && open}
         disabled={disabled}
         onClick={() => {
@@ -5927,6 +5935,7 @@ function ActionPalette({
   onInspect,
   attestPlan,
   targetInScope,
+  coinsEnabled,
   /** Semantic state of the focused editor passage. Mutates the AUTHOR primary
    *  slot between Step, Mint, disabled Coin, and disabled invalid Mint. */
   authorSelectionState,
@@ -5989,6 +5998,8 @@ function ActionPalette({
    *  endorsing or ensuring reachability of an existing exact node does not
    *  write into the target content. */
   targetInScope: boolean;
+  /** One user opt-in gates Coin creation and citation authoring. */
+  coinsEnabled: boolean;
   /** Semantic state of the focused editor passage presented by the palette. */
   authorSelectionState: PaletteSelectionState;
   /** Whether Send's delivery plan is append-and-send rather than send-latest. */
@@ -6087,6 +6098,7 @@ function ActionPalette({
                 primaryAction.actionable &&
                 (hasMintablePassage || stepAvailable) &&
                 (hasMintablePassage ? targetInScope : scopedDeliver) &&
+                (!hasMintablePassage || coinsEnabled) &&
                 !immutableMint &&
                 !replayFrozen;
             return (
@@ -6098,6 +6110,8 @@ function ActionPalette({
                 title={
                   isRunning
                     ? `${primaryAction.label} in progress`
+                    : hasMintablePassage && !coinsEnabled
+                      ? "Enable Coins in Networking to Mint this passage"
                     : primaryAction.title
                 }
                 onClick={() => onOp("step")}
@@ -6370,7 +6384,6 @@ function Panel({
   replayFrozen,
   replayMounted,
   onSelectSpan,
-  onCopySpan,
   onCopySelection,
   onPasteSelection,
   onReplayEditAttempt,
@@ -6401,6 +6414,7 @@ function Panel({
   file?: FileState;
   directCoinComposer: {
     phrase: string;
+    enabled: boolean;
     busy: boolean;
     error: string | null;
     onPhraseChange: (phrase: string) => void;
@@ -6481,9 +6495,6 @@ function Panel({
   replayMounted: boolean;
   /** Clicking a citation chip in this editor selects that coin. */
   onSelectSpan: (nodeId: string, phrase: string) => void;
-  /** Clicking a citation chip's copy button curates the span (clipboard +
-   *  palette append). */
-  onCopySpan: (nodeId: string, phrase: string) => void;
   onCopySelection: (view: EditorView, event: ClipboardEvent) => boolean;
   onPasteSelection: (view: EditorView, event: ClipboardEvent) => boolean;
   /** Fired when the user tries to edit while replay-frozen. The App surfaces
@@ -6721,6 +6732,11 @@ function Panel({
           candidates={traceCandidates}
           alreadyCited={file.citationIds ?? []}
           disabled={pickerDisabled || readOnly}
+          disabledTitle={
+            !directCoinComposer.enabled
+              ? "Enable Coins in Networking to add a citation"
+              : undefined
+          }
           onActivate={onFocusPanel}
           onPick={onAddCitation}
         />
@@ -7152,6 +7168,7 @@ function Panel({
       {coinComposerActive ? (
         <DirectCoinComposerView
           phrase={directCoinComposer.phrase}
+          enabled={directCoinComposer.enabled}
           busy={directCoinComposer.busy}
           error={directCoinComposer.error}
           onPhraseChange={directCoinComposer.onPhraseChange}
@@ -7167,7 +7184,7 @@ function Panel({
         />
       ) : file ? (
         // .panel-body positions the one CodeMirror surface that now serves
-        // all three modes — LLM ops, palette citations, and Cmd+S step all hold
+        // all three modes — LLM ops, citation chips, and Cmd+S step all hold
         // its view ref regardless of which mode is active. Preview vs Markdown
         // is purely a decoration/CSS switch (see FileEditor/modeFacet), not a
         // second mounted component. Diff keeps the editor mounted (so the view
@@ -7189,7 +7206,6 @@ function Panel({
             scrollTarget={scrollTarget}
             readOnly={readOnly}
             onSelectSpan={onSelectSpan}
-            onCopySpan={onCopySpan}
             onCopySelection={onCopySelection}
             onPasteSelection={onPasteSelection}
             onReplayEditAttempt={onReplayEditAttempt}
@@ -7543,13 +7559,28 @@ function useProvenance(
   useEffect(() => {
     if (!isTauri()) return;
     let cancelled = false;
+    const flushRendezvous = () => {
+      void flushRendezvousPublicationOutbox().catch((e: unknown) => {
+        if (!cancelled) console.warn("[rendezvous] indexing outbox retry failed:", e);
+      });
+    };
     import("@tauri-apps/api/core")
       .then(({ invoke }) => invoke("spawn_relay"))
       .catch((e: unknown) => {
         if (!cancelled) console.warn("[provenance] spawn_relay failed (relay may already be up):", e);
       });
+    import("../networking/kademlia.js")
+      .then(({ ensureKademliaStarted }) => ensureKademliaStarted())
+      .then(() => {
+        if (!cancelled) flushRendezvous();
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) console.warn("[rendezvous] Kademlia startup failed:", e);
+      });
+    window.addEventListener("online", flushRendezvous);
     return () => {
       cancelled = true;
+      window.removeEventListener("online", flushRendezvous);
     };
   }, []);
 
@@ -7874,6 +7905,11 @@ export type GlobalCtxItem =
   | { kind: "sep" };
 
 function App() {
+  const coinsEnabled = useSyncExternalStore(
+    subscribeKademliaConfig,
+    kademliaEnabledSnapshot,
+    () => false,
+  );
   // The workspace is folder-driven: `files` starts empty and is populated by
   // the boot scan once a folder is attached. `folder` holds the attached
   // folder's stable id + absolute path (persisted in localStorage by
@@ -8974,7 +9010,7 @@ function App() {
   // Read at fire time (see scheduleStep), so an AUTHOR switch mid-debounce wins.
   authorSignerRef.current = () => secretKeyForVoice(authorPubkey) ?? undefined;
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  // Width of the collection/palette sidebar, driven by the .sidebar-resizer
+  // Width of the directory sidebar, driven by the .sidebar-resizer
   // handle. Resting default 220px; persisted in localStorage on change.
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => readSidebarWidth());
   const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -9335,7 +9371,7 @@ function App() {
     setFiles((prev) => {
       const current = prev[path];
       if (!current) return prev;
-      // Copy/mint may wait on a relay while the author keeps typing. Advance
+      // Mint/Step may wait on a relay while the author keeps typing. Advance
       // only the stepped nucleus and drain exactly the KEdit prefix captured
       // above; never overwrite newer runs with the source snapshot.
       const remaining = dropKEditLogPrefix(current.kedits ?? EMPTY_KEDIT_LOG, steppedKedits);
@@ -9352,30 +9388,41 @@ function App() {
     return nodeId;
   }
 
-  /** Strike one immutable, single-Step coin without changing the source body.
+  /** Strike one immutable Coin without changing the source body.
+   * Mint is the compound Step → Publish → Attest gesture; this helper does not
+   * report success until the Coin and its minter attestation are public.
    * The caller decides whether to resolve a bracket in the source (the Mint
-   * gesture does; provenance-aware Copy deliberately does not). */
+   * gesture does; provenance-aware Copy never creates a Coin). */
   async function mintCoinTrace(
     phrase: string,
     origin: CoinOrigin,
     signer?: Uint8Array,
     kedits?: KEdit[],
-  ): Promise<{ path: string; nodeId: string; runs: Run[] }> {
+  ): Promise<{ path: string; nodeId: string; attestationId: string; runs: Run[] }> {
+    if (!kademliaEnabledSnapshot()) {
+      throw new Error("Enable Coins in Networking before minting a Coin.");
+    }
     if (!folder) throw new Error("Cannot mint a coin without an attached press.");
     const sourceFolderId = folder.id;
-    const taken = new Set([
-      ...Object.keys(filesRef.current),
-      ...pendingPaths.current,
-    ]);
-    const newPath = mintedPath(phrase, new Date(), taken);
-    pendingPaths.current.add(newPath);
-    try {
+    const coinVoice = signer ? getPublicKey(signer) : authorPubkey;
+    const operationKey = coinMintOperationKey({
+      sourceFolderId,
+      signerPubkey: coinVoice,
+      phrase,
+      origin,
+    });
+    const pending = await preparePendingCoinMint(operationKey, async () => {
+      const taken = new Set([
+        ...Object.keys(filesRef.current),
+        ...pendingPaths.current,
+      ]);
+      const localPath = mintedPath(phrase, new Date(), taken);
       const mintFolderId = await getOrCreateMintFolder(sourceFolderId, signer);
-      const mintMemberName = newPath.slice(`${MINT}/`.length);
+      const memberName = localPath.slice(`${MINT}/`.length);
       const coin = origin.kind === "direct"
         ? await publishDirectCoin({
             folderId: mintFolderId,
-            relativePath: mintMemberName,
+            relativePath: memberName,
             phrase,
             signer,
             kedits,
@@ -9383,7 +9430,7 @@ function App() {
           })
         : await publishHardenedSpan({
             folderId: mintFolderId,
-            relativePath: mintMemberName,
+            relativePath: memberName,
             phrase,
             originNodeId: origin.sourceNodeId,
             sourceContentHash: origin.sourceContentHash,
@@ -9391,39 +9438,66 @@ function App() {
             signer,
             localOnly: true,
           });
-      const parsed = JSON.parse(coin.content) as { contentHash?: string };
-      await upsertManifestEntry(
+      return {
+        sourceFolderId,
         mintFolderId,
-        {
-          kind: "file",
-          relativePath: mintMemberName,
-          latestNodeId: coin.id,
-          contentHash: parsed.contentHash ?? "",
-        },
-        signer,
-        { localOnly: true, operationId: operationIdFromNode(coin) },
-      );
-      const coinVoice = signer ? getPublicKey(signer) : authorPubkey;
+        localPath,
+        memberName,
+        phrase,
+        coin,
+      };
+    });
+    pendingPaths.current.add(pending.localPath);
+    try {
       const runs: Run[] = [{ voice: coinVoice, text: phrase }];
-      saveLocalFile(sourceFolderId, newPath, {
-        content: phrase,
-        tags: [],
-        nodeId: coin.id,
+      // The transaction journal retains this exact signed Coin through every
+      // public and local phase. A retry resumes it instead of minting a sibling.
+      const attestation = await completePendingCoinMintTransaction(pending, {
+        publishPair: (coin) => completeCoinMint(coin, signer),
+        persistMembership: async (record) => {
+          const parsed = JSON.parse(record.coin.content) as { contentHash?: string };
+          await upsertManifestEntry(
+            record.mintFolderId,
+            {
+              kind: "file",
+              relativePath: record.memberName,
+              latestNodeId: record.coin.id,
+              contentHash: parsed.contentHash ?? "",
+            },
+            signer,
+            { localOnly: true, operationId: operationIdFromNode(record.coin) },
+          );
+        },
+        persistLocal: (record) => {
+          const persisted = saveLocalFile(record.sourceFolderId, record.localPath, {
+            content: record.phrase,
+            tags: [],
+            nodeId: record.coin.id,
+            runs,
+            voicePubkey: coinVoice,
+          });
+          if (!persisted) {
+            throw new Error("Mint is public but its local inventory could not be persisted");
+          }
+          seedSteppedRef.current({
+            [record.localPath]: { runs, nodeId: record.coin.id, tags: [] },
+          });
+          if (folderIdRef.current === record.sourceFolderId) {
+            setFiles((prev) => ({
+              ...prev,
+              [record.localPath]: { runs, nodeId: record.coin.id, tags: [] },
+            }));
+          }
+        },
+      });
+      return {
+        path: pending.localPath,
+        nodeId: pending.coin.id,
+        attestationId: attestation.id,
         runs,
-        voicePubkey: coinVoice,
-      });
-      seedSteppedRef.current({
-        [newPath]: { runs, nodeId: coin.id, tags: [] },
-      });
-      if (folderIdRef.current === sourceFolderId) {
-        setFiles((prev) => ({
-          ...prev,
-          [newPath]: { runs, nodeId: coin.id, tags: [] },
-        }));
-      }
-      return { path: newPath, nodeId: coin.id, runs };
+      };
     } finally {
-      pendingPaths.current.delete(newPath);
+      pendingPaths.current.delete(pending.localPath);
     }
   }
 
@@ -9455,10 +9529,9 @@ function App() {
     }
   }
 
-  /** Mint a selection as a named, immutable trace in the dedicated Mint folder, then
-   *  resolve the source bracket to cite it. Both source checkpoints and the
-   *  new Mint member are stepped only to the home relay. Send remains a later,
-   *  separate reachability gesture.
+  /** Mint a selection as a named, immutable trace in the dedicated Mint folder,
+   *  publishing and attesting it as part of the same gesture, then resolve the
+   *  source bracket to cite it.
    *
    *  `from`/`to` are the current selection in `view`. If the selection is
    *  already inside a pending `[[ phrase ]]`, that phrase is used as-is;
@@ -9471,6 +9544,7 @@ function App() {
     to: number,
     stepSigner?: Uint8Array,
   ): Promise<boolean> {
+    if (!kademliaEnabledSnapshot()) return false;
     if (!folder || isMint(path) || isScan(path) || isOblivion(path)) return false;
     // Step mints either a loose-text highlight or the entire unresolved bracket
     // containing the selection. Resolved/cross-boundary selections are not new
@@ -9546,78 +9620,38 @@ function App() {
     }
   }
 
-  /** Materialize a copied selection as a coin-backed citation. A clean source
-   * reuses its current Step; a dirty source is locally stepped first. Copying
-   * a whole existing coin reuses that coin instead of minting a duplicate. */
-  async function prepareCopiedCoin(
-    path: string,
+  /** Copy can carry an existing Coin citation, but it never mints. */
+  function copiedCoinCitation(
     view: EditorView,
     from: number,
     to: number,
     phrase: string,
-  ): Promise<CoinClipboardCitation> {
-    const file = filesRef.current[path];
-    if (!file) throw new Error(`Cannot copy from missing trace ${path}.`);
+  ): CoinClipboardCitation | null {
     const docText = view.state.doc.toString();
-
-    // A phrase selected inside an existing resolved bracket already has the
-    // strongest possible provenance. Reuse its coin rather than striking an
-    // identical child coin.
     const existing = findResolvedBrackets(docText).find(
       (bracket) =>
         bracket.phrase === phrase &&
         bracket.matchStart <= from &&
         bracket.matchEnd >= to,
     );
-    if (existing) return { phrase, nodeId: existing.nodeId };
-
-    const signer = secretKeyForVoice(authorPubkey) ?? undefined;
-    let originNodeId: string;
-    if (isMint(path)) {
-      if (!file.nodeId) throw new Error("The source coin has no stepped nucleus.");
-      if (from === 0 && to === docText.length) {
-        return { phrase, nodeId: file.nodeId };
-      }
-      originNodeId = file.nodeId;
-    } else if (isScan(path)) {
-      if (!file.nodeId) throw new Error("The scanned source has no stepped nucleus.");
-      originNodeId = file.nodeId;
-    } else {
-      originNodeId = await flushEditorLocally(path, view, signer);
-    }
-
-    const sourceContentHash = await sha256HexLocal(docText);
-    const coin = await mintCoinTrace(
-      phrase,
-      {
-        kind: "extracted",
-        sourceNodeId: originNodeId,
-        sourceContentHash,
-        range: { start: from, end: to },
-      },
-      signer,
-    );
-    void appendToPalette({
-      nodeId: coin.nodeId,
-      text: phrase,
-      originPath: path,
-      mintedAt: Date.now(),
-    }).catch((error) => console.warn("[coin-copy] palette append failed:", error));
-    return { phrase, nodeId: coin.nodeId };
+    return existing ? { phrase, nodeId: existing.nodeId } : null;
   }
 
-  /** Upgrade a normal editor Copy into an intra-press coin transfer while
+  /** Carry an existing resolved Coin citation across an intra-press Copy while
    * keeping `text/plain` on the system clipboard for every other app. */
   function copySelectionWithCoin(
     path: string,
     view: EditorView,
     event: ClipboardEvent,
   ): boolean {
+    if (!kademliaEnabledSnapshot()) return false;
     if (!folder || replayActiveRef.current || isOblivion(path)) return false;
     const { from, to } = view.state.selection.main;
     if (from === to) return false;
     const phrase = view.state.sliceDoc(from, to);
-    if (!canCoinText(phrase) || !event.clipboardData) return false;
+    if (!event.clipboardData) return false;
+    const citation = copiedCoinCitation(view, from, to, phrase);
+    if (!citation) return false;
 
     const ticket = typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
@@ -9633,10 +9667,6 @@ function App() {
     }
     event.preventDefault();
 
-    const citation = prepareCopiedCoin(path, view, from, to, phrase);
-    // Attach a rejection observer even if the user never pastes; paste itself
-    // still receives the original promise and degrades to plain text on error.
-    void citation.catch((error) => console.warn("[coin-copy] mint failed:", error));
     coinClipboardTicketsRef.current.set(ticket, { phrase, citation });
     // Bound session memory without time-based clipboard invalidation: the
     // newest 32 provenance copies remain pasteable, older envelopes safely
@@ -9656,6 +9686,7 @@ function App() {
     view: EditorView,
     event: ClipboardEvent,
   ): boolean {
+    if (!kademliaEnabledSnapshot()) return false;
     if (!event.clipboardData) return false;
     const envelope = parseCoinClipboardEnvelope(
       event.clipboardData.getData(COIN_CLIPBOARD_MIME),
@@ -9684,13 +9715,7 @@ function App() {
       view.focus();
     };
 
-    void ticket.citation.then(
-      (citation) => insert(resolvedBracketMarkup(citation.phrase, citation.nodeId)),
-      (error) => {
-        console.warn("[coin-paste] citation unavailable; pasted plain text:", error);
-        insert(plainText);
-      },
-    );
+    insert(resolvedBracketMarkup(ticket.citation.phrase, ticket.citation.nodeId));
     return true;
   }
 
@@ -10186,21 +10211,13 @@ function App() {
     const notes: Partial<Record<PromptOpKind, string>> = {
       settle: "Bracket spans appear as protected anchor tokens in the request and are restored byte-for-byte after the complete response.",
     };
-    const [paletteResult, focusResult] = await Promise.allSettled([
-      fetchPalette(),
+    const [focusResult] = await Promise.allSettled([
       folder ? focusTimeline(folder.id) : Promise.resolve([] as FocusEntry[]),
     ]);
-    if (paletteResult.status === "fulfilled") {
-      inputs.reply = {
-        ...inputs.reply,
-        traces: paletteResult.value
-          .slice(0, 20)
-          .map((item) => `- "${item.text}" (nodeId ${item.nodeId})`)
-          .join("\n"),
-      };
-    } else {
-      notes.reply = "The relay palette fetch failed; Reply would continue without citable traces.";
-    }
+    inputs.reply = {
+      ...inputs.reply,
+      traces: renderMintCoinReferences(listMintCoins(filesRef.current)),
+    };
     if (focusResult.status === "fulfilled" && folder) {
       inputs.analyze = {
         limelightLog: renderLimelightLog(
@@ -10609,13 +10626,7 @@ function App() {
       const sourceText = hasSel
         ? view!.state.sliceDoc(sel!.from, sel!.to)
         : (srcRel && filesRef.current[srcRel] ? flatten(filesRef.current[srcRel].runs) : "");
-      let palette: PaletteItem[] = [];
-      try {
-        palette = await fetchPalette();
-      } catch {
-        /* no palette is fine — the response just won't carry citations */
-      }
-      const traces = palette.slice(0, 20).map((p) => `- "${p.text}" (nodeId ${p.nodeId})`).join("\n");
+      const traces = renderMintCoinReferences(listMintCoins(filesRef.current));
       const inputs: OpInputs = { source: sourceText, traces };
       const sourceNodeId = filesRef.current[srcRel]?.nodeId || undefined;
       let llmMeta: LlmStepMeta | null = null;
@@ -11354,6 +11365,10 @@ function App() {
         );
         const mintTarget = findMintSelectionTarget(view.state.doc.toString(), from, to);
         if (mintTarget) {
+          if (!kademliaEnabledSnapshot()) {
+            setOpStatus(idx, "error", "Enable Coins in Networking before minting a Coin", op);
+            return;
+          }
           setOpStatus(idx, "running", undefined, op);
           const minted = await zinePhrase(path, view, from, to, signer);
           if (minted) {
@@ -12451,6 +12466,7 @@ function App() {
   /** Open the one session-owned direct-Coin draft. Repeated activation focuses
    * the existing tab so switching away and back never discards typed bytes. */
   function openDirectCoinComposer() {
+    if (!kademliaEnabledSnapshot()) return;
     const current = panelsRef.current;
     const existingPanel = current.findIndex((panel) =>
       panel.tabs.includes(DIRECT_COIN_COMPOSER_TAB),
@@ -12602,21 +12618,6 @@ function App() {
     setShielded(next.shielded);
     saveLocalShielded(folder.id, next.shielded);
   }
-  /** Curate a coin into the palette. Triggered by the copy button on
-   *  a citation chip (Preview mode) — the chip still owns its own clipboard
-   *  write (so copy stays a pasteable citation), and this is the "also save for
-   *  reuse" side effect. `appendToPalette` is idempotent (deduped by nodeId), so
-   *  re-copying an already-curated span is a no-op. Fire-and-forget; errors only
-   *  log — the chip's own copy still succeeds either way. */
-  function copySpan(nodeId: string, phrase: string, originPath: string) {
-    appendToPalette({
-      nodeId,
-      text: phrase,
-      originPath,
-      mintedAt: Date.now(),
-    }).catch((e) => console.warn("[zine] palette append failed:", e));
-  }
-
   // Keep the focused path-backed trace's head fresh without changing its exact
   // live panel/tab locus.
   useEffect(() => {
@@ -15178,6 +15179,7 @@ function App() {
                 onActivateFolder={selectFolder}
                 onOpenFolder={openFolder}
                 onMintCoin={openDirectCoinComposer}
+                coinsEnabled={coinsEnabled}
                 onScan={(kind) => void onScan(kind)}
                 onReify={(target) => setReifyPrompt({ includeTrace: false, target })}
                 onStepFolder={stepFolderPath}
@@ -15242,12 +15244,12 @@ function App() {
                 }}
               />
               {/* Horizontal resize handle for the press: drag to change the
-                  collection/palette sidebar width; double-click resets. */}
+                  directory sidebar width; double-click resets. */}
               <div
                 className="sidebar-resizer"
                 role="separator"
                 aria-orientation="vertical"
-                aria-label="Resize collection sidebar"
+                aria-label="Resize directory sidebar"
                 aria-valuenow={sidebarWidth}
                 aria-valuemin={SIDEBAR_WIDTH_MIN}
                 aria-valuemax={SIDEBAR_WIDTH_MAX}
@@ -15517,6 +15519,7 @@ function App() {
                             file={panelFile}
                             directCoinComposer={{
                               phrase: directCoinDraft.phrase,
+                              enabled: coinsEnabled,
                               busy: directCoinBusy,
                               error: directCoinError,
                               onPhraseChange: editDirectCoinDraft,
@@ -15675,9 +15678,6 @@ function App() {
                             onSelectSpan={(nodeId, phrase) => {
                               selectSpan(nodeId, phrase);
                             }}
-                            onCopySpan={(nodeId, phrase) =>
-                              copySpan(nodeId, phrase, path)
-                            }
                             onCopySelection={(view, event) =>
                               copySelectionWithCoin(path, view, event)
                             }
@@ -15719,13 +15719,14 @@ function App() {
                             }}
                             traceCandidates={traceCandidates}
                             pickerDisabled={
+                              !coinsEnabled ||
                               isFolderTab(path) ||
                               !path ||
                               !files[path]?.nodeId ||
                               citationReadOnly
                             }
                             onAddCitation={(nodeId) => {
-                              if (!path || citationReadOnly) return;
+                              if (!kademliaEnabledSnapshot() || !path || citationReadOnly) return;
                               const cur = files[path]?.citationIds ?? [];
                               if (cur.includes(nodeId)) return; // dedupe
                               editCitations(path, [...cur, nodeId]);
@@ -15735,6 +15736,7 @@ function App() {
                               // cases that don't apply to a name pick:
                               // self-drop, unstepped source, already cited.
                               if (
+                                !kademliaEnabledSnapshot() ||
                                 isFolderTab(path) ||
                                 !path ||
                                 !files[path]?.nodeId ||
@@ -15750,7 +15752,7 @@ function App() {
                               return true;
                             }}
                             onAddCitationByPath={(srcPath) => {
-                              if (!path || citationReadOnly) return;
+                              if (!kademliaEnabledSnapshot() || !path || citationReadOnly) return;
                               const src = files[srcPath];
                               if (!src || src.kind === "folder" || !src.nodeId) return;
                               const cur = files[path]?.citationIds ?? [];
@@ -15758,6 +15760,7 @@ function App() {
                               editCitations(path, [...cur, src.nodeId]);
                             }}
                             citationBodyDropMarkup={(srcPath) => {
+                              if (!kademliaEnabledSnapshot()) return null;
                               if (!isMint(srcPath)) return null;
                               const src = files[srcPath];
                               if (!src || src.kind === "folder" || !src.nodeId) return null;
@@ -16110,6 +16113,7 @@ function App() {
                 tokenEstimate={tokenEstimate}
                 onInspect={() => void openInspector()}
                 attestPlan={paletteAttestationPlan()}
+                coinsEnabled={coinsEnabled}
                 targetInScope={(() => {
                   const p = panels[opTargetPanel()]?.active;
                   return !!p && isInScope(scope, shielded, p);
