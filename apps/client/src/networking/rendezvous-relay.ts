@@ -3,6 +3,7 @@ import type { Event, Filter } from "nostr-tools";
 import type { RelaySampleBounds, SampleHit } from "../provenance/provenance.js";
 
 interface NativeRelaySampleRequest {
+  operationId: string;
   url: string;
   filter: Filter;
   requestedIds?: readonly string[];
@@ -23,18 +24,44 @@ function aborted(signal: AbortSignal): Error {
   return error;
 }
 
-async function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) throw aborted(signal);
-  let onAbort: (() => void) | undefined;
+async function withAbort<T>(
+  start: () => Promise<T>,
+  signal?: AbortSignal,
+  cancelNative?: () => void,
+): Promise<T> {
+  if (!signal) return start();
+  let dispatched = false;
+  let cancellationSent = false;
+  let rejectCancellation!: (error: Error) => void;
   const cancellation = new Promise<never>((_, reject) => {
-    onAbort = () => reject(aborted(signal));
-    signal.addEventListener("abort", onAbort, { once: true });
+    rejectCancellation = reject;
   });
+  const onAbort = () => {
+    if (dispatched && !cancellationSent) {
+      cancellationSent = true;
+      try {
+        cancelNative?.();
+      } catch {
+        // Cancellation is best-effort; the caller must still stop waiting.
+      }
+    }
+    rejectCancellation(aborted(signal));
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) {
+    signal.removeEventListener("abort", onAbort);
+    throw aborted(signal);
+  }
   try {
+    // Arm cancellation before dispatch. A synchronous mock, bridge hook, or
+    // abort fired while invoke() is constructing its Promise must still send
+    // the exact operation id to the native pre-cancel path.
+    dispatched = true;
+    const promise = start();
+    if (signal.aborted) onAbort();
     return await Promise.race([promise, cancellation]);
   } finally {
-    if (onAbort) signal.removeEventListener("abort", onAbort);
+    signal.removeEventListener("abort", onAbort);
   }
 }
 
@@ -49,7 +76,9 @@ export async function sampleRendezvousRelays(
   const errors: { url: string; error: string }[] = [];
   const byId = new Map<string, SampleHit>();
   await Promise.all(urls.map(async (url) => {
+    const operationId = crypto.randomUUID();
     const request: NativeRelaySampleRequest = {
+      operationId,
       url,
       filter,
       ...(bounds.requestedIds ? { requestedIds: bounds.requestedIds } : {}),
@@ -63,9 +92,14 @@ export async function sampleRendezvousRelays(
       maxTagValueLength: bounds.maxTagValueLength,
     };
     try {
+      if (bounds.signal?.aborted) throw aborted(bounds.signal);
       const events = await withAbort(
-        invoke<Event[]>("rendezvous_sample_relay", { request }),
+        () => invoke<Event[]>("rendezvous_sample_relay", { request }),
         bounds.signal,
+        () => {
+          void invoke("rendezvous_cancel_relay_sample", { operationId })
+            .catch(() => undefined);
+        },
       );
       for (const event of events) {
         const existing = byId.get(event.id);

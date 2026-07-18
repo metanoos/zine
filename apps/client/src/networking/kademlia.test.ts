@@ -93,6 +93,15 @@ function deferred() {
   return { promise, resolve };
 }
 
+function within<T>(promise: Promise<T>, ms = 250): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(`operation did not start within ${ms}ms`)), ms);
+    }),
+  ]);
+}
+
 afterEach(() => {
   if (typeof window !== "undefined") clearMocks();
   restoreGlobal("window", originalWindow);
@@ -221,6 +230,12 @@ test("Kademlia IPC uses the exact native commands and camelCase boundaries", asy
   await publishRendezvousPointer("coin-coordinate", pointers[0]);
   assert.deepEqual(await lookupRendezvousPointers("coin-coordinate"), pointers);
 
+  const publishOperationId = (calls[4]?.payload as { operationId?: string }).operationId;
+  const lookupOperationId = (calls[6]?.payload as { operationId?: string }).operationId;
+  assert.match(publishOperationId ?? "", /^[0-9a-f-]{36}$/);
+  assert.match(lookupOperationId ?? "", /^[0-9a-f-]{36}$/);
+  assert.notEqual(publishOperationId, lookupOperationId);
+
   assert.deepEqual(calls, [
     {
       command: "kademlia_start",
@@ -237,6 +252,7 @@ test("Kademlia IPC uses the exact native commands and camelCase boundaries", asy
       payload: {
         coordinate: "coin-coordinate",
         pointer: pointers[0],
+        operationId: publishOperationId,
       },
     },
     {
@@ -245,7 +261,7 @@ test("Kademlia IPC uses the exact native commands and camelCase boundaries", asy
     },
     {
       command: "kademlia_lookup",
-      payload: { coordinate: "coin-coordinate" },
+      payload: { coordinate: "coin-coordinate", operationId: lookupOperationId },
     },
   ]);
 });
@@ -273,6 +289,99 @@ test("disabled Kademlia skips start and lookup IPC and rejects publication", asy
   );
   assert.deepEqual(await lookupRendezvousPointers("coin-coordinate"), []);
   assert.deepEqual(commands, []);
+});
+
+test("independent Kademlia lookups are not serialized behind one slow query", async () => {
+  const storage = memoryStorage();
+  saveKademliaConfig(ENABLED_CONFIG, storage);
+  installLocalStorage(storage);
+  const firstStarted = deferred();
+  const secondStarted = deferred();
+  const release = deferred();
+  let lookups = 0;
+  installTauriMock((command) => {
+    if (command === "kademlia_start") return RUNNING_STATUS;
+    if (command === "kademlia_lookup") {
+      lookups++;
+      (lookups === 1 ? firstStarted : secondStarted).resolve();
+      return release.promise.then(() => []);
+    }
+    return undefined;
+  });
+
+  const first = lookupRendezvousPointers("a".repeat(64));
+  await within(firstStarted.promise);
+  const second = lookupRendezvousPointers("b".repeat(64));
+  await within(secondStarted.promise);
+  release.resolve();
+  await Promise.all([first, second]);
+  assert.equal(lookups, 2);
+});
+
+test("aborting a Kademlia lookup cancels the exact native operation", async () => {
+  const storage = memoryStorage();
+  saveKademliaConfig(ENABLED_CONFIG, storage);
+  installLocalStorage(storage);
+  const lookupStarted = deferred();
+  const cancelled = deferred();
+  let lookupOperationId = "";
+  installTauriMock((command, payload) => {
+    if (command === "kademlia_start") return RUNNING_STATUS;
+    if (command === "kademlia_lookup") {
+      lookupOperationId = (payload as { operationId?: string } | undefined)?.operationId ?? "";
+      lookupStarted.resolve();
+      return new Promise(() => undefined);
+    }
+    if (command === "kademlia_cancel") {
+      assert.equal(
+        (payload as { operationId?: string } | undefined)?.operationId,
+        lookupOperationId,
+      );
+      cancelled.resolve();
+      return undefined;
+    }
+    return undefined;
+  });
+  const controller = new AbortController();
+  const lookup = lookupRendezvousPointers("c".repeat(64), controller.signal);
+  await within(lookupStarted.promise);
+  controller.abort(new Error("selection changed"));
+  await assert.rejects(lookup, /selection changed/);
+  await within(cancelled.promise);
+  assert.ok(lookupOperationId);
+});
+
+test("a synchronous lookup abort cancels the operation id dispatched to native", async () => {
+  const storage = memoryStorage();
+  saveKademliaConfig(ENABLED_CONFIG, storage);
+  installLocalStorage(storage);
+  const controller = new AbortController();
+  const cancelled = deferred();
+  let lookupOperationId = "";
+  installTauriMock((command, payload) => {
+    if (command === "kademlia_start") return RUNNING_STATUS;
+    if (command === "kademlia_lookup") {
+      lookupOperationId = (payload as { operationId?: string } | undefined)?.operationId ?? "";
+      controller.abort(new Error("cancelled during native dispatch"));
+      return new Promise(() => undefined);
+    }
+    if (command === "kademlia_cancel") {
+      assert.equal(
+        (payload as { operationId?: string } | undefined)?.operationId,
+        lookupOperationId,
+      );
+      cancelled.resolve();
+      return undefined;
+    }
+    throw new Error(`Unexpected command: ${command}`);
+  });
+
+  await assert.rejects(
+    lookupRendezvousPointers("e".repeat(64), controller.signal),
+    /cancelled during native dispatch/,
+  );
+  await within(cancelled.promise);
+  assert.ok(lookupOperationId);
 });
 
 test("restart stops the current runtime before starting its replacement", async () => {
@@ -571,6 +680,45 @@ test("the pre-lock fence rejects newly submitted Kademlia work", async () => {
     );
     assert.deepEqual(trace, []);
     assert.equal(loadKademliaConfig().enabled, true);
+  } finally {
+    deactivateVaultStorage();
+  }
+});
+
+test("switching vaults cancels an in-flight native lookup by operation id", async () => {
+  const rawStorage = new FakeStorage();
+  installLocalStorage(rawStorage);
+  activateVaultStorage("vault-a", VAULT_KEY_A);
+  saveKademliaConfig(ENABLED_CONFIG);
+  const lookupStarted = deferred();
+  const cancelled = deferred();
+  let lookupOperationId = "";
+  installTauriMock((command, payload) => {
+    if (command === "kademlia_start") return RUNNING_STATUS;
+    if (command === "kademlia_lookup") {
+      lookupOperationId = (payload as { operationId?: string } | undefined)?.operationId ?? "";
+      lookupStarted.resolve();
+      return new Promise(() => undefined);
+    }
+    if (command === "kademlia_cancel") {
+      assert.equal(
+        (payload as { operationId?: string } | undefined)?.operationId,
+        lookupOperationId,
+      );
+      cancelled.resolve();
+      return undefined;
+    }
+    throw new Error(`Unexpected command: ${command}`);
+  });
+
+  try {
+    const lookup = lookupRendezvousPointers("d".repeat(64));
+    await within(lookupStarted.promise);
+    const rejected = assert.rejects(lookup, /active vault changed/);
+    activateVaultStorage("vault-b", VAULT_KEY_B);
+    await rejected;
+    await within(cancelled.promise);
+    assert.ok(lookupOperationId);
   } finally {
     deactivateVaultStorage();
   }

@@ -108,18 +108,31 @@ test("the Coins opt-in gates Mint and Cite mutations without hiding existing Coi
 });
 
 test("Mint completes Step, Publish, and minter-Attest before success", () => {
+  const completion = appSource.match(
+    /function coinMintCompletionFor\([\s\S]*?(?=\/\*\* Retry every durable Mint)/,
+  )?.[0];
   const mint = appSource.match(
     /async function mintCoinTrace\([\s\S]*?(?=\/\*\* Mint the text entered)/,
   )?.[0];
+  assert.ok(completion);
   assert.ok(mint);
   assert.match(mint, /publish(?:DirectCoin|HardenedSpan)\(/);
-  assert.match(mint, /const attestation = await completePendingCoinMintTransaction\(pending/);
-  assert.match(mint, /publishPair: \(coin\) => completeCoinMint\(coin, signer\)/);
+  assert.match(mint, /prepareOnly: true/);
+  assert.match(
+    mint,
+    /const attestation = await completePendingCoinMintTransaction\([\s\S]*?pending,[\s\S]*?coinMintCompletionFor\(mintSigner\)/,
+  );
+  assert.match(completion, /publishPair: \(coin: Event\) => completeCoinMint\(coin, signer\)/);
   assert.match(mint, /attestationId: attestation\.id/);
   assert.ok(
-    mint.indexOf("completePendingCoinMintTransaction(pending") <
+    mint.indexOf("completePendingCoinMintTransaction(") <
       mint.indexOf("attestationId: attestation.id"),
     "unfinished Mint attempts must not report a successful attestation",
+  );
+  assert.match(
+    mint,
+    /pendingCoinMints\(\)[\s\S]*?record\.sourceFolderId === sourceFolderId[\s\S]*?record\.localPath/,
+    "durable unfinished Mint paths remain reserved while allocating a new Coin",
   );
 });
 

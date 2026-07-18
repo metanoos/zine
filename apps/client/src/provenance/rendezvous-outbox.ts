@@ -102,17 +102,21 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
 
 /** Transactional O(1) enqueue/remove for the desktop webview. No operation
  * serializes or scans the rest of the queue on the UI thread. */
-class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
+export class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
   private database: Promise<IDBDatabase> | null = null;
   private legacyMigration: Promise<void> | null = null;
 
+  constructor(private readonly factory?: Pick<IDBFactory, "open">) {}
+
   private open(): Promise<IDBDatabase> {
     if (this.database) return this.database;
-    if (typeof indexedDB === "undefined") {
+    const factory = this.factory ?? (typeof indexedDB === "undefined" ? null : indexedDB);
+    if (!factory) {
       throw new Error("durable rendezvous storage is unavailable in this runtime");
     }
-    this.database = new Promise((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, DB_VERSION);
+    let rejected = false;
+    const opening = new Promise<IDBDatabase>((resolve, reject) => {
+      const request = factory.open(DB_NAME, DB_VERSION);
       request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains(EVENTS_STORE)) {
@@ -122,11 +126,27 @@ class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
           db.createObjectStore(META_STORE, { keyPath: ["scope", "key"] });
         }
       };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error ?? new Error("could not open rendezvous outbox"));
-      request.onblocked = () => reject(new Error("rendezvous outbox upgrade is blocked"));
+      request.onsuccess = () => {
+        if (rejected) {
+          request.result.close();
+        } else {
+          resolve(request.result);
+        }
+      };
+      request.onerror = () => {
+        rejected = true;
+        reject(request.error ?? new Error("could not open rendezvous outbox"));
+      };
+      request.onblocked = () => {
+        rejected = true;
+        reject(new Error("rendezvous outbox upgrade is blocked"));
+      };
     });
-    return this.database;
+    this.database = opening;
+    void opening.catch(() => {
+      if (this.database === opening) this.database = null;
+    });
+    return opening;
   }
 
   /** Version 1 had one install-global queue. Only the vault explicitly chosen
@@ -282,7 +302,9 @@ class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
     const database = this.database;
     this.database = null;
     this.legacyMigration = null;
-    if (database) (await database).close();
+    if (!database) return;
+    const opened = await database.catch(() => null);
+    opened?.close();
   }
 }
 

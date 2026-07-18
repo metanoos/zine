@@ -68,7 +68,10 @@ import { pendingLocalEventCount } from "../../client/src/provenance/event-outbox
 import {
   coinMintOperationKey,
   completePendingCoinMint as completePendingCoinMintTransaction,
+  pendingCoinMints,
   preparePendingCoinMint,
+  resumePendingCoinMints,
+  type PendingCoinMint,
 } from "../../client/src/provenance/coin-mint-journal.js";
 
 /** The headless press's signing key. Seeded on first call, persisted via the
@@ -576,10 +579,48 @@ export function registerTools(
         phrase,
         origin,
       });
+      const completionFor = () => ({
+        publishPair: (coin: Event) => completeCoinMint(coin, voice.secretKey),
+        persistMembership: async (record: PendingCoinMint) => {
+          const parsed = JSON.parse(record.coin.content) as { contentHash?: string };
+          await upsertManifestEntry(
+            record.mintFolderId,
+            {
+              kind: "file" as const,
+              relativePath: record.memberName,
+              latestNodeId: record.coin.id,
+              contentHash: parsed.contentHash ?? "",
+            },
+            voice.secretKey,
+            { localOnly: true, operationId: operationIdFromNode(record.coin) },
+          );
+        },
+        persistLocal: (record: PendingCoinMint) => {
+          const persisted = saveLocalFile(record.sourceFolderId, record.localPath, {
+            content: record.phrase,
+            tags: [],
+            nodeId: record.coin.id,
+            runs: [{ voice: record.coin.pubkey, text: record.phrase }],
+          });
+          if (!persisted) {
+            throw new Error("Mint is public but its local inventory could not be persisted");
+          }
+        },
+      });
+      await resumePendingCoinMints(
+        completionFor,
+        localStorage,
+        (record) => record.operationKey !== operationKey,
+      );
       const pending = await preparePendingCoinMint(operationKey, async () => {
         const mintFolderId = await getOrCreateMintFolder(ref.id, voice.secretKey);
         const manifest = await fetchManifest(mintFolderId);
-        const occupied = new Set(manifest.map((entry) => `${MINT}/${entry.relativePath}`));
+        const occupied = new Set([
+          ...manifest.map((entry) => `${MINT}/${entry.relativePath}`),
+          ...pendingCoinMints(localStorage)
+            .filter((record) => record.sourceFolderId === ref.id)
+            .map((record) => record.localPath),
+        ]);
         const localPath = mintedPath(phrase, new Date(), occupied);
         const memberName = localPath.slice(`${MINT}/`.length);
         const coin = await publishHardenedSpan({
@@ -590,7 +631,7 @@ export function registerTools(
           sourceContentHash,
           sourceRange: origin.range,
           signer: voice.secretKey,
-          localOnly: true,
+          prepareOnly: true,
         });
         return {
           sourceFolderId: ref.id,
@@ -601,34 +642,7 @@ export function registerTools(
           coin,
         };
       });
-      const attestation = await completePendingCoinMintTransaction(pending, {
-        publishPair: (coin) => completeCoinMint(coin, voice.secretKey),
-        persistMembership: async (record) => {
-          const parsed = JSON.parse(record.coin.content) as { contentHash?: string };
-          await upsertManifestEntry(
-            record.mintFolderId,
-            {
-              kind: "file",
-              relativePath: record.memberName,
-              latestNodeId: record.coin.id,
-              contentHash: parsed.contentHash ?? "",
-            },
-            voice.secretKey,
-            { localOnly: true, operationId: operationIdFromNode(record.coin) },
-          );
-        },
-        persistLocal: (record) => {
-          const persisted = saveLocalFile(record.sourceFolderId, record.localPath, {
-            content: record.phrase,
-            tags: [],
-            nodeId: record.coin.id,
-            runs: [{ voice: voice.publicKey, text: record.phrase }],
-          });
-          if (!persisted) {
-            throw new Error("Mint is public but its local inventory could not be persisted");
-          }
-        },
-      });
+      const attestation = await completePendingCoinMintTransaction(pending, completionFor());
       return jsonResult({
         mintedNodeId: pending.coin.id,
         attestationId: attestation.id,

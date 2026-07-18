@@ -7,6 +7,7 @@ import {
   captureRendezvousOutboxSession,
   drainRendezvousEvents,
   enqueueRendezvousEvent,
+  IndexedDbRendezvousOutbox,
   MemoryRendezvousOutbox,
   pendingRendezvousEvents,
   removeRendezvousEvent,
@@ -261,6 +262,24 @@ test("work captured after the pre-lock fence cannot begin a new drain", async ()
       delete (globalThis as { localStorage?: Storage }).localStorage;
     }
   }
+});
+
+test("a transient IndexedDB open failure is retried instead of cached forever", async () => {
+  let opens = 0;
+  const factory = {
+    open() {
+      opens++;
+      const request = { error: new Error(`open failed ${opens}`) } as unknown as IDBOpenDBRequest;
+      queueMicrotask(() => request.onerror?.(new Event("error")));
+      return request;
+    },
+  } as Pick<IDBFactory, "open">;
+  const storage = new IndexedDbRendezvousOutbox(factory);
+
+  await assert.rejects(storage.list("vault-test"), /open failed 1/);
+  await assert.rejects(storage.list("vault-test"), /open failed 2/);
+  await storage.close();
+  assert.equal(opens, 2);
 });
 
 test("Send awaits durable enqueue and surfaces partial-success storage failures", () => {

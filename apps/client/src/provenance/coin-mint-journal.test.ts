@@ -5,13 +5,16 @@ import { finalizeEvent } from "nostr-tools/pure";
 import {
   activateVaultStorage,
   deactivateVaultStorage,
+  fenceVaultStorageSession,
 } from "../storage/vault-storage.js";
 
 import {
   coinMintOperationKey,
   completePendingCoinMint,
+  pendingCoinMints,
   pendingCoinMint,
   preparePendingCoinMint,
+  resumePendingCoinMints,
 } from "./coin-mint-journal.js";
 
 const SECRET = Uint8Array.from([...new Uint8Array(31), 1]);
@@ -237,6 +240,48 @@ test("pending Mint capacity is enforced per vault", async () => {
   assert.equal(pendingCoinMint("vault-b-first")?.coin.id, pendingB.coin.id);
 });
 
+test("the pre-lock fence rejects newly submitted Mint work", async () => {
+  installLocalStorage(new FakeStorage());
+  activateVaultStorage("vault-a", VAULT_KEY_A);
+  const durable = await preparePendingCoinMint(
+    "durable-before-fence",
+    async () => pendingContents(3_500),
+  );
+  let created = false;
+  let published = false;
+
+  fenceVaultStorageSession();
+  await assert.rejects(
+    preparePendingCoinMint("after-fence", async () => {
+      created = true;
+      return pendingContents(3_501);
+    }),
+    /active vault changed/,
+  );
+  await assert.rejects(
+    completePendingCoinMint(durable, {
+      publishPair: async () => {
+        published = true;
+        return "attestation";
+      },
+      persistMembership: async () => undefined,
+      persistLocal: () => undefined,
+    }),
+    /active vault changed/,
+  );
+  await assert.rejects(
+    resumePendingCoinMints(() => ({
+      publishPair: async () => "attestation",
+      persistMembership: async () => undefined,
+      persistLocal: () => undefined,
+    })),
+    /active vault changed/,
+  );
+  assert.equal(created, false);
+  assert.equal(published, false);
+  assert.equal(pendingCoinMint("durable-before-fence")?.coin.id, durable.coin.id);
+});
+
 test("a Mint created after vault A loses its lease is never journaled in vault B", async () => {
   installLocalStorage(new FakeStorage());
   activateVaultStorage("vault-a", VAULT_KEY_A);
@@ -253,8 +298,208 @@ test("a Mint created after vault A loses its lease is never journaled in vault B
   await started;
   const rejected = assert.rejects(preparing, /active vault changed/);
   activateVaultStorage("vault-b", VAULT_KEY_B);
+  const pendingB = await preparePendingCoinMint(
+    "vault-b-does-not-wait",
+    async () => pendingContents(4_001),
+  );
   release();
   await rejected;
 
   assert.equal(pendingCoinMint("delayed-vault-a"), null);
+  assert.equal(pendingCoinMint("vault-b-does-not-wait")?.coin.id, pendingB.coin.id);
+});
+
+test("pending Mint recovery resumes every durable record without recreating Coins", async () => {
+  const store = storage();
+  const records = [coin(11), coin(12)];
+  for (const [index, signedCoin] of records.entries()) {
+    await preparePendingCoinMint(`operation-${index}`, async () => ({
+      sourceFolderId: "source",
+      mintFolderId: "mint",
+      localPath: `mint/coin-${index}.md`,
+      memberName: `coin-${index}.md`,
+      phrase: "coin",
+      coin: signedCoin,
+    }), store, index);
+  }
+  const published: string[] = [];
+  const result = await resumePendingCoinMints(
+    () => ({
+      publishPair: async (event) => {
+        published.push(event.id);
+        return event.id;
+      },
+      persistMembership: async () => undefined,
+      persistLocal: () => undefined,
+    }),
+    store,
+  );
+
+  assert.deepEqual(published, records.map((event) => event.id));
+  assert.deepEqual(result, { completed: 2, remaining: 0, failures: [] });
+  assert.deepEqual(pendingCoinMints(store), []);
+});
+
+test("pending Mint recovery leaves a failed record available for the next pass", async () => {
+  const store = storage();
+  const signedCoin = coin(13);
+  await preparePendingCoinMint("operation", async () => ({
+    sourceFolderId: "source",
+    mintFolderId: "mint",
+    localPath: "mint/coin.md",
+    memberName: "coin.md",
+    phrase: "coin",
+    coin: signedCoin,
+  }), store, 1);
+
+  const result = await resumePendingCoinMints(
+    () => ({
+      publishPair: async () => {
+        throw new Error("offline");
+      },
+      persistMembership: async () => undefined,
+      persistLocal: () => undefined,
+    }),
+    store,
+  );
+
+  assert.equal(result.completed, 0);
+  assert.equal(result.remaining, 1);
+  assert.match(result.failures[0]?.error ?? "", /offline/);
+  assert.equal(pendingCoinMints(store)[0]?.coin.id, signedCoin.id);
+});
+
+test("journal-wide preparation enforces capacity across distinct concurrent gestures", async () => {
+  const store = storage();
+  for (let index = 0; index < 31; index++) {
+    await preparePendingCoinMint(
+      `existing-${index}`,
+      async () => pendingContents(5_000 + index),
+      store,
+    );
+  }
+  let creates = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const first = preparePendingCoinMint("first-new", async () => {
+    creates++;
+    await gate;
+    return pendingContents(6_000);
+  }, store);
+  const second = preparePendingCoinMint("second-new", async () => {
+    creates++;
+    return pendingContents(6_001);
+  }, store);
+  release();
+
+  await first;
+  await assert.rejects(second, /too many incomplete Mint gestures \(32\)/);
+  assert.equal(creates, 1);
+  assert.equal(pendingCoinMints(store).length, 32);
+});
+
+test("same-vault completion coalesces one public transaction", async () => {
+  const store = storage();
+  const pending = await preparePendingCoinMint(
+    "coalesced",
+    async () => pendingContents(7_000),
+    store,
+  );
+  let publishes = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const completion = {
+    publishPair: async () => {
+      publishes++;
+      await gate;
+      return "attestation";
+    },
+    persistMembership: async () => undefined,
+    persistLocal: () => undefined,
+  };
+
+  const first = completePendingCoinMint(pending, completion, store);
+  const second = completePendingCoinMint(pending, completion, store);
+  release();
+  assert.deepEqual(await Promise.all([first, second]), ["attestation", "attestation"]);
+  assert.equal(publishes, 1);
+  assert.equal(pendingCoinMint("coalesced", store), null);
+});
+
+test("vault B completion does not coalesce with an in-flight vault A gesture", async () => {
+  installLocalStorage(new FakeStorage());
+  activateVaultStorage("vault-a", VAULT_KEY_A);
+  const pendingA = await preparePendingCoinMint(
+    "same-operation",
+    async () => pendingContents(8_000, "vault-a"),
+  );
+  let releaseA!: () => void;
+  const gateA = new Promise<void>((resolve) => { releaseA = resolve; });
+  let startedA!: () => void;
+  const publishedA = new Promise<void>((resolve) => { startedA = resolve; });
+  const completingA = completePendingCoinMint(pendingA, {
+    publishPair: async () => {
+      startedA();
+      await gateA;
+      return "attestation-a";
+    },
+    persistMembership: async () => undefined,
+    persistLocal: () => undefined,
+  });
+  await publishedA;
+  const rejectedA = assert.rejects(completingA, /active vault changed/);
+
+  activateVaultStorage("vault-b", VAULT_KEY_B);
+  const pendingB = await preparePendingCoinMint(
+    "same-operation",
+    async () => pendingContents(8_001, "vault-b"),
+  );
+  let publishesB = 0;
+  const completedB = await completePendingCoinMint(pendingB, {
+    publishPair: async () => {
+      publishesB++;
+      return "attestation-b";
+    },
+    persistMembership: async () => undefined,
+    persistLocal: () => undefined,
+  });
+  assert.equal(completedB, "attestation-b");
+  assert.equal(publishesB, 1);
+  assert.equal(pendingCoinMint("same-operation"), null);
+
+  releaseA();
+  await rejectedA;
+  activateVaultStorage("vault-a", VAULT_KEY_A);
+  assert.equal(pendingCoinMint("same-operation")?.coin.id, pendingA.coin.id);
+});
+
+test("recovery aborts on a vault switch without reading vault B as its remaining set", async () => {
+  installLocalStorage(new FakeStorage());
+  activateVaultStorage("vault-a", VAULT_KEY_A);
+  await preparePendingCoinMint("vault-a-recovery", async () => pendingContents(9_000));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const published = new Promise<void>((resolve) => { started = resolve; });
+  const recovery = resumePendingCoinMints(() => ({
+    publishPair: async () => {
+      started();
+      await gate;
+      return "attestation-a";
+    },
+    persistMembership: async () => undefined,
+    persistLocal: () => undefined,
+  }));
+  await published;
+  const rejected = assert.rejects(recovery, /active vault changed/);
+
+  activateVaultStorage("vault-b", VAULT_KEY_B);
+  const pendingB = await preparePendingCoinMint(
+    "vault-b-pending",
+    async () => pendingContents(9_001),
+  );
+  release();
+  await rejected;
+
+  assert.equal(pendingCoinMint("vault-b-pending")?.coin.id, pendingB.coin.id);
 });

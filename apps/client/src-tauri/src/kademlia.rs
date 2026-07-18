@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -54,6 +54,7 @@ const MAX_OWNED_POINTER_FILE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_STARTUP_REPUBLISH_QUERIES: usize = 4;
 const MAX_REMOTE_RECORDS: usize = 1_024;
 const MAX_PENDING_PERSISTENCE: usize = 64;
+const MAX_PRE_CANCELLED_OPERATIONS: usize = 256;
 const MAX_PENDING_INCOMING_CONNECTIONS: u32 = 32;
 const MAX_PENDING_OUTGOING_CONNECTIONS: u32 = 32;
 const MAX_ESTABLISHED_INCOMING_CONNECTIONS: u32 = 96;
@@ -124,13 +125,19 @@ struct KademliaClient {
 
 enum Command {
     Publish {
+        operation_id: String,
         coordinate: String,
         pointer: RendezvousPointer,
         reply: oneshot::Sender<Result<(), String>>,
     },
     Lookup {
+        operation_id: String,
         coordinate: String,
         reply: oneshot::Sender<Result<Vec<RendezvousPointer>, String>>,
+    },
+    Cancel {
+        operation_id: String,
+        reply: oneshot::Sender<()>,
     },
     Status {
         reply: oneshot::Sender<KademliaStatus>,
@@ -149,12 +156,14 @@ struct ZineBehaviour {
 
 enum PendingGet {
     Publish {
+        operation_id: String,
         coordinate: String,
         pointer: RendezvousPointer,
         pointers: BTreeSet<RendezvousPointer>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     Lookup {
+        operation_id: String,
         coordinate: String,
         pointers: BTreeSet<RendezvousPointer>,
         reply: oneshot::Sender<Result<Vec<RendezvousPointer>, String>>,
@@ -166,11 +175,55 @@ enum PendingGet {
 }
 
 enum PendingPut {
-    Publish(oneshot::Sender<Result<(), String>>),
-    Republish { coordinate: String },
+    Publish {
+        operation_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    Republish {
+        coordinate: String,
+    },
+}
+
+impl PendingGet {
+    fn operation_id(&self) -> Option<&str> {
+        match self {
+            Self::Publish { operation_id, .. } | Self::Lookup { operation_id, .. } => {
+                Some(operation_id)
+            }
+            Self::Republish { .. } => None,
+        }
+    }
+
+    fn cancel(self) {
+        match self {
+            Self::Publish { reply, .. } => {
+                let _ = reply.send(Err("Kademlia operation was cancelled".to_string()));
+            }
+            Self::Lookup { reply, .. } => {
+                let _ = reply.send(Err("Kademlia operation was cancelled".to_string()));
+            }
+            Self::Republish { .. } => {}
+        }
+    }
+}
+
+impl PendingPut {
+    fn operation_id(&self) -> Option<&str> {
+        match self {
+            Self::Publish { operation_id, .. } => Some(operation_id),
+            Self::Republish { .. } => None,
+        }
+    }
+
+    fn cancel(self) {
+        if let Self::Publish { reply, .. } = self {
+            let _ = reply.send(Err("Kademlia operation was cancelled".to_string()));
+        }
+    }
 }
 
 struct PendingPersist {
+    operation_id: String,
     coordinate: String,
     pointer: RendezvousPointer,
     reply: oneshot::Sender<Result<(), String>>,
@@ -184,6 +237,7 @@ struct EventLoop {
     pending_gets: HashMap<kad::QueryId, PendingGet>,
     pending_puts: HashMap<kad::QueryId, PendingPut>,
     pending_persists: VecDeque<PendingPersist>,
+    cancelled_operations: BTreeSet<String>,
     persistence_tasks: FuturesUnordered<JoinHandle<PersistResult>>,
     republish_queue: VecDeque<String>,
     republish_pending: BTreeSet<String>,
@@ -194,10 +248,16 @@ struct EventLoop {
 }
 
 impl KademliaClient {
-    async fn publish(&self, coordinate: String, pointer: RendezvousPointer) -> Result<(), String> {
+    async fn publish(
+        &self,
+        operation_id: String,
+        coordinate: String,
+        pointer: RendezvousPointer,
+    ) -> Result<(), String> {
         let (reply, receive) = oneshot::channel();
         self.sender
             .send(Command::Publish {
+                operation_id,
                 coordinate,
                 pointer,
                 reply,
@@ -210,16 +270,39 @@ impl KademliaClient {
             .map_err(|_| "Kademlia task stopped during publish".to_string())?
     }
 
-    async fn lookup(&self, coordinate: String) -> Result<Vec<RendezvousPointer>, String> {
+    async fn lookup(
+        &self,
+        operation_id: String,
+        coordinate: String,
+    ) -> Result<Vec<RendezvousPointer>, String> {
         let (reply, receive) = oneshot::channel();
         self.sender
-            .send(Command::Lookup { coordinate, reply })
+            .send(Command::Lookup {
+                operation_id,
+                coordinate,
+                reply,
+            })
             .await
             .map_err(|_| "Kademlia task is not running".to_string())?;
         timeout(LOOKUP_COMMAND_TIMEOUT, receive)
             .await
             .map_err(|_| "Kademlia lookup timed out".to_string())?
             .map_err(|_| "Kademlia task stopped during lookup".to_string())?
+    }
+
+    async fn cancel(&self, operation_id: String) {
+        let (reply, receive) = oneshot::channel();
+        if self
+            .sender
+            .send(Command::Cancel {
+                operation_id,
+                reply,
+            })
+            .await
+            .is_ok()
+        {
+            let _ = timeout(Duration::from_secs(2), receive).await;
+        }
     }
 
     async fn status(&self) -> Result<KademliaStatus, String> {
@@ -254,11 +337,15 @@ impl EventLoop {
             tokio::select! {
                 command = self.commands.recv() => {
                     match command {
-                        Some(Command::Publish { coordinate, pointer, reply }) => {
-                            self.begin_publish(coordinate, pointer, reply);
+                        Some(Command::Publish { operation_id, coordinate, pointer, reply }) => {
+                            self.begin_publish(operation_id, coordinate, pointer, reply);
                         }
-                        Some(Command::Lookup { coordinate, reply }) => {
-                            self.begin_lookup(coordinate, reply);
+                        Some(Command::Lookup { operation_id, coordinate, reply }) => {
+                            self.begin_lookup(operation_id, coordinate, reply);
+                        }
+                        Some(Command::Cancel { operation_id, reply }) => {
+                            self.cancel_operation(&operation_id);
+                            let _ = reply.send(());
                         }
                         Some(Command::Status { reply }) => {
                             let _ = reply.send(self.status());
@@ -300,7 +387,7 @@ impl EventLoop {
             }
         }
         for (_, pending) in self.pending_puts.drain() {
-            if let PendingPut::Publish(reply) = pending {
+            if let PendingPut::Publish { reply, .. } = pending {
                 let _ = reply.send(Err("Kademlia task stopped".to_string()));
             }
         }
@@ -311,15 +398,21 @@ impl EventLoop {
 
     fn begin_publish(
         &mut self,
+        operation_id: String,
         coordinate: String,
         pointer: RendezvousPointer,
         reply: oneshot::Sender<Result<(), String>>,
     ) {
+        if self.cancelled_operations.remove(&operation_id) {
+            let _ = reply.send(Err("Kademlia operation was cancelled".to_string()));
+            return;
+        }
         if self.pending_persists.len() >= MAX_PENDING_PERSISTENCE {
             let _ = reply.send(Err("Kademlia persistence queue is full".to_string()));
             return;
         }
         self.pending_persists.push_back(PendingPersist {
+            operation_id,
             coordinate,
             pointer,
             reply,
@@ -358,7 +451,13 @@ impl EventLoop {
         match result {
             Ok(pointers) if continue_publish => {
                 self.owned.insert(pending.coordinate.clone(), pointers);
-                self.begin_publish_get(pending);
+                if self.cancelled_operations.remove(&pending.operation_id) {
+                    let _ = pending
+                        .reply
+                        .send(Err("Kademlia operation was cancelled".to_string()));
+                } else {
+                    self.begin_publish_get(pending);
+                }
             }
             Ok(pointers) => {
                 self.owned.insert(pending.coordinate, pointers);
@@ -385,6 +484,7 @@ impl EventLoop {
         self.pending_gets.insert(
             id,
             PendingGet::Publish {
+                operation_id: pending.operation_id,
                 coordinate: pending.coordinate,
                 pointer: pending.pointer,
                 pointers: BTreeSet::new(),
@@ -395,9 +495,14 @@ impl EventLoop {
 
     fn begin_lookup(
         &mut self,
+        operation_id: String,
         coordinate: String,
         reply: oneshot::Sender<Result<Vec<RendezvousPointer>, String>>,
     ) {
+        if self.cancelled_operations.remove(&operation_id) {
+            let _ = reply.send(Err("Kademlia operation was cancelled".to_string()));
+            return;
+        }
         let id = self
             .swarm
             .behaviour_mut()
@@ -406,11 +511,70 @@ impl EventLoop {
         self.pending_gets.insert(
             id,
             PendingGet::Lookup {
+                operation_id,
                 coordinate,
                 pointers: BTreeSet::new(),
                 reply,
             },
         );
+    }
+
+    fn cancel_operation(&mut self, operation_id: &str) {
+        let get_id = self.pending_gets.iter().find_map(|(id, pending)| {
+            (pending.operation_id() == Some(operation_id)).then_some(*id)
+        });
+        if let Some(id) = get_id {
+            if let Some(mut query) = self.swarm.behaviour_mut().kad.query_mut(&id) {
+                query.finish();
+            }
+            if let Some(pending) = self.pending_gets.remove(&id) {
+                pending.cancel();
+            }
+            return;
+        }
+
+        let put_id = self.pending_puts.iter().find_map(|(id, pending)| {
+            (pending.operation_id() == Some(operation_id)).then_some(*id)
+        });
+        if let Some(id) = put_id {
+            if let Some(mut query) = self.swarm.behaviour_mut().kad.query_mut(&id) {
+                query.finish();
+            }
+            if let Some(pending) = self.pending_puts.remove(&id) {
+                pending.cancel();
+            }
+            return;
+        }
+
+        if self
+            .pending_persists
+            .front()
+            .is_some_and(|pending| pending.operation_id == operation_id)
+            && !self.persistence_tasks.is_empty()
+        {
+            self.cancelled_operations.insert(operation_id.to_string());
+            return;
+        }
+
+        if let Some(index) = self
+            .pending_persists
+            .iter()
+            .position(|pending| pending.operation_id == operation_id)
+        {
+            if let Some(pending) = self.pending_persists.remove(index) {
+                let _ = pending
+                    .reply
+                    .send(Err("Kademlia operation was cancelled".to_string()));
+            }
+            return;
+        }
+
+        // IPC calls and their cancellation commands are dispatched by separate
+        // tasks. Remember a bounded set so cancellation still wins if it is
+        // delivered just before the operation itself.
+        if self.cancelled_operations.len() < MAX_PRE_CANCELLED_OPERATIONS {
+            self.cancelled_operations.insert(operation_id.to_string());
+        }
     }
 
     fn fill_republish_window(&mut self) {
@@ -499,7 +663,7 @@ impl EventLoop {
                         self.last_error = Some(error.clone());
                     }
                     match pending {
-                        PendingPut::Publish(reply) => {
+                        PendingPut::Publish { reply, .. } => {
                             let _ = reply.send(outcome);
                         }
                         PendingPut::Republish { coordinate } => {
@@ -529,10 +693,12 @@ impl EventLoop {
                 ..
             })) => {
                 for address in info.listen_addrs {
-                    self.swarm
-                        .behaviour_mut()
-                        .kad
-                        .add_address(&peer_id, address);
+                    if is_safe_identify_address(&address) {
+                        self.swarm
+                            .behaviour_mut()
+                            .kad
+                            .add_address(&peer_id, address);
+                    }
                 }
             }
             SwarmEvent::OutgoingConnectionError { error, .. } => {
@@ -566,6 +732,7 @@ impl EventLoop {
                 )));
             }
             PendingGet::Publish {
+                operation_id,
                 pointer,
                 pointers,
                 reply,
@@ -575,8 +742,13 @@ impl EventLoop {
                 debug_assert!(owned.contains(&pointer));
                 match put_pointer_record(&mut self.swarm, &coordinate, pointers, &owned) {
                     Ok(Some(query_id)) => {
-                        self.pending_puts
-                            .insert(query_id, PendingPut::Publish(reply));
+                        self.pending_puts.insert(
+                            query_id,
+                            PendingPut::Publish {
+                                operation_id,
+                                reply,
+                            },
+                        );
                     }
                     Ok(None) => {
                         let _ = reply.send(Ok(()));
@@ -868,6 +1040,75 @@ fn validate_coordinate(coordinate: &str) -> Result<(), String> {
     } else {
         Err("rendezvous coordinate must be 64 lowercase hex characters".to_string())
     }
+}
+
+fn validate_operation_id(operation_id: &str) -> Result<(), String> {
+    if !operation_id.is_empty()
+        && operation_id.len() <= 64
+        && operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        Ok(())
+    } else {
+        Err("Kademlia operation id is invalid".to_string())
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || a == 0
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 192 && b == 88 && c == 99)
+        || (a == 198 && (18..=19).contains(&b))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 240)
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return is_public_ipv4(mapped);
+    }
+    let segments = ip.segments();
+    let global_unicast = (segments[0] & 0xe000) == 0x2000;
+    let ietf_protocol_assignment = segments[0] == 0x2001 && segments[1] < 0x0200;
+    let documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
+    let deprecated_6to4 = segments[0] == 0x2002;
+    let documentation_v2 = segments[0] & 0xfff0 == 0x3ff0;
+    global_unicast
+        && !ietf_protocol_assignment
+        && !documentation
+        && !deprecated_6to4
+        && !documentation_v2
+        && !ip.is_loopback()
+        && !ip.is_unspecified()
+        && !ip.is_unique_local()
+        && !ip.is_unicast_link_local()
+        && !ip.is_multicast()
+}
+
+/// Identify payloads are remote-controlled dialing hints. Admit only a public
+/// literal IP followed by one TCP port so DNS rebinding, private-network SSRF,
+/// and transports this runtime did not configure never reach the dialer.
+fn is_safe_identify_address(address: &Multiaddr) -> bool {
+    let mut protocols = address.iter();
+    let safe_host = match protocols.next() {
+        Some(Protocol::Ip4(ip)) => is_public_ipv4(ip),
+        Some(Protocol::Ip6(ip)) => is_public_ipv6(ip),
+        _ => false,
+    };
+    safe_host
+        && matches!(protocols.next(), Some(Protocol::Tcp(port)) if port != 0)
+        && protocols.next().is_none()
 }
 
 fn validate_pointer(pointer: &RendezvousPointer) -> Result<(), String> {
@@ -1283,6 +1524,7 @@ async fn start_runtime(
             pending_gets: HashMap::new(),
             pending_puts: HashMap::new(),
             pending_persists: VecDeque::new(),
+            cancelled_operations: BTreeSet::new(),
             persistence_tasks: FuturesUnordered::new(),
             republish_queue,
             republish_pending,
@@ -1426,15 +1668,17 @@ pub async fn kademlia_status(
 #[tauri::command]
 pub async fn kademlia_publish_pointer(
     runtime: State<'_, KademliaRuntime>,
+    operation_id: String,
     coordinate: String,
     pointer: RendezvousPointer,
 ) -> Result<(), String> {
     let binding = crate::active_vault_binding()?;
+    validate_operation_id(&operation_id)?;
     validate_coordinate(&coordinate)?;
     validate_pointer(&pointer)?;
     let result = runtime_client(&runtime, &binding)
         .await?
-        .publish(coordinate, pointer)
+        .publish(operation_id, coordinate, pointer)
         .await;
     crate::require_active_vault_binding(&binding)?;
     result
@@ -1443,16 +1687,34 @@ pub async fn kademlia_publish_pointer(
 #[tauri::command]
 pub async fn kademlia_lookup(
     runtime: State<'_, KademliaRuntime>,
+    operation_id: String,
     coordinate: String,
 ) -> Result<Vec<RendezvousPointer>, String> {
     let binding = crate::active_vault_binding()?;
+    validate_operation_id(&operation_id)?;
     validate_coordinate(&coordinate)?;
     let result = runtime_client(&runtime, &binding)
         .await?
-        .lookup(coordinate)
+        .lookup(operation_id, coordinate)
         .await;
     crate::require_active_vault_binding(&binding)?;
     result
+}
+
+#[tauri::command]
+pub async fn kademlia_cancel(
+    runtime: State<'_, KademliaRuntime>,
+    operation_id: String,
+) -> Result<(), String> {
+    let binding = crate::active_vault_binding()?;
+    validate_operation_id(&operation_id)?;
+    let client = require_bound_runtime(runtime.0.lock().await.as_ref(), &binding)?
+        .map(|bound| bound.client.clone());
+    if let Some(client) = client {
+        client.cancel(operation_id).await;
+    }
+    crate::require_active_vault_binding(&binding)?;
+    Ok(())
 }
 
 pub async fn stop_for_vault_transition(
@@ -1492,6 +1754,25 @@ mod tests {
             event_id: std::iter::repeat_n(event_byte, 64).collect(),
             relay_url: relay.to_string(),
         }
+    }
+
+    #[test]
+    fn remotely_advertised_addresses_must_be_public_literal_tcp() {
+        for unsafe_address in [
+            "/ip4/127.0.0.1/tcp/4001",
+            "/ip4/10.0.0.4/tcp/4001",
+            "/ip6/::1/tcp/4001",
+            "/dns4/rebind.example/tcp/4001",
+            "/ip4/203.0.113.9/udp/4001",
+        ] {
+            let parsed: Multiaddr = unsafe_address.parse().expect("valid test multiaddr");
+            assert!(
+                !is_safe_identify_address(&parsed),
+                "accepted {unsafe_address}"
+            );
+        }
+        let public: Multiaddr = "/ip4/8.8.8.8/tcp/4001".parse().unwrap();
+        assert!(is_safe_identify_address(&public));
     }
 
     #[test]
@@ -1838,7 +2119,7 @@ mod tests {
         runtime_client(&runtime, &vault_a_first)
             .await
             .expect("vault A client")
-            .publish(H.to_string(), owned.clone())
+            .publish("vault-a-publish".to_string(), H.to_string(), owned.clone())
             .await
             .expect("persist vault A pointer");
 
@@ -1958,6 +2239,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_delivered_before_a_lookup_fences_that_exact_operation() {
+        let root = temporary_test_root("pre-cancelled-lookup");
+        let client = start_runtime(root.clone(), local_test_config())
+            .await
+            .expect("start cancellation test runtime");
+        let operation_id = "pre-cancelled-lookup".to_string();
+
+        client.cancel(operation_id.clone()).await;
+        let error = client
+            .lookup(operation_id, H.to_string())
+            .await
+            .expect_err("pre-cancelled lookup must not enter the DHT");
+        assert!(error.contains("cancelled"));
+
+        client.stop().await;
+        fs::remove_dir_all(root).expect("remove cancellation test directory");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn runtime_start_waits_for_a_real_listener_and_rejects_an_occupied_port() {
         let occupied =
             std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a local TCP port");
@@ -1995,10 +2295,17 @@ mod tests {
 
         let expected = pointer('b', "wss://relay.example");
         client
-            .publish(H.to_string(), expected.clone())
+            .publish(
+                "one-node-publish".to_string(),
+                H.to_string(),
+                expected.clone(),
+            )
             .await
             .expect("store a pointer on a standalone node");
-        let found = client.lookup(H.to_string()).await.expect("local lookup");
+        let found = client
+            .lookup("one-node-lookup".to_string(), H.to_string())
+            .await
+            .expect("local lookup");
         assert!(found.contains(&expected));
 
         client.stop().await;
@@ -2036,10 +2343,17 @@ mod tests {
 
         let expected = pointer('b', "wss://relay.example");
         second
-            .publish(H.to_string(), expected.clone())
+            .publish(
+                "two-node-publish".to_string(),
+                H.to_string(),
+                expected.clone(),
+            )
             .await
             .expect("publish pointer to a real peer");
-        let found = first.lookup(H.to_string()).await.expect("lookup pointer");
+        let found = first
+            .lookup("two-node-lookup".to_string(), H.to_string())
+            .await
+            .expect("lookup pointer");
         assert!(found.contains(&expected));
 
         second.stop().await;

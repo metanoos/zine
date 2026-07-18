@@ -80,7 +80,7 @@ struct ActiveVaultRuntime {
     closing: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct VaultRuntimeBinding {
     pub(crate) id: String,
     pub(crate) directory: PathBuf,
@@ -2066,11 +2066,13 @@ fn remove_onion(app: tauri::AppHandle, address: String) -> Result<(), String> {
 
 /// End vault-owned reachability before the webview releases its secret
 /// session. Marking the generation as closing rejects new native work while
-/// Kademlia drains its persistence queue; the active binding remains installed
-/// until every vault-owned service has stopped.
+/// Kademlia drains its persistence queue and relay samples are cancelled; the
+/// active binding remains installed until every vault-owned service has
+/// stopped.
 async fn lock_vault_runtime_inner(
     app: &tauri::AppHandle,
     kademlia_runtime: &kademlia::KademliaRuntime,
+    rendezvous_runtime: &rendezvous_relay::RendezvousRelayRuntime,
 ) -> Result<(), String> {
     let _transition = VAULT_TRANSITION_GATE.lock().await;
     let binding = {
@@ -2088,6 +2090,9 @@ async fn lock_vault_runtime_inner(
     };
 
     kademlia::stop_for_vault_transition(kademlia_runtime, &binding).await?;
+    rendezvous_runtime
+        .cancel_for_vault_transition(&binding)
+        .await;
 
     let _gate = VAULT_RUNTIME_GATE
         .lock()
@@ -2109,7 +2114,8 @@ async fn lock_vault_runtime_inner(
 #[tauri::command]
 async fn lock_vault_runtime(app: tauri::AppHandle) -> Result<(), String> {
     let kademlia_runtime = app.state::<kademlia::KademliaRuntime>();
-    lock_vault_runtime_inner(&app, &kademlia_runtime).await
+    let rendezvous_runtime = app.state::<rendezvous_relay::RendezvousRelayRuntime>();
+    lock_vault_runtime_inner(&app, &kademlia_runtime, &rendezvous_runtime).await
 }
 
 /// A webview reload does not reset native plugin or sidecar state. If the new
@@ -2387,6 +2393,7 @@ pub fn run() {
     }
     let app = builder
         .manage(kademlia::KademliaRuntime::default())
+        .manage(rendezvous_relay::RendezvousRelayRuntime::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -2435,7 +2442,9 @@ pub fn run() {
             kademlia::kademlia_status,
             kademlia::kademlia_publish_pointer,
             kademlia::kademlia_lookup,
+            kademlia::kademlia_cancel,
             rendezvous_relay::rendezvous_sample_relay,
+            rendezvous_relay::rendezvous_cancel_relay_sample,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -79,8 +79,12 @@ export interface RendezvousAdapters {
     perRelayMs: number,
     bounds: RelaySampleBounds,
   ): Promise<RelaySampleResult>;
-  publishPointer(coordinate: string, pointer: RendezvousPointer): Promise<void>;
-  lookupPointers(coordinate: string): Promise<RendezvousPointer[]>;
+  publishPointer(
+    coordinate: string,
+    pointer: RendezvousPointer,
+    signal?: AbortSignal,
+  ): Promise<void>;
+  lookupPointers(coordinate: string, signal?: AbortSignal): Promise<RendezvousPointer[]>;
 }
 
 export interface RendezvousOperationOptions {
@@ -257,6 +261,22 @@ function deadlineSignal(parent: AbortSignal | undefined, ms: number, label: stri
     signal: controller.signal,
     dispose() {
       clearTimeout(timer);
+      parent?.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
+function childOperationSignal(parent?: AbortSignal): {
+  controller: AbortController;
+  dispose(): void;
+} {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(parent?.reason);
+  if (parent?.aborted) onAbort();
+  else parent?.addEventListener("abort", onAbort, { once: true });
+  return {
+    controller,
+    dispose() {
       parent?.removeEventListener("abort", onAbort);
     },
   };
@@ -487,12 +507,17 @@ export async function publishSentCoinCitations(
     const existing = pointerPuts.get(key);
     if (existing) return existing;
     const promise = limit(async () => {
+      const operation = childOperationSignal(signal);
       try {
         if (!adapters.enabled()) {
           throw new Error("Kademlia rendezvous was disabled before pointer publication");
         }
         await withTimeout(
-          adapters.publishPointer(coordinate, { eventId: carrying.id, relayUrl }),
+          adapters.publishPointer(
+            coordinate,
+            { eventId: carrying.id, relayUrl },
+            operation.controller.signal,
+          ),
           POINTER_PUT_TIMEOUT_MS,
           `pointer Put for ${coordinate}`,
           signal,
@@ -511,6 +536,11 @@ export async function publishSentCoinCitations(
           error: errorMessage(error),
         });
         return false;
+      } finally {
+        // If the Promise race ended on timeout/parent abort, propagate that
+        // result through the IPC adapter so native Kademlia work is cancelled.
+        operation.controller.abort(new Error(`pointer Put for ${coordinate} finished`));
+        operation.dispose();
       }
     });
     pointerPuts.set(key, promise);
@@ -620,12 +650,16 @@ export async function discoverCoinCitations(
   const deadline = deadlineSignal(options.signal, DISCOVERY_DEADLINE_MS, "discovery");
   try {
     const coordinate = await quoteHash(phrase);
+    const operation = childOperationSignal(deadline.signal);
     const raw = (await withTimeout(
-      adapters.lookupPointers(coordinate),
+      adapters.lookupPointers(coordinate, operation.controller.signal),
       LOOKUP_TIMEOUT_MS,
       "Kademlia lookup",
       deadline.signal,
-    ))
+    ).finally(() => {
+      operation.controller.abort(new Error(`Kademlia lookup for ${coordinate} finished`));
+      operation.dispose();
+    }))
       .filter((pointer) =>
         HEX_64.test(pointer.eventId) && isPublicRendezvousRelayUrl(pointer.relayUrl))
       .slice(0, MAX_RAW_POINTERS);

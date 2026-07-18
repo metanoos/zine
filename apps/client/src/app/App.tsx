@@ -91,7 +91,10 @@ import { CoinView, DirectCoinComposerView } from "../provenance/CoinModal.js";
 import {
   coinMintOperationKey,
   completePendingCoinMint as completePendingCoinMintTransaction,
+  pendingCoinMints,
   preparePendingCoinMint,
+  resumePendingCoinMints,
+  type PendingCoinMint,
 } from "../provenance/coin-mint-journal.js";
 import { OblivionModal } from "../workspace/OblivionModal.js";
 import { RunModal } from "../ai/RunModal.js";
@@ -9402,6 +9405,64 @@ function App() {
    * report success until the Coin and its minter attestation are public.
    * The caller decides whether to resolve a bracket in the source (the Mint
    * gesture does; provenance-aware Copy never creates a Coin). */
+  function coinMintCompletionFor(signer: Uint8Array) {
+    return {
+      publishPair: (coin: Event) => completeCoinMint(coin, signer),
+      persistMembership: async (record: PendingCoinMint) => {
+        const parsed = JSON.parse(record.coin.content) as { contentHash?: string };
+        await upsertManifestEntry(
+          record.mintFolderId,
+          {
+            kind: "file",
+            relativePath: record.memberName,
+            latestNodeId: record.coin.id,
+            contentHash: parsed.contentHash ?? "",
+          },
+          signer,
+          { localOnly: true, operationId: operationIdFromNode(record.coin) },
+        );
+      },
+      persistLocal: (record: PendingCoinMint) => {
+        const runs: Run[] = [{ voice: record.coin.pubkey, text: record.phrase }];
+        const persisted = saveLocalFile(record.sourceFolderId, record.localPath, {
+          content: record.phrase,
+          tags: [],
+          nodeId: record.coin.id,
+          runs,
+          voicePubkey: record.coin.pubkey,
+        });
+        if (!persisted) {
+          throw new Error("Mint is public but its local inventory could not be persisted");
+        }
+        seedSteppedRef.current({
+          [record.localPath]: { runs, nodeId: record.coin.id, tags: [] },
+        });
+        if (folderIdRef.current === record.sourceFolderId) {
+          setFiles((prev) => ({
+            ...prev,
+            [record.localPath]: { runs, nodeId: record.coin.id, tags: [] },
+          }));
+        }
+      },
+    };
+  }
+
+  /** Retry every durable Mint whose signing key remains in this press. Stored
+   * path/source metadata makes recovery independent of the editor selection
+   * that originally created the Coin. */
+  async function recoverPendingCoinMints(exceptOperationKey: string): Promise<void> {
+    const result = await resumePendingCoinMints((pending) => {
+      const signer = secretKeyForVoice(pending.coin.pubkey);
+      if (!signer) {
+        throw new Error(`the Coin signer ${formatPubkey(pending.coin.pubkey)} is unavailable`);
+      }
+      return coinMintCompletionFor(signer);
+    }, localStorage, (pending) => pending.operationKey !== exceptOperationKey);
+    if (result.failures.length > 0) {
+      console.warn("[mint] pending Mint recovery remains incomplete:", result.failures);
+    }
+  }
+
   async function mintCoinTrace(
     phrase: string,
     origin: CoinOrigin,
@@ -9414,28 +9475,38 @@ function App() {
     if (!folder) throw new Error("Cannot mint a coin without an attached press.");
     const sourceFolderId = folder.id;
     const coinVoice = signer ? getPublicKey(signer) : authorPubkey;
+    const mintSigner = signer ?? secretKeyForVoice(coinVoice);
+    if (!mintSigner) throw new Error(`no key for voice ${formatPubkey(coinVoice)}`);
     const operationKey = coinMintOperationKey({
       sourceFolderId,
       signerPubkey: coinVoice,
       phrase,
       origin,
     });
+    // Complete abandoned gestures directly from their stored records before a
+    // new one consumes journal capacity. Exclude this gesture so its retry
+    // returns the original exact Coin to the caller instead of completing it
+    // invisibly and then creating a sibling.
+    await recoverPendingCoinMints(operationKey);
     const pending = await preparePendingCoinMint(operationKey, async () => {
       const taken = new Set([
         ...Object.keys(filesRef.current),
         ...pendingPaths.current,
+        ...pendingCoinMints()
+          .filter((record) => record.sourceFolderId === sourceFolderId)
+          .map((record) => record.localPath),
       ]);
       const localPath = mintedPath(phrase, new Date(), taken);
-      const mintFolderId = await getOrCreateMintFolder(sourceFolderId, signer);
+      const mintFolderId = await getOrCreateMintFolder(sourceFolderId, mintSigner);
       const memberName = localPath.slice(`${MINT}/`.length);
       const coin = origin.kind === "direct"
         ? await publishDirectCoin({
             folderId: mintFolderId,
             relativePath: memberName,
             phrase,
-            signer,
+            signer: mintSigner,
             kedits,
-            localOnly: true,
+            prepareOnly: true,
           })
         : await publishHardenedSpan({
             folderId: mintFolderId,
@@ -9444,8 +9515,8 @@ function App() {
             originNodeId: origin.sourceNodeId,
             sourceContentHash: origin.sourceContentHash,
             sourceRange: origin.range,
-            signer,
-            localOnly: true,
+            signer: mintSigner,
+            prepareOnly: true,
           });
       return {
         sourceFolderId,
@@ -9458,47 +9529,13 @@ function App() {
     });
     pendingPaths.current.add(pending.localPath);
     try {
-      const runs: Run[] = [{ voice: coinVoice, text: phrase }];
       // The transaction journal retains this exact signed Coin through every
       // public and local phase. A retry resumes it instead of minting a sibling.
-      const attestation = await completePendingCoinMintTransaction(pending, {
-        publishPair: (coin) => completeCoinMint(coin, signer),
-        persistMembership: async (record) => {
-          const parsed = JSON.parse(record.coin.content) as { contentHash?: string };
-          await upsertManifestEntry(
-            record.mintFolderId,
-            {
-              kind: "file",
-              relativePath: record.memberName,
-              latestNodeId: record.coin.id,
-              contentHash: parsed.contentHash ?? "",
-            },
-            signer,
-            { localOnly: true, operationId: operationIdFromNode(record.coin) },
-          );
-        },
-        persistLocal: (record) => {
-          const persisted = saveLocalFile(record.sourceFolderId, record.localPath, {
-            content: record.phrase,
-            tags: [],
-            nodeId: record.coin.id,
-            runs,
-            voicePubkey: coinVoice,
-          });
-          if (!persisted) {
-            throw new Error("Mint is public but its local inventory could not be persisted");
-          }
-          seedSteppedRef.current({
-            [record.localPath]: { runs, nodeId: record.coin.id, tags: [] },
-          });
-          if (folderIdRef.current === record.sourceFolderId) {
-            setFiles((prev) => ({
-              ...prev,
-              [record.localPath]: { runs, nodeId: record.coin.id, tags: [] },
-            }));
-          }
-        },
-      });
+      const attestation = await completePendingCoinMintTransaction(
+        pending,
+        coinMintCompletionFor(mintSigner),
+      );
+      const runs: Run[] = [{ voice: pending.coin.pubkey, text: pending.phrase }];
       return {
         path: pending.localPath,
         nodeId: pending.coin.id,

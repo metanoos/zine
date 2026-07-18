@@ -9,13 +9,20 @@ import {
 
 const STORAGE_KEY = "zine.pending-coin-mints.v1";
 const MAX_PENDING_COIN_MINTS = 32;
-const prepareQueues = new Map<string, Promise<unknown>>();
 
 type JournalStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+type QueueScope = JournalStorage | string;
 interface VaultLease {
   generation: number;
   vaultId: string | null;
 }
+interface CompletionQueueEntry {
+  coinId: string;
+  task: Promise<unknown>;
+}
+
+const prepareQueues = new Map<QueueScope, Promise<unknown>>();
+const completionQueues = new Map<QueueScope, Map<string, CompletionQueueEntry>>();
 
 export interface PendingCoinMint {
   operationKey: string;
@@ -88,15 +95,27 @@ function captureVaultLease(storage: JournalStorage): VaultLease | null {
     : null;
 }
 
-function assertCurrentVault(lease: VaultLease | null): void {
-  if (
-    lease &&
-    (!vaultStorageSessionAcceptsWork() ||
-      lease.generation !== vaultStorageGeneration() ||
-      lease.vaultId !== activeVaultStorageId())
-  ) {
-    throw new Error("pending Mint operation was cancelled because the active vault changed");
+function vaultLeaseIsCurrent(lease: VaultLease): boolean {
+  return vaultStorageSessionAcceptsWork() &&
+    lease.generation === vaultStorageGeneration() &&
+    lease.vaultId === activeVaultStorageId();
+}
+
+class StaleVaultOperationError extends Error {
+  constructor() {
+    super("pending Mint operation was cancelled because the active vault changed");
+    this.name = "StaleVaultOperationError";
   }
+}
+
+function assertCurrentVault(lease: VaultLease | null): void {
+  if (lease && !vaultLeaseIsCurrent(lease)) throw new StaleVaultOperationError();
+}
+
+function queueScope(storage: JournalStorage, lease: VaultLease | null): QueueScope {
+  return lease
+    ? `vault:${lease.generation}:${lease.vaultId ?? "browser"}`
+    : storage;
 }
 
 /** Stable identity for one incomplete user gesture. The record is removed on
@@ -122,6 +141,18 @@ export function pendingCoinMint(
   return readJournal(storage).find((record) => record.operationKey === operationKey) ?? null;
 }
 
+/** Every incomplete Mint retained by this install, oldest first. Recovery
+ * callers use the signed Coin and stored folder/path metadata directly; they
+ * never need to reconstruct a now-stale source selection. */
+export function pendingCoinMints(
+  storage: JournalStorage = vaultStorage,
+): PendingCoinMint[] {
+  return readJournal(storage).sort(
+    (left, right) => left.queuedAt - right.queuedAt ||
+      left.operationKey.localeCompare(right.operationKey),
+  );
+}
+
 /** Create and durably remember the exact signed Coin before any public phase. */
 export async function preparePendingCoinMint(
   operationKey: string,
@@ -130,10 +161,8 @@ export async function preparePendingCoinMint(
   now = Date.now(),
 ): Promise<PendingCoinMint> {
   const lease = captureVaultLease(storage);
-  const queueKey = lease
-    ? `${lease.generation}:${lease.vaultId ?? "browser"}:${operationKey}`
-    : operationKey;
-  const previous = prepareQueues.get(queueKey) ?? Promise.resolve();
+  const scope = queueScope(storage, lease);
+  const previous = prepareQueues.get(scope) ?? Promise.resolve();
   const task = previous.catch(() => undefined).then(async () => {
     assertCurrentVault(lease);
     const records = readJournal(storage);
@@ -151,22 +180,27 @@ export async function preparePendingCoinMint(
     if (!isPendingCoinMint(pending)) {
       throw new Error("refusing to journal an invalid pending Mint");
     }
-    // Another operation key may have completed while create awaited I/O.
+    // Completion may have removed another record while signing awaited I/O.
+    // Re-read both identity and capacity before committing this exact event.
     const latest = readJournal(storage);
     const concurrentlyPrepared = latest.find(
       (record) => record.operationKey === operationKey,
     );
     if (concurrentlyPrepared) return concurrentlyPrepared;
+    if (latest.length >= MAX_PENDING_COIN_MINTS) {
+      throw new Error(`too many incomplete Mint gestures (${MAX_PENDING_COIN_MINTS})`);
+    }
     latest.push(pending);
     assertCurrentVault(lease);
     writeJournal(storage, latest);
     return pending;
   });
-  prepareQueues.set(queueKey, task);
+  const barrier = task.then(() => undefined, () => undefined);
+  prepareQueues.set(scope, barrier);
   try {
     return await task;
   } finally {
-    if (prepareQueues.get(queueKey) === task) prepareQueues.delete(queueKey);
+    if (prepareQueues.get(scope) === barrier) prepareQueues.delete(scope);
   }
 }
 
@@ -179,21 +213,94 @@ export async function completePendingCoinMint<TAttestation>(
 ): Promise<TAttestation> {
   const lease = captureVaultLease(storage);
   assertCurrentVault(lease);
-  const durable = pendingCoinMint(pending.operationKey, storage);
-  if (!durable || durable.coin.id !== pending.coin.id) {
-    throw new Error("the pending Mint journal no longer matches the signed Coin pair");
+  const scope = queueScope(storage, lease);
+  let scopedQueue = completionQueues.get(scope);
+  const inFlight = scopedQueue?.get(pending.operationKey);
+  if (inFlight) {
+    if (inFlight.coinId !== pending.coin.id) {
+      throw new Error("the pending Mint journal no longer matches the signed Coin pair");
+    }
+    return inFlight.task as Promise<TAttestation>;
   }
-  const attestation = await completion.publishPair(durable.coin);
+  const task = (async () => {
+    assertCurrentVault(lease);
+    const durable = pendingCoinMint(pending.operationKey, storage);
+    if (!durable || durable.coin.id !== pending.coin.id) {
+      throw new Error("the pending Mint journal no longer matches the signed Coin pair");
+    }
+    const attestation = await completion.publishPair(durable.coin);
+    assertCurrentVault(lease);
+    await completion.persistMembership(durable);
+    assertCurrentVault(lease);
+    await completion.persistLocal(durable);
+    assertCurrentVault(lease);
+    const records = readJournal(storage);
+    assertCurrentVault(lease);
+    writeJournal(
+      storage,
+      records.filter((record) => record.operationKey !== durable.operationKey),
+    );
+    return attestation;
+  })();
+  if (!scopedQueue) {
+    scopedQueue = new Map();
+    completionQueues.set(scope, scopedQueue);
+  }
+  const entry = { coinId: pending.coin.id, task };
+  scopedQueue.set(pending.operationKey, entry);
+  try {
+    return await task;
+  } finally {
+    if (scopedQueue.get(pending.operationKey) === entry) {
+      scopedQueue.delete(pending.operationKey);
+      if (scopedQueue.size === 0) completionQueues.delete(scope);
+    }
+  }
+}
+
+export interface CoinMintRecoveryFailure {
+  operationKey: string;
+  coinId: string;
+  error: string;
+}
+
+/** Resume every durable record without requiring the original source gesture
+ * to be recreated. Failures remain journaled and do not starve later records. */
+export async function resumePendingCoinMints<TAttestation>(
+  completionFor: (pending: PendingCoinMint) => CoinMintCompletion<TAttestation>,
+  storage: JournalStorage = vaultStorage,
+  shouldResume: (pending: PendingCoinMint) => boolean = () => true,
+): Promise<{
+  completed: number;
+  remaining: number;
+  failures: CoinMintRecoveryFailure[];
+}> {
+  const lease = captureVaultLease(storage);
   assertCurrentVault(lease);
-  await completion.persistMembership(durable);
+  let completed = 0;
+  const failures: CoinMintRecoveryFailure[] = [];
+  for (const pending of pendingCoinMints(storage)) {
+    assertCurrentVault(lease);
+    if (!shouldResume(pending)) {
+      assertCurrentVault(lease);
+      continue;
+    }
+    try {
+      await completePendingCoinMint(pending, completionFor(pending), storage);
+      assertCurrentVault(lease);
+      completed++;
+    } catch (error) {
+      // A vault transition invalidates the complete recovery pass. It is not a
+      // per-record publication failure, and the new vault's journal must never
+      // be used to calculate this session's result.
+      assertCurrentVault(lease);
+      failures.push({
+        operationKey: pending.operationKey,
+        coinId: pending.coin.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   assertCurrentVault(lease);
-  await completion.persistLocal(durable);
-  assertCurrentVault(lease);
-  const records = readJournal(storage);
-  assertCurrentVault(lease);
-  writeJournal(
-    storage,
-    records.filter((record) => record.operationKey !== durable.operationKey),
-  );
-  return attestation;
+  return { completed, remaining: pendingCoinMints(storage).length, failures };
 }

@@ -391,6 +391,11 @@ export interface PublishEditInput {
    *  doesn't leave the machine. The user later Sends (pushToExternalRelays)
    *  if they want the node reachable by others. Default false. */
   localOnly?: boolean;
+  /** Sign and return the exact event without recording the Step anywhere.
+   * Compound Mint uses this narrow preflight so its transaction journal is the
+   * first durability boundary. The prepared event is stepped later by
+   * `completeCoinMint`; ordinary callers should leave this false. */
+  prepareOnly?: boolean;
   /** Per-character attribution for `snapshot`, serialized into the node's
    *  `authors` field (protocol §FileTraceNode Content). Concatenating the runs'
    *  text in order MUST reproduce `snapshot` exactly; readers validate this and
@@ -904,6 +909,20 @@ export function applyPendingLlmMeta(input: PublishEditInput): void {
 
 /** Builds, signs, and publishes a kind-4290 FileTraceNode. Returns the signed
  *  event (its `id` is the new node id the caller should track as prevEventId). */
+/** Record one already-signed immutable event as an exact local Step. The local
+ * outbox is written before the home relay is touched, so callers can retry the
+ * same bytes after an offline or partial attempt. */
+async function stepSignedEventLocally(event: Event): Promise<Relay[]> {
+  if (!verifyEvent(event)) {
+    throw new Error(`cannot Step invalid signed event ${event.id}`);
+  }
+  enqueueLocalEvent(event);
+  const homeRelay = await getRelayRetrying(resolveRelayUrl(), 1);
+  if (!homeRelay) return [];
+  await flushLocalEventOutboxThrough(homeRelay);
+  return pendingLocalEventById(event.id) ? [] : [homeRelay];
+}
+
 export async function publishEdit(input: PublishEditInput): Promise<Event> {
   if (!Array.isArray(input.kedits)) {
     throw new Error("cannot publish a file Step without its required KEdit array");
@@ -1102,25 +1121,14 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   };
 
   const signed = finalizeEvent(template, signer);
+  if (input.prepareOnly) return signed;
   // Step (localOnly): publish to the home relay only — the node is recorded but
   // hasn't left the machine. A newly-created Step under Send fans out to all
   // write-enabled relays. Sending unchanged state uses sendStep on the existing
   // node instead of creating another checkpoint.
   let publishedRelays: Relay[];
   if (input.localOnly) {
-    // localStorage is the first durability boundary. Queue the exact signed
-    // event before touching the relay so an offline Step can return a stable id
-    // and later synchronization publishes those same bytes rather than minting
-    // a sibling replacement.
-    enqueueLocalEvent(signed);
-    const homeUrl = resolveRelayUrl();
-    const homeRelay = await getRelayRetrying(homeUrl, 1);
-    if (homeRelay) {
-      await flushLocalEventOutboxThrough(homeRelay);
-      publishedRelays = pendingLocalEventById(signed.id) ? [] : [homeRelay];
-    } else {
-      publishedRelays = [];
-    }
+    publishedRelays = await stepSignedEventLocally(signed);
   } else {
     const relays = await getWriteRelays();
     await publishToMany(relays, signed);
@@ -1641,6 +1649,13 @@ export async function completeCoinMint(
     throw new Error("cannot complete Mint with a signer other than the Coin owner");
   }
   try {
+    await stepSignedEventLocally(coin);
+  } catch (error) {
+    throw new Error(
+      `Mint could not Step Coin ${coin.id}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
     await sendStep(coin, mintSigner);
   } catch (error) {
     throw new Error(
@@ -1675,6 +1690,8 @@ export async function publishCoin(input: {
   kedits?: KEdit[];
   /** The Coin Step is durably local until `completeCoinMint` publishes it. */
   localOnly?: boolean;
+  /** Sign only. Used so the pending-Mint journal can commit before Step. */
+  prepareOnly?: boolean;
   operationId?: string;
 }): Promise<Event> {
   if (!input.phrase) throw new Error("A Coin cannot have an empty body.");
@@ -1714,6 +1731,7 @@ export async function publishCoin(input: {
     summary: "coin",
     signer,
     localOnly: input.localOnly ?? true,
+    prepareOnly: input.prepareOnly,
     bodyHashTag: contentHash,
     coinOrigin: input.origin,
     authors: [{ voice: getPublicKey(signer), text: input.phrase }],
@@ -1758,6 +1776,8 @@ export async function publishHardenedSpan(input: {
   signer?: Uint8Array;
   /** The Coin Step is durably local until `completeCoinMint` publishes it. */
   localOnly?: boolean;
+  /** Sign only. Used so the pending-Mint journal can commit before Step. */
+  prepareOnly?: boolean;
   operationId?: string;
 }): Promise<Event> {
   return publishCoin({
@@ -1772,6 +1792,7 @@ export async function publishHardenedSpan(input: {
     },
     signer: input.signer,
     localOnly: input.localOnly ?? true,
+    prepareOnly: input.prepareOnly,
     operationId: input.operationId,
   });
 }
@@ -1784,6 +1805,8 @@ export async function publishDirectCoin(input: {
   signer?: Uint8Array;
   kedits?: KEdit[];
   localOnly?: boolean;
+  /** Sign only. Used so the pending-Mint journal can commit before Step. */
+  prepareOnly?: boolean;
 }): Promise<Event> {
   return publishCoin({
     ...input,
