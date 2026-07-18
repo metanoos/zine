@@ -1,4 +1,5 @@
 import type { ModelLessonResume } from "../ai/model-context-lesson.js";
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
 
 export type { ModelLessonResume } from "../ai/model-context-lesson.js";
 

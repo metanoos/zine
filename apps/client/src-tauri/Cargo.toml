@@ -28,6 +28,16 @@ reqwest = { version = "0.13.4", features = ["stream"] }
 tauri-plugin-dialog = "2"
 base64 = "0.22"
 hex = "0.4"
+getrandom = "0.3"
+rust-argon2 = "2.1"
+sha2 = "0.10"
+zeroize = "1"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"
+
+[dev-dependencies]
+argon2-legacy = { package = "rust-argon2", version = "=1.0.0" }
 
 # Stronghold's password and snapshot KDFs are intentionally expensive. In an
 # otherwise-unoptimized dev build their inner loops take minutes, which makes a

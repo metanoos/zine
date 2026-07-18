@@ -1,5 +1,6 @@
 import type { Event, Filter } from "nostr-tools";
 import { verifyEvent } from "nostr-tools/pure";
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
 
 const STORAGE_KEY = "zine.pending-trace-events";
 

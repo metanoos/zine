@@ -1,9 +1,15 @@
+import {
+  activeVaultStorageId,
+  vaultStorage as localStorage,
+} from "../storage/vault-storage.js";
+
 /**
- * The install root — the single home for everything this install writes. One
- * root per browser/machine profile, minted on first boot and reopened on every
- * ordinary boot thereafter. It is never unmounted or switched away from. An
- * explicit factory reset is the one lifecycle boundary: it clears the whole
- * profile and the local relay, then the next boot mints a different root.
+ * The active vault's Root — the single home for everything that vault writes.
+ * One Root is minted on the vault's first unlock and reopened whenever that
+ * vault is activated. The same desktop install may hold several parallel
+ * vaults; vaultStorage scopes this pointer and its local workspace state so
+ * switching vaults cannot reopen another vault's Root. An explicit factory
+ * reset clears every vault and the local relay.
  *
  * Identity is the genesis node's event id (protocol §3.1: trace identity IS
  * the genesis node id), minted via `createFolderGenesis`. That id is stored
@@ -12,7 +18,7 @@
  *   - this localStorage slot, the local pointer that lets every boot reopen
  *     the exact same root without re-minting.
  *
- * WRITE-ONCE within one install lifecycle. `mintRoot` guards against a
+ * WRITE-ONCE within one vault lifecycle. `mintRoot` guards against a
  * double-mint by refusing to overwrite an existing id. Factory reset is not a
  * mutation of that root: App.tsx erases the entire local profile and sidecar
  * history, so the following first-run boot creates a new lifecycle and a new
@@ -80,16 +86,64 @@ export function rootAuthorSigner(): Uint8Array {
   return signer;
 }
 
-/** Mint the install root: publish its genesis node, persist the returned event
- *  id to `zine.root`, and return it. Idempotent within an install lifecycle —
+export interface RootMintOperations {
+  scope(): string;
+  existing(): string | null;
+  create(): Promise<string>;
+  persist(id: string): void;
+}
+
+/** Coalesce every first-Root caller onto one genesis publication. React
+ * StrictMode intentionally replays mount effects in development, and both
+ * calls can observe empty storage before the first network await completes.
+ * Pending work is scoped to the active vault so a fast switch cannot reuse or
+ * persist another vault's Root publication. */
+export function createRootMinter(operations: RootMintOperations): () => Promise<string> {
+  const pendingByScope = new Map<string, Promise<string>>();
+  return async () => {
+    const scope = operations.scope();
+    const existing = operations.existing();
+    if (existing) return existing;
+    const pending = pendingByScope.get(scope);
+    if (pending) return pending;
+
+    let tracked: Promise<string>;
+    tracked = operations.create()
+      .then((id) => {
+        if (operations.scope() !== scope) {
+          throw new Error("The active vault changed while Root was being created");
+        }
+        operations.persist(id);
+        return id;
+      })
+      .then(
+        (id) => {
+          if (pendingByScope.get(scope) === tracked) pendingByScope.delete(scope);
+          return id;
+        },
+        (error: unknown) => {
+          if (pendingByScope.get(scope) === tracked) pendingByScope.delete(scope);
+          throw error;
+        },
+      );
+    pendingByScope.set(scope, tracked);
+    return tracked;
+  };
+}
+
+const mintActiveVaultRoot = createRootMinter({
+  scope: () => activeVaultStorageId() ?? "browser",
+  existing: getRootId,
+  create: () => createFolderGenesis({ signer: rootAuthorSigner() }),
+  persist: (id) => localStorage.setItem(ROOT_KEY, JSON.stringify({ id })),
+});
+
+/** Mint the vault Root: publish its genesis node, persist the returned event
+ *  id to `zine.root`, and return it. Idempotent within a vault lifecycle —
  *  if a root already exists, returns the existing id without minting again
  *  (guards against a double-mint racing two boot paths). */
 export async function mintRoot(): Promise<string> {
-  const existing = getRootId();
-  if (existing) return existing;
-  const id = await createFolderGenesis({ signer: rootAuthorSigner() });
-  localStorage.setItem(ROOT_KEY, JSON.stringify({ id }));
-  return id;
+  return mintActiveVaultRoot();
 }
 
 /** The dedicated Mint folder mounted beside an install root. Mint is a real

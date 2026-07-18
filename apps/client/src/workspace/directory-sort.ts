@@ -1,3 +1,5 @@
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+
 /** Local presentation preference for every section of the Press directory. */
 
 export const DIRECTORY_SORT_STORAGE_KEY = "zine.press.directorySort";

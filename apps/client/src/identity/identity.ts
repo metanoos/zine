@@ -1,6 +1,7 @@
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import type { Event } from "nostr-tools";
 import { canSignWithSecrets } from "./secret-store.js";
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
 
 /**
  * Browser-side signing identity for the desktop client.

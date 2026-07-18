@@ -1,3 +1,5 @@
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+
 /**
  * Optional editorial lenses for the five single-shot LLM operations.
  *

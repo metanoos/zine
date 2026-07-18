@@ -1,3 +1,5 @@
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+
 /**
  * Local automation recipes and durable agent-run manifests.
  *

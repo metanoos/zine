@@ -1,3 +1,5 @@
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+
 /**
  * Per-voice model selection. Maps a voice's pubkey to a provider id
  * (`ProviderConfig.id` from models-store). This is what Press → MODEL's

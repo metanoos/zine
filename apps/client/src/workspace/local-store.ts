@@ -1,3 +1,5 @@
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+
 /**
  * localStorage persistence for webapp folders — the primary store.
  *

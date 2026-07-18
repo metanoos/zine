@@ -79,6 +79,34 @@ test("closing a secret session releases its backend and clears cached material",
   await unlockSecretSession(new MemorySecretStore());
 });
 
+test("a backend close failure still locks the JavaScript secret session", async () => {
+  class FailingCloseStore extends MemorySecretStore {
+    attempts = 0;
+
+    async close(): Promise<void> {
+      this.attempts += 1;
+      if (this.attempts === 1) throw new Error("native unload failed");
+    }
+  }
+
+  const store = new FailingCloseStore({ persistent: true, signing: true, model: true });
+  await unlockSecretSession(store);
+  await putSecret("voice:must-clear", new Uint8Array([4, 2]));
+
+  await assert.rejects(closeSecretSession(), /native unload failed/);
+  assert.equal(isSecretSessionUnlocked(), false);
+  assert.equal(getSecretCached("voice:must-clear"), null);
+  await assert.rejects(putSecret("voice:after-failure", new Uint8Array([1])), /locked/);
+  await assert.rejects(
+    unlockSecretSession(new MemorySecretStore()),
+    /Finish locking the current vault/,
+  );
+
+  await closeSecretSession();
+  assert.equal(store.attempts, 2);
+  await unlockSecretSession(new MemorySecretStore());
+});
+
 test("browser session is explicitly non-authoring and non-persistent", async () => {
   await initializeBrowserReadOnlySecretSession();
   assert.deepEqual(secretSessionCapabilities(), {

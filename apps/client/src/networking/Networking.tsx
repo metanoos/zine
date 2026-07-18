@@ -420,7 +420,10 @@ function NodeSection() {
     expected: string,
   ): Promise<string> {
     const { seedBase64 } = onionAddressForSecret(secret);
-    const reported = (await invoke("setup_onion", { seedBase64 })) as string;
+    const reported = (await invoke("setup_onion", {
+      seedBase64,
+      expectedAddress: expected,
+    })) as string;
     if (reported !== expected) {
       throw new Error(
         `Tor reported ${reported} but the key derives ${expected}. Seed may be corrupted.`,
@@ -436,6 +439,15 @@ function NodeSection() {
    *  privilege. Doors are untouched: secondary .onions stay live, so this is
    *  zero-downtime rotation for the owner. */
   async function onNodeKeyChange(id: string) {
+    if (torStatus.kind === "live" && onionAddress) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("remove_onion", { address: onionAddress });
+      } catch (e) {
+        setError(`Could not retire the old primary onion: ${String(e)}`);
+        return;
+      }
+    }
     setNodeKeyId(id);
     setNodeKeyIdState(id);
     setKeys(loadKeys());
@@ -469,6 +481,10 @@ function NodeSection() {
     setError(null);
     setTorStatus({ kind: "starting" });
     try {
+      const peers = await listPeers();
+      if (!peers.networkedMode || peers.owner !== nodeVoice()) {
+        await setOwner(nodeVoice());
+      }
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke<string>("spawn_tor");
       const ownerKey = getNodeKey();
@@ -530,9 +546,18 @@ function NodeSection() {
     }
   }
 
-  function onRemoveDoor(id: string) {
+  async function onRemoveDoor(id: string) {
     setError(null);
     const removed = doors.find((d) => d.id === id);
+    if (torStatus.kind === "live" && removed) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("remove_onion", { address: removed.address });
+      } catch (e) {
+        setError(`Could not retire the door: ${String(e)}`);
+        return;
+      }
+    }
     setDoors(removeDoor(id));
     if (torStatus.kind === "live" && removed) {
       setTorStatus({
@@ -661,7 +686,7 @@ function NodeSection() {
                         type="button"
                         className="door-delete"
                         title="Remove door"
-                        onClick={() => onRemoveDoor(d.id)}
+                        onClick={() => void onRemoveDoor(d.id)}
                       >
                         <Trash2 size={16} strokeWidth={1.75} />
                       </button>
@@ -705,7 +730,8 @@ function NodeSection() {
 
 /**
  * Peers section — who can reach your node. Desktop only: it configures the
- * bundled relay's access policy via ~/.tracer/peers.json. On the webapp there
+ * bundled relay's active-vault access policy. Legacy installs keep that ACL at
+ * ~/.tracer/peers.json. On the webapp there
  * is no local node to gate, so it shows a note.
  */
 function PeersSection() {

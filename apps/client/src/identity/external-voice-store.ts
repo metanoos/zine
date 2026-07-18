@@ -1,3 +1,5 @@
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+
 /**
  * External-actor voice registry. Each external actor that writes to a traced
  * folder gets its own voice — a distinct keypair in the standard keychain

@@ -1,3 +1,5 @@
+import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+
 /**
  * Nostr keypair keychain — the set of voices the user can sign and attribute
  * text with. Promotes the `keys` nav entry from placeholder to a real view,
@@ -503,7 +505,7 @@ export function setModelKeyId(id: string): void {
 //                                    onion, is the `owner` in peers.json, and
 //                                    signs the NIP-42 AUTH challenge that proves
 //                                    ownership to the local relay. Set once per
-//                                    install — it is your *address*, not a pen.
+//                                    vault — it is that vault's *address*, not a pen.
 //
 // The NODE role decouples the onion/AUTH identity (which must be stable so your
 // address doesn't change and peers keep reaching you) from the AUTHOR role
