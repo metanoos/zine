@@ -1128,7 +1128,7 @@ test("target staleness is durable before review or after acceptance and never re
       selectedContext: withPlacement(focusOnlySelected),
       maxOutputTokens: 1_024,
     },
-  }), /valid only for a stale retry/);
+  }), /valid only for stale or ambiguous retries/);
 
   const accepted = await atStatus("accepted");
   const applyStaleReduction = reduceDesktopOperationV1(

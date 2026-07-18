@@ -202,8 +202,9 @@ async function preparedFor(
 async function directivePreparedFor(
   targetFixture = directiveTarget(),
   providerFixture = provider(),
+  identity: { requestId?: string; createdAt?: number } = {},
 ): Promise<PreparedOperation> {
-  const base = await preparedFor(targetFixture, providerFixture);
+  const base = await preparedFor(targetFixture, providerFixture, undefined, identity);
   const fromUtf16 = targetFixture.text.indexOf("((");
   assert.ok(fromUtf16 >= 0, "directive fixture must contain authoring syntax");
   const compiled = compileTraceAuthoringOperation({
@@ -770,7 +771,7 @@ test("expired directive authority is durably stopped before every provider bound
   assert.equal(transportCalls, 0);
 });
 
-test("unauthorized terminal directive attempts require a fresh operation, including duplicate-risk retry", async () => {
+test("ambiguous expired directives require confirmation and persist one linked fresh retry before I/O", async () => {
   const repository = new MemoryRepository();
   const authorized = new DesktopOperationRuntimeV1(runtimeDependencies({
     repository,
@@ -791,9 +792,10 @@ test("unauthorized terminal directive attempts require a fresh operation, includ
       diagnosticRef: `diag:${HASH("test-provider-unavailable")}`,
     },
   }));
+  const unknownTarget = directiveTarget("terminal-unknown");
   let unknown = await authorized.approve(keyFor(await persistDirective(
     authorized,
-    directiveTarget("terminal-unknown"),
+    unknownTarget,
     { operationId: "operation-directive-unknown", attemptId: "attempt-directive-unknown" },
   )));
   unknown = await replaceWithTransition(
@@ -817,9 +819,18 @@ test("unauthorized terminal directive attempts require a fresh operation, includ
       return "must not dispatch";
     },
   }));
-  const freshTarget = directiveTarget("terminal-fresh");
+  const freshText = "revised draft ((tighten the terminal unknown ending))";
+  const freshTarget: TargetFixture = {
+    ...unknownTarget,
+    text: freshText,
+    headId: HASH("head-terminal-unknown-fresh"),
+    contentHash: HASH(freshText),
+  };
   const freshPreparation = {
-    prepared: await directivePreparedFor(freshTarget),
+    prepared: await directivePreparedFor(freshTarget, provider(), {
+      requestId: "request-terminal-unknown-fresh",
+      createdAt: unknown.updatedAtMs + 1,
+    }),
     provider: provider(),
     maxOutputTokens: 1_024,
   };
@@ -829,14 +840,36 @@ test("unauthorized terminal directive attempts require a fresh operation, includ
     /expired directive authority requires a fresh operation/,
   );
   await assert.rejects(
-    () => unauthorized.retry(keyFor(unknown), {
-      possibleDuplicateAcknowledged: true,
-      freshPreparation,
-    }),
-    /expired directive authority requires a fresh operation/,
+    () => unauthorized.retry(keyFor(unknown), { freshPreparation }),
+    /explicit operator confirmation/,
   );
   assert.equal(transportCalls, 0);
   assert.equal(repository.records.size, 2, "no linked retry attempt may be persisted");
+
+  const retry = await unauthorized.retry(keyFor(unknown), {
+    createdAtMs: freshPreparation.prepared.createdAt,
+    possibleDuplicateAcknowledged: true,
+    freshPreparation,
+  });
+  assert.equal(retry.operationId, unknown.operationId);
+  assert.equal(retry.attempt.retryOfAttemptId, unknown.attempt.attemptId);
+  assert.equal(retry.attempt.possibleDuplicateAcknowledgedAtMs, retry.attempt.createdAtMs);
+  assert.equal(retry.prepared.requestId, freshPreparation.prepared.requestId);
+  assert.equal(repository.records.size, 3);
+  assert.equal(transportCalls, 0, "confirmation records a retry but does not itself call the provider");
+
+  const afterRestart = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => false,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not resume after restart";
+    },
+  }));
+  const recovery = await afterRestart.recover();
+  assert.equal(recovery.failureCount, 0);
+  assert.equal((await afterRestart.load(keyFor(retry)))?.lifecycle.status, "stale");
+  assert.equal(transportCalls, 0);
 });
 
 test("failed authorization reconciliation never exposes resume or retry after a CAS conflict", async () => {
@@ -1011,7 +1044,7 @@ test("dispatch-intent, provider-io, and repeated unknown recovery never silently
   assert.equal(calls, 0);
 });
 
-test("apply-before-receipt crash is recovered through an idempotent artifact applier", async () => {
+test("restart records an exact already-applied directive receipt before expired authority can stale it", async () => {
   const repository = new MemoryRepository();
   let applied = false;
   let calls = 0;
@@ -1023,8 +1056,17 @@ test("apply-before-receipt crash is recovered through an idempotent artifact app
     }
     return { status: "already-applied", resultingContentHash: HASH(responseText) };
   };
-  const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({ repository, applyArtifact }));
-  const ready = await responseReady(runtime, target("apply-crash"));
+  const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    applyArtifact,
+    isAttemptAuthorizedForCurrentEditorSession: () => true,
+  }));
+  let ready = await persistDirective(runtime, directiveTarget("apply-crash"), {
+    operationId: "operation-directive-apply-crash",
+    attemptId: "attempt-directive-apply-crash",
+  });
+  ready = await runtime.approve(keyFor(ready));
+  ready = await runtime.dispatch(keyFor(ready));
   await assert.rejects(() => runtime.accept(keyFor(ready)), /simulated process death/);
   const afterCrash = await runtime.load(keyFor(ready));
   assert.equal(afterCrash!.lifecycle.status, "accepted");
@@ -1033,11 +1075,14 @@ test("apply-before-receipt crash is recovered through an idempotent artifact app
   const reconstructed = new DesktopOperationRuntimeV1(runtimeDependencies({
     repository,
     applyArtifact,
+    isAttemptAuthorizedForCurrentEditorSession: () => false,
   }));
   const recovery = await reconstructed.recover();
   assert.equal(recovery.failureCount, 0);
   const recovered = await reconstructed.load(keyFor(ready));
   assert.ok(recovered!.artifactReceipt);
+  assert.equal(recovered!.lifecycle.status, "accepted");
+  assert.equal(recovered!.fault, null);
   assert.equal(calls, 2);
 });
 

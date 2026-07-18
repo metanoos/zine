@@ -417,7 +417,18 @@ export class DesktopOperationRuntimeV1 {
     return this.withOperation(key, async () => {
       const prior = await this.requireEnvelope(key);
       if (!this.isAuthorized(prior)) {
-        if (prior.lifecycle.status !== "stale") {
+        if (
+          prior.lifecycle.retryPolicy === "operator-confirmation-required"
+          && command.freshPreparation !== undefined
+          && command.possibleDuplicateAcknowledged !== true
+        ) {
+          fail("possible provider dispatch requires explicit operator confirmation before retry");
+        }
+        const confirmedAmbiguousFreshRetry =
+          prior.lifecycle.retryPolicy === "operator-confirmation-required"
+          && command.freshPreparation !== undefined
+          && command.possibleDuplicateAcknowledged === true;
+        if (prior.lifecycle.status !== "stale" && !confirmedAmbiguousFreshRetry) {
           fail("expired directive authority requires a fresh operation");
         }
         if (command.freshPreparation === undefined) {
@@ -774,22 +785,29 @@ export class DesktopOperationRuntimeV1 {
       (current.lifecycle.status === "prepared" || current.lifecycle.status === "approved")
       && !this.isAuthorized(current)
     ) {
-      await this.reconcileUnauthorizedPreDispatch(current);
+      const stale = await this.reconcileUnauthorizedPreDispatch(current);
+      await this.present(stale, "recovery");
       return;
     }
     switch (current.lifecycle.status) {
       case "dispatch-intent":
-      case "provider-io":
-        await this.commit(current, this.transition("mark-dispatch-unknown", current, {}, {
+      case "provider-io": {
+        const unknown = await this.commit(current, this.transition("mark-dispatch-unknown", current, {}, {
           diagnosticRef: this.diagnosticRef(),
         }));
+        await this.present(unknown.envelope, "recovery");
         return;
+      }
       case "response-completed":
         await this.present(current, "recovery");
         return;
-      case "accepted":
-        if (!current.artifactReceipt) await this.applyAcceptedIntent(current);
+      case "accepted": {
+        const recovered = current.artifactReceipt
+          ? current
+          : (await this.applyAcceptedIntent(current)).envelope;
+        await this.present(recovered, "recovery");
         return;
+      }
       case "stale":
         await this.present(current, "recovery");
         return;
@@ -800,6 +818,7 @@ export class DesktopOperationRuntimeV1 {
       case "unknown":
       case "rejected":
       case "abandoned":
+        await this.present(current, "recovery");
         return;
     }
   }

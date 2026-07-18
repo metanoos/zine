@@ -451,7 +451,7 @@ export interface CreateDesktopOperationRetryV1Input {
   createdAtMs: number;
   retainForMs?: number;
   possibleDuplicateAcknowledged?: true;
-  /** Required after TARGET_STALE; must be captured from the current editor revision. */
+  /** Required after TARGET_STALE or expired authority on an ambiguous attempt. */
   freshPreparation?: Pick<
     CreateDesktopOperationEnvelopeV1Input,
     "prepared" | "provider" | "selectedContext" | "maxOutputTokens"
@@ -485,12 +485,13 @@ export function createDesktopOperationRetryV1(
   if (!Number.isSafeInteger(retainForMs) || retainForMs <= 0 || retainForMs > DESKTOP_OPERATION_MAX_RETENTION_MS) {
     fail(`retry retention must be between 1 and ${DESKTOP_OPERATION_MAX_RETENTION_MS}`);
   }
+  const ambiguous = prior.lifecycle.retryPolicy === "operator-confirmation-required";
   if (prior.lifecycle.status === "stale" && !input.freshPreparation) {
     fail("stale retry requires a fresh prepared operation and selected context");
   }
   if (input.freshPreparation) {
-    if (prior.lifecycle.status !== "stale") {
-      fail("fresh preparation is valid only for a stale retry");
+    if (prior.lifecycle.status !== "stale" && !ambiguous) {
+      fail("fresh preparation is valid only for stale or ambiguous retries");
     }
     if (input.freshPreparation.prepared.requestId === prior.prepared.requestId) {
       fail("fresh retry must use a new prepared request id");
@@ -508,7 +509,7 @@ export function createDesktopOperationRetryV1(
       || freshTarget.path !== priorTarget.path
       || freshTarget.traceId !== priorTarget.traceId
     ) {
-      fail("stale retry must re-prepare the same stable folder, path, and trace target");
+      fail("fresh retry must re-prepare the same stable folder, path, and trace target");
     }
     const fresh = createDesktopOperationEnvelopeV1({
       operationId: prior.operationId,

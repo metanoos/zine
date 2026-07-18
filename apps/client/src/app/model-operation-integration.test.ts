@@ -109,6 +109,11 @@ test("desktop Accept writes one exact crash-pad receipt before dispatching CodeM
   assert.match(apply, /transaction\.state\.field\(voiceField\)/);
   assert.match(apply, /transaction\.state\.field\(keditField\)/);
   assert.ok(apply.indexOf("mirrorPad(") < apply.indexOf("view.dispatch(transaction)"));
+  assert.ok(
+    apply.indexOf("receipt?.intentId === input.intent.intentId")
+      < apply.indexOf("isDesktopOperationAuthorizedThisSessionV1"),
+    "restart receipt reconciliation must precede ephemeral directive authority",
+  );
   assert.match(apply, /createDesktopOperationCrashPadReceiptV1/);
   assert.match(apply, /prepared\.modelVoicePubkey/);
   assert.doesNotMatch(apply, /modelPubkeyRef\.current/);
@@ -151,7 +156,10 @@ test("recovery errors stay generic and saved operations navigate exact bounded c
   assert.match(app, /saved AI operation\(s\) need recovery attention/);
   assert.doesNotMatch(app, /failureSamples\[/);
   assert.match(refresh, /repository\.listPage\(cursor, 16\)/);
+  assert.match(refresh, /resolveDesktopOperationPageLineageV1\(/);
+  assert.match(refresh, /page\.records,[\s\S]*pageSize: 16, isCancelled: cancelled/);
   assert.match(refresh, /setDesktopOperationEnvelopes\(\[\.\.\.page\.records\]\)/);
+  assert.match(refresh, /setDesktopOperationPageLineageHeads\(\[\.\.\.lineageHeads\]\)/);
   assert.match(refresh, /setDesktopOperationPageCursor\(cursor\)/);
   assert.match(refresh, /setDesktopOperationNextCursor\(page\.nextCursor\)/);
   assert.match(next, /desktopOperationNextCursor/);
@@ -159,6 +167,9 @@ test("recovery errors stay generic and saved operations navigate exact bounded c
   assert.match(previous, /desktopOperationPreviousCursors\[desktopOperationPreviousCursors\.length - 1\]/);
   assert.match(previous, /desktopOperationPreviousCursors\.slice\(0, -1\)/);
   assert.doesNotMatch(refresh, /\.\.\.current|slice\(-64\)/);
+  assert.match(refresh, /setDesktopOperationEnvelopes\(\[\]\)[\s\S]*setDesktopOperationPageLineageHeads\(\[\]\)/);
+  assert.match(refresh, /desktopOperationStoreRef\.current !== repository/);
+  assert.match(app, /mergeDesktopOperationPinnedHeadsV1\(current, \[envelope\], 16\)/);
   assert.match(app, />Previous<\/button>/);
   assert.match(app, /"More \/ Next"/);
 });
@@ -171,11 +182,17 @@ test("stale re-prepare opens only the original workspace path and trace", () => 
   assert.match(action, /Restore the original workspace and trace/);
 });
 
-test("expired terminal directive re-prepare starts a fresh operation instead of a linked retry", () => {
+test("expired terminal directive re-prepare distinguishes safe fresh operations from confirmed ambiguous linkage", () => {
   const dispatch = functionBody("dispatchFreshDesktopRetry", "const [opLenses");
-  assert.match(dispatch, /prior\.lifecycle\.status === "stale"[\s\S]*runtime\.retry\(staleKey/);
+  assert.match(dispatch, /ambiguous = prior\.lifecycle\.retryPolicy === "operator-confirmation-required"/);
+  assert.match(dispatch, /ambiguous[\s\S]*window\.confirm\(/);
+  assert.ok(dispatch.indexOf("window.confirm(") < dispatch.indexOf("await runtime.retry(staleKey"));
+  assert.ok(dispatch.indexOf("await runtime.retry(staleKey") < dispatch.indexOf("dispatchDesktopOperationAttempt(retry)"));
+  assert.match(dispatch, /possibleDuplicateAcknowledged: true as const/);
+  assert.match(dispatch, /prior\.lifecycle\.status === "stale" \|\| ambiguous[\s\S]*runtime\.retry\(staleKey/);
   assert.match(dispatch, /: await runtime\.persistApprovedExtend\(/);
   assert.match(dispatch, /desktopOperationAttemptKeyV1\(retry\.operationId, retry\.attempt\.attemptId\)/);
+  assert.match(app, /case "reprepare-possible-duplicate": return "Re-prepare \(may duplicate\)"/);
 });
 
 test("desktop recovery constructs the native frozen-session store only after App mounts", () => {

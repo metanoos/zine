@@ -100,6 +100,15 @@ provider-completed-without-result attempt requires explicit operator
 confirmation and creates a newly linked attempt. This may spend another model
 call, but it cannot silently duplicate one.
 
+If current-session directive authority has expired on that ambiguous attempt,
+the compact review uses a distinct **Re-prepare (may duplicate)** path. It
+focuses the exact stable target, captures a fresh prepared request, and asks for
+confirmation again at the final dispatch boundary. Only confirmation creates
+the linked retry, with both `retryOfAttemptId` and
+`possibleDuplicateAcknowledgedAtMs`; declining performs no provider I/O and
+persists no retry. An ambiguous attempt is never converted into an unlinked
+bare operation.
+
 An operator may instead permanently abandon an `unknown` attempt. Abandonment
 retains `may-have-dispatched` certainty and the structured dispatch-unknown
 fault; it never rewrites ambiguous history as known not dispatched, and
@@ -122,16 +131,23 @@ approved attempt without that same-mount authorization is durably marked stale
 with known-not-dispatched certainty before any provider effect. It carries no
 response and can only focus the exact target for re-preparation. If that
 reconciliation cannot win its compare-and-set, the UI still exposes only exact-
-target re-preparation. Unauthorized failed, cancelled, rejected, or unknown
-attempts start a fresh operation rather than reusing or linking the expired
-request. Directive-free attempts remain recoverable across activations.
+target re-preparation. Unauthorized safe failed, cancelled, or rejected
+attempts start a fresh operation rather than reusing the expired request.
+Unauthorized ambiguous failed or unknown attempts use the confirmed linked
+fresh-preparation path described above. Directive-free attempts remain
+recoverable across activations.
 
 The public MODEL voice key frozen in the prepared request is the sole identity
 used for CodeMirror attribution, local runs, KEdits, crash-pad metadata, and
 recovery verification. The crash-pad receipt binds the intent id to canonical
 content, canonical runs, canonical KEdits, and that public MODEL key. A missing
 or tampered component cannot produce `already-applied`; recovery never
-synthesizes attribution or KEdits as a fallback.
+synthesizes attribution or KEdits as a fallback. On restart, exact crash-pad
+receipt recognition and restoration precede the ephemeral directive-authority
+check: converging an already-applied receipt records no new editor mutation and
+must not be rewritten as target-stale merely because the App activation
+changed. Applied and abandoned terminal records are suppressed before the
+authorization-expired review override.
 
 The caller rechecks the captured target before acceptance and uses compare-and-
 set when applying an accepted intent. A failed recheck moves
@@ -222,7 +238,16 @@ local effects. The compact UI reads one bounded page at a time, retains the
 opaque current and next cursors plus a previous-cursor stack, and replaces its
 view with exactly one native page of at most 16 records. Compact **Previous**
 and **More / Next** actions move backward and forward without accumulating
-earlier pages in memory. Selective portable commitments and
+earlier pages in memory. Because encrypted native rows are intentionally
+ordered only by opaque keyed record ids, every archive load streams the journal
+in bounded pages and retains lineage heads only for the operations on the
+visible page. Superseded attempts therefore never regain actions when a linked
+head lands on another page. A separate bounded 16-operation current-head
+overlay keeps newly completed work visible regardless of record-id order and
+deduplicates it against the archive head. Scan failure or vault-session change
+clears archive actions rather than projecting a partial lineage. No operation
+id, attempt id, or timing field is added to plaintext native metadata.
+Selective portable commitments and
 disclosure belong to Phase 3 after the trust/schema review.
 
 ## Not included

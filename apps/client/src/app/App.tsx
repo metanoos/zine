@@ -254,6 +254,8 @@ import {
 import type { DesktopOperationEnvelopeV1 } from "../ai/desktop-operation-envelope.js";
 import {
   desktopOperationReviewQueueV1,
+  mergeDesktopOperationPinnedHeadsV1,
+  resolveDesktopOperationPageLineageV1,
   type DesktopOperationReviewActionV1,
   type DesktopOperationReviewItemV1,
 } from "../ai/desktop-operation-review.js";
@@ -6001,7 +6003,11 @@ function DesktopExtendReviewStrip({
               {item.actions.map((action) => (
                 <button
                   type="button"
-                  className={action === "accept" ? "primary" : action === "retry-possible-duplicate" ? "caution" : ""}
+                  className={action === "accept"
+                    ? "primary"
+                    : action === "retry-possible-duplicate" || action === "reprepare-possible-duplicate"
+                      ? "caution"
+                      : ""}
                   disabled={busy}
                   key={action}
                   onClick={() => onAction(item, action)}
@@ -6037,6 +6043,7 @@ function desktopReviewActionLabel(action: DesktopOperationReviewActionV1): strin
     case "retry-possible-duplicate": return "Retry (may duplicate)";
     case "abandon": return "Abandon";
     case "reprepare": return "Re-prepare";
+    case "reprepare-possible-duplicate": return "Re-prepare (may duplicate)";
     case "resume": return "Resume";
   }
 }
@@ -10299,7 +10306,13 @@ function App() {
   const desktopOperationStoreRef = useRef<DesktopOperationStoreV1 | null>(null);
   const desktopOperationRuntimeRef = useRef<DesktopOperationRuntimeV1 | null>(null);
   const [desktopRuntimeReady, setDesktopRuntimeReady] = useState(false);
-  const [desktopOperationEnvelopes, setDesktopOperationEnvelopes] = useState<
+  const [, setDesktopOperationEnvelopes] = useState<
+    DesktopOperationEnvelopeV1[]
+  >([]);
+  const [desktopOperationPageLineageHeads, setDesktopOperationPageLineageHeads] = useState<
+    DesktopOperationEnvelopeV1[]
+  >([]);
+  const [desktopOperationPinnedHeads, setDesktopOperationPinnedHeads] = useState<
     DesktopOperationEnvelopeV1[]
   >([]);
   const [desktopOperationPageCursor, setDesktopOperationPageCursor] = useState<string | null>(null);
@@ -10310,19 +10323,23 @@ function App() {
   const [desktopOperationLoadingMore, setDesktopOperationLoadingMore] = useState(false);
   const [desktopOperationBusyKey, setDesktopOperationBusyKey] = useState<string | null>(null);
   const [desktopOperationError, setDesktopOperationError] = useState<string | null>(null);
+  const desktopOperationRefreshSequenceRef = useRef(0);
   const desktopReprepareKeyRef = useRef<DesktopOperationKeyV1 | null>(null);
   // Directive authority is deliberately non-durable. Only attempts created or
   // linked from an authorized attempt during this App activation may consume
   // prepared one-shot directives.
   const desktopAuthorizedAttemptKeysRef = useRef(new Set<string>());
   const desktopOperationQueue = useMemo(
-    () => desktopOperationReviewQueueV1(desktopOperationEnvelopes.filter((envelope) =>
+    () => desktopOperationReviewQueueV1([
+      ...desktopOperationPinnedHeads,
+      ...desktopOperationPageLineageHeads,
+    ].filter((envelope) =>
       envelope.prepared.targetRevision.folderId === folder?.id), (envelope) =>
       isDesktopOperationAuthorizedThisSessionV1(
         envelope,
         desktopAuthorizedAttemptKeysRef.current,
       )),
-    [desktopOperationEnvelopes, folder?.id],
+    [desktopOperationPageLineageHeads, desktopOperationPinnedHeads, folder?.id],
   );
 
   // SecurityBootstrap mounts App only after vault activation has captured the
@@ -10356,6 +10373,7 @@ function App() {
       setDesktopOperationError(error instanceof Error ? error.message : String(error));
     }
     return () => {
+      desktopOperationRefreshSequenceRef.current += 1;
       desktopOperationRuntimeRef.current = null;
       desktopOperationStoreRef.current = null;
       setDesktopRuntimeReady(false);
@@ -10390,14 +10408,23 @@ function App() {
   }, [desktopRuntimeReady, bootState, folder?.id]);
 
   function upsertDesktopOperationEnvelope(envelope: DesktopOperationEnvelopeV1): void {
+    setDesktopOperationPinnedHeads((current) => [
+      ...mergeDesktopOperationPinnedHeadsV1(current, [envelope], 16),
+    ]);
     setDesktopOperationEnvelopes((current) => {
       const existing = current.findIndex((candidate) => (
         candidate.operationId === envelope.operationId
         && candidate.attempt.attemptId === envelope.attempt.attemptId
       ));
       if (existing >= 0) return current.map((candidate, index) => index === existing ? envelope : candidate);
-      return desktopOperationPageCursor === null ? [...current, envelope].slice(-16) : current;
+      return current;
     });
+    setDesktopOperationPageLineageHeads((current) => current.map((candidate) => (
+      candidate.operationId === envelope.operationId
+      && candidate.attempt.attemptId === envelope.attempt.attemptId
+        ? envelope
+        : candidate
+    )));
   }
 
   async function refreshDesktopOperationEnvelopes(
@@ -10406,11 +10433,32 @@ function App() {
   ): Promise<void> {
     const repository = desktopOperationStoreRef.current;
     if (!repository) return;
-    const page = await repository.listPage(cursor, 16);
-    setDesktopOperationEnvelopes([...page.records]);
-    setDesktopOperationPageCursor(cursor);
-    setDesktopOperationNextCursor(page.nextCursor);
-    setDesktopOperationPreviousCursors(previousCursors);
+    const sequence = ++desktopOperationRefreshSequenceRef.current;
+    const cancelled = () => (
+      sequence !== desktopOperationRefreshSequenceRef.current
+      || desktopOperationStoreRef.current !== repository
+    );
+    try {
+      const page = await repository.listPage(cursor, 16);
+      const lineageHeads = await resolveDesktopOperationPageLineageV1(
+        repository,
+        page.records,
+        { pageSize: 16, isCancelled: cancelled },
+      );
+      if (cancelled()) return;
+      setDesktopOperationEnvelopes([...page.records]);
+      setDesktopOperationPageLineageHeads([...lineageHeads]);
+      setDesktopOperationPageCursor(cursor);
+      setDesktopOperationNextCursor(page.nextCursor);
+      setDesktopOperationPreviousCursors(previousCursors);
+    } catch (error) {
+      if (cancelled()) return;
+      // A partial/global lineage scan must never leave an older archived
+      // attempt actionable from the previously rendered page.
+      setDesktopOperationEnvelopes([]);
+      setDesktopOperationPageLineageHeads([]);
+      throw error;
+    }
   }
 
   async function loadMoreDesktopOperationEnvelopes(): Promise<void> {
@@ -10495,7 +10543,7 @@ function App() {
       setDesktopOperationError("The desktop operation journal is unavailable");
       return;
     }
-    if (action === "reprepare") {
+    if (action === "reprepare" || action === "reprepare-possible-duplicate") {
       const prior = await runtime.load(item.key);
       const target = prior?.prepared.targetRevision;
       const liveFolder = folderRef.current;
@@ -10565,9 +10613,17 @@ function App() {
     try {
       const prior = await runtime.load(staleKey);
       if (!prior) throw new Error("The saved Extend attempt is no longer available");
-      const retry = prior.lifecycle.status === "stale"
+      const ambiguous = prior.lifecycle.retryPolicy === "operator-confirmation-required";
+      if (
+        ambiguous
+        && !window.confirm(
+          "The provider may already have processed the previous request. Dispatching this re-prepared request may duplicate provider work. Continue?",
+        )
+      ) return;
+      const retry = prior.lifecycle.status === "stale" || ambiguous
         ? await runtime.retry(staleKey, {
             freshPreparation: { prepared, provider, maxOutputTokens: 4096 },
+            ...(ambiguous ? { possibleDuplicateAcknowledged: true as const } : {}),
           })
         : await runtime.persistApprovedExtend({
             prepared,
@@ -15238,10 +15294,6 @@ function App() {
     const target = input.intent.targetRevision;
     const liveFolder = folderRef.current;
     if (!liveFolder || liveFolder.id !== target.folderId) return { status: "deferred" };
-    if (!isDesktopOperationAuthorizedThisSessionV1(
-      input.envelope,
-      desktopAuthorizedAttemptKeysRef.current,
-    )) return { status: "stale" };
     const modelVoicePubkey = input.envelope.prepared.modelVoicePubkey;
     const padFile = loadPad(liveFolder.id)?.[target.path];
     const receipt = padFile?.desktopOperationReceipt;
@@ -15265,6 +15317,13 @@ function App() {
       }
       throw new Error("Accepted Extend receipt exists without its exact crash-pad buffer");
     }
+
+    // An exact crash-pad receipt above proves the accepted mutation already
+    // happened. Only a genuinely new mutation needs live directive authority.
+    if (!isDesktopOperationAuthorizedThisSessionV1(
+      input.envelope,
+      desktopAuthorizedAttemptKeysRef.current,
+    )) return { status: "stale" };
 
     const current = readDesktopCurrentTarget(target);
     if (
