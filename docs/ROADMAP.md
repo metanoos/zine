@@ -55,8 +55,9 @@ Already built:
   current file/folder text, and structured process history;
 - the initial shared `@zine/trace-context` authoring-syntax kernel, compatibility
   fixtures, golden parser/compiler cases, and generated scale corpus;
-- a desktop Extend/Settle adapter with exact current-session manual-origin
-  authority, protected-output validation, and accepted-success cleanup;
+- a desktop adapter for the Extend (continuation) and Settle (revision)
+  operations with exact current-session manual-origin authority,
+  protected-output validation, and accepted-success cleanup;
 - a read-only trace-context Inspector presentation for prepared operations;
 - a preregistered writing-outcome study and operational scoring rubric; and
 - a preregistered narration study showing a narrow process-description effect.
