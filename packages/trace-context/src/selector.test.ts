@@ -32,6 +32,9 @@ const corpus = corpusJson as unknown as {
   cases: GoldenCase[];
 };
 
+const VOICE_A = "a".repeat(64);
+const VOICE_B = "b".repeat(64);
+
 test("selection corpus is portable JSON and identifies the package-local contract", async () => {
   assert.equal(corpus.version, 1);
   assert.equal(corpus.contract, "package-local-non-normative-v1");
@@ -186,11 +189,137 @@ test("process facts reject caller-authored prose and inconsistent mechanical sha
     range: { fromUtf16: 0, toUtf16: 1 },
     insertedCodePointCount: 1,
     deletedCodePointCount: 0,
-    voiceId: "voice",
+    voiceId: VOICE_A,
   });
   const inconsistentResult = await selectTraceContextV1(selectionInput([inconsistent]));
   assert.equal(inconsistentResult.ok, false);
   if (!inconsistentResult.ok) assert.equal(inconsistentResult.error.code, "MALFORMED_INPUT");
+});
+
+test("process facts reject impossible summaries, signer identities, and count relationships", async () => {
+  const invalidFacts: readonly TraceProcessFactV1[] = [
+    { ...zeroStepSummary(), rangeCount: 1 },
+    {
+      kind: "step-summary",
+      transactionCount: 1,
+      rangeCount: 1,
+      insertedCodePointCount: 1,
+      deletedCodePointCount: 0,
+      spanMs: 0,
+      longestGapMs: 0,
+      undoCount: 0,
+      redoCount: 0,
+    },
+    {
+      kind: "step-summary",
+      transactionCount: 2,
+      rangeCount: 1,
+      insertedCodePointCount: 1,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 1,
+      lastCapturedAtMs: 2,
+      spanMs: 1,
+      longestGapMs: 1,
+      undoCount: 0,
+      redoCount: 0,
+    },
+    {
+      kind: "step-summary",
+      transactionCount: 1,
+      rangeCount: 1,
+      insertedCodePointCount: 1,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 1,
+      lastCapturedAtMs: 11,
+      spanMs: 10,
+      longestGapMs: 1,
+      undoCount: 0,
+      redoCount: 0,
+    },
+    {
+      kind: "step-summary",
+      transactionCount: 1,
+      rangeCount: 1,
+      insertedCodePointCount: 1,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 1,
+      lastCapturedAtMs: 1,
+      spanMs: 0,
+      longestGapMs: 0,
+      undoCount: 1,
+      redoCount: 1,
+    },
+    {
+      kind: "transaction",
+      transactionIndex: 0,
+      capturedAtMs: 1,
+      changeCount: 1,
+      voiceIds: [VOICE_A, VOICE_B],
+    },
+    {
+      kind: "transaction",
+      transactionIndex: 0,
+      capturedAtMs: 1,
+      changeCount: 1,
+      voiceIds: ["friendly voice"],
+    },
+    {
+      kind: "transaction",
+      transactionIndex: 0,
+      capturedAtMs: 1,
+      changeCount: 1,
+      voiceIds: ["A".repeat(64)],
+    },
+    {
+      kind: "transaction",
+      transactionIndex: 0,
+      capturedAtMs: 1,
+      changeCount: 1,
+      voiceIds: ["a".repeat(63)],
+    },
+    {
+      kind: "transaction",
+      transactionIndex: 0,
+      capturedAtMs: 1,
+      changeCount: 1,
+      voiceIds: ["a".repeat(65)],
+    },
+    {
+      kind: "transaction",
+      transactionIndex: 0,
+      capturedAtMs: 1,
+      changeCount: 1,
+      voiceIds: [`${"a".repeat(63)}\n`],
+    },
+    {
+      kind: "change",
+      transactionIndex: 0,
+      operation: "delete",
+      range: { fromUtf16: 0, toUtf16: 1 },
+      insertedCodePointCount: 0,
+      deletedCodePointCount: 2,
+      voiceId: VOICE_A,
+    },
+  ];
+
+  for (const [index, fact] of invalidFacts.entries()) {
+    const result = await selectTraceContextV1(selectionInput([processFact(`invalid-${index}`, fact)]));
+    assert.equal(result.ok, false, `invalid fact ${index}`);
+    if (!result.ok) assert.equal(result.error.code, "MALFORMED_INPUT", `invalid fact ${index}`);
+  }
+});
+
+test("canonical signer pubkeys render in full as opaque mechanical identifiers", async () => {
+  const result = await selectTraceContextV1(selectionInput([processFact("voices", {
+    kind: "transaction",
+    transactionIndex: 0,
+    capturedAtMs: 1,
+    changeCount: 2,
+    voiceIds: [VOICE_B, VOICE_A],
+  })]));
+  assertSuccess(result);
+  assert.ok(result.renderedContext.includes(`voices ${VOICE_A},${VOICE_B}`));
+  assert.equal(result.renderedContext.includes("friendly voice"), false);
 });
 
 test("every process fact is bound to the exact target trace and prepared head chain", async () => {
@@ -204,7 +333,7 @@ test("every process fact is bound to the exact target trace and prepared head ch
       transactionIndex: 1,
       capturedAtMs: 1,
       changeCount: 1,
-      voiceIds: ["voice"],
+      voiceIds: [VOICE_A],
     }),
   ];
   for (const candidate of mismatches) {
@@ -323,6 +452,17 @@ test("host-task cancellation interrupts bounded candidate validation", async () 
   if (!result.ok) assert.equal(result.error.code, "CANCELLED");
 });
 
+test("host-task cancellation interrupts aggregate UTF-8 preflight inside a large string", async () => {
+  const controller = new AbortController();
+  const pending = selectTraceContextV1(selectionInput([
+    citation("large", "x".repeat(TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidateInputBytes * 2)),
+  ]), { signal: controller.signal });
+  setTimeout(() => controller.abort("test preflight cancellation"), 0);
+  const result = await pending;
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.error.code, "CANCELLED");
+});
+
 test("duplicate collapse is deterministic and conflicting identities fail", async () => {
   const first = preference("z", "same", "First");
   const duplicate = { ...preference("a", "same", "First"), dedupeKey: first.dedupeKey };
@@ -348,30 +488,84 @@ test("success output is deeply frozen and exact UTF-16 ranges survive selection"
     claimClass: "explicit",
     source: {
       kind: "target",
-      ref: "target:emoji",
+      ref: "protected-v1:0001:0:6",
       traceId: "trace",
       headId: "head",
-      range: { fromUtf16: 0, toUtf16: 2 },
+      range: { fromUtf16: 0, toUtf16: 6 },
     },
     reasons: ["protected-current-range"],
-    text: "😀",
+    text: "[[😀]]",
   }], {
     operation: "settle",
-    currentText: "😀 target",
-    range: { fromUtf16: 0, toUtf16: 2 },
+    currentText: "[[😀]] target",
+    range: { fromUtf16: 0, toUtf16: 6 },
   }));
   assertSuccess(result);
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.manifest), true);
   assert.equal(Object.isFrozen(result.manifest.selected[0]), true);
-  assert.deepEqual(result.manifest.operation.range, { fromUtf16: 0, toUtf16: 2 });
+  assert.deepEqual(result.manifest.operation.range, { fromUtf16: 0, toUtf16: 6 });
   assert.deepEqual(result.manifest.selected[0]?.source, {
     kind: "target",
-    ref: "target:emoji",
+    ref: "protected-v1:0001:0:6",
     traceId: "trace",
     headId: "head",
-    range: { fromUtf16: 0, toUtf16: 2 },
+    range: { fromUtf16: 0, toUtf16: 6 },
   });
+});
+
+test("protected evidence binds to the exact scanner range, target identity, and operation range", async () => {
+  const base: Extract<EvidenceCandidateV1, { kind: "protected-range" }> = {
+    version: 1,
+    id: "protected",
+    dedupeKey: "protected",
+    kind: "protected-range",
+    claimClass: "explicit",
+    source: {
+      kind: "target",
+      ref: "protected-v1:0001:7:13",
+      traceId: "trace",
+      headId: "head",
+      range: { fromUtf16: 7, toUtf16: 13 },
+    },
+    reasons: ["protected-current-range"],
+    text: "[[😀]]",
+  };
+  const mismatches: readonly [string, EvidenceCandidateV1, OperationOverrides?][] = [
+    ["wrong trace", { ...base, source: { ...base.source, traceId: "other" } }],
+    ["wrong head", { ...base, source: { ...base.source, headId: "other" } }],
+    ["out of bounds", {
+      ...base,
+      source: { ...base.source, range: { fromUtf16: 7, toUtf16: 99 } },
+    }],
+    ["surrogate split", {
+      ...base,
+      source: { ...base.source, range: { fromUtf16: 7, toUtf16: 10 } },
+      text: "[[",
+    }],
+    ["text mismatch", { ...base, text: "[[other]]" }],
+    ["scanner ref mismatch", { ...base, source: { ...base.source, ref: "protected-v1:9999:7:13" } }],
+    ["not protected syntax", {
+      ...base,
+      source: {
+        ...base.source,
+        ref: "protected-v1:0001:0:6",
+        range: { fromUtf16: 0, toUtf16: 6 },
+      },
+      text: "prefix",
+    }],
+    ["outside operation", base, { range: { fromUtf16: 0, toUtf16: 6 } }],
+  ];
+
+  for (const [name, candidate, overrides] of mismatches) {
+    const result = await selectTraceContextV1(selectionInput([candidate], {
+      currentText: "prefix [[😀]] suffix",
+      range: { fromUtf16: 7, toUtf16: 13 },
+      ...overrides,
+    }));
+    assert.equal(result.ok, false, name);
+    if (!result.ok) assert.equal(result.error.code, "TARGET_SOURCE_MISMATCH", name);
+  }
 });
 
 function materializeFixtureInput(fixture: GoldenCase): unknown {
@@ -558,7 +752,7 @@ function processFact(
   };
 }
 
-function zeroStepSummary(): TraceProcessFactV1 {
+function zeroStepSummary(): Extract<TraceProcessFactV1, { kind: "step-summary" }> {
   return {
     kind: "step-summary",
     transactionCount: 0,

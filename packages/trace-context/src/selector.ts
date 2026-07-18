@@ -1,4 +1,6 @@
 import type { Utf16Range } from "./types.js";
+import { containsRange, isUtf16Boundary } from "./ranges.js";
+import { scanAuthoringSyntax } from "./scanner.js";
 import {
   TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1,
   type EvidenceCandidateKindV1,
@@ -24,6 +26,8 @@ import {
 
 const encoder = new TextEncoder();
 const CANCELLATION_YIELD_INTERVAL = 256;
+const CANCELLATION_CODE_UNIT_INTERVAL = 16 * 1_024;
+const VOICE_PUBKEY_PATTERN = /^[0-9a-f]{64}$/;
 
 const POLICIES: readonly TraceContextPolicyV1[] = ["text-only-v1", "selected-trace-v1"];
 
@@ -122,8 +126,8 @@ export async function selectTraceContextV1(
   if (!validation.ok) return validation;
   const normalized = validation.value;
 
-  const processSafety = validateSelectedProcessEvidence(normalized);
-  if (processSafety) return processSafety;
+  const bindingSafety = validateSelectedEvidenceBindings(normalized);
+  if (bindingSafety) return bindingSafety;
 
   const grouped = await collapseCandidates(normalized.candidates, options.signal);
   if (!grouped.ok) return grouped;
@@ -374,21 +378,41 @@ async function validateAndNormalizeInput(
     ?? TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxInputBytes;
   const maxCandidateInputBytes = limitsResult.value?.maxCandidateInputBytes
     ?? TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidateInputBytes;
-  const oversizedOperationString = firstOversizedOperationString(input.operation, maxInputBytes);
-  if (oversizedOperationString !== null) {
+  const operationPreflight = await measureCanonicalJsonBytes(
+    operationPreflightProjection(input.operation),
+    maxInputBytes,
+    signal,
+  );
+  if (operationPreflight.cancelled) return cancelled("validate");
+  if (operationPreflight.bytes > maxInputBytes) {
     return failure({
       version: 1,
       code: "INPUT_LIMIT_EXCEEDED",
       stage: "validate",
-      message: "An operation string alone exceeds the total input byte ceiling",
-      actual: oversizedOperationString,
+      message: "The projected operation exceeds the total input byte ceiling",
+      actual: operationPreflight.bytes,
       limit: maxInputBytes,
     });
   }
   const operationResult = normalizeOperation(input.operation);
   if (!operationResult.ok) return operationResult;
+  const candidateLimit = limitsResult.value?.maxCandidates
+    ?? TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidates;
+  const preflight = await preflightProjectedInput({
+    policy: input.policy,
+    operation: operationResult.value,
+    candidates: input.candidates,
+    limits: limitsResult.value,
+    maxInputBytes,
+    maxCandidateInputBytes,
+    candidateLimit,
+    signal,
+  });
+  if (!preflight.ok) return preflight;
 
-  const projectedValues: { value: unknown; path: string }[] = [];
+  const candidates: NormalizedCandidate[] = [];
+  const candidateIds = new Set<string>();
+  let projectedIndex = 0;
   for (let index = 0; index < input.candidates.length; index += 1) {
     if (signal && index % CANCELLATION_YIELD_INTERVAL === 0) {
       await yieldToHost();
@@ -396,50 +420,11 @@ async function validateAndNormalizeInput(
     }
     const value = input.candidates[index];
     if (input.policy === "text-only-v1" && isPolicyExcludedTextOnlyCandidate(value)) continue;
-    projectedValues.push({ value, path: `$.candidates[${index}]` });
-  }
-
-  const candidateLimit = limitsResult.value?.maxCandidates
-    ?? TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidates;
-  if (projectedValues.length > candidateLimit) {
-    return failure({
-      version: 1,
-      code: "CANDIDATE_LIMIT_EXCEEDED",
-      stage: "validate",
-      message: `Projected candidate count ${projectedValues.length} exceeds limit ${candidateLimit}`,
-      actual: projectedValues.length,
-      limit: candidateLimit,
-    });
-  }
-
-  const candidates: NormalizedCandidate[] = [];
-  const candidateIds = new Set<string>();
-  let candidateBytesLowerBound = 0;
-  for (let index = 0; index < projectedValues.length; index += 1) {
-    if (signal && index % CANCELLATION_YIELD_INTERVAL === 0) {
-      await yieldToHost();
-      if (signal.aborted) return cancelled("validate");
-    }
-    const projected = projectedValues[index]!;
-    const oversizedCandidateString = firstOversizedCandidateString(
-      projected.value,
-      maxCandidateInputBytes,
-    );
-    if (oversizedCandidateString !== null) {
-      return failure({
-        version: 1,
-        code: "CANDIDATE_INPUT_LIMIT_EXCEEDED",
-        stage: "validate",
-        message: "A candidate string alone exceeds its input byte ceiling",
-        candidateId: boundedCandidateId(projected.value, index),
-        actual: oversizedCandidateString,
-        limit: maxCandidateInputBytes,
-      });
-    }
-    const result = normalizeCandidate(projected.value, projected.path, input.policy);
+    const path = `$.candidates[${index}]`;
+    const result = normalizeCandidate(value, path, input.policy);
     if (!result.ok) return result;
     if (candidateIds.has(result.value.id)) {
-      return malformed(`${projected.path}.id`, "Candidate ids must be unique after policy projection");
+      return malformed(`${path}.id`, "Candidate ids must be unique after policy projection");
     }
     candidateIds.add(result.value.id);
     const candidateBytes = utf8Bytes(canonicalJson(result.value));
@@ -454,18 +439,16 @@ async function validateAndNormalizeInput(
         limit: maxCandidateInputBytes,
       });
     }
-    candidateBytesLowerBound += candidateBytes;
-    if (candidateBytesLowerBound > maxInputBytes) {
-      return failure({
-        version: 1,
-        code: "INPUT_LIMIT_EXCEEDED",
-        stage: "validate",
-        message: "Projected candidate bytes exceed the total input byte ceiling",
-        actual: candidateBytesLowerBound,
-        limit: maxInputBytes,
-      });
-    }
     candidates.push(result.value);
+    projectedIndex += 1;
+  }
+  if (projectedIndex !== preflight.projectedCandidateCount) {
+    return failure({
+      version: 1,
+      code: "INTERNAL_INVARIANT",
+      stage: "validate",
+      message: "Policy projection count changed between input preflight and normalization",
+    });
   }
   candidates.sort(compareCandidatesForFrozenInput);
 
@@ -477,14 +460,12 @@ async function validateAndNormalizeInput(
     ...(limitsResult.value ? { limits: limitsResult.value } : {}),
   };
   const projectedInputBytes = utf8Bytes(canonicalJson(frozenProjection));
-  if (projectedInputBytes > maxInputBytes) {
+  if (projectedInputBytes !== preflight.projectedInputBytes) {
     return failure({
       version: 1,
-      code: "INPUT_LIMIT_EXCEEDED",
+      code: "INTERNAL_INVARIANT",
       stage: "validate",
-      message: "Projected selector input exceeds the total input byte ceiling",
-      actual: projectedInputBytes,
-      limit: maxInputBytes,
+      message: "Projected input byte accounting changed after normalization",
     });
   }
 
@@ -913,20 +894,57 @@ function normalizeProcessFact(
       if ((value.longestGapMs as number) > (value.spanMs as number)) {
         return malformed(`${path}.longestGapMs`, "Longest gap cannot exceed the Step span");
       }
+      const transactionCount = value.transactionCount as number;
+      const rangeCount = value.rangeCount as number;
+      const insertedCodePointCount = value.insertedCodePointCount as number;
+      const deletedCodePointCount = value.deletedCodePointCount as number;
+      const longestGapMs = value.longestGapMs as number;
+      const undoCount = value.undoCount as number;
+      const redoCount = value.redoCount as number;
+      if (transactionCount === 0) {
+        if (
+          hasFirst
+          || rangeCount !== 0
+          || insertedCodePointCount !== 0
+          || deletedCodePointCount !== 0
+          || value.spanMs !== 0
+          || longestGapMs !== 0
+          || undoCount !== 0
+          || redoCount !== 0
+        ) {
+          return malformed(path, "An empty Step summary cannot report transactions, ranges, edits, times, or intents");
+        }
+      } else {
+        if (!hasFirst) {
+          return malformed(path, "A non-empty Step summary requires first and last capture times");
+        }
+        if (rangeCount < transactionCount) {
+          return malformed(`${path}.rangeCount`, "A non-empty Step must report at least one range per transaction");
+        }
+        if (insertedCodePointCount + deletedCodePointCount === 0) {
+          return malformed(path, "A non-empty Step must report at least one inserted or deleted code point");
+        }
+      }
+      if (undoCount + redoCount > transactionCount) {
+        return malformed(path, "Undo and redo transactions cannot exceed the total transaction count");
+      }
+      if (transactionCount <= 1 && longestGapMs !== 0) {
+        return malformed(`${path}.longestGapMs`, "A Step with at most one transaction must have zero longest gap");
+      }
       return {
         ok: true,
         value: deepFreeze({
           kind: "step-summary",
-          transactionCount: value.transactionCount as number,
-          rangeCount: value.rangeCount as number,
-          insertedCodePointCount: value.insertedCodePointCount as number,
-          deletedCodePointCount: value.deletedCodePointCount as number,
+          transactionCount,
+          rangeCount,
+          insertedCodePointCount,
+          deletedCodePointCount,
           ...(hasFirst ? { firstCapturedAtMs: value.firstCapturedAtMs as number } : {}),
           ...(hasLast ? { lastCapturedAtMs: value.lastCapturedAtMs as number } : {}),
           spanMs: value.spanMs,
-          longestGapMs: value.longestGapMs as number,
-          undoCount: value.undoCount as number,
-          redoCount: value.redoCount as number,
+          longestGapMs,
+          undoCount,
+          redoCount,
         }),
       };
     }
@@ -962,10 +980,20 @@ function normalizeProcessFact(
       for (let index = 0; index < value.voiceIds.length; index += 1) {
         const error = validateString(value.voiceIds[index], `${path}.voiceIds[${index}]`, false);
         if (error) return error;
-        voices.push(value.voiceIds[index] as string);
+        const voiceId = value.voiceIds[index] as string;
+        if (!VOICE_PUBKEY_PATTERN.test(voiceId)) {
+          return malformed(
+            `${path}.voiceIds[${index}]`,
+            "Voice id must be an exact 64-character lowercase-hex Nostr signer pubkey",
+          );
+        }
+        voices.push(voiceId);
       }
       if (new Set(voices).size !== voices.length) {
         return malformed(`${path}.voiceIds`, "Transaction voice ids must be unique");
+      }
+      if (voices.length > value.changeCount) {
+        return malformed(`${path}.voiceIds`, "Transaction cannot report more unique voices than changes");
       }
       return {
         ok: true,
@@ -1007,9 +1035,21 @@ function normalizeProcessFact(
       }
       const voiceError = validateString(value.voiceId, `${path}.voiceId`, false);
       if (voiceError) return voiceError;
+      if (!VOICE_PUBKEY_PATTERN.test(value.voiceId as string)) {
+        return malformed(
+          `${path}.voiceId`,
+          "Voice id must be an exact 64-character lowercase-hex Nostr signer pubkey",
+        );
+      }
       const emptyRange = range.value.fromUtf16 === range.value.toUtf16;
       const insertedCodePointCount = value.insertedCodePointCount as number;
       const deletedCodePointCount = value.deletedCodePointCount as number;
+      if (deletedCodePointCount > range.value.toUtf16 - range.value.fromUtf16) {
+        return malformed(
+          `${path}.deletedCodePointCount`,
+          "Deleted code-point count cannot exceed the UTF-16 source range length",
+        );
+      }
       const consistent = value.operation === "insert"
         ? emptyRange && insertedCodePointCount > 0 && deletedCodePointCount === 0
         : value.operation === "delete"
@@ -1076,11 +1116,47 @@ function normalizeLimits(
   };
 }
 
-function validateSelectedProcessEvidence(
+function validateSelectedEvidenceBindings(
   input: NormalizedInput,
 ): TraceContextSelectionFailureV1 | null {
-  if (input.policy !== "selected-trace-v1") return null;
+  let scannedProtectedRanges: ReturnType<typeof scanAuthoringSyntax>["protectedRanges"] | undefined;
   for (const candidate of input.candidates) {
+    if (candidate.kind === "protected-range" && candidate.source.kind === "target") {
+      const targetText = input.operation.target.currentText;
+      const sourceRange = candidate.source.range;
+      scannedProtectedRanges ??= scanAuthoringSyntax(targetText).protectedRanges;
+      const exactTarget = input.policy === "text-only-v1" || (
+        "traceId" in candidate.source
+        && "headId" in candidate.source
+        && candidate.source.traceId === input.operation.target.traceId
+        && candidate.source.headId === input.operation.target.headId
+      );
+      const validRange = sourceRange.toUtf16 <= targetText.length
+        && isUtf16Boundary(targetText, sourceRange.fromUtf16)
+        && isUtf16Boundary(targetText, sourceRange.toUtf16);
+      const exactText = validRange
+        && candidate.text === targetText.slice(sourceRange.fromUtf16, sourceRange.toUtf16);
+      const exactScannerRange = scannedProtectedRanges.some((protectedRange) => (
+        protectedRange.id === candidate.source.ref
+        && protectedRange.range.fromUtf16 === sourceRange.fromUtf16
+        && protectedRange.range.toUtf16 === sourceRange.toUtf16
+        && protectedRange.text === candidate.text
+      ));
+      const withinOperation = input.operation.range === undefined
+        || containsRange(input.operation.range, sourceRange);
+      if (!exactTarget || !validRange || !exactText || !exactScannerRange || !withinOperation) {
+        return failure({
+          version: 1,
+          code: "TARGET_SOURCE_MISMATCH",
+          stage: "select",
+          message: "Protected evidence is not the exact scanner-owned range of the operation target",
+          candidateId: candidate.id,
+          sourceRef: candidate.source.ref,
+        });
+      }
+    }
+
+    if (input.policy !== "selected-trace-v1") continue;
     if (candidate.kind !== "process-fact" || candidate.source.kind !== "trace") continue;
     if (candidate.source.processStatus === "invalid") {
       return failure({
@@ -1190,45 +1266,338 @@ function isPolicyExcludedTextOnlyCandidate(value: unknown): boolean {
     && (value.kind === "correction" || value.kind === "explicit-preference" || value.kind === "process-fact");
 }
 
-/** Valid Unicode always occupies at least one UTF-8 byte per UTF-16 code unit. */
-function firstOversizedOperationString(value: unknown, byteLimit: number): number | null {
-  if (!isRecord(value)) return null;
-  const target = isRecord(value.target) ? value.target : {};
-  for (const candidate of [
-    value.operation,
-    target.traceId,
-    target.headId,
-    target.contentHash,
-    target.currentText,
-    target.chosenPath,
-  ]) {
-    if (typeof candidate === "string" && candidate.length > byteLimit) return candidate.length;
-  }
-  return null;
+interface ProjectedInputPreflightArgs {
+  policy: TraceContextPolicyV1;
+  operation: TraceContextSelectionOperationV1;
+  candidates: readonly unknown[];
+  limits?: TraceContextSelectionInputV1["limits"];
+  maxInputBytes: number;
+  maxCandidateInputBytes: number;
+  candidateLimit: number;
+  signal?: AbortSignal;
 }
 
-function firstOversizedCandidateString(value: unknown, byteLimit: number): number | null {
-  if (!isRecord(value)) return null;
-  const source = isRecord(value.source) ? value.source : {};
-  const fact = isRecord(value.fact) ? value.fact : {};
-  for (const candidate of [
-    value.id,
-    value.dedupeKey,
-    value.text,
-    source.ref,
-    source.traceId,
-    source.headId,
-    source.nodeId,
-    fact.voiceId,
-  ]) {
-    if (typeof candidate === "string" && candidate.length > byteLimit) return candidate.length;
+async function preflightProjectedInput(
+  args: ProjectedInputPreflightArgs,
+): Promise<
+  | { ok: true; projectedCandidateCount: number; projectedInputBytes: number }
+  | TraceContextSelectionFailureV1
+> {
+  const base = await measureCanonicalJsonBytes({
+    version: 1,
+    policy: args.policy,
+    operation: args.operation,
+    candidates: [],
+    ...(args.limits ? { limits: args.limits } : {}),
+  }, args.maxInputBytes, args.signal);
+  if (base.cancelled) return cancelled("validate");
+  if (base.bytes > args.maxInputBytes) {
+    return failure({
+      version: 1,
+      code: "INPUT_LIMIT_EXCEEDED",
+      stage: "validate",
+      message: "Projected operation and limits exceed the total input byte ceiling",
+      actual: base.bytes,
+      limit: args.maxInputBytes,
+    });
   }
-  if (Array.isArray(fact.voiceIds) && fact.voiceIds.length <= TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxFactVoiceIds) {
-    for (const voiceId of fact.voiceIds) {
-      if (typeof voiceId === "string" && voiceId.length > byteLimit) return voiceId.length;
+
+  let projectedCandidateCount = 0;
+  let projectedInputBytes = base.bytes;
+  for (let index = 0; index < args.candidates.length; index += 1) {
+    if (args.signal && index % CANCELLATION_YIELD_INTERVAL === 0) {
+      await yieldToHost();
+      if (args.signal.aborted) return cancelled("validate");
+    }
+    const candidate = args.candidates[index];
+    if (args.policy === "text-only-v1" && isPolicyExcludedTextOnlyCandidate(candidate)) continue;
+    projectedCandidateCount += 1;
+    if (projectedCandidateCount > args.candidateLimit) {
+      return failure({
+        version: 1,
+        code: "CANDIDATE_LIMIT_EXCEEDED",
+        stage: "validate",
+        message: `Projected candidate count exceeds limit ${args.candidateLimit}`,
+        actual: projectedCandidateCount,
+        limit: args.candidateLimit,
+      });
+    }
+
+    const measured = await measureCanonicalJsonBytes(
+      candidatePreflightProjection(candidate, args.policy),
+      args.maxCandidateInputBytes,
+      args.signal,
+    );
+    if (measured.cancelled) return cancelled("validate");
+    if (measured.bytes > args.maxCandidateInputBytes) {
+      return failure({
+        version: 1,
+        code: "CANDIDATE_INPUT_LIMIT_EXCEEDED",
+        stage: "validate",
+        message: "A policy-projected candidate exceeds its input byte ceiling",
+        candidateId: boundedCandidateId(candidate, index),
+        actual: measured.bytes,
+        limit: args.maxCandidateInputBytes,
+      });
+    }
+    projectedInputBytes += measured.bytes + (projectedCandidateCount > 1 ? 1 : 0);
+    if (projectedInputBytes > args.maxInputBytes) {
+      return failure({
+        version: 1,
+        code: "INPUT_LIMIT_EXCEEDED",
+        stage: "validate",
+        message: "Policy-projected input exceeds the total input byte ceiling",
+        actual: projectedInputBytes,
+        limit: args.maxInputBytes,
+      });
     }
   }
-  return null;
+  return { ok: true, projectedCandidateCount, projectedInputBytes };
+}
+
+function operationPreflightProjection(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  const target = isRecord(value.target) ? value.target : value.target;
+  return {
+    version: value.version,
+    operation: value.operation,
+    target: isRecord(target) ? {
+      traceId: target.traceId,
+      headId: target.headId,
+      contentHash: target.contentHash,
+      currentText: target.currentText,
+      chosenPath: target.chosenPath,
+    } : target,
+    range: rangePreflightProjection(value.range),
+    maxContextBytes: value.maxContextBytes,
+    preparedRequestMaxBytes: value.preparedRequestMaxBytes,
+    reservedPromptBytes: value.reservedPromptBytes,
+  };
+}
+
+function candidatePreflightProjection(value: unknown, policy: TraceContextPolicyV1): unknown {
+  if (!isRecord(value)) return value;
+  const process = value.kind === "process-fact";
+  return {
+    version: value.version,
+    id: value.id,
+    dedupeKey: value.dedupeKey,
+    kind: value.kind,
+    claimClass: value.claimClass,
+    source: sourcePreflightProjection(value.source, policy),
+    reasons: value.reasons,
+    ...(process
+      ? { fact: processFactPreflightProjection(value.fact) }
+      : { text: value.text }),
+  };
+}
+
+function sourcePreflightProjection(value: unknown, policy: TraceContextPolicyV1): unknown {
+  if (!isRecord(value)) return value;
+  if (policy === "text-only-v1") {
+    if (value.kind === "operation") return { kind: value.kind, ref: value.ref };
+    if (value.kind === "target") {
+      return { kind: value.kind, ref: value.ref, range: rangePreflightProjection(value.range) };
+    }
+    if (value.kind === "citation") {
+      return { kind: value.kind, ref: value.ref, approvedOrder: value.approvedOrder };
+    }
+  }
+  switch (value.kind) {
+    case "operation":
+    case "local":
+      return { kind: value.kind, ref: value.ref };
+    case "target":
+      return {
+        kind: value.kind,
+        ref: value.ref,
+        traceId: value.traceId,
+        headId: value.headId,
+        range: rangePreflightProjection(value.range),
+      };
+    case "trace":
+      return {
+        kind: value.kind,
+        ref: value.ref,
+        traceId: value.traceId,
+        headId: value.headId,
+        nodeId: value.nodeId,
+        processStatus: value.processStatus,
+        chainDistance: value.chainDistance,
+        transactionIndex: value.transactionIndex,
+        range: rangePreflightProjection(value.range),
+      };
+    case "citation":
+      return {
+        kind: value.kind,
+        ref: value.ref,
+        nodeId: value.nodeId,
+        approvedOrder: value.approvedOrder,
+        processStatus: value.processStatus,
+        traceId: value.traceId,
+        range: rangePreflightProjection(value.range),
+      };
+    default:
+      return value;
+  }
+}
+
+function processFactPreflightProjection(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  switch (value.kind) {
+    case "step-summary":
+      return {
+        kind: value.kind,
+        transactionCount: value.transactionCount,
+        rangeCount: value.rangeCount,
+        insertedCodePointCount: value.insertedCodePointCount,
+        deletedCodePointCount: value.deletedCodePointCount,
+        firstCapturedAtMs: value.firstCapturedAtMs,
+        lastCapturedAtMs: value.lastCapturedAtMs,
+        spanMs: value.spanMs,
+        longestGapMs: value.longestGapMs,
+        undoCount: value.undoCount,
+        redoCount: value.redoCount,
+      };
+    case "transaction":
+      return {
+        kind: value.kind,
+        transactionIndex: value.transactionIndex,
+        capturedAtMs: value.capturedAtMs,
+        intent: value.intent,
+        changeCount: value.changeCount,
+        voiceIds: value.voiceIds,
+      };
+    case "change":
+      return {
+        kind: value.kind,
+        transactionIndex: value.transactionIndex,
+        operation: value.operation,
+        range: rangePreflightProjection(value.range),
+        insertedCodePointCount: value.insertedCodePointCount,
+        deletedCodePointCount: value.deletedCodePointCount,
+        voiceId: value.voiceId,
+      };
+    default:
+      return value;
+  }
+}
+
+function rangePreflightProjection(value: unknown): unknown {
+  return isRecord(value)
+    ? { fromUtf16: value.fromUtf16, toUtf16: value.toUtf16 }
+    : value;
+}
+
+interface CanonicalByteMeasureState {
+  bytes: number;
+  limit: number;
+  codeUnitsSinceYield: number;
+  signal?: AbortSignal;
+  cancelled: boolean;
+}
+
+async function measureCanonicalJsonBytes(
+  value: unknown,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<{ cancelled: boolean; bytes: number }> {
+  const state: CanonicalByteMeasureState = {
+    bytes: 0,
+    limit,
+    codeUnitsSinceYield: 0,
+    ...(signal ? { signal } : {}),
+    cancelled: false,
+  };
+  await measureCanonicalValue(value, state);
+  return { cancelled: state.cancelled, bytes: state.bytes };
+}
+
+async function measureCanonicalValue(value: unknown, state: CanonicalByteMeasureState): Promise<void> {
+  if (state.cancelled || state.bytes > state.limit) return;
+  if (value === null) return addMeasuredBytes(state, 4);
+  if (typeof value === "string") return measureCanonicalString(value, state);
+  if (typeof value === "number") {
+    return addMeasuredBytes(state, Number.isFinite(value) ? JSON.stringify(value).length : 4);
+  }
+  if (typeof value === "boolean") return addMeasuredBytes(state, value ? 4 : 5);
+  if (Array.isArray(value)) {
+    addMeasuredBytes(state, 1);
+    for (let index = 0; index < value.length && state.bytes <= state.limit; index += 1) {
+      if (index > 0) addMeasuredBytes(state, 1);
+      await measureCanonicalValue(value[index], state);
+      if (await measurementCheckpoint(state, 1)) return;
+    }
+    addMeasuredBytes(state, 1);
+    return;
+  }
+  if (isRecord(value)) {
+    addMeasuredBytes(state, 1);
+    const keys = Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort(compareUtf8);
+    for (let index = 0; index < keys.length && state.bytes <= state.limit; index += 1) {
+      if (index > 0) addMeasuredBytes(state, 1);
+      const key = keys[index]!;
+      await measureCanonicalString(key, state);
+      addMeasuredBytes(state, 1);
+      await measureCanonicalValue(value[key], state);
+    }
+    addMeasuredBytes(state, 1);
+  }
+  // Invalid primitive/object kinds are rejected by normalization; preflight
+  // intentionally avoids materializing them just to produce a different error.
+}
+
+async function measureCanonicalString(
+  value: string,
+  state: CanonicalByteMeasureState,
+): Promise<void> {
+  addMeasuredBytes(state, 1);
+  for (let index = 0; index < value.length && state.bytes <= state.limit; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0x22 || code === 0x5c || code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d) {
+      addMeasuredBytes(state, 2);
+    } else if (code <= 0x1f) {
+      addMeasuredBytes(state, 6);
+    } else if (code <= 0x7f) {
+      addMeasuredBytes(state, 1);
+    } else if (code <= 0x7ff) {
+      addMeasuredBytes(state, 2);
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        addMeasuredBytes(state, 4);
+        index += 1;
+        state.codeUnitsSinceYield += 1;
+      } else {
+        addMeasuredBytes(state, 6);
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      addMeasuredBytes(state, 6);
+    } else {
+      addMeasuredBytes(state, 3);
+    }
+    if (await measurementCheckpoint(state, 1)) return;
+  }
+  addMeasuredBytes(state, 1);
+}
+
+function addMeasuredBytes(state: CanonicalByteMeasureState, bytes: number): void {
+  state.bytes = Math.min(state.limit + 1, state.bytes + bytes);
+}
+
+async function measurementCheckpoint(
+  state: CanonicalByteMeasureState,
+  codeUnits: number,
+): Promise<boolean> {
+  if (!state.signal) return false;
+  state.codeUnitsSinceYield += codeUnits;
+  if (state.codeUnitsSinceYield < CANCELLATION_CODE_UNIT_INTERVAL) return false;
+  state.codeUnitsSinceYield = 0;
+  await yieldToHost();
+  state.cancelled = state.signal.aborted;
+  return state.cancelled;
 }
 
 function boundedCandidateId(value: unknown, index: number): string {

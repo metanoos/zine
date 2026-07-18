@@ -69,16 +69,20 @@ input limits, candidate limits, manifest limits, and conflicting duplicates
 return typed failures rather than an apparently complete result.
 
 Source ranges remain exact half-open UTF-16 coordinates and are never remapped
-or normalized. The validating adapter must reject a boundary that splits a
-surrogate pair in its named source revision; the selector intentionally does
-not receive or duplicate every historical source body just to re-derive that
-validation.
+or normalized. A protected-range candidate must identify the operation's exact
+trace and head, reproduce the exact current-text slice on code-point
+boundaries, match the scanner-owned protected-range id and coordinates, and
+fall within the operation range when one is present. Historical source ranges
+remain the validating adapter's responsibility because the selector does not
+receive every historical source body.
 
 `process-fact` has no caller-authored text field. It carries one closed
 `step-summary`, `transaction`, or `change` shape; the package validates its
 numeric/range relationships and owns the only prompt rendering. Transaction
-intent is limited to explicit `undo` or `redo`. No V1 fact can name motive,
-retention, rejection, influence, inferred preference, or psychology.
+intent is limited to explicit `undo` or `redo`. Voice ids are raw Nostr signer
+pubkeys: exactly 64 lowercase hexadecimal characters, rejected rather than
+normalized and rendered in full as opaque identifiers. No V1 fact can name
+motive, retention, rejection, influence, inferred preference, or psychology.
 
 Selected-trace process evidence must be `full-trace`, belong to the operation's
 exact target trace and prepared-head chain, and use the target head itself at
@@ -105,9 +109,12 @@ bytes, request remainder, effective ceiling, and final rendered bytes so the
 arithmetic can be independently checked.
 
 The hard projected-input ceiling is 4 MiB and the hard per-candidate ceiling is
-128 KiB; callers may lower either. Validation and selection yield at bounded
-intervals when an abort signal is supplied. Hitting any ceiling or cancellation
-returns a typed failure instead of a false completeness claim.
+128 KiB; callers may lower either. Before normalized candidate arrays are
+copied or sorted, an incremental canonical-UTF-8 preflight enforces both
+ceilings and yields within large strings at bounded code-unit intervals when an
+abort signal is supplied. Validation and selection retain bounded cancellation
+checkpoints afterward. Hitting any ceiling or cancellation returns a typed
+failure instead of a false completeness claim.
 
 Successful results contain an exact rendered byte string,
 per-projected-candidate Inspector decisions, a compact frozen

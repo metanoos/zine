@@ -111,6 +111,9 @@ export type TextOnlyEvidenceSourceV1 =
 
 export type SelectedEvidenceSourceV1 = EvidenceSourceV1 | TextOnlyEvidenceSourceV1;
 
+/** Runtime-validated Nostr signer pubkey: exactly 64 lowercase hexadecimal characters. */
+export type TraceVoicePubkeyV1 = string;
+
 export type TraceProcessFactV1 =
   | {
       kind: "step-summary";
@@ -131,7 +134,7 @@ export type TraceProcessFactV1 =
       capturedAtMs: number;
       intent?: "undo" | "redo";
       changeCount: number;
-      voiceIds: readonly string[];
+      voiceIds: readonly TraceVoicePubkeyV1[];
     }
   | {
       kind: "change";
@@ -140,7 +143,7 @@ export type TraceProcessFactV1 =
       range: Utf16Range;
       insertedCodePointCount: number;
       deletedCodePointCount: number;
-      voiceId: string;
+      voiceId: TraceVoicePubkeyV1;
     };
 
 interface EvidenceCandidateBaseV1 {
@@ -382,6 +385,12 @@ export type TraceContextSelectionErrorV1 =
       sourceRef: string;
     })
   | (SelectionErrorBaseV1 & {
+      code: "TARGET_SOURCE_MISMATCH";
+      stage: "select";
+      candidateId: string;
+      sourceRef: string;
+    })
+  | (SelectionErrorBaseV1 & {
       code: "DUPLICATE_CONFLICT";
       stage: "select";
       dedupeKey: string;
@@ -406,7 +415,7 @@ export type TraceContextSelectionErrorV1 =
     })
   | (SelectionErrorBaseV1 & {
       code: "INTERNAL_INVARIANT";
-      stage: "render";
+      stage: "validate" | "render";
     });
 
 export interface TraceContextSelectionFailureV1 {

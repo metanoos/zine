@@ -272,14 +272,14 @@
               "capturedAtMs": 100,
               "intent": "undo",
               "changeCount": 2,
-              "voiceIds": ["voice-b", "voice-a"]
+              "voiceIds": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
             }
           }
         ]
       },
       "expected": {
         "ok": true,
-        "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"Draft\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"transaction\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"head-fact\",\"kind\":\"trace\",\"nodeId\":\"head-fact\",\"processStatus\":\"full-trace\",\"ref\":\"trace:tx:0\",\"traceId\":\"trace-fact\",\"transactionIndex\":0},\"text\":\"tx 0 @ 100 · undo · 2 changes · voices voice-a,voice-b\",\"version\":1}]",
+        "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"Draft\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"transaction\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"head-fact\",\"kind\":\"trace\",\"nodeId\":\"head-fact\",\"processStatus\":\"full-trace\",\"ref\":\"trace:tx:0\",\"traceId\":\"trace-fact\",\"transactionIndex\":0},\"text\":\"tx 0 @ 100 · undo · 2 changes · voices aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"version\":1}]",
         "selectedIds": ["transaction"],
         "effectiveContextBytes": 4096,
         "preparedRequestAvailableBytes": 8192,
@@ -328,7 +328,7 @@
               "transactionIndex": 0,
               "capturedAtMs": 100,
               "changeCount": 1,
-              "voiceIds": ["voice"]
+              "voiceIds": ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]
             }
           }
         ]
