@@ -1,16 +1,23 @@
 # Zine
 
-**Signed process provenance for work made by people and AI.**
+**Trace-native writing for people and AI.**
 
-AI can rewrite a document in seconds, but ordinary version history does not
-reliably answer what the model saw, which passages it produced, what a human
-accepted, or where copied material came from. Looking only at the final text
-is too late.
+AI usually receives the text as it stands. A collaborator would also want to
+know how the text got there: what was attempted, removed, restored, protected,
+accepted, or repeatedly revised. Final text is a lossy summary of writing.
+
+Zine's foundational bet is that an AI can help you write better when it receives
+the current text plus a bounded, inspectable account of its trace—not text
+alone. That is a product thesis under active evaluation, not a proven claim.
 
 Zine records the process at the point of writing. Each deliberate checkpoint
 is a signed, self-contained **trace** that can be replayed, cited, forked, and
 verified without trusting one editor or hosted account. Human and model voices
 remain visible. Draft checkpoints stay local until their author sends them.
+
+The same trace serves two jobs. During writing, it can give an AI relevant
+process context that the finished prose no longer contains. Later, it can give
+people inspectable evidence of what the AI saw, changed, and contributed.
 
 Zine is to authorship provenance what Git is to source history: the open
 protocol and local press are the commons; durable remotes, team controls,
@@ -21,7 +28,41 @@ The reference press is open source and BYOK. Model calls use provider
 credentials the operator controls; local authoring does not require a Zine
 account or hosted service.
 
-## Start with agents
+## Write with the trace
+
+The daily loop Zine is building is:
+
+```text
+current text + selected trace evidence
+                  |
+                  v
+        inspect and correct context
+                  |
+                  v
+             ask the AI
+                  |
+                  v
+       accept, revise, or reject in-text
+                  |
+                  v
+          extend the signed trace
+```
+
+Context must remain bounded, task-specific, and visible before dispatch. A
+writer should be able to see which Step, edit, preference, or correction was
+selected, exclude it for one operation, and correct durable memory. Derived
+preferences are never protocol truth.
+
+Zine's document grammar makes intent explicit. `[[ protected words ]]` are
+verbatim, inert text that an eligible transformation must preserve.
+`(( author directive ))` is intended as a one-shot instruction to the selected
+AI operation: it is removed only after accepted success and cannot grant tools
+or access outside that operation's approved scope. Universal directive
+authority, scoped memory, and the shared trace-context compiler are roadmap
+work; today's Stir operation contains an earlier, narrower version of the
+bracket/directive behavior.
+
+## Start with accountable agents
 
 The first product wedge is teams that let AI agents edit durable files such as
 reports, research, policies, and editorial work. When the result matters, a
@@ -32,10 +73,10 @@ reviewer should be able to answer:
 - Which version was opened for discussion, and which version was endorsed?
 - Can another party inspect the evidence without access to the original app?
 
-That adoption wedge remains the starting use case. As of 2026-07-17, the
-build focus is the local-first multi-AI task and correspondence platform that
-serves it. Customer discovery runs in parallel; managed services and network
-layers remain evidence-gated.
+That remains the initial buyer wedge: accountability gives a team a concrete
+reason to adopt the trace while the trace-aware writing loop supplies daily
+value. Customer discovery and writing-outcome evaluation run alongside the
+pivot. Managed services and network layers remain evidence-gated.
 
 Native model operations in the desktop press can also record the prompt,
 model configuration, and cited context. Threading equivalent harness-supplied
@@ -51,7 +92,7 @@ to the loopback home later. LLMs consume the raw trace directly, while a Send
 can return a locator for the desktop to verify and render for a human.
 
 Read the [documentation hub](docs/README.md), or go directly to the
-[product wedge](docs/PRODUCT.md), [protocol tour](docs/PROTOCOL.md),
+[product](docs/PRODUCT.md), [protocol tour](docs/PROTOCOL.md),
 [evidence ledger](docs/EVIDENCE.md), [product roadmap](docs/ROADMAP.md), and
 [protocol/company boundary](docs/COMPANY.md).
 
@@ -82,7 +123,7 @@ work into the receiving owner's chain.
 | Mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
 | Raw-file Reify export with an optional signed-event bundle | Implemented on desktop |
 | Stronghold storage for signing and provider secrets | Implemented on desktop; the browser remains read-only |
-| Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures; not yet universal or durably bound to Steps |
+| Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures; current prompts include file/folder text and structured process history, but there is no shared selector, scoped memory, universal directive grammar, or durable context binding yet |
 | Hosted relay | Implemented; an operator ACL equivalent to the local relay policy remains a gap |
 | Global content-hash rendezvous over Kademlia | Specified as a sketch, not implemented |
 | Managed remote, organization control plane, and no-install public verifier | Commercial product hypotheses, not shipping services |
@@ -167,9 +208,8 @@ owning specification, the specification wins.
   attribution, transport, and vetting.
 - [Evidence](docs/EVIDENCE.md): what is implemented, measured, asserted, and
   still unknown.
-- [Roadmap](docs/ROADMAP.md): the multi-AI task and correspondence build now
-  underway alongside customer discovery, with evidence gates for hosted and
-  network phases.
+- [Roadmap](docs/ROADMAP.md): the trace-context runtime, complete desktop loop,
+  outcome evidence, and later team/network gates.
 - [Company](docs/COMPANY.md): how an open sovereign protocol can support a
   commercial service without making the press dependent on it.
 - [Protocol specifications](protocol/README.md): normative authority and status
@@ -182,7 +222,8 @@ owning specification, the specification wins.
   ownership gap and implementation plan.
 - Narration study: [pre-registration](research/narration-rubric.md) and
   [results](research/results.md), with raw model outputs preserved alongside
-  them.
+  them. The broader writing-outcome preregistration lives at
+  [research/trace-writing-preregistration.md](research/trace-writing-preregistration.md).
 
 ## Working in this codebase
 
