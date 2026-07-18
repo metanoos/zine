@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { loadLocalFolder, loadPad, saveLocalFile } from "./local-store.js";
+import { loadLocalFolder, loadPad, mirrorPad, saveLocalFile } from "./local-store.js";
 
 const values = new Map<string, string>();
 // @ts-expect-error minimal storage surface for pure persistence tests
@@ -39,4 +39,17 @@ test("crash pads reject records without the current kind discriminator", () => {
     "draft.md": { content: "draft", tags: [], nodeId: "", updatedAt: 1 },
   }));
   assert.equal(loadPad("root"), null);
+});
+
+test("crash pads preserve stable trace identity with the buffered head", () => {
+  values.clear();
+  mirrorPad("root", "draft.md", {
+    content: "draft",
+    tags: [],
+    nodeId: "head-2",
+    traceId: "genesis-1",
+  });
+
+  assert.equal(loadPad("root")?.["draft.md"]?.nodeId, "head-2");
+  assert.equal(loadPad("root")?.["draft.md"]?.traceId, "genesis-1");
 });

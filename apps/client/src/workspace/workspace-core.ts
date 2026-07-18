@@ -31,11 +31,75 @@
 // bridge owns the shape) and carried as an optional on FileState. Type-only,
 // so the storage interface doesn't take a runtime dep on nostr-tools.
 
-import type { KEdit } from "@zine/protocol";
+import {
+  synthesizeKEditTransition,
+  validateKEditTransition,
+  type KEdit,
+} from "@zine/protocol";
 import type { SampleEventMeta } from "../provenance/provenance.js";
 
 export { synthesizeKEditTransition, validateKEditTransition } from "@zine/protocol";
 export type { KEditTransitionValidation } from "@zine/protocol";
+
+export interface StepKEditResolution {
+  kedits: KEdit[];
+  source: "captured" | "snapshot";
+  rejectedReason?: string;
+}
+
+/** Resolve the process record staged for an ordinary Step.
+ *
+ * Missing capture means the caller performed a discrete non-editor transition,
+ * so one atomic snapshot KEdit is honest. Present editor capture is a stronger
+ * claim: if it cannot replay, publication must fail rather than silently
+ * signing a synthetic FULL TRACE for a journaling defect.
+ */
+export function resolveStepKEdits(
+  before: string,
+  after: string,
+  captured: readonly KEdit[] | undefined,
+  voice: string,
+  t = Date.now(),
+): StepKEditResolution {
+  if (captured !== undefined) {
+    const validation = validateKEditTransition(before, after, captured);
+    if (validation.valid) {
+      return { kedits: [...captured], source: "captured" };
+    }
+    throw new Error(
+      `invalid captured KEdit log${validation.reason ? `: ${validation.reason}` : ""}`,
+    );
+  }
+  return {
+    kedits: synthesizeKEditTransition(before, after, voice, t),
+    source: "snapshot",
+  };
+}
+
+/** Repair only an explicitly recovered crash-pad journal.
+ *
+ * A legacy pad may contain a valid recent suffix whose older prefix was never
+ * journaled. At this named recovery boundary, collapse the observed before /
+ * after state to one atomic transition. Normal Step publication never calls
+ * this helper and remains fail-closed above.
+ */
+export function recoverStepKEdits(
+  before: string,
+  after: string,
+  captured: readonly KEdit[] | undefined,
+  voice: string,
+  t = Date.now(),
+): StepKEditResolution {
+  try {
+    return resolveStepKEdits(before, after, captured, voice, t);
+  } catch (error) {
+    return {
+      kedits: synthesizeKEditTransition(before, after, voice, t),
+      source: "snapshot",
+      rejectedReason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
 
 /**
  * Append-efficient in-memory KEdit log.

@@ -88,7 +88,7 @@ export interface DeltaSpanView {
 
 /** One entry in the directory action log — a stepped node (file or folder),
  *  summarized. `source` discriminates per-file edit/llm/import actions from
- *  folder-membership add/remove actions; `relativePath` names which doc each
+ *  folder-membership add/remove/rename actions; `relativePath` names which doc each
  *  line is about. `deltas` carries the per-span content payload for file
  *  events (so the model can read what changed, not just that something did);
  *  absent on folder events and on nodes with no content delta (genesis,
@@ -100,12 +100,14 @@ export interface DeltaLogEntry {
   /** ms-epoch. */
   steppedAt: number;
   /** Relative path of the doc this action touched. For a file event, the doc
-   *  being edited/imported/stepped; for a folder event, the member that joined
-   *  or left the directory. */
+   *  being edited/imported/stepped; for a folder event, the member that joined,
+   *  left, or became the destination of a rename. */
   relativePath: string;
+  /** Previous path for a folder rename. Absent for every other action. */
+  fromPath?: string;
   /** Whether this is a per-file action ('file') or a folder-membership action
-   *  ('folder'). Folder events render with a `+`/`-` prefix and a joined/left
-   *  annotation so the model can distinguish structure changes from edits. */
+   *  ('folder'). Folder events render with `+`/`-`/`~` prefixes and a structural
+   *  annotation so the model can distinguish joins, exits, and moves from edits. */
   source: 'file' | 'folder';
   prompt: string | null;
   summary: string | null;
@@ -370,9 +372,15 @@ function renderDeltaLine(d: DeltaLogEntry, prevSteppedAt: number | null, stripLa
     stripLabels || prevSteppedAt === null ? '' : formatInterval(d.steppedAt - prevSteppedAt).padStart(5);
   const tsField = interval ? `${ts}${interval}` : `${ts}     `;
   if (d.source === 'folder') {
-    // Membership events: +add / -remove, with a joined/left annotation so the
-    // model reads structure changes distinctly from edits. No char delta —
-    // membership events describe structure, not prose.
+    // Membership events: +add / -remove / ~rename. A rename carries both
+    // protocol coordinates so the model sees a move, not a fresh join.
+    if (d.action === 'rename') {
+      const act = '~rename'.padEnd(7);
+      const path = d.fromPath
+        ? `${d.fromPath} → ${d.relativePath}`
+        : d.relativePath;
+      return `[#${d.seq}] ${act} ${tsField}   ${path}   (renamed)`;
+    }
     const sign = d.action === 'remove' ? '-' : '+';
     const note = d.action === 'remove' ? '(left directory)' : '(joined directory)';
     const act = `${sign}${d.action}`.padEnd(7);

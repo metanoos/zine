@@ -31,6 +31,18 @@ function event(path: string): Event {
   };
 }
 
+function folderEvent(deltas: unknown[]): Event {
+  return {
+    id: "folder-head",
+    pubkey: "a".repeat(64),
+    created_at: 1,
+    kind: 4290,
+    tags: [["z", "folder"]],
+    content: JSON.stringify({ steppedAt: 1_000, deltas }),
+    sig: "b".repeat(128),
+  };
+}
+
 async function tracedEvent(path: string): Promise<Event> {
   const snapshot = `body:${path}`;
   const contentHash = Buffer.from(
@@ -140,6 +152,78 @@ test("random fetch completion order does not change the snapshot fingerprint", a
     },
   );
   assert.equal((await gather(false)).fingerprint, (await gather(true)).fingerprint);
+});
+
+test("protocol-valid focus and rename folder deltas never create undefined context paths", async () => {
+  const snapshot = await gatherContextSnapshot(
+    folder,
+    { "draft.md": file("current draft") },
+    [...rootScope],
+    "draft.md",
+    new Set(),
+    {
+      fetchChain: async () => [],
+      fetchFolderNodes: async () => [folderEvent([
+        {
+          type: "focus",
+          op: "mount",
+          selection: { kind: "file", path: "draft.md" },
+          panelIndex: 0,
+          timestamp: 900,
+        },
+        {
+          type: "rename",
+          kind: "file",
+          fromPath: "old.md",
+          toPath: "draft.md",
+          nodeId: "head:draft.md",
+          timestamp: 950,
+        },
+      ])],
+    },
+  );
+
+  assert.equal(snapshot.completeness.complete, true);
+  assert.equal(snapshot.inputs[0].body, "current draft");
+  assert.deepEqual(snapshot.inputs[0].deltaLog.map((entry) => ({
+    action: entry.action,
+    relativePath: entry.relativePath,
+    fromPath: entry.fromPath,
+  })), [{ action: "rename", relativePath: "draft.md", fromPath: "old.md" }]);
+  assert.match(snapshot.renderedBlock, /old\.md → draft\.md\s+\(renamed\)/);
+});
+
+test("renames crossing a shield boundary never disclose the hidden endpoint", async () => {
+  const snapshot = await gatherContextSnapshot(
+    folder,
+    {
+      "draft.md": file("visible draft"),
+      "private/secret.md": file("hidden draft"),
+    },
+    [...rootScope],
+    "draft.md",
+    new Set(["private"]),
+    {
+      fetchChain: async () => [],
+      fetchFolderNodes: async () => [folderEvent([{
+        type: "rename",
+        kind: "file",
+        fromPath: "private/secret.md",
+        toPath: "draft.md",
+        nodeId: "head:draft.md",
+        timestamp: 950,
+      }])],
+    },
+  );
+
+  assert.equal(snapshot.completeness.complete, true);
+  assert.deepEqual(snapshot.deltaLog.map((entry) => ({
+    action: entry.action,
+    relativePath: entry.relativePath,
+    fromPath: entry.fromPath,
+  })), [{ action: "add", relativePath: "draft.md", fromPath: undefined }]);
+  assert.doesNotMatch(snapshot.renderedBlock, /private\/secret\.md/);
+  assert.doesNotMatch(JSON.stringify(snapshot.deltaLog), /private\/secret\.md/);
 });
 
 test("validated editor transactions enter the snapshot and every AI context as mechanical observations", async () => {

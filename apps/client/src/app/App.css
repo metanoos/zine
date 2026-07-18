@@ -7733,7 +7733,7 @@ html[data-theme="light"] .editor-host {
 .onboarding-stage-context-mount .tree-icon-btn,
 .onboarding-stage-context-shield .tree-icon-btn,
 .onboarding-stage-scan-file .op-scan-file,
-.onboarding-stage-context-inspect .action-palette-token-count,
+.onboarding-stage-context-inspect .action-palette-inspect,
 .onboarding-stage-context-run .op-extend,
 .onboarding-stage-context-step .op-save,
 .onboarding-stage-context-replay .action-palette-replay-play {
@@ -8239,7 +8239,7 @@ html[data-theme="light"] .editor-host {
 .action-palette-action.op-scan {
   white-space: nowrap;
 }
-.action-palette-actions > .action-palette-token-count,
+.action-palette-actions > .action-palette-inspect,
 .action-palette-actions > .action-palette-action-done,
 .action-palette-actions > .action-palette-action-error {
   align-self: center;
@@ -8906,29 +8906,34 @@ html[data-theme="light"] .editor-host {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-.action-palette-token-count {
+.action-palette-inspect {
+  flex: 0 0 auto;
+  min-width: 5.5rem;
+  height: var(--action-palette-control-height);
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 400;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.action-palette-inspect:hover {
+  background: var(--surface-raised);
+}
+.action-palette-inspect-estimate {
   color: var(--ink-dim);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  /* The token count is the click target that opens the prompt inspector —
-   * render it as a quiet button, not a bare label. Inherits the action-palette-action
-   * family's reset so it sits in the op-button track without odd styling. */
-  font: inherit;
-  background: none;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-  text-decoration: underline dotted;
-  text-underline-offset: 3px;
 }
-.action-palette-token-count:hover {
-  color: var(--ink);
-}
-/* Very tight: shed token estimate and status. */
+/* Very tight: terminal status can yield, but Inspector access remains visible. */
 @container action-palette (max-width: 36rem) {
-  .action-palette-token-count {
-    display: none;
-  }
   .action-palette-action-error {
     display: none;
   }

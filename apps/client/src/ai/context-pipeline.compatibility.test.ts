@@ -388,7 +388,7 @@ test("Settle preserves the exact provider, operation, and context-plus-passage l
     fixture.prepared.messages.map((message) => contentFingerprint(message.content)),
     [
       "a7ac870883c7252d1a11ee02253f7b4943d084532fa1b5a81a6fcf6cd83dc80c",
-      "96b20d83dcd7965263411667f8658572ea600927e70c8f7cd1e8bbe2d65b84f5",
+      "dbad6b723259574ab03c8324c7112590e2fe1af29c94a2c141aa93dceea6fb57",
       "b7f3462039e2bc963a42173070da5a29b42214681094d961aef3d8048eec10a5",
     ],
   );
