@@ -1,0 +1,653 @@
+{
+  "format": "zine-trace-context-selector-parity",
+  "version": 1,
+  "contract": "package-local-non-normative-v1",
+  "runtimeBoundary": "Native desktop and MCP adapters must materialize byte-identical TraceContextSelectionInputV1 values and obtain these pinned package-local outcomes.",
+  "protocolFixtures": [
+    {
+      "name": "two-step-full-trace",
+      "sourceVector": "two-step Full Trace",
+      "expectedStatus": "full",
+      "signatureExpectation": "valid",
+      "chain": [
+        {
+          "kind": 4290,
+          "created_at": 1700000000,
+          "tags": [
+            ["z", "file"],
+            ["F", "essay.md"],
+            ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+            ["action", "import"]
+          ],
+          "content": "{\"snapshot\":\"draft\",\"contentHash\":\"7743ce348d9284d677a185f33295b92266cc435a5b5f775029b300066d26693a\",\"kedits\":[{\"op\":\"ins\",\"from\":0,\"to\":0,\"text\":\"draft\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000000000,\"tx\":0}],\"operationId\":\"0101010101010101010101010101010101010101010101010101010101010101\"}",
+          "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "id": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+          "sig": "642bc4e280b51aba1c6a29ae7beda69759db97b05fee5a246b6c29af48f0e87054c2f4743a344c192d1078c60d07b6ad7f16645a17b15139ea9620ab497274a6"
+        },
+        {
+          "kind": 4290,
+          "created_at": 1700000001,
+          "tags": [
+            ["z", "file"],
+            ["F", "essay.md"],
+            ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+            ["action", "edit"],
+            ["e", "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81", "", "prev"]
+          ],
+          "content": "{\"snapshot\":\"final\",\"contentHash\":\"2443630b4620165c8b173e7265e17526fe2787ae594364dd6d839ad58f2fc007\",\"kedits\":[{\"op\":\"repl\",\"from\":0,\"to\":5,\"text\":\"final\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000000001,\"tx\":0}],\"operationId\":\"0101010101010101010101010101010101010101010101010101010101010101\"}",
+          "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "id": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+          "sig": "6ca17fb581f1ea7901eced274e8f64a4ed742c9f41a64736eb86deeebe86885f8fde8ae44bb33770e9c7253fac990dc51c95640b09aee1c25d7266d369f76b33"
+        }
+      ]
+    },
+    {
+      "name": "snapshot-only",
+      "sourceVector": "readable snapshot without process log",
+      "expectedStatus": "snapshot-only",
+      "signatureExpectation": "valid",
+      "chain": [
+        {
+          "kind": 4290,
+          "created_at": 1700000002,
+          "tags": [
+            ["z", "file"],
+            ["F", "essay.md"],
+            ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+            ["action", "import"]
+          ],
+          "content": "{\"snapshot\":\"readable\",\"contentHash\":\"9c49e2bceb8eecb24f3135db28c9482f18b3f9ef3473369b0c0ea85e7fb92d8b\",\"operationId\":\"0202020202020202020202020202020202020202020202020202020202020202\"}",
+          "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "id": "3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e",
+          "sig": "4175db8b257ae554e9c94c468f59ffa4b35b3fbdd8994a5fbbe12bf339df2700b18f8bbbd20c87267adfcee6bb0b4eed3978319d6b3c95f7bc113eda67182a7b"
+        }
+      ]
+    },
+    {
+      "name": "invalid-signature",
+      "sourceVector": "invalid signature",
+      "expectedStatus": "invalid",
+      "signatureExpectation": "invalid",
+      "chain": [
+        {
+          "kind": 4290,
+          "created_at": 1700000000,
+          "tags": [
+            ["z", "file"],
+            ["F", "essay.md"],
+            ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+            ["action", "import"]
+          ],
+          "content": "{\"snapshot\":\"draft\",\"contentHash\":\"7743ce348d9284d677a185f33295b92266cc435a5b5f775029b300066d26693a\",\"kedits\":[{\"op\":\"ins\",\"from\":0,\"to\":0,\"text\":\"draft\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000000000,\"tx\":0}],\"operationId\":\"0303030303030303030303030303030303030303030303030303030303030303\"}",
+          "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "id": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
+          "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "name": "two-step full trace",
+      "protocolFixture": "two-step-full-trace",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+            "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+            "contentHash": "2443630b4620165c8b173e7265e17526fe2787ae594364dd6d839ad58f2fc007",
+            "currentText": "final",
+            "chosenPath": "essay.md"
+          },
+          "maxContextBytes": 65536,
+          "preparedRequestMaxBytes": 131072,
+          "reservedPromptBytes": 32
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "full-genesis-change-0",
+            "dedupeKey": "full-genesis-change-0",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:tx:0:change:0",
+              "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "nodeId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "processStatus": "full-trace",
+              "chainDistance": 1,
+              "transactionIndex": 0
+            },
+            "reasons": ["recent-target-process"],
+            "fact": {
+              "kind": "change",
+              "transactionIndex": 0,
+              "operation": "insert",
+              "range": {"fromUtf16": 0, "toUtf16": 0},
+              "insertedCodePointCount": 5,
+              "deletedCodePointCount": 0,
+              "voiceId": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            }
+          },
+          {
+            "version": 1,
+            "id": "full-head-transaction-0",
+            "dedupeKey": "full-head-transaction-0",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:tx:0",
+              "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "nodeId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "processStatus": "full-trace",
+              "chainDistance": 0,
+              "transactionIndex": 0
+            },
+            "reasons": ["prepared-head-process"],
+            "fact": {
+              "kind": "transaction",
+              "transactionIndex": 0,
+              "capturedAtMs": 1700000000001,
+              "changeCount": 1,
+              "voiceIds": ["79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]
+            }
+          },
+          {
+            "version": 1,
+            "id": "full-genesis-summary",
+            "dedupeKey": "full-genesis-summary",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:summary",
+              "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "nodeId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "processStatus": "full-trace",
+              "chainDistance": 1,
+              "transactionIndex": 0
+            },
+            "reasons": ["recent-target-process"],
+            "fact": {
+              "kind": "step-summary",
+              "transactionCount": 1,
+              "rangeCount": 1,
+              "insertedCodePointCount": 5,
+              "deletedCodePointCount": 0,
+              "firstCapturedAtMs": 1700000000000,
+              "lastCapturedAtMs": 1700000000000,
+              "spanMs": 0,
+              "longestGapMs": 0,
+              "undoCount": 0,
+              "redoCount": 0
+            }
+          },
+          {
+            "version": 1,
+            "id": "full-head-change-0",
+            "dedupeKey": "full-head-change-0",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:tx:0:change:0",
+              "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "nodeId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "processStatus": "full-trace",
+              "chainDistance": 0,
+              "transactionIndex": 0
+            },
+            "reasons": ["prepared-head-process"],
+            "fact": {
+              "kind": "change",
+              "transactionIndex": 0,
+              "operation": "replace",
+              "range": {"fromUtf16": 0, "toUtf16": 5},
+              "insertedCodePointCount": 5,
+              "deletedCodePointCount": 5,
+              "voiceId": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            }
+          },
+          {
+            "version": 1,
+            "id": "full-genesis-transaction-0",
+            "dedupeKey": "full-genesis-transaction-0",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:tx:0",
+              "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "nodeId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "processStatus": "full-trace",
+              "chainDistance": 1,
+              "transactionIndex": 0
+            },
+            "reasons": ["recent-target-process"],
+            "fact": {
+              "kind": "transaction",
+              "transactionIndex": 0,
+              "capturedAtMs": 1700000000000,
+              "changeCount": 1,
+              "voiceIds": ["79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]
+            }
+          },
+          {
+            "version": 1,
+            "id": "full-head-summary",
+            "dedupeKey": "full-head-summary",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:summary",
+              "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "nodeId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "processStatus": "full-trace",
+              "chainDistance": 0,
+              "transactionIndex": 0
+            },
+            "reasons": ["prepared-head-process"],
+            "fact": {
+              "kind": "step-summary",
+              "transactionCount": 1,
+              "rangeCount": 1,
+              "insertedCodePointCount": 5,
+              "deletedCodePointCount": 5,
+              "firstCapturedAtMs": 1700000000001,
+              "lastCapturedAtMs": 1700000000001,
+              "spanMs": 0,
+              "longestGapMs": 0,
+              "undoCount": 0,
+              "redoCount": 0
+            }
+          }
+        ]
+      },
+      "expected": {"ok":true,"renderedContext":"[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"final\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"full-head-summary\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"processStatus\":\"full-trace\",\"ref\":\"trace:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:summary\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"Step 46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a · 1 tx / 1 ranges · +5/−5 · first 1700000000001 · last 1700000000001 · span 0ms · longest gap 0ms · undo 0 · redo 0\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"full-head-transaction-0\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"processStatus\":\"full-trace\",\"ref\":\"trace:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:tx:0\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"tx 0 @ 1700000000001 · 1 changes · voices 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"full-head-change-0\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"processStatus\":\"full-trace\",\"ref\":\"trace:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:tx:0:change:0\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"change tx 0 · replace · range [0,5) · +5/−5 · voice 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"full-genesis-summary\",\"kind\":\"process-fact\",\"reasons\":[\"recent-target-process\"],\"source\":{\"chainDistance\":1,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"processStatus\":\"full-trace\",\"ref\":\"trace:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:summary\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"Step 44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81 · 1 tx / 1 ranges · +5/−0 · first 1700000000000 · last 1700000000000 · span 0ms · longest gap 0ms · undo 0 · redo 0\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"full-genesis-transaction-0\",\"kind\":\"process-fact\",\"reasons\":[\"recent-target-process\"],\"source\":{\"chainDistance\":1,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"processStatus\":\"full-trace\",\"ref\":\"trace:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:tx:0\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"tx 0 @ 1700000000000 · 1 changes · voices 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"full-genesis-change-0\",\"kind\":\"process-fact\",\"reasons\":[\"recent-target-process\"],\"source\":{\"chainDistance\":1,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"processStatus\":\"full-trace\",\"ref\":\"trace:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:tx:0:change:0\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"change tx 0 · insert · range [0,0) · +5/−0 · voice 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"version\":1}]","manifestSha256":"82dcabad105f8d64aaf6d947becfae810688dacb48559449aa01197ca9fa3400","selectedFacts":[{"kind":"step-summary","transactionCount":1,"rangeCount":1,"insertedCodePointCount":5,"deletedCodePointCount":5,"firstCapturedAtMs":1700000000001,"lastCapturedAtMs":1700000000001,"spanMs":0,"longestGapMs":0,"undoCount":0,"redoCount":0},{"kind":"transaction","transactionIndex":0,"capturedAtMs":1700000000001,"changeCount":1,"voiceIds":["79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]},{"kind":"change","transactionIndex":0,"operation":"replace","range":{"fromUtf16":0,"toUtf16":5},"insertedCodePointCount":5,"deletedCodePointCount":5,"voiceId":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"},{"kind":"step-summary","transactionCount":1,"rangeCount":1,"insertedCodePointCount":5,"deletedCodePointCount":0,"firstCapturedAtMs":1700000000000,"lastCapturedAtMs":1700000000000,"spanMs":0,"longestGapMs":0,"undoCount":0,"redoCount":0},{"kind":"transaction","transactionIndex":0,"capturedAtMs":1700000000000,"changeCount":1,"voiceIds":["79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]},{"kind":"change","transactionIndex":0,"operation":"insert","range":{"fromUtf16":0,"toUtf16":0},"insertedCodePointCount":5,"deletedCodePointCount":0,"voiceId":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"}],"decisions":[{"version":1,"candidateId":"full-head-summary","dedupeKey":"full-head-summary","inclusionReasons":["prepared-head-process"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"full-head-summary"},{"version":1,"candidateId":"full-head-transaction-0","dedupeKey":"full-head-transaction-0","inclusionReasons":["prepared-head-process"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"full-head-transaction-0"},{"version":1,"candidateId":"full-head-change-0","dedupeKey":"full-head-change-0","inclusionReasons":["prepared-head-process"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"full-head-change-0"},{"version":1,"candidateId":"full-genesis-summary","dedupeKey":"full-genesis-summary","inclusionReasons":["recent-target-process"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"full-genesis-summary"},{"version":1,"candidateId":"full-genesis-transaction-0","dedupeKey":"full-genesis-transaction-0","inclusionReasons":["recent-target-process"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"full-genesis-transaction-0"},{"version":1,"candidateId":"full-genesis-change-0","dedupeKey":"full-genesis-change-0","inclusionReasons":["recent-target-process"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"full-genesis-change-0"}]}
+    },
+    {
+      "name": "text-only projection",
+      "input": {
+        "version": 1,
+        "policy": "text-only-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "1111111111111111111111111111111111111111111111111111111111111111",
+            "headId": "2222222222222222222222222222222222222222222222222222222222222222",
+            "contentHash": "3333333333333333333333333333333333333333333333333333333333333333",
+            "currentText": "plain target"
+          },
+          "maxContextBytes": 4096,
+          "preparedRequestMaxBytes": 8192,
+          "reservedPromptBytes": 20
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "hidden-process",
+            "dedupeKey": "hidden-process",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:hidden:summary",
+              "traceId": "1111111111111111111111111111111111111111111111111111111111111111",
+              "headId": "2222222222222222222222222222222222222222222222222222222222222222",
+              "nodeId": "2222222222222222222222222222222222222222222222222222222222222222",
+              "processStatus": "full-trace",
+              "chainDistance": 0,
+              "transactionIndex": 0
+            },
+            "reasons": ["prepared-head-process"],
+            "fact": {
+              "kind": "step-summary",
+              "transactionCount": 0,
+              "rangeCount": 0,
+              "insertedCodePointCount": 0,
+              "deletedCodePointCount": 0,
+              "spanMs": 0,
+              "longestGapMs": 0,
+              "undoCount": 0,
+              "redoCount": 0
+            }
+          },
+          {
+            "version": 1,
+            "id": "hidden-preference",
+            "dedupeKey": "hidden-preference",
+            "kind": "explicit-preference",
+            "claimClass": "explicit",
+            "source": {"kind": "local", "ref": "local:hidden-preference"},
+            "reasons": ["explicit-scoped-preference"],
+            "text": "Do not expose me."
+          },
+          {
+            "version": 1,
+            "id": "approved-citation",
+            "dedupeKey": "approved-citation",
+            "kind": "citation",
+            "claimClass": "explicit",
+            "source": {
+              "kind": "citation",
+              "ref": "citation:approved",
+              "nodeId": "4444444444444444444444444444444444444444444444444444444444444444",
+              "approvedOrder": 0,
+              "processStatus": "full-trace",
+              "traceId": "5555555555555555555555555555555555555555555555555555555555555555",
+              "range": {"fromUtf16": 1, "toUtf16": 9}
+            },
+            "reasons": ["approved-direct-citation"],
+            "text": "Approved excerpt"
+          }
+        ]
+      },
+      "expected": {"ok":true,"renderedContext":"[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"plain target\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"explicit\",\"evidenceId\":\"approved-citation\",\"kind\":\"citation\",\"reasons\":[\"approved-direct-citation\"],\"source\":{\"approvedOrder\":0,\"kind\":\"citation\",\"ref\":\"citation:approved\"},\"text\":\"Approved excerpt\",\"version\":1}]","manifestSha256":"e27afa2b919d0455c7c7b5fe775f7fef3ca4eaada24d8472de4e37ca23cfc61a","selectedFacts":[],"decisions":[{"version":1,"candidateId":"approved-citation","dedupeKey":"approved-citation","inclusionReasons":["approved-direct-citation"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"approved-citation"}]}
+    },
+    {
+      "name": "unicode bytes",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "settle",
+          "target": {
+            "traceId": "6666666666666666666666666666666666666666666666666666666666666666",
+            "headId": "7777777777777777777777777777777777777777777777777777777777777777",
+            "contentHash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "currentText": "草稿 😀 café café"
+          },
+          "range": {"fromUtf16": 0, "toUtf16": 16},
+          "maxContextBytes": 4096,
+          "preparedRequestMaxBytes": 8192,
+          "reservedPromptBytes": 0
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "unicode-citation",
+            "dedupeKey": "unicode-citation",
+            "kind": "citation",
+            "claimClass": "explicit",
+            "source": {
+              "kind": "citation",
+              "ref": "citation:unicode",
+              "nodeId": "9999999999999999999999999999999999999999999999999999999999999999",
+              "approvedOrder": 0
+            },
+            "reasons": ["approved-direct-citation"],
+            "text": "引用：雪 “quoted”\nline"
+          }
+        ]
+      },
+      "expected": {"ok":true,"renderedContext":"[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"草稿 😀 café café\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"explicit\",\"evidenceId\":\"unicode-citation\",\"kind\":\"citation\",\"reasons\":[\"approved-direct-citation\"],\"source\":{\"approvedOrder\":0,\"kind\":\"citation\",\"nodeId\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"ref\":\"citation:unicode\"},\"text\":\"引用：雪 “quoted”\\nline\",\"version\":1}]","manifestSha256":"8858c275e96364e6a07dcf65f6b128bad765e0c0bdeb9b907f580dac9c72b5a2","selectedFacts":[],"decisions":[{"version":1,"candidateId":"unicode-citation","dedupeKey":"unicode-citation","inclusionReasons":["approved-direct-citation"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"unicode-citation"}]}
+    },
+    {
+      "name": "exact rendered budget edge",
+      "exactBudgetProbe": true,
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "headId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "contentHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "currentText": "Edge"
+          },
+          "maxContextBytes": 326,
+          "preparedRequestMaxBytes": 343,
+          "reservedPromptBytes": 17
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "edge-instruction",
+            "dedupeKey": "edge-instruction",
+            "kind": "operation-instruction",
+            "claimClass": "explicit",
+            "source": {"kind": "operation", "ref": "operation:edge"},
+            "reasons": ["explicit-operation-intent"],
+            "text": "Continue exactly."
+          }
+        ]
+      },
+      "expected": {"ok":true,"renderedContext":"[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"Edge\",\"version\":1},{\"authority\":\"instruction\",\"claimClass\":\"explicit\",\"evidenceId\":\"edge-instruction\",\"kind\":\"operation-instruction\",\"reasons\":[\"explicit-operation-intent\"],\"source\":{\"kind\":\"operation\",\"ref\":\"operation:edge\"},\"text\":\"Continue exactly.\",\"version\":1}]","manifestSha256":"ecfbfcdfcd65ebd74647996f0d16fdfb599e9ce3cf753a42d4adbc4a5b34556c","selectedFacts":[],"decisions":[{"version":1,"candidateId":"edge-instruction","dedupeKey":"edge-instruction","inclusionReasons":["explicit-operation-intent"],"disposition":"selected","reason":"mandatory","selectedEvidenceId":"edge-instruction"}]}
+    },
+    {
+      "name": "snapshot-only failure",
+      "protocolFixture": "snapshot-only",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e",
+            "headId": "3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e",
+            "contentHash": "9c49e2bceb8eecb24f3135db28c9482f18b3f9ef3473369b0c0ea85e7fb92d8b",
+            "currentText": "readable"
+          },
+          "maxContextBytes": 4096,
+          "preparedRequestMaxBytes": 8192,
+          "reservedPromptBytes": 0
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "snapshot-summary",
+            "dedupeKey": "snapshot-summary",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:summary",
+              "traceId": "3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e",
+              "headId": "3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e",
+              "nodeId": "3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e",
+              "processStatus": "snapshot-only",
+              "chainDistance": 0,
+              "transactionIndex": 0
+            },
+            "reasons": ["prepared-head-process"],
+            "fact": {
+              "kind": "step-summary",
+              "transactionCount": 0,
+              "rangeCount": 0,
+              "insertedCodePointCount": 0,
+              "deletedCodePointCount": 0,
+              "spanMs": 0,
+              "longestGapMs": 0,
+              "undoCount": 0,
+              "redoCount": 0
+            }
+          }
+        ]
+      },
+      "expected": {"ok": false, "code": "CONTEXT_INCOMPLETE", "stage": "select", "candidateId": "snapshot-summary", "sourceRef": "trace:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:summary"}
+    },
+    {
+      "name": "invalid trace failure",
+      "protocolFixture": "invalid-signature",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
+            "headId": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
+            "contentHash": "7743ce348d9284d677a185f33295b92266cc435a5b5f775029b300066d26693a",
+            "currentText": "draft"
+          },
+          "maxContextBytes": 4096,
+          "preparedRequestMaxBytes": 8192,
+          "reservedPromptBytes": 0
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "invalid-summary",
+            "dedupeKey": "invalid-summary",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary",
+              "traceId": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
+              "headId": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
+              "nodeId": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
+              "processStatus": "invalid",
+              "chainDistance": 0,
+              "transactionIndex": 0
+            },
+            "reasons": ["prepared-head-process"],
+            "fact": {
+              "kind": "step-summary",
+              "transactionCount": 1,
+              "rangeCount": 1,
+              "insertedCodePointCount": 5,
+              "deletedCodePointCount": 0,
+              "firstCapturedAtMs": 1700000000000,
+              "lastCapturedAtMs": 1700000000000,
+              "spanMs": 0,
+              "longestGapMs": 0,
+              "undoCount": 0,
+              "redoCount": 0
+            }
+          }
+        ]
+      },
+      "expected": {"ok": false, "code": "INVALID_PROCESS_EVIDENCE", "stage": "select", "candidateId": "invalid-summary", "sourceRef": "trace:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary"}
+    },
+    {
+      "name": "trace source mismatch",
+      "protocolFixture": "two-step-full-trace",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+            "contentHash": "2443630b4620165c8b173e7265e17526fe2787ae594364dd6d839ad58f2fc007",
+            "currentText": "final"
+          },
+          "maxContextBytes": 4096,
+          "preparedRequestMaxBytes": 8192,
+          "reservedPromptBytes": 0
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "trace-mismatch-summary",
+            "dedupeKey": "trace-mismatch-summary",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:mismatch:summary",
+              "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "nodeId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "processStatus": "full-trace",
+              "chainDistance": 0,
+              "transactionIndex": 0
+            },
+            "reasons": ["prepared-head-process"],
+            "fact": {
+              "kind": "step-summary",
+              "transactionCount": 1,
+              "rangeCount": 1,
+              "insertedCodePointCount": 5,
+              "deletedCodePointCount": 5,
+              "firstCapturedAtMs": 1700000000001,
+              "lastCapturedAtMs": 1700000000001,
+              "spanMs": 0,
+              "longestGapMs": 0,
+              "undoCount": 0,
+              "redoCount": 0
+            }
+          }
+        ]
+      },
+      "expected": {"ok": false, "code": "PROCESS_SOURCE_MISMATCH", "stage": "select", "candidateId": "trace-mismatch-summary", "sourceRef": "trace:mismatch:summary"}
+    },
+    {
+      "name": "head source mismatch",
+      "protocolFixture": "two-step-full-trace",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+            "headId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "contentHash": "2443630b4620165c8b173e7265e17526fe2787ae594364dd6d839ad58f2fc007",
+            "currentText": "final"
+          },
+          "maxContextBytes": 4096,
+          "preparedRequestMaxBytes": 8192,
+          "reservedPromptBytes": 0
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "head-mismatch-summary",
+            "dedupeKey": "head-mismatch-summary",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace:head-mismatch:summary",
+              "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "nodeId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "processStatus": "full-trace",
+              "chainDistance": 0,
+              "transactionIndex": 0
+            },
+            "reasons": ["prepared-head-process"],
+            "fact": {
+              "kind": "step-summary",
+              "transactionCount": 1,
+              "rangeCount": 1,
+              "insertedCodePointCount": 5,
+              "deletedCodePointCount": 5,
+              "firstCapturedAtMs": 1700000000001,
+              "lastCapturedAtMs": 1700000000001,
+              "spanMs": 0,
+              "longestGapMs": 0,
+              "undoCount": 0,
+              "redoCount": 0
+            }
+          }
+        ]
+      },
+      "expected": {"ok": false, "code": "PROCESS_SOURCE_MISMATCH", "stage": "select", "candidateId": "head-mismatch-summary", "sourceRef": "trace:head-mismatch:summary"}
+    }
+  ]
+}
