@@ -141,7 +141,10 @@ test("startup rejects a loopback publication destination", () => {
 });
 
 test("cold headless profile mints one Root and Steps exact events while the relay is offline", {
-  timeout: 90_000,
+  // Coverage instruments both server subprocesses. Under the canonical verifier
+  // they also run beside the client, trace-context, Go, and Rust suites, so the
+  // same test can take roughly twice its isolated wall-clock time.
+  timeout: 180_000,
 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "zine-mcp-home-"));
   const config = join(home, "profile.json");

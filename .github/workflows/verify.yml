@@ -26,7 +26,7 @@ jobs:
           cache-dependency-path: packages/protocol/package-lock.json
       - run: npm ci
         working-directory: packages/protocol
-      - run: npm test
+      - run: npm run test:coverage
         working-directory: packages/protocol
 
   trace-context:
@@ -41,7 +41,7 @@ jobs:
           cache-dependency-path: packages/trace-context/package-lock.json
       - run: npm ci
         working-directory: packages/trace-context
-      - run: npm test
+      - run: npm run test:coverage
         working-directory: packages/trace-context
 
   client:
@@ -54,12 +54,12 @@ jobs:
           node-version: "24"
           cache: npm
           cache-dependency-path: apps/client/package-lock.json
-      - run: node --test scripts/dependency-state.test.mjs scripts/test-rust.test.mjs
+      - run: node --test scripts/dependency-state.test.mjs scripts/check-go-coverage.test.mjs scripts/test-rust.test.mjs scripts/dogfood-macos.test.mjs
       - run: npm ci
         working-directory: apps/client
       - run: npm run typecheck
         working-directory: apps/client
-      - run: npm test
+      - run: npm run test:coverage
         working-directory: apps/client
       - run: npm run build
         working-directory: apps/client
@@ -80,7 +80,7 @@ jobs:
         working-directory: apps/client
       - run: npm ci
         working-directory: apps/mcp
-      - run: npm test
+      - run: npm run test:coverage
         working-directory: apps/mcp
 
   relay:
@@ -92,8 +92,10 @@ jobs:
         with:
           go-version-file: relay/go.mod
           cache-dependency-path: relay/go.sum
-      - run: go test ./...
-        working-directory: relay
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: node scripts/check-go-coverage.mjs
 
   rust:
     name: Rust shell tests
