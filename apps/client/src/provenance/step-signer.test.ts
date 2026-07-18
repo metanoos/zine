@@ -22,13 +22,12 @@ test("Step keeps the requested trace signer when MODEL text dominates the edit",
   );
 });
 
-test("in-place MODEL operations retain the AUTHOR ownership context for later Step", () => {
-  for (const name of ["extendLLM", "settleLLM", "stirLLM"]) {
-    const source = functionSource(name, name === "extendLLM"
-      ? "function settleDeDupeLLM"
-      : name === "settleLLM"
-        ? "function stirLLM"
-        : "function replyLLM");
+test("in-place Settle and Stir retain the AUTHOR ownership context for later Step", () => {
+  for (const name of ["settleLLM", "stirLLM"]) {
+    const source = functionSource(
+      name,
+      name === "settleLLM" ? "function stirLLM" : "function replyLLM",
+    );
     assert.match(
       source,
       /beginOp\(idx, secretKeyForVoice\(authorPubkey\) \?\? undefined,/,
@@ -40,6 +39,15 @@ test("in-place MODEL operations retain the AUTHOR ownership context for later St
       name,
     );
   }
+});
+
+test("durable Extend attributes local MODEL text without signing or stepping it", () => {
+  const extend = functionSource("extendLLM", "function settleDeDupeLLM");
+  const apply = functionSource("applyDesktopArtifact", "function editFile");
+
+  assert.doesNotMatch(extend, /beginOp|secretKeyForVoice/);
+  assert.match(apply, /opVoiceEffect\.of\(modelPubkeyRef\.current\)/);
+  assert.doesNotMatch(apply, /stepFile\(|sendStep\(|publish|mint/i);
 });
 
 test("folder Settle never bypasses focused-file preparation or writes automatically", () => {
