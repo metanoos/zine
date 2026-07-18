@@ -12,8 +12,9 @@
     "./corpus": "./corpus/authoring-syntax-v1.json"
   },
   "scripts": {
+    "benchmark": "tsx benchmark/run.ts",
     "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck && tsx --test src/*.test.ts"
+    "test": "npm run typecheck && tsx --test src/*.test.ts benchmark/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

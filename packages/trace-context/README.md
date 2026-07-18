@@ -44,11 +44,30 @@ identical fragments beyond count and order.
 
 The fixed corpus at `corpus/authoring-syntax-v1.json` pins UTF-16 offsets,
 Unicode behavior, authority failures, operation clipping, protected precedence,
-markers, excerpts, deduplication, and malformed-syntax errors.
+markers, excerpts, deduplication, and malformed-syntax errors. The generated
+scale corpus at `corpus/authoring-scale-v1.json` pins hashes, counts, ranges,
+and observable work-set/output size for deterministic 0, 100, 1,000, and
+10,000-candidate inputs. Its generator also exercises Unicode, protected fake
+directives, eligible and inert authority, exact operation clipping, oversized
+anchors, and malformed syntax both inside and outside the prepared range.
+
+These scale fixtures are authoring-syntax workloads, not trace-manifest
+transactions. The current compiler is synchronous and has no candidate store,
+cache, quota, context envelope, or cancellation boundary. Cancellation,
+cache-cold/cache-warm behavior, incomplete candidate ceilings, and rendered
+manifest limits belong to the future manifest compiler and are not simulated by
+this package.
 
 ## Development
 
 ```sh
 npm test
 npm run typecheck
+npm run benchmark
 ```
+
+The benchmark reports first-run and repeated-run local timings plus byte/count
+diagnostics. It is opt-in and deliberately has no wall-clock CI gate: results
+from a shared runner are neither product latency claims nor published p95
+budgets. Use `npm run benchmark -- --iterations=1 --sizes=0,100` for a quick
+smoke, or `npm run benchmark -- --manifest` to reproduce the pinned summaries.
