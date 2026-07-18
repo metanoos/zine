@@ -1,25 +1,33 @@
 # Documentation
 
-These five documents explain Zine from product, protocol, evidence, roadmap,
-and company perspectives. They are the shared reader-facing source for this
+These documents explain Zine from product, protocol, evidence, roadmap, and
+company perspectives. They are the shared reader-facing source for this
 repository and the app's About view.
+
+The organizing product thesis is that current content discards information
+useful to both collaborators and reviewers. A zine is a file or folder together
+with its trace; Root is the topmost folder zine. Zine preserves that trace so an
+AI can work with selected, inspectable process context while people retain
+portable evidence of what happened. The [Evidence](EVIDENCE.md) page
+distinguishes that foundational bet from what the repository has actually
+demonstrated.
 
 | Document | Question it answers |
 |---|---|
-| [Product](PRODUCT.md) | Who needs Zine, what problem it solves, and where adoption starts |
+| [Product](PRODUCT.md) | How trace-aware writing works, who needs it, and where adoption starts |
 | [Protocol](PROTOCOL.md) | How traces, gestures, attribution, transport, and vetting work |
 | [Evidence](EVIDENCE.md) | What is implemented, measured, asserted, and still unknown |
-| [Roadmap](ROADMAP.md) | What is being built now, and which evidence gates each later phase |
+| [Roadmap](ROADMAP.md) | How the trace-context runtime, evaluation, and later team layers are sequenced |
 | [Company](COMPANY.md) | How an open sovereign protocol can support an optional paid layer |
 
 ## Accepted migration direction
 
-The [Trace-Native Zines](TRACE_NATIVE_ZINES.md) design records the accepted
-pre-product pivot: a zine is Markdown plus its complete trace; Publish replaces
-Send; Mint creates a manually attested coin; and exact AI-operation evidence,
-portable analysis, supply, and corpus vetting become first-class. It is the
-non-normative migration target until the owning specifications and
-implementation make the schema cut together.
+[Trace-Native Zines](TRACE_NATIVE_ZINES.md) records the complete accepted
+pre-product direction: recursive file/folder/Root zines, trace-aware AI,
+publication disclosure, Full Trace, manual Mint, coin supply, and the evidence
+program. Its folder ontology is now owned normatively by the trace
+specification. Other items remain coordinated migration targets until their
+owning specifications and implementation land together.
 
 ## Authority
 

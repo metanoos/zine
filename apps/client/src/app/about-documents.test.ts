@@ -44,10 +44,10 @@ test("About exposes the five reader-facing documents in product order", () => {
   assert.deepEqual(
     documents.map(({ id, title, sections }) => ({ id, title, sections: sections.length })),
     [
-      { id: "product", title: "Product", sections: 6 },
+      { id: "product", title: "Product", sections: 8 },
       { id: "protocol", title: "Protocol", sections: 7 },
-      { id: "evidence", title: "Evidence", sections: 4 },
-      { id: "roadmap", title: "Roadmap", sections: 8 },
+      { id: "evidence", title: "Evidence", sections: 5 },
+      { id: "roadmap", title: "Roadmap", sections: 12 },
       { id: "company", title: "Company", sections: 7 },
     ],
   );

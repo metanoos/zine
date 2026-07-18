@@ -5,11 +5,17 @@ path, not a trial. This page explains how an optional paid layer can exist
 without compromising that — and what stays free no matter what. No paid
 service is shipping today.
 
+The product has two coupled value layers. Trace-aware assistance should give a
+writer a reason to use Zine every day. Portable accountability gives teams a
+reason to standardize, administer, retain, and potentially pay. Neither demand
+nor willingness to pay has been demonstrated yet.
+
 ## The framing
 
-Zine separates local history from hosted coordination the way Git separates a
-repository from a remote. The protocol is the commons. A company can sell the
-operational layer that teams want but the wire deliberately does not require.
+Zine separates local writing intelligence and history from hosted coordination
+the way Git separates a repository from a remote. The protocol and local
+trace-aware press are the commons. A company can sell the operational layer
+that teams want, but neither the wire nor the daily writing loop requires it.
 
 In that analogy Zine is the Git, and an optional managed service can play the
 GitHub role: durable coordination, organization controls, review, and
@@ -26,6 +32,7 @@ without phoning home.
 | Always open | Optional paid layer |
 |---|---|
 | Signed trace events and verification rules | Managed always-on remote with backups and SLA |
+| Local trace-context compiler, inspection, and BYOK model use | Organization context policy, retention, and review administration |
 | Local desktop and MCP presses | Organization onboarding, support, and policy controls |
 | Self-hosted compatible relays | Team key, writer, peer, and ACL management |
 | Step, Send, Attest, Mint, Cite, fork, and merge | Hosted anchoring cadence and proof retention |
@@ -51,8 +58,9 @@ workflow, and calibrated interpretation around commodity storage.
 
 ## How pricing would work
 
-The free product includes everything required to author, self-host, and
-verify a trace. Paid plans charge for operational outcomes:
+The free product includes everything required to author with local trace
+context, self-host, and verify a trace. Paid plans charge for operational
+outcomes:
 
 - availability and durable retention;
 - organization identity and access administration;
@@ -61,21 +69,24 @@ verify a trace. Paid plans charge for operational outcomes:
 - support and deployment assurance; and
 - calibrated interpretation built from an opt-in, consented corpus.
 
-The first paid conversion should come from a team asking for reliable remote
-operation, organization control, or review evidence. Charging for the local
-press, or making verification depend on a proprietary endpoint, would weaken
-the thesis rather than strengthen the business.
+The first paid conversion should come from a team already receiving daily value
+from the writing loop and asking for reliable remote operation, organization
+control, context-policy administration, or review evidence. Charging for the
+local compiler/press, hiding selection behind a service, or making verification
+depend on a proprietary endpoint would weaken the thesis rather than strengthen
+the business.
 
 ## Why openness is the strategy
 
 Cryptographic primitives and relay storage are not what makes this durable.
 If the company earns a lasting position, it compounds in this order:
 
-1. Integration into real agent-to-artifact workflows.
-2. A growing corpus of portable, independently verifiable traces.
-3. Review and organization workflows that make the evidence useful.
-4. A consented dataset for calibrated process interpretation.
-5. A network of authors, reviewers, and citations, if density emerges.
+1. Repeated use because trace-aware AI collaboration improves real writing.
+2. Integration into durable agent-to-artifact workflows.
+3. A growing corpus of portable, independently verifiable traces.
+4. Review and organization workflows that make the evidence useful.
+5. A consented dataset for calibrated process interpretation.
+6. A network of authors, reviewers, and citations, if density emerges.
 
 Open verification strengthens each step: every shared proof can bring a new
 reviewer into the product without asking anyone to trust a sales claim.
@@ -99,7 +110,10 @@ These hold regardless of business model:
 The strategy fails if teams do not care enough about agent-written artifacts
 to change their workflow, if ordinary version control plus model logs answer
 the review question well enough, or if reviewers will not open a shared
-proof. The network thesis fails if real corpora do not produce useful
+proof. The daily-use thesis also fails or narrows if selected trace does not
+improve measured writing outcomes over text-only and bounded-history controls,
+or if privacy, correction burden, latency, and over-personalization outweigh
+the benefit. The network thesis fails if real corpora do not produce useful
 co-citations.
 
 The [roadmap](ROADMAP.md) sequences the work so those questions are answered

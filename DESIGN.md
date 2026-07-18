@@ -4,7 +4,9 @@
 
 - **What this is:** Zine is a local-first, AI-native writing instrument that
   records how text is made. The text is the arrangement; its trace is the
-  process or performance that produced it.
+  process or performance that produced it. Zine uses selected trace evidence
+  to help the AI collaborate with more than the final text while keeping that
+  context inspectable and correctable.
 - **Who it is for:** Authors, AI-assisted teams, agents, collaborators, and
   later readers who want to write, replay, interpret, cite, and extend a
   composition without surrendering its history to one hosted editor.
@@ -39,23 +41,32 @@ Use **Write**, not **Edit**, in user-facing mode labels. Writing includes
 invention, revision, correspondence, arrangement, and AI contribution; editing
 describes only part of that activity.
 
-### Text, Trace, and Step
+### Content tree, Zine, Trace, and Step
 
-- **Text** is the arrangement: the composed state a reader encounters.
+- **Text** is a file zine's Markdown arrangement: the composed state a reader
+  encounters.
+- **Content tree** is a folder zine's recursive arrangement of child zines.
+- A **zine** is one stably identified file or folder together with its trace.
+  The **Root zine** is the topmost folder; there is no separate project object.
 - **Trace** is the process or performance: keystrokes, pauses, deletions,
-  rewrites, pasted material, voice changes, AI interactions, and other
-  observable actions that produced the text.
+  rewrites, pasted material, structural changes, descendant activity, voice
+  changes, AI interactions, and other observable actions that produced the
+  file or folder state.
 - **Replay** is the interface for experiencing a trace. Do not use Replay and
   Trace as interchangeable names.
-- **Step** is a signed, durable landmark within the trace. It is not a synonym
-  for the continuous process.
-- A **zine** is one canonical Markdown text together with its complete trace
-  and stable work identity. **Zine** is the reference press that produces
-  zines.
+- A **checkpoint** is any signed durable landmark within the trace. **Step** is
+  the deliberate checkpoint gesture; automatic ancestor roll-ups remain
+  visible derived checkpoints and must not masquerade as additional Steps.
 - An **edition** is an immutable publication at one exact Step. **Publish** is
   the disclosure/reachability gesture; **Attest** is the separate commitment
   to stand behind that edition. Product language migrates from Send to Publish
   with the accepted schema cut.
+
+Folder replay reconstructs the descendant tree and interactions across it, not
+just a list of current names. Rename and move preserve zine identity. An
+explicit folder or Root Step checkpoints dirty descendants and then creates one
+deliberate scoped landmark; derived child advances are collapsed beneath that
+gesture by default and remain expandable for verification.
 
 The trace is a creative medium, not an audit screen hidden behind the final
 document. Interfaces may reveal compositional patterns such as hesitation,
@@ -85,6 +96,57 @@ When Zine sends context to an AI, show and preserve the context Zine actually
 sent when available. Never imply that Zine can prove everything an external
 provider or harness may have seen.
 
+### Trace-aware AI collaboration
+
+AI context is part of the writing instrument, not invisible prompt plumbing.
+The primary loop stays in the authored text:
+
+1. choose an operation in relation to the current text;
+2. inspect the exact text and trace evidence Zine selected;
+3. exclude, correct, forget, or explicitly authorize context;
+4. approve the frozen request;
+5. accept, revise, reject, or recover the result in place; and
+6. extend the trace with the accepted outcome and its context receipt.
+
+Prompt Inspector should expose each evidence item as a concrete record: source
+Step or span, file/folder/user scope, classification, selection reason,
+sensitivity, and byte cost. Quoted document material must remain visually and
+semantically distinct from instruction-authority segments. Do not reduce this
+to one opaque prompt textarea.
+
+Memory follows the zine tree rather than a separate project abstraction:
+
+- **operation** is ephemeral;
+- **file** follows one stable file trace;
+- **folder** applies to the current descendant subtree, including the Root as
+  the topmost folder zine; and
+- **user** crosses Roots only through an explicit author choice.
+
+More specific memory wins. Equal-scope conflicts block preparation and ask the
+writer to supersede, narrow, revoke, or exclude one choice. Nothing promotes
+itself upward. Folder inheritance changes when containment changes; file memory
+survives a move through stable trace identity.
+
+Two inline forms express local intent:
+
+- `[[…]]` is protected quoted data. Preserve its exact bytes through eligible
+  transformations. Directive-looking text inside it remains inert.
+- `((…))` is a one-shot directive candidate for any prepared AI operation. A
+  position-aware parser replaces an authorized directive with a stable marker
+  in quoted text and presents its exact instruction plus bounded local anchor
+  in a dedicated Inspector section. It disappears only after accepted success.
+
+Only complete bytes manually authored by the acting local AUTHOR, or explicitly
+promoted in Inspector, may become directive authority. Paste, import,
+filesystem, AI, another author, mixed, historical, malformed, and unknown-origin
+forms remain quoted data. A directive may steer an approved operation but never
+grant tools, filesystem access, network access, or broader scope.
+
+Consumed directives remain one-shot across undo. If their bytes reappear, show
+them as consumed and inert with a deliberate Reactivate action. If textual
+cleanup fails after accepted success, keep the result, display the cleanup
+state, and never repeat the operation.
+
 ### People, peers, and nodes
 
 - **People** are human collaborators who receive access or participate in the
@@ -99,12 +161,12 @@ and routing in networking details where the technical distinction matters.
 ### Human–AI review
 
 A review of a trace should itself be composed in Zine by a human–AI team. The
-review is an ordinary Zine text that:
+review is an ordinary file or folder zine that:
 
 - records the reviewers' own back-and-forth in its trace;
 - cites exact source text or trace spans through the ordinary citation
   machinery;
-- can be replayed, stepped, sent, and reviewed like other Zine work.
+- can be replayed, stepped, sent, and reviewed like other zines.
 
 Do not introduce reviewer-only composition language when ordinary quotation
 and citation controls suffice. Quoting does not require coining. An inline
@@ -236,7 +298,11 @@ CSS are valid when they improve icon or baseline alignment.
 The current layout is the baseline. Future design changes should be surgical:
 
 - make every action that creates a Step visibly carry the Step icon or mark;
+- distinguish an explicit Step from structural and derived folder checkpoints,
+  collapsing a recursive roll-up beneath its originating gesture;
 - add replay layers for trace patterns without obscuring the text;
+- make selected AI context, scope, conflicts, and correction legible in the
+  existing Prompt Inspector rather than adding a second application shell;
 - let reviews cite text and trace spans through existing citation language;
 - adopt AI terminology in user-facing surfaces;
 - distinguish People from technical Peers and Nodes progressively.
@@ -270,8 +336,8 @@ an unsigned/provisional state appear accepted.
    they Step, the interface must say so before activation and show the Step
    mark.
 4. **AI inference remains inspectable.** An AI may use trace patterns to infer
-   needs and preferences; the human–AI team must be able to review the relevant
-   trace and compose a response in Zine.
+   needs and preferences; the human–AI team must be able to review the exact
+   selected evidence, correct or forget it, and compose a response in Zine.
 5. **Local-first state is legible.** Show whether work is local, stepped, sent,
    reachable, or synchronized without turning networking details into the
    primary writing experience.
@@ -302,3 +368,8 @@ an unsigned/provisional state appear accepted.
 | 2026-07-17 | Separate People from Peers | People hold collaborative relationships; peers are the devices or nodes that route and synchronize work. |
 | 2026-07-17 | Treat trace as a creative medium | Replay and analysis should support interpretation, intuition, and art as well as provenance. |
 | 2026-07-17 | Skip redesign mockups | The user explicitly approved documenting the live design rather than replacing it with generated directions. |
+| 2026-07-17 | Make trace-aware writing the daily product loop | Process evidence should improve collaboration during writing while remaining useful for later verification. |
+| 2026-07-17 | Use one universal inline directive grammar | `[[…]]` is protected data; authorized `((…))` is a one-shot instruction across operation-specific adapters. |
+| 2026-07-17 | Keep AI memory scoped and correctable | Operation, file, folder, and explicit user scopes follow the actual folder tree and block unresolved equal-scope conflicts. |
+| 2026-07-17 | Treat every file and folder as a zine | A zine is content plus its scoped trace; Root is the topmost folder zine and can replay the whole descendant interaction history. |
+| 2026-07-17 | Separate Steps from derived checkpoints | A deliberate file/folder/Root Step is one author gesture even when signed child-head roll-ups propagate through ancestors. |

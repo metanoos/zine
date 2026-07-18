@@ -15,6 +15,7 @@ test("Root opens and creates but cannot be renamed or deleted", () => {
   assert.equal(menu.newFile, true);
   assert.equal(menu.newFolder, true);
   assert.equal(menu.reify, true);
+  assert.equal(menu.stepFolder, true);
   assert.equal(menu.rename, false);
   assert.equal(menu.delete, false);
 });
@@ -33,6 +34,8 @@ test("ordinary files and folders share Open, Open to side, rename, and delete", 
   assert.equal(file.newFile, false);
   assert.equal(folder.newFile, true);
   assert.equal(folder.newFolder, true);
+  assert.equal(folder.stepFolder, true);
+  assert.equal(file.stepFolder, false);
 });
 
 test("Mint and its Coins expose creation, open, and Reify actions", () => {
@@ -87,6 +90,7 @@ test("the Sidebar wires the standardized capabilities to their existing flows", 
   assert.match(appSource, /menu\.scanFolder[\s\S]*?onScan\("folder"\)[\s\S]*?Scan Folder/);
   assert.match(appSource, /menu\.scanFile[\s\S]*?onScan\("file"\)[\s\S]*?Scan File/);
   assert.match(appSource, /menu\.reify[\s\S]*?onReify\(\{ kind: isFolder \? "folder" : "file", path \}\)[\s\S]*?Reify/);
+  assert.match(appSource, /menu\.stepFolder[\s\S]*?onStepFolder\(path\)[\s\S]*?Step Folder/);
   assert.match(
     appSource,
     /relPath === ROOT \|\| isSystemRootPath\(relPath\) \|\| folderPaths\.has\(relPath\)/,

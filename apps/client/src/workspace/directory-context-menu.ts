@@ -18,6 +18,7 @@ export interface DirectoryContextMenuCapabilities {
   scanFile: boolean;
   scanFolder: boolean;
   reify: boolean;
+  stepFolder: boolean;
   rename: boolean;
   renameDisabled: boolean;
   delete: boolean;
@@ -60,6 +61,7 @@ export function directoryContextMenuCapabilities(
     // Reify is an explicit filesystem export, independent of prompt context.
     // Oblivion keeps its narrower inspect/restore lifecycle menu.
     reify: singleTarget && !isOblivionPath(path),
+    stepFolder: singleTarget && isOrdinaryFolder,
     // Root's cosmetic label is intentionally not a directory-menu mutation.
     rename:
       path !== "" &&

@@ -48,6 +48,24 @@ function canonicalEvent(event: Event): Event {
   return JSON.parse(JSON.stringify(event)) as Event;
 }
 
+function orderFolderChain(events: readonly Event[], traceId: string): Event[] {
+  const byId = new Map(events.map((event) => [event.id, event]));
+  const ordered: Event[] = [];
+  let nodeId: string | undefined = traceId;
+  while (nodeId) {
+    const event = byId.get(nodeId);
+    assert.ok(event, `folder chain is missing ${nodeId}`);
+    ordered.push(event);
+    const children = events.filter((candidate) =>
+      candidate.tags.some((tag) => tag[0] === "e" && tag[1] === nodeId && tag[3] === "prev"),
+    );
+    assert.ok(children.length <= 1, `folder chain branches after ${nodeId}`);
+    nodeId = children[0]?.id;
+  }
+  assert.equal(ordered.length, events.length, "folder chain contains disconnected nodes");
+  return ordered;
+}
+
 async function main(): Promise<void> {
   // Dynamic imports are load-bearing: relay URL and localStorage must be
   // installed before the shared browser modules evaluate under Node.
@@ -64,12 +82,15 @@ async function main(): Promise<void> {
     fetchChain,
     fetchEventById,
     fetchManifest,
+    fetchFolderNodes,
     flushLocalEventOutbox,
+    operationIdFromNode,
     publishEdit,
     publishDirectCoin,
     publishHardenedSpan,
     sendStep,
     sha256HexLocal,
+    stepFolderManifest,
     upsertManifestEntry,
   } = await import("../../client/src/provenance/provenance.js");
   const {
@@ -80,8 +101,10 @@ async function main(): Promise<void> {
   const { finalizeEvent, getPublicKey, verifyEvent } = await import("nostr-tools/pure");
   const { Relay } = await import("nostr-tools/relay");
   const {
+    createTraceOperationId,
     synthesizeKEditTransition,
     validateKEditTransition,
+    verifyFolderTraceChain,
   } = await import("@zine/protocol");
 
   const queryRelay = async (
@@ -219,6 +242,8 @@ async function main(): Promise<void> {
       steppedAt,
       snapshot: { members: [] },
       contentHash: emptyFolderHash,
+      operationId: createTraceOperationId(),
+      folderCheckpoint: { version: 1, cause: "genesis" },
     }),
   }, ownerSecret);
   const ownerRelay = new Relay(homeRelayUrl);
@@ -290,12 +315,26 @@ async function main(): Promise<void> {
     "first Step KEdits do not reproduce its snapshot",
   );
   assert.equal(first.pubkey, expectedAgent, "Step must be owned by the agent voice");
-  await upsertManifestEntry(folderId, {
+  const firstFolderHead = await upsertManifestEntry(folderId, {
     kind: "file",
     relativePath: path,
     latestNodeId: first.id,
     contentHash: firstHash,
-  }, voice.secretKey, { localOnly: true });
+  }, voice.secretKey, {
+    localOnly: true,
+    operationId: operationIdFromNode(first),
+  });
+  assert.equal(
+    operationIdFromNode(firstFolderHead),
+    operationIdFromNode(first),
+    "file Step and structural folder checkpoint must share an operation id",
+  );
+  const firstFolderPayload = JSON.parse(firstFolderHead.content) as {
+    deltas?: Array<{ type?: string }>;
+    folderCheckpoint?: { cause?: string };
+  };
+  assert.equal(firstFolderPayload.folderCheckpoint?.cause, "structure-change");
+  assert.deepEqual(firstFolderPayload.deltas?.map((delta) => delta.type), ["add"]);
 
   const firstManifest = await fetchManifest(folderId);
   assert.deepEqual(firstManifest.map((entry) => entry.relativePath), [path]);
@@ -419,12 +458,50 @@ async function main(): Promise<void> {
   );
   assert.equal(verifyEvent(third), true, "Cite Step signature is invalid");
   await sendStep(third, voice.secretKey);
-  await upsertManifestEntry(folderId, {
+  const advancedFolderHead = await upsertManifestEntry(folderId, {
     kind: "file",
     relativePath: path,
     latestNodeId: third.id,
     contentHash: thirdHash,
-  }, voice.secretKey, { localOnly: true });
+  }, voice.secretKey, {
+    localOnly: true,
+    operationId: operationIdFromNode(third),
+  });
+  assert.equal(
+    operationIdFromNode(advancedFolderHead),
+    operationIdFromNode(third),
+    "file Step and child-advance checkpoint must share an operation id",
+  );
+  const advancedFolderPayload = JSON.parse(advancedFolderHead.content) as {
+    deltas?: Array<{ type?: string }>;
+    folderCheckpoint?: { cause?: string; sourceNodeId?: string };
+  };
+  assert.equal(advancedFolderPayload.folderCheckpoint?.cause, "child-advance");
+  assert.equal(advancedFolderPayload.folderCheckpoint?.sourceNodeId, third.id);
+  assert.deepEqual(advancedFolderPayload.deltas?.map((delta) => delta.type), ["advance"]);
+
+  const explicitFolderHead = await stepFolderManifest(folderId, voice.secretKey, {
+    localOnly: true,
+    operationId: createTraceOperationId(),
+  });
+  const explicitFolderPayload = JSON.parse(explicitFolderHead.content) as {
+    deltas?: unknown[];
+    folderCheckpoint?: { cause?: string };
+  };
+  assert.equal(explicitFolderPayload.folderCheckpoint?.cause, "explicit-step");
+  assert.deepEqual(explicitFolderPayload.deltas ?? [], []);
+
+  const folderChain = orderFolderChain(await fetchFolderNodes(folderId), folderId);
+  const folderVerdict = await verifyFolderTraceChain(folderChain, verifyEvent, {
+    expectedOwnerPubkey: voice.publicKey,
+    expectedNucleusId: explicitFolderHead.id,
+    expectedTraceId: folderId,
+  });
+  assert.equal(
+    folderVerdict.status,
+    "full",
+    folderVerdict.issues.map((issue) => issue.message).join("; "),
+  );
 
   const chain = await fetchChain(folderId, path);
   assert.deepEqual(chain.map((event) => event.id), [first.id, second.id, third.id]);
@@ -598,6 +675,7 @@ async function main(): Promise<void> {
     sourceFolderId: sourceFolder.id,
     automaticRootId: automaticRoot.folderId,
     folderId,
+    folderSteps: folderChain.length,
     steps: chain.length,
     attestationId,
     coinId: coin.id,

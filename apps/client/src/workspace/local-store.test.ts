@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { loadLocalFolder, loadPad, saveLocalFile } from "./local-store.js";
+import {
+  clearFolderStepOperation,
+  loadLocalFolder,
+  loadPad,
+  pendingFolderStepOperation,
+  saveLocalFile,
+  stageFolderStepOperation,
+} from "./local-store.js";
 
 const values = new Map<string, string>();
 // @ts-expect-error minimal storage surface for pure persistence tests
@@ -39,4 +46,22 @@ test("crash pads reject records without the current kind discriminator", () => {
     "draft.md": { content: "draft", tags: [], nodeId: "", updatedAt: 1 },
   }));
   assert.equal(loadPad("root"), null);
+});
+
+test("staged file and recursive folder operations survive reload until cleared", () => {
+  values.clear();
+  const operationId = "ab".repeat(32);
+  saveLocalFile("root", "draft.md", {
+    content: "draft",
+    tags: [],
+    nodeId: "",
+    pendingOperationId: operationId,
+  });
+  stageFolderStepOperation("root", "notes", operationId);
+
+  assert.equal(loadLocalFolder("root")?.files["draft.md"]?.pendingOperationId, operationId);
+  assert.equal(pendingFolderStepOperation("root", "notes"), operationId);
+  clearFolderStepOperation("root", "notes");
+  assert.equal(pendingFolderStepOperation("root", "notes"), null);
+  assert.equal(loadLocalFolder("root")?.files["draft.md"]?.pendingOperationId, operationId);
 });
