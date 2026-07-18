@@ -611,6 +611,11 @@ export function previousStepCitationTargets(
   return eventMeta(chain[chain.length - 1]).citationTargets;
 }
 
+// Multiple Workspace facades can address the same persisted Root in one
+// process. Coalesce at module scope so the complete recursive cascade, not
+// merely the selected folder node, remains one causal operation across them.
+const recursiveFolderStepFlights = new Map<string, Promise<string>>();
+
 export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Workspace {
   let ref: FolderRef | null = null;
   const resolveFileSigner = options.signerForVoice ?? localFileSigner;
@@ -1547,44 +1552,58 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       requestedOperationId?: string,
     ): Promise<string> {
       const rootId = requireId();
-      const folderId = relativePath === ""
-        ? rootId
-        : (() => {
-            const folder = loadLocalFolder(rootId)?.files[relativePath];
-            const id = folder?.traceId ?? folder?.nodeId;
-            if (folder?.kind !== "folder" || !id) {
-              throw new Error(`cannot resolve folder trace for ${relativePath}`);
-            }
-            return id;
-          })();
+      const operationId = requestedOperationId ?? createTraceOperationId();
       const signer = requestedSigner ?? resolveFileSigner(authorVoice());
       if (!signer) throw new Error(`cannot resolve a local signer for ${relativePath || "Root"}`);
-      const folderSigner = folderWriteSigner(await fetchFolderOwner(folderId), signer);
-      if (!folderSigner) {
-        throw new Error(`cannot Step foreign folder ${relativePath || "Root"}`);
+      const flightKey = `${getPublicKey(signer)}:${rootId}:${relativePath}:${operationId}`;
+      const existing = recursiveFolderStepFlights.get(flightKey);
+      if (existing) return existing;
+
+      const pending = (async () => {
+        const folderId = relativePath === ""
+          ? rootId
+          : (() => {
+              const folder = loadLocalFolder(rootId)?.files[relativePath];
+              const id = folder?.traceId ?? folder?.nodeId;
+              if (folder?.kind !== "folder" || !id) {
+                throw new Error(`cannot resolve folder trace for ${relativePath}`);
+              }
+              return id;
+            })();
+        const folderSigner = folderWriteSigner(await fetchFolderOwner(folderId), signer);
+        if (!folderSigner) {
+          throw new Error(`cannot Step foreign folder ${relativePath || "Root"}`);
+        }
+        const head = await stepFolderManifest(folderId, folderSigner, {
+          localOnly: true,
+          operationId,
+        });
+        if (relativePath !== "") {
+          rememberLocalTreeFolderHead(
+            { storageRootId: rootId, folderId: rootId, storagePath: "" },
+            relativePath,
+            folderId,
+            head,
+          );
+          await propagateFolderHead(
+            rootId,
+            relativePath,
+            folderId,
+            head,
+            folderSigner,
+            true,
+          );
+        }
+        return head.id;
+      })();
+      recursiveFolderStepFlights.set(flightKey, pending);
+      try {
+        return await pending;
+      } finally {
+        if (recursiveFolderStepFlights.get(flightKey) === pending) {
+          recursiveFolderStepFlights.delete(flightKey);
+        }
       }
-      const operationId = requestedOperationId ?? createTraceOperationId();
-      const head = await stepFolderManifest(folderId, folderSigner, {
-        localOnly: true,
-        operationId,
-      });
-      if (relativePath !== "") {
-        rememberLocalTreeFolderHead(
-          { storageRootId: rootId, folderId: rootId, storagePath: "" },
-          relativePath,
-          folderId,
-          head,
-        );
-        await propagateFolderHead(
-          rootId,
-          relativePath,
-          folderId,
-          head,
-          folderSigner,
-          true,
-        );
-      }
-      return head.id;
     },
 
     async deletePath(relativePath: string, isFolder: boolean): Promise<void> {

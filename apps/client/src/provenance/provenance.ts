@@ -10,6 +10,7 @@ import {
   synthesizeKEditTransition,
   traceOperationIdFromEvent,
   validateKEditTransition,
+  verifyFolderTraceChain,
   type FolderCheckpoint,
   type KEdit,
 } from "@zine/protocol";
@@ -2482,6 +2483,90 @@ export async function fetchFolderNodes(folderId: string): Promise<Event[]> {
   return [...byIdMap.values()];
 }
 
+/** Read only folder nodes the home relay has accepted. Unlike `queryMany`, this
+ * deliberately excludes the durable local outbox and every federated read
+ * relay: an interrupted local Step may be resumed only from a node the home has
+ * actually acknowledged. */
+async function fetchHomeFolderNodes(folderId: string): Promise<Event[]> {
+  const home = await getRelayRetrying(resolveRelayUrl(), 1);
+  if (!home) throw new Error(`cannot verify folder ${folderId} on the home relay`);
+  const [byFolder, genesis] = await Promise.all([
+    queryOnce(home, { kinds: [TRACE_NODE_KIND], "#f": [folderId] }),
+    queryOnce(home, { kinds: [TRACE_NODE_KIND], ids: [folderId] }),
+  ]);
+  const nodes = [...byFolder, ...genesis].filter(
+    (event) => event.tags.some((tag) => tag[0] === "z" && tag[1] === "folder"),
+  );
+  return [...new Map(nodes.map((event) => [event.id, event])).values()];
+}
+
+function folderChainAtHead(
+  folderId: string,
+  head: Event,
+  nodes: readonly Event[],
+): Event[] | null {
+  const byId = new Map(nodes.map((event) => [event.id, event]));
+  const newestFirst: Event[] = [];
+  const seen = new Set<string>();
+  let cursor: string | null = head.id;
+  while (cursor) {
+    if (seen.has(cursor)) return null;
+    seen.add(cursor);
+    const event = byId.get(cursor);
+    if (!event) return null;
+    newestFirst.push(event);
+    if (event.id === folderId) return newestFirst.reverse();
+    cursor = event.tags.find(
+      (tag) => tag[0] === "e" && tag[3] === "prev",
+    )?.[1] ?? null;
+  }
+  return null;
+}
+
+async function requireValidFolderChain(
+  folderId: string,
+  head: Event,
+  nodes: readonly Event[],
+  expectedOwnerPubkey: string,
+): Promise<Event[]> {
+  const chain = folderChainAtHead(folderId, head, nodes);
+  if (!chain) {
+    throw new Error(`folder ${folderId} head ${head.id} does not reach its fixed identity`);
+  }
+  const verdict = await verifyFolderTraceChain(chain, verifyEvent, {
+    expectedOwnerPubkey,
+    expectedNucleusId: head.id,
+    expectedTraceId: folderId,
+  });
+  if (verdict.status !== "full") {
+    throw new Error(
+      `folder ${folderId} head ${head.id} is unsafe: ${
+        verdict.issues.map((issue) => issue.message).join("; ") || "nonconforming chain"
+      }`,
+    );
+  }
+  return chain;
+}
+
+async function requireCurrentFolderChain(
+  folderId: string,
+  nodes: readonly Event[],
+  expectedOwnerPubkey: string,
+): Promise<{ chain: Event[]; head: Event }> {
+  const ownerNodes = nodes.filter((event) => event.pubkey === expectedOwnerPubkey);
+  const heads = listUncitedHeads(ownerNodes);
+  if (heads.length !== 1) {
+    throw new Error(
+      `folder ${folderId} has ${heads.length} accepted owner heads; reconcile before Step`,
+    );
+  }
+  const head = heads[0]!;
+  return {
+    chain: await requireValidFolderChain(folderId, head, nodes, expectedOwnerPubkey),
+    head,
+  };
+}
+
 /** Resolves the latest (uncited-as-prev) folder-trace node for `folderId`, or
  *  null if the folder has no folder chain yet. Same head-finding rule as file
  *  chains (`resolveHead`): a node nobody else cites as `prev` is the head. */
@@ -3179,35 +3264,98 @@ export async function renameManifestEntry(
   });
 }
 
-/** Append the deliberate landmark for an already-materialized folder frontier. */
+const folderStepManifestFlights = new Map<string, Promise<Event>>();
+
+async function stepFolderManifestOnce(
+  folderId: string,
+  signer: Uint8Array,
+  opts: { localOnly?: boolean; operationId: string },
+): Promise<Event> {
+  const expectedOwnerPubkey = getPublicKey(signer);
+  const federatedNodes = await fetchFolderNodes(folderId);
+  const acceptedNodes = opts.localOnly
+    ? await fetchHomeFolderNodes(folderId)
+    : federatedNodes;
+  const observedNodes = [...new Map(
+    [...federatedNodes, ...acceptedNodes].map((event) => [event.id, event]),
+  ).values()];
+  const current = await requireCurrentFolderChain(
+    folderId,
+    acceptedNodes,
+    expectedOwnerPubkey,
+  );
+
+  const matchingExplicit = observedNodes.filter((event) => {
+    const meta = eventMeta(event);
+    return meta.operationId === opts.operationId &&
+      meta.folderCheckpoint?.cause === "explicit-step";
+  });
+  if (matchingExplicit.length > 1) {
+    throw new Error(
+      `folder Step operation ${opts.operationId} already has multiple explicit checkpoints`,
+    );
+  }
+  const acceptedExplicit = matchingExplicit[0];
+  if (acceptedExplicit) {
+    await requireValidFolderChain(
+      folderId,
+      acceptedExplicit,
+      observedNodes,
+      expectedOwnerPubkey,
+    );
+    if (!acceptedNodes.some((event) => event.id === acceptedExplicit.id)) {
+      throw new Error(
+        `folder Step operation ${opts.operationId} is not accepted by the home relay`,
+      );
+    }
+    if (acceptedExplicit.id !== current.head.id) {
+      throw new Error(
+        `cannot resume folder Step operation ${opts.operationId}: folder head advanced after its explicit checkpoint`,
+      );
+    }
+    return current.head;
+  }
+
+  return publishFolderNode(folderId, membersFromNode(current.head), {
+    prevEventId: current.head.id,
+    action: "edit",
+    signer,
+    localOnly: opts.localOnly,
+    operationId: opts.operationId,
+    folderCheckpoint: { version: 1, cause: "explicit-step" },
+  });
+}
+
+/** Append the deliberate landmark for an already-materialized folder frontier.
+ * Same-operation callers share the complete check/publish flight, so two local
+ * retries cannot both observe the same prior head and mint sibling Steps. */
 export async function stepFolderManifest(
   folderId: string,
   signer?: Uint8Array,
   opts?: { localOnly?: boolean; operationId?: string },
 ): Promise<Event> {
-  const previous = await fetchLatestFolderNode(folderId);
-  if (!previous) throw new Error(`cannot Step unavailable folder ${folderId}`);
-  // A recursive folder Step persists its operation id before the first relay
-  // write. If the selected explicit checkpoint landed but an ancestor roll-up
-  // did not, retry must resume from that exact signed node rather than append a
-  // second author gesture. Only reuse the current head: a later folder advance
-  // means this old recovery transaction can no longer safely move ancestors.
-  const previousMeta = eventMeta(previous);
-  if (
-    opts?.operationId &&
-    previousMeta.operationId === opts.operationId &&
-    previousMeta.folderCheckpoint?.cause === "explicit-step"
-  ) {
-    return previous;
+  const key = signer ?? authoringVoice().secretKey;
+  const operationId = opts?.operationId ?? createTraceOperationId();
+  if (!isTraceOperationId(operationId)) {
+    throw new Error("cannot Step a folder with a malformed operation id");
   }
-  return publishFolderNode(folderId, membersFromNode(previous), {
-    prevEventId: previous.id,
-    action: "edit",
-    signer,
+  const publicationScope = opts?.localOnly ? "home" : "federated";
+  const flightKey = `${getPublicKey(key)}:${folderId}:${operationId}:${publicationScope}`;
+  const existing = folderStepManifestFlights.get(flightKey);
+  if (existing) return existing;
+
+  const pending = stepFolderManifestOnce(folderId, key, {
     localOnly: opts?.localOnly,
-    operationId: opts?.operationId,
-    folderCheckpoint: { version: 1, cause: "explicit-step" },
+    operationId,
   });
+  folderStepManifestFlights.set(flightKey, pending);
+  try {
+    return await pending;
+  } finally {
+    if (folderStepManifestFlights.get(flightKey) === pending) {
+      folderStepManifestFlights.delete(flightKey);
+    }
+  }
 }
 
 /** Expose the shared operation id on a signed node to transaction coordinators. */
