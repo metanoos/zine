@@ -10,6 +10,8 @@ export interface SnapshotDependencies {
   lensId: string;
   operation: string;
   operationInputsHash: string;
+  /** Current-session editor authority can change prompt instruction bytes. */
+  authoringAuthorityHash?: string;
   promptLayerVersions: readonly string[];
 }
 

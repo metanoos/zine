@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { renderContextBlock } from "./context-block.js";
 import { contentFingerprint, createContextSnapshot } from "./context-snapshot.js";
 import { ModelOperationController } from "./model-operation-controller.js";
 import type { CurrentModelTarget } from "./model-operation-executor.js";
@@ -33,6 +34,15 @@ function harness() {
   let body = "draft body";
   let focused = true;
   let workspaceId: string | null = "folder-1";
+  let actingAuthorId = "author-a";
+  let authoritySpans: Array<{
+    id: string;
+    actorId: string;
+    origin: string;
+    instructionEligible: boolean;
+    fromUtf16: number;
+    toUtf16: number;
+  }> = [];
   let currentTarget: ((prepared: PreparedOperation) => CurrentModelTarget | null) | null = null;
   let gathers = 0;
 
@@ -54,11 +64,13 @@ function harness() {
         traceId: "trace-1",
         headId: "head-1",
         contentHash: contentFingerprint(body),
+        authoritySpans,
       },
       mount: [{ kind: "folder", path: "" }],
       shields: [],
       voicePrompt: "Use short sentences.",
       dirtyTarget: false,
+      actingAuthorId,
       gatherContext: async () => {
         gathers += 1;
         return createContextSnapshot({
@@ -81,7 +93,12 @@ function harness() {
             deltaLog: [],
             unstepped: false,
           }],
-          renderedBlock: `=== CONTEXT ===\n${body}\n=== END CONTEXT ===`,
+          renderedBlock: renderContextBlock({
+            folderLabel: "folder-1",
+            entries: [{ relativePath: "draft.md", content: body }],
+            activePath: "draft.md",
+            deltaLog: [],
+          }),
           createdAt: 1,
         });
       },
@@ -98,6 +115,8 @@ function harness() {
     setBody: (next: string) => { body = next; },
     setFocused: (next: boolean) => { focused = next; },
     setWorkspaceId: (next: string | null) => { workspaceId = next; },
+    setActingAuthorId: (next: string) => { actingAuthorId = next; },
+    setAuthoritySpans: (next: typeof authoritySpans) => { authoritySpans = next; },
     setCurrentTarget: (next: typeof currentTarget) => { currentTarget = next; },
   };
 }
@@ -171,6 +190,42 @@ test("execution refuses missing or dependency-stale approval before transport", 
   );
   assert.equal(transported, false);
   assert.equal(applied, false);
+});
+
+test("same target bytes with a changed directive-authority map require re-approval", async () => {
+  const subject = harness();
+  const body = "((tighten))";
+  subject.setBody(body);
+  const input = {
+    ...prepareInput("extend"),
+    operationInputs: {
+      seed: body,
+      hasSelection: true,
+      rangeFrom: body.length,
+      rangeTo: body.length,
+      sourceFrom: 0,
+      sourceTo: body.length,
+    },
+  };
+  subject.setAuthoritySpans([{
+    id: "paste-1", actorId: "author-a", origin: "paste", instructionEligible: false,
+    fromUtf16: 0, toUtf16: body.length,
+  }]);
+  const approved = await subject.controller.prepare(input);
+  subject.controller.approve(approved);
+  subject.setAuthoritySpans([{
+    id: "manual-1", actorId: "author-a", origin: "manual", instructionEligible: true,
+    fromUtf16: 0, toUtf16: body.length,
+  }]);
+  await assert.rejects(
+    subject.controller.executeApproved({
+      ...input,
+      maxTokens: 100,
+      complete: async () => "must not run",
+      apply: () => assert.fail("changed authority must not apply"),
+    }),
+    /Inspect and approve this AI request before running it/,
+  );
 });
 
 test("post-transport target drift preserves recovery and never applies", async () => {

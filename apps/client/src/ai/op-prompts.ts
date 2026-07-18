@@ -328,6 +328,11 @@ export interface OpInputs {
    *  it participates in PreparedOperation dependencies and atomic apply. */
   rangeFrom?: number;
   rangeTo?: number;
+  /** Exact source range interpreted by the trace-authoring compiler. Extend's
+   * apply range is an insertion point, so its source range is recorded
+   * separately. Settle normally uses the same source and apply range. */
+  sourceFrom?: number;
+  sourceTo?: number;
   /** Extend: selected passage or doc tail. */
   seed?: string;
   /** Extend: was there a live selection? */
@@ -375,6 +380,10 @@ export interface OpPromptLayers {
   voicePrompt?: string;
   /** Canonical `=== CONTEXT ===` block gathered for the focused file/scope. */
   contextBlock?: string;
+  /** The only document-derived bytes allowed into an instruction role. */
+  authorDirectiveInstructions?: string;
+  /** Position/locality evidence remains user-role quoted data. */
+  authorDirectiveExcerpts?: string;
 }
 
 /**
@@ -411,17 +420,27 @@ export function applyOpPromptLayers(
     };
   }
 
+  const authorDirectiveInstructions = layers.authorDirectiveInstructions ?? "";
+  if (authorDirectiveInstructions && systemIdx >= 0) {
+    assembled[systemIdx] = {
+      ...assembled[systemIdx],
+      content: `${assembled[systemIdx].content}\n\n${authorDirectiveInstructions}`,
+    };
+  }
+
   const contextBlock = layers.contextBlock ?? "";
-  if (contextBlock) {
+  const authorDirectiveExcerpts = layers.authorDirectiveExcerpts ?? "";
+  const quotedContext = [contextBlock, authorDirectiveExcerpts].filter(Boolean).join("\n\n");
+  if (quotedContext) {
     const userIdx = assembled.findIndex((message) => message.role === "user");
     if (userIdx >= 0) {
       assembled = assembled.map((message, idx) =>
         idx === userIdx
-          ? { ...message, content: `${contextBlock}\n\n${message.content}` }
+          ? { ...message, content: `${quotedContext}\n\n${message.content}` }
           : message,
       );
     } else {
-      assembled.push({ role: "user", content: contextBlock });
+      assembled.push({ role: "user", content: quotedContext });
     }
   }
   return assembled;

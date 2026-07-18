@@ -62,10 +62,13 @@ Zine's document grammar makes intent explicit. `[[ protected words ]]` are
 verbatim, inert text that an eligible transformation must preserve.
 `(( author directive ))` is intended as a one-shot instruction to the selected
 AI operation: it is removed only after accepted success and cannot grant tools
-or access outside that operation's approved scope. Universal directive
-authority, scoped memory, and the shared trace-context compiler are roadmap
-work; today's Stir operation contains an earlier, narrower version of the
-bracket/directive behavior.
+or access outside that operation's approved scope. The initial shared syntax
+kernel and desktop Extend/Settle adapter now enforce exact operation ranges,
+protected bytes, and current-editor-session manual-author authority. This is a
+deliberately partial slice: Stir still uses its earlier grammar, other
+operations are not generalized, and explicit promotion, persisted authority,
+durable consumption receipts, shared evidence selection, scoped memory, and
+result-to-context binding remain roadmap work.
 
 ## Start with accountable agents
 
@@ -131,7 +134,8 @@ work into the receiving owner's chain.
 | Mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
 | Raw-file Reify export with an optional signed-event bundle | Implemented on desktop |
 | Stronghold storage for signing and provider secrets | Implemented on desktop; the browser remains read-only |
-| Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures; current prompts include file/folder text and structured process history, but there is no shared selector, scoped memory, universal directive grammar, or durable context binding yet |
+| Shared trace-context authoring-syntax kernel | Initial deterministic `[[…]]` / `((…))` scanner and compiler implemented with golden and generated scale corpora; task-specific evidence selection and cross-press rendering are not yet implemented |
+| Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures; Extend and Settle now use the shared syntax kernel, exact current-session authority spans, protected-output validation, and accepted-success directive cleanup, while the other operations, durable receipts, and context binding remain deferred |
 | Hosted relay | Implemented; an operator ACL equivalent to the local relay policy remains a gap |
 | Global content-hash rendezvous over Kademlia | Specified as a sketch, not implemented |
 | Managed remote, organization control plane, and no-install public verifier | Commercial product hypotheses, not shipping services |
@@ -196,6 +200,7 @@ owning specification, the specification wins.
 ```text
 /
 ├── packages/protocol/              shared TypeScript protocol kernel and fixed conformance corpus
+├── packages/trace-context/         non-normative trace-context syntax kernel and deterministic corpora
 ├── docs/                          reader-facing product, protocol, evidence, roadmap, and company
 ├── protocol/                      trace, transport, and rendezvous specifications
 ├── relay/                         Go relay, local sidecar, and hosted peer

@@ -9,13 +9,6 @@ accepted migration is collected in
 [Trace-Native Zines](TRACE_NATIVE_ZINES.md); for implemented machinery, read
 the [Protocol](PROTOCOL.md) tour.
 
-The accepted pre-product pivot is specified in
-[Trace-Native Zines](TRACE_NATIVE_ZINES.md): a **zine** is canonical Markdown
-plus its complete trace, AI assistance is prepared from text and trace rather
-than text alone, and publishing discloses both together. That document is the
-migration target; this page and the current protocol tour continue to describe
-implemented behavior until the schema cut lands.
-
 ## The problem
 
 Current content is a lossy summary of writing. A file preserves the text that

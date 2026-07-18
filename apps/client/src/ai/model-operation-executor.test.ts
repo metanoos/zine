@@ -26,6 +26,7 @@ function fixture(operation: PreparedOperation["operation"] = "extend"): Prepared
     operationInputs: Object.freeze({}),
     contextSnapshot: {} as PreparedOperation["contextSnapshot"],
     contextFingerprint: "context-1",
+    traceAuthoring: null,
     messages: Object.freeze([{ role: "user" as const, content: operation }]),
     providerId: provider.id,
     providerFingerprint: "provider-fingerprint",
@@ -104,6 +105,23 @@ test("cancelled transport never applies", async () => {
     apply: () => assert.fail("cancelled response must not apply"),
   });
   assert.equal(result.status, "cancelled");
+});
+
+test("provider failure never reaches the apply boundary", async () => {
+  const prepared = fixture("settle");
+  let applied = false;
+  await assert.rejects(
+    executePreparedOperation({
+      prepared,
+      provider,
+      maxTokens: 100,
+      readCurrentTarget: () => current(prepared),
+      complete: async () => { throw new Error("provider unavailable"); },
+      apply: () => { applied = true; },
+    }),
+    /provider unavailable/,
+  );
+  assert.equal(applied, false);
 });
 
 test("multi-call batches freeze order, target, and total budget", () => {

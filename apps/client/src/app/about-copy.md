@@ -10,13 +10,6 @@ accepted migration is collected in
 [Trace-Native Zines](TRACE_NATIVE_ZINES.md); for implemented machinery, read
 the [Protocol](PROTOCOL.md) tour.
 
-The accepted pre-product pivot is specified in
-[Trace-Native Zines](TRACE_NATIVE_ZINES.md): a **zine** is canonical Markdown
-plus its complete trace, AI assistance is prepared from text and trace rather
-than text alone, and publishing discloses both together. That document is the
-migration target; this page and the current protocol tour continue to describe
-implemented behavior until the schema cut lands.
-
 ## The problem
 
 Current content is a lossy summary of writing. A file preserves the text that
@@ -720,6 +713,7 @@ hypotheses. Last updated 2026-07-17.
 | Headless MCP press with its own voice key and permanent profile Root | Implemented | Offline stdio smoke proves zero-folder cold start, exact signed-event outbox, raw node reads, and Root/key reuse; isolated real-relay integration flushes a queued event unchanged, preserves optional source forks, and exercises external Send |
 | Prepared desktop MODEL operations and approval gating | Implemented for direct single-shot gestures; not yet enforced on every live model call | `prepared-operation.test.ts`, `context-snapshot.test.ts`, `model-operation-executor.test.ts`, and `llm-prepared.test.ts`; the separate agent loop still uses its own transport, and `preparedRequestHash` is not yet stored in Step metadata |
 | Current text plus structured trace context in desktop prompts | Implemented as a client-local compatibility baseline | Direct operations gather current file/folder text and a chronological process log through `context-block.ts`, `context-snapshot.ts`, and `prepared-operation.ts`; there is no shared task-specific selector, scoped memory, cross-press fixture contract, or durable context binding yet |
+| Shared authoring-syntax kernel and desktop Extend/Settle adapter | Initial deterministic slice implemented; authority is current-editor-session-only | `packages/trace-context` pins UTF-16 parsing, protected precedence, exact operation clipping, authority failures, directive markers, local excerpts, malformed syntax, and generated 0/100/1,000/10,000-candidate scale fixtures. Desktop tests cover manual versus paste/drop/MODEL/undo/reload authority, exact prepared identity, protected-output rejection, atomic accepted-success cleanup, and inert legacy behavior. Persisted authority, promotion, durable consumption receipts, crash recovery, other operations, and MCP parity remain deferred |
 | Per-delta human/model attribution | Implemented | Attribution regression suite; trust status remains asserted unless corroborated through a signed seam |
 | Fork and merge | Implemented for owned recursive destinations and current top-level foreign flows | Nested Scan/adoption/fork tests plus merge and ownership tests; recursive fork-on-write through an already-foreign folder remains deferred |
 | Mutual-peer co-citation and process vet | Implemented and tested | `co-citation.ts`, `vet.ts`, `vet-walker.ts`, and their tests |
@@ -907,19 +901,28 @@ Already built:
   durable operation grouping, explicit folder/Root Step, and derived Replay
   collapse;
 - prepared direct MODEL operations with approval, stale-result protection,
-  current file/folder text, and structured process history; and
+  current file/folder text, and structured process history;
+- the initial shared `@zine/trace-context` authoring-syntax kernel, compatibility
+  fixtures, golden parser/compiler cases, and generated scale corpus;
+- a desktop Extend/Settle adapter with exact current-session manual-origin
+  authority, protected-output validation, and accepted-success cleanup;
+- a read-only trace-context Inspector presentation for prepared operations;
+- a preregistered writing-outcome study and operational scoring rubric; and
 - a preregistered narration study showing a narrow process-description effect.
 
-Not yet built as one system: a shared trace-context package, task-specific
-selection, inspectable evidence records, corrections, scoped memory, universal
-directive authority, durable result-to-context binding, writing-outcome
-evaluation, or equivalent desktop/MCP rendering. Fixed cross-runtime folder
-vectors and explicit crash-boundary real-relay recovery fixtures remain
-hardening work for the recursive checkpoint cut.
+Not yet built as one system: task-specific evidence selection and rendering,
+cross-press manifest parity, Inspector exclusions/corrections/promotion,
+persisted directive authority and durable consumption receipts, scoped memory,
+durable result-to-context binding, writing-outcome evaluation, or complete
+desktop/MCP operation coverage. Fixed cross-runtime folder vectors and explicit
+crash-boundary real-relay recovery fixtures remain hardening work for the
+recursive checkpoint cut.
 
 ## Phase 0: declare and preregister
 
-This phase is active now.
+The declaration, preregistration, and scoring artifacts are present. Keep them
+aligned as implementation evidence changes; writing-outcome results do not yet
+exist.
 
 1. Make the product hierarchy explicit in README, Product, Design, Roadmap,
    Evidence, and Company: trace-aware writing is the daily loop; accountable
@@ -938,6 +941,11 @@ describe the same claim without presenting conviction as evidence.
 
 ## Phase 1: shared deterministic context runtime
 
+This phase is in progress. The authoring-syntax kernel, compatibility baseline,
+golden cases, and scale corpus exist; the task-specific evidence selector,
+rendered manifest contract, correction/preference stores, cancellation and
+quota boundaries, and desktop/MCP parity do not.
+
 Harden the landed recursive-zine cut while building the shared runtime:
 
 - add fixed cross-runtime folder-chain vectors to the conformance corpus;
@@ -948,6 +956,7 @@ Harden the landed recursive-zine cut while building the shared runtime:
   originating gesture.
 
 Build a non-normative package used by every press and provider adapter:
+
 
 - closed operation, evidence, correction, preference, directive, error, and
   Inspector contracts;
@@ -971,6 +980,13 @@ rendered bytes from the same context fixtures, including nil, empty, malformed,
 oversized, Unicode, cancelled, and invalid-trace cases.
 
 ## Phase 2: one complete desktop vertical slice
+
+This phase has an initial read-only dogfood slice: Extend and Settle prepare
+through the shared syntax kernel, and Prompt Inspector can present the frozen
+boundary. Exclusion, correction, explicit promotion, persisted authority,
+durable receipts, and crash recovery are still required before the vertical
+slice is complete.
+
 
 Integrate Extend and Settle first because continuation and revision expose
 different ways trace may help. Preserve today's Stir behavior through the new

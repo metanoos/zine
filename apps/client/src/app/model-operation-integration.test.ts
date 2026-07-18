@@ -36,6 +36,23 @@ test("Inspector renders frozen PreparedOperation messages and owns explicit appr
   assert.doesNotMatch(inspector, /assembleOpMessages|prepareChatMessages|complete\(/);
 });
 
+test("Inspector projects the selected prepared operation without replacing its exact messages", () => {
+  assert.match(inspector, /adaptPreparedOperationForTraceContextInspector\(preparedOperation\)/);
+  assert.match(inspector, /<TraceContextInspectorView/);
+  assert.match(inspector, /presentation=\{traceContextPresentation\}/);
+  assert.match(inspector, /className="prompt-inspector-trace-context"[\s\S]*tabIndex=\{0\}/);
+  assert.match(inspector, /Exact prepared message stack/);
+  assert.ok(
+    inspector.indexOf("<TraceContextInspectorView") < inspector.indexOf('className="prompt-inspector-body"'),
+    "trace context should precede, not replace, the exact message stack",
+  );
+  const invocation = inspector.slice(
+    inspector.indexOf("<TraceContextInspectorView"),
+    inspector.indexOf("/>", inspector.indexOf("<TraceContextInspectorView")) + 2,
+  );
+  assert.doesNotMatch(invocation, /onExclude|onPromote|onReactivate|onInspectSource/);
+});
+
 test("stale session results expose inspect, copy, and retry recovery without mutation", () => {
   assert.match(app, /AI response held/);
   assert.match(app, /Copy response/);
@@ -48,4 +65,20 @@ test("Analyze produces an ordinary review with citations to every analyzed sourc
   assert.match(source, /approved\.contextSnapshot\.inputs/);
   assert.match(source, /editCitations\(newPath, sourceHeadIds\)/);
   assert.match(source, /openInPanel\(newPath, destIdx\)/);
+});
+
+test("Extend and Settle alone use the current-session trace-authoring adapter", () => {
+  const extend = functionBody("extendLLM", "function settleDeDupeLLM");
+  const settle = functionBody("settleLLM", "function stirLLM");
+  const stir = functionBody("stirLLM", "function replyLLM");
+  assert.match(app, /const authoringAuthorityField = StateField\.define/);
+  assert.match(app, /resetEditorAuthorityState\(authority, tr\.newDoc\.length\)/);
+  assert.match(app, /paste: tr\.isUserEvent\("input\.paste"\)/);
+  assert.match(app, /undoRedo: tr\.isUserEvent\("undo"\) \|\| tr\.isUserEvent\("redo"\)/);
+  assert.match(app, /actingAuthorId: authorPubkeyRef\.current/);
+  assert.match(extend, /sourceFrom/);
+  assert.match(extend, /buildAcceptedExtendChanges/);
+  assert.match(settle, /sourceFrom/);
+  assert.match(settle, /validateTraceAuthoringResult/);
+  assert.doesNotMatch(stir, /traceAuthoring|buildAcceptedExtendChanges|validateTraceAuthoringResult/);
 });

@@ -21,6 +21,7 @@ if (mode !== "check" && mode !== "verify") {
 
 const checks = [
   { label: "protocol package tests", command: npm, args: ["test"], cwd: join(repoRoot, "packages", "protocol") },
+  { label: "trace-context package tests", command: npm, args: ["test"], cwd: join(repoRoot, "packages", "trace-context") },
   {
     label: "dev automation tests",
     command: process.execPath,

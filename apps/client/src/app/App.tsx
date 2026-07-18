@@ -225,6 +225,17 @@ import { providerProfileFingerprint } from "../ai/provider-fingerprint.js";
 import type { RecoverableModelResult } from "../ai/model-operation-executor.js";
 import { ModelOperationController } from "../ai/model-operation-controller.js";
 import {
+  buildAcceptedExtendChanges,
+  validateTraceAuthoringResult,
+} from "../ai/trace-authoring-adapter.js";
+import {
+  applyEditorAuthorityChanges,
+  classifyEditorTransaction,
+  createEditorAuthorityState,
+  resetEditorAuthorityState,
+  type EditorAuthorityState,
+} from "../editor/authoring-authority.js";
+import {
   resolveAiPaletteRegistry,
   type AiPaletteActionId,
 } from "../ai/palette-registry.js";
@@ -761,21 +772,6 @@ function encodeSettleAnchors(text: string): { promptText: string; anchors: strin
   }
   promptText += text.slice(cursor);
   return { promptText, anchors };
-}
-
-function restoreSettleAnchors(response: string, anchors: readonly string[]): string {
-  let restored = response;
-  const used = new Set<number>();
-  restored = restored.replace(/__ZINE_ANCHOR_(\d+)__/g, (_match, rawIndex: string) => {
-    const index = Number(rawIndex) - 1;
-    if (!Number.isInteger(index) || !anchors[index]) return "";
-    used.add(index);
-    return anchors[index];
-  });
-  for (let index = 0; index < anchors.length; index++) {
-    if (!used.has(index)) restored += `${restored.endsWith("\n") ? "" : "\n"}${anchors[index]}`;
-  }
-  return restored;
 }
 
 /** Remove [start, end) ranges from `text`, in order, by absolute position.
@@ -4092,6 +4088,35 @@ const keditField = StateField.define<KEditLog>({
   },
 });
 
+/**
+ * Exact current-session origin map for author directives. Unlike voiceField,
+ * this field never infers authority from Runs. Reload/setRuns resets the whole
+ * body to unknown; paste, drop, MODEL, undo/redo reinsertion, and unannotated
+ * programmatic changes are retained as explicitly ineligible spans.
+ */
+const authoringAuthorityField = StateField.define<EditorAuthorityState>({
+  create: (state) => createEditorAuthorityState(state.doc.length),
+  update(authority, tr) {
+    if (tr.effects.some((effect) => effect.is(setRunsEffect))) {
+      return resetEditorAuthorityState(authority, tr.newDoc.length);
+    }
+    if (!tr.docChanged) return authority;
+    const changes: Array<{ fromA: number; toA: number; fromB: number; toB: number }> = [];
+    tr.changes.iterChanges((fromA, toA, fromB, toB) => {
+      changes.push({ fromA, toA, fromB, toB });
+    });
+    const origin = classifyEditorTransaction({
+      model: tr.effects.some((effect) => effect.is(opVoiceEffect)),
+      paste: tr.isUserEvent("input.paste"),
+      drop: tr.isUserEvent("input.drop"),
+      manualType: tr.isUserEvent("input.type"),
+      undoRedo: tr.isUserEvent("undo") || tr.isUserEvent("redo"),
+    });
+    const actorId = tr.state.facet(voiceFacet) || authorVoice();
+    return applyEditorAuthorityChanges(authority, changes, origin, actorId);
+  },
+});
+
 const voiceDecorations = ViewPlugin.fromClass(
   class {
     decorations: DecorationSet;
@@ -4461,6 +4486,8 @@ function buildExtensions(
     voiceField,
     // Keystroke log — parallel sink to voiceField, drained at step time.
     keditField,
+    // Non-normative, current-session-only instruction-authority evidence.
+    authoringAuthorityField,
     // Voice color decorations, gated by the global voice-attribution toggle.
     // Reconfigured live via voiceAttributionCompartment (see FileEditor) when
     // the user flips the rail toggle — drops to [] (no coloring) or restores
@@ -8747,6 +8774,15 @@ function App() {
         const activePath = panelsRef.current[panelIndex]?.active ?? "";
         const liveFocus = uiFocusRef.current;
         const liveFile = filesRef.current[activePath];
+        const liveAuthority = panelViews.current[panelIndex]?.state.field(
+          authoringAuthorityField,
+          false,
+        );
+        const liveBody = liveFile && liveFile.kind !== "folder"
+          ? flatten(liveFile.runs)
+          : "";
+        const editorBody = panelViews.current[panelIndex]?.state.doc.toString();
+        const exactAuthority = editorBody === liveBody ? liveAuthority?.spans ?? [] : [];
         return {
           workspaceId: liveFolder?.id ?? null,
           activePath,
@@ -8764,13 +8800,15 @@ function App() {
                 path: activePath,
                 traceId: liveFile.traceId ?? null,
                 headId: liveFile.nodeId || null,
-                contentHash: contentFingerprint(flatten(liveFile.runs)),
+                contentHash: contentFingerprint(liveBody),
+                authoritySpans: exactAuthority,
               }
             : null,
           mount: scopeRef.current,
           shields: [...shieldedRef.current],
           voicePrompt: getVoicePrompt(modelVoicePubkey) ?? "",
           dirtyTarget: unsteppedPathSetRef.current.has(activePath),
+          actingAuthorId: authorPubkeyRef.current,
           gatherContext: (signal) => {
             if (!liveFolder) {
               return Promise.reject(new Error("Open a workspace before running an AI operation"));
@@ -8927,6 +8965,8 @@ function App() {
   // keychain key if the stored role id is gone (key deleted), then "author-1".
   const authorKey = keys.find((k) => k.id === authorKeyId) ?? null;
   const authorPubkey = authorKey?.pubkey ?? fallbackPubkey;
+  const authorPubkeyRef = useRef(authorPubkey);
+  authorPubkeyRef.current = authorPubkey;
   const modelKey = keys.find((k) => k.id === modelKeyId) ?? null;
   const modelPubkey = modelKey?.pubkey ?? fallbackPubkey;
   // Hand the debounced auto-save a resolver for the AUTHOR key's secret, so
@@ -9987,7 +10027,7 @@ function App() {
     modelOperationControllerRef.current!.invalidate();
     setApprovedRequestHash(null);
     setInspectPrepared({});
-  }, [folder?.id, files, uiFocus, scope, shielded, providers, modelPubkey, opLenses]);
+  }, [folder?.id, files, uiFocus, scope, shielded, providers, authorPubkey, modelPubkey, opLenses]);
 
   function recordModelLessonResult(prepared: PreparedOperation, response: string): void {
     const lesson = modelLessonResume;
@@ -10081,7 +10121,9 @@ function App() {
     const sel = view.state.selection.main;
     const hasSel = sel.from !== sel.to;
     // Extend: seed from selection, else doc tail (matches extendLLM).
-    const seed = hasSel ? view.state.sliceDoc(sel.from, sel.to) : doc.slice(-4000);
+    const seedFrom = hasSel ? sel.from : Math.max(0, doc.length - 4000);
+    const seedTo = hasSel ? sel.to : doc.length;
+    const seed = view.state.sliceDoc(seedFrom, seedTo);
     // Stir: gather commands + loose prose + anchor count over the selection
     // (or whole doc), mirroring shakeLLM.
     const stirText = hasSel ? view.state.sliceDoc(sel.from, sel.to) : doc;
@@ -10091,8 +10133,8 @@ function App() {
     const anchorCount = [...iterBrackets(stirText)].length;
     const settlePrompt = encodeSettleAnchors(stirText).promptText;
     return {
-      extend: { seed, hasSelection: hasSel, rangeFrom: hasSel ? sel.to : doc.length, rangeTo: hasSel ? sel.to : doc.length },
-      settle: { loose: settlePrompt, rangeFrom: hasSel ? sel.from : 0, rangeTo: hasSel ? sel.to : doc.length },
+      extend: { seed, hasSelection: hasSel, rangeFrom: hasSel ? sel.to : doc.length, rangeTo: hasSel ? sel.to : doc.length, sourceFrom: seedFrom, sourceTo: seedTo },
+      settle: { loose: settlePrompt, rangeFrom: hasSel ? sel.from : 0, rangeTo: hasSel ? sel.to : doc.length, sourceFrom: hasSel ? sel.from : 0, sourceTo: hasSel ? sel.to : doc.length },
       stir: { loose, anchorCount, commands: cmds.map((c) => c.command), rangeFrom: hasSel ? sel.from : 0, rangeTo: hasSel ? sel.to : doc.length },
       // Reply/Analyze relay-backed bodies are filled by openInspector.
       reply: { source: stirText },
@@ -10303,12 +10345,15 @@ function App() {
       const seed = hasSel
         ? view.state.sliceDoc(sel.from, sel.to)
         : view.state.doc.toString().slice(-4000);
+      const sourceFrom = hasSel ? sel.from : Math.max(0, view.state.doc.length - seed.length);
       const anchor = hasSel ? sel.to : view.state.doc.length;
       const inputs: OpInputs = {
         seed,
         hasSelection: hasSel,
         rangeFrom: anchor,
         rangeTo: anchor,
+        sourceFrom,
+        sourceTo: anchor,
       };
       const { prepared, result } = await modelOperationControllerRef.current!.executeApproved({
         panelIndex: idx,
@@ -10325,11 +10370,16 @@ function App() {
         onStale: (recovery) => setStaleModelResult(recovery),
         apply: (response, approved) => {
           const insertAt = approved.operationInputs.rangeFrom ?? anchor;
-          const prefix = insertAt > 0 && view.state.doc.sliceString(insertAt - 1, insertAt) !== "\n"
-            ? "\n"
-            : "";
+          const authoring = approved.traceAuthoring;
+          if (!authoring) throw new Error("Extend trace-authoring preparation is missing");
+          const changes = buildAcceptedExtendChanges(
+            authoring,
+            approved.contextSnapshot.target.body,
+            insertAt,
+            response,
+          );
           view.dispatch({
-            changes: { from: insertAt, insert: prefix + response },
+            changes,
             effects: opVoiceEffect.of(pubkey),
           });
         },
@@ -10400,6 +10450,8 @@ function App() {
         loose: encoded.promptText,
         rangeFrom: from,
         rangeTo: to,
+        sourceFrom: from,
+        sourceTo: to,
       };
       const { prepared, result } = await modelOperationControllerRef.current!.executeApproved({
         panelIndex: idx,
@@ -10412,7 +10464,9 @@ function App() {
         signal: controller.signal,
         onStale: (recovery) => setStaleModelResult(recovery),
         apply: (response, approved) => {
-          const next = restoreSettleAnchors(response, encoded.anchors);
+          const authoring = approved.traceAuthoring;
+          if (!authoring) throw new Error("Settle trace-authoring preparation is missing");
+          const next = validateTraceAuthoringResult(authoring, response);
           if (next === text) return;
           view.dispatch({
             changes: {

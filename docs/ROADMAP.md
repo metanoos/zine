@@ -52,19 +52,28 @@ Already built:
   durable operation grouping, explicit folder/Root Step, and derived Replay
   collapse;
 - prepared direct MODEL operations with approval, stale-result protection,
-  current file/folder text, and structured process history; and
+  current file/folder text, and structured process history;
+- the initial shared `@zine/trace-context` authoring-syntax kernel, compatibility
+  fixtures, golden parser/compiler cases, and generated scale corpus;
+- a desktop Extend/Settle adapter with exact current-session manual-origin
+  authority, protected-output validation, and accepted-success cleanup;
+- a read-only trace-context Inspector presentation for prepared operations;
+- a preregistered writing-outcome study and operational scoring rubric; and
 - a preregistered narration study showing a narrow process-description effect.
 
-Not yet built as one system: a shared trace-context package, task-specific
-selection, inspectable evidence records, corrections, scoped memory, universal
-directive authority, durable result-to-context binding, writing-outcome
-evaluation, or equivalent desktop/MCP rendering. Fixed cross-runtime folder
-vectors and explicit crash-boundary real-relay recovery fixtures remain
-hardening work for the recursive checkpoint cut.
+Not yet built as one system: task-specific evidence selection and rendering,
+cross-press manifest parity, Inspector exclusions/corrections/promotion,
+persisted directive authority and durable consumption receipts, scoped memory,
+durable result-to-context binding, writing-outcome evaluation, or complete
+desktop/MCP operation coverage. Fixed cross-runtime folder vectors and explicit
+crash-boundary real-relay recovery fixtures remain hardening work for the
+recursive checkpoint cut.
 
 ## Phase 0: declare and preregister
 
-This phase is active now.
+The declaration, preregistration, and scoring artifacts are present. Keep them
+aligned as implementation evidence changes; writing-outcome results do not yet
+exist.
 
 1. Make the product hierarchy explicit in README, Product, Design, Roadmap,
    Evidence, and Company: trace-aware writing is the daily loop; accountable
@@ -83,6 +92,11 @@ describe the same claim without presenting conviction as evidence.
 
 ## Phase 1: shared deterministic context runtime
 
+This phase is in progress. The authoring-syntax kernel, compatibility baseline,
+golden cases, and scale corpus exist; the task-specific evidence selector,
+rendered manifest contract, correction/preference stores, cancellation and
+quota boundaries, and desktop/MCP parity do not.
+
 Harden the landed recursive-zine cut while building the shared runtime:
 
 - add fixed cross-runtime folder-chain vectors to the conformance corpus;
@@ -93,6 +107,7 @@ Harden the landed recursive-zine cut while building the shared runtime:
   originating gesture.
 
 Build a non-normative package used by every press and provider adapter:
+
 
 - closed operation, evidence, correction, preference, directive, error, and
   Inspector contracts;
@@ -116,6 +131,13 @@ rendered bytes from the same context fixtures, including nil, empty, malformed,
 oversized, Unicode, cancelled, and invalid-trace cases.
 
 ## Phase 2: one complete desktop vertical slice
+
+This phase has an initial read-only dogfood slice: Extend and Settle prepare
+through the shared syntax kernel, and Prompt Inspector can present the frozen
+boundary. Exclusion, correction, explicit promotion, persisted authority,
+durable receipts, and crash recovery are still required before the vertical
+slice is complete.
+
 
 Integrate Extend and Settle first because continuation and revision expose
 different ways trace may help. Preserve today's Stir behavior through the new
