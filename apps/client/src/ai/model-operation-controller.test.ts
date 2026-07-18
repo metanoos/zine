@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { renderContextBlock } from "./context-block.js";
 import { contentFingerprint, createContextSnapshot } from "./context-snapshot.js";
+import type { CompletePreparedRequest } from "./llm.js";
 import { ModelOperationController } from "./model-operation-controller.js";
 import type { CurrentModelTarget } from "./model-operation-executor.js";
 import type { ProviderConfig } from "./models-store.js";
@@ -138,7 +139,7 @@ for (const operation of ["extend", "settle", "stir", "reply", "analyze"] as cons
     const approved = await subject.controller.prepare(prepareInput(operation));
     subject.controller.approve(approved);
     const events: string[] = [];
-    let transported: PreparedOperation | null = null;
+    let transported: CompletePreparedRequest | null = null;
     let applied: PreparedOperation | null = null;
 
     const execution = await subject.controller.executeApproved({

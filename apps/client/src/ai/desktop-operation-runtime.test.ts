@@ -29,7 +29,10 @@ import {
 } from "./desktop-operation-runtime.js";
 import { completePrepared } from "./llm.js";
 import type { ProviderConfig } from "./models-store.js";
-import type { PreparedOperation } from "./prepared-operation.js";
+import {
+  computePreparedOperationRequestHashV1,
+  type PreparedOperation,
+} from "./prepared-operation.js";
 import { providerProfileFingerprint } from "./provider-fingerprint.js";
 
 const BASE_TIME = 10_000;
@@ -108,42 +111,50 @@ async function preparedFor(
   targetFixture = target(),
   providerFixture = provider(),
   messageTransform: (rendered: string) => string = (rendered) => `Before\n${rendered}\nAfter`,
+  identity: { requestId?: string; createdAt?: number } = {},
 ): Promise<PreparedOperation> {
   const selection = await selectionFor(targetFixture);
+  const requestId = identity.requestId ?? `request-${targetFixture.path}`;
+  const createdAt = identity.createdAt ?? BASE_TIME;
+  const operationInputs = Object.freeze({
+    seed: targetFixture.text,
+    hasSelection: false,
+    rangeFrom: targetFixture.text.length,
+    rangeTo: targetFixture.text.length,
+    sourceFrom: 0,
+    sourceTo: targetFixture.text.length,
+  });
+  const messages = Object.freeze([
+    { role: "system" as const, content: "Continue the document." },
+    { role: "user" as const, content: messageTransform(selection.renderedContext) },
+  ]);
+  const providerFingerprint = providerProfileFingerprint(providerFixture);
+  const targetRevision = {
+    folderId: targetFixture.folderId,
+    path: targetFixture.path,
+    traceId: targetFixture.traceId,
+    headId: targetFixture.headId,
+    contentHash: targetFixture.contentHash,
+  };
+  const dependencyFingerprint = HASH(`dependency-${targetFixture.path}`);
   return Object.freeze({
     version: 1,
-    requestId: `request-${targetFixture.path}`,
+    requestId,
     operation: "extend",
-    operationInputs: Object.freeze({
-      seed: targetFixture.text,
-      hasSelection: false,
-      rangeFrom: targetFixture.text.length,
-      rangeTo: targetFixture.text.length,
-      sourceFrom: 0,
-      sourceTo: targetFixture.text.length,
-    }),
+    operationInputs,
     contextSnapshot: {} as PreparedOperation["contextSnapshot"],
     contextFingerprint: HASH(`context-${targetFixture.path}`),
     traceAuthoring: null,
     traceContextSelection: selection,
-    messages: Object.freeze([
-      { role: "system" as const, content: "Continue the document." },
-      { role: "user" as const, content: messageTransform(selection.renderedContext) },
-    ]),
+    messages,
     providerId: providerFixture.id,
-    providerFingerprint: providerProfileFingerprint(providerFixture),
-    targetRevision: {
-      folderId: targetFixture.folderId,
-      path: targetFixture.path,
-      traceId: targetFixture.traceId,
-      headId: targetFixture.headId,
-      contentHash: targetFixture.contentHash,
-    },
+    providerFingerprint,
+    targetRevision,
     provenance: Object.freeze({
       modelVoicePubkey: "a".repeat(64),
       lensId: "default" as const,
       voicePromptHash: HASH("voice"),
-      dependencyFingerprint: HASH(`dependency-${targetFixture.path}`),
+      dependencyFingerprint,
     }),
     budget: Object.freeze({
       maxBytes: 32_768,
@@ -152,14 +163,27 @@ async function preparedFor(
       contextBytes: selection.manifest.budget.usedRenderedBytes,
       promptLayerBytes: 1_024,
     }),
-    preparedRequestHash: HASH(`upstream-${targetFixture.path}`),
-    createdAt: BASE_TIME,
+    preparedRequestHash: computePreparedOperationRequestHashV1({
+      requestId,
+      operation: "extend",
+      operationInputs,
+      messages,
+      traceAuthoring: null,
+      providerFingerprint,
+      targetRevision,
+      dependencyFingerprint,
+      createdAt,
+    }),
+    createdAt,
   });
 }
 
 class MemoryRepository implements DesktopOperationRepositoryV1 {
   readonly records = new Map<string, DesktopOperationEnvelopeV1>();
   readonly events: string[] = [];
+  expiryNowMs: () => number = () => BASE_TIME;
+  listPageCalls = 0;
+  maxPageRecordsReturned = 0;
 
   async create(envelope: DesktopOperationEnvelopeV1): Promise<"created" | "exists"> {
     const id = mapKey(keyFor(envelope));
@@ -187,8 +211,36 @@ class MemoryRepository implements DesktopOperationRepositoryV1 {
     return this.records.get(mapKey(key)) ?? null;
   }
 
-  async list(): Promise<readonly DesktopOperationEnvelopeV1[]> {
-    return [...this.records.values()];
+  async listPage(cursor: string | null, limit: number) {
+    this.listPageCalls += 1;
+    const remaining = [...this.records.entries()]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .filter(([id]) => cursor === null || id > cursor);
+    const page = remaining.slice(0, limit);
+    this.maxPageRecordsReturned = Math.max(this.maxPageRecordsReturned, page.length);
+    return {
+      records: page.map(([, envelope]) => envelope),
+      nextCursor: remaining.length > page.length ? page.at(-1)![0] : null,
+    };
+  }
+
+  async deleteExpired(limit: number) {
+    const nowMs = this.expiryNowMs();
+    const due = [...this.records.entries()]
+      .filter(([, envelope]) => envelope.retention.deleteByMs <= nowMs)
+      .sort(([leftId, left], [rightId, right]) => (
+        left.retention.deleteByMs - right.retention.deleteByMs
+        || (leftId < rightId ? -1 : leftId > rightId ? 1 : 0)
+      ));
+    let deleted = 0;
+    for (const [, envelope] of due.slice(0, limit)) {
+      const result = await this.delete(keyFor(envelope), hashDesktopOperationEnvelopeV1(envelope));
+      if (result === "deleted") deleted += 1;
+    }
+    const hasMore = [...this.records.values()].some(
+      (envelope) => envelope.retention.deleteByMs <= nowMs,
+    );
+    return { deleted, hasMore };
   }
 
   async delete(
@@ -544,9 +596,9 @@ test("reconstruction handles every durable crash window without replaying provid
   }));
   const recovery = await recoveredRuntime.recover();
   assert.equal(
-    recovery.failures.length,
+    recovery.failureCount,
     0,
-    recovery.failures.map(({ key, error }) => `${key.attemptId}: ${String(error)}`).join("\n"),
+    recovery.failureSamples.map(({ key, error }) => `${key.attemptId}: ${String(error)}`).join("\n"),
   );
   assert.equal((await recoveredRuntime.load(keyFor(preparedEnvelope)))!.lifecycle.status, "prepared");
   assert.equal((await recoveredRuntime.load(keyFor(approvedEnvelope)))!.lifecycle.status, "approved");
@@ -704,7 +756,7 @@ test("apply-before-receipt crash is recovered through an idempotent artifact app
     applyArtifact,
   }));
   const recovery = await reconstructed.recover();
-  assert.equal(recovery.failures.length, 0);
+  assert.equal(recovery.failureCount, 0);
   const recovered = await reconstructed.load(keyFor(ready));
   assert.ok(recovered!.artifactReceipt);
   assert.equal(calls, 2);
@@ -840,6 +892,64 @@ test("same-target acceptance serializes recheck through apply so the loser is re
   assert.equal(applyCalls, 1);
 });
 
+test("focus-only stale retry requires fresh preparation while preserving byte-identical target linkage", async () => {
+  const repository = new MemoryRepository();
+  const focusTarget = target("focus-only-stale-retry");
+  const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    readCurrentTarget: (captured) => ({ ...captured, focused: false }),
+  }));
+  const ready = await responseReady(runtime, focusTarget, provider(), {
+    operationId: "operation-focus-only-stale-retry",
+    attemptId: "attempt-focus-only-stale-original",
+  });
+  const stale = await runtime.accept(keyFor(ready));
+  assert.equal(stale.status, "stale");
+  assert.equal(stale.envelope.fault!.stage, "review");
+
+  const freshCreatedAt = stale.envelope.updatedAtMs + 1;
+  const priorPrepared = await preparedFor(focusTarget);
+  const cosmeticallyRelabeled: PreparedOperation = {
+    ...priorPrepared,
+    requestId: "request-focus-only-cosmetic-relabel",
+    createdAt: freshCreatedAt,
+  };
+  await assert.rejects(
+    () => runtime.retry(keyFor(stale.envelope), {
+      attemptId: "attempt-focus-only-cosmetic-relabel",
+      createdAtMs: freshCreatedAt,
+      freshPreparation: {
+        prepared: cosmeticallyRelabeled,
+        provider: provider(),
+        maxOutputTokens: 1_024,
+      },
+    }),
+    /new prepared request identity/,
+  );
+  const freshPrepared = await preparedFor(focusTarget, provider(), undefined, {
+    requestId: "request-focus-only-stale-retry-new",
+    createdAt: freshCreatedAt,
+  });
+  const retry = await runtime.retry(keyFor(stale.envelope), {
+    attemptId: "attempt-focus-only-stale-retry-new",
+    createdAtMs: freshCreatedAt,
+    freshPreparation: {
+      prepared: freshPrepared,
+      provider: provider(),
+      maxOutputTokens: 1_024,
+    },
+  });
+
+  assert.equal(retry.operationId, stale.envelope.operationId);
+  assert.equal(retry.attempt.retryOfAttemptId, stale.envelope.attempt.attemptId);
+  assert.equal(retry.attempt.possibleDuplicateAcknowledgedAtMs, null);
+  assert.equal(retry.prepared.requestId, freshPrepared.requestId);
+  assert.notEqual(retry.prepared.requestId, stale.envelope.prepared.requestId);
+  assert.deepEqual(retry.prepared.targetRevision, stale.envelope.prepared.targetRevision);
+  assert.equal(retry.selectedContext.renderedContext, freshPrepared.traceContextSelection!.renderedContext);
+  assert.equal(retry.appliedTransitions.length, 0);
+});
+
 test("a stale compare-and-set becomes a durable reviewable state and never reapplies on recovery", async () => {
   const repository = new MemoryRepository();
   let applyCalls = 0;
@@ -855,7 +965,8 @@ test("a stale compare-and-set becomes a durable reviewable state and never reapp
     },
   });
   const runtime = new DesktopOperationRuntimeV1(dependencies);
-  const ready = await responseReady(runtime, target("stale-cas"));
+  const staleTarget = target("stale-cas");
+  const ready = await responseReady(runtime, staleTarget);
   const accepted = await runtime.accept(keyFor(ready));
   assert.equal(accepted.status, "stale");
   assert.equal(accepted.envelope.lifecycle.status, "stale");
@@ -871,14 +982,33 @@ test("a stale compare-and-set becomes a durable reviewable state and never reapp
     presentResult: dependencies.presentResult,
   }));
   const recovery = await reconstructed.recover();
-  assert.equal(recovery.failures.length, 0);
+  assert.equal(recovery.failureCount, 0);
   assert.equal(applyCalls, 1, "stale recovery must not retry the artifact mutation");
   assert.deepEqual(presentations.at(-1), { status: "stale", reason: "recovery" });
+  await assert.rejects(
+    () => reconstructed.retry(keyFor(ready), {
+      attemptId: "attempt-stale-missing-preparation",
+    }),
+    /stale retry requires a fresh prepared operation/,
+  );
+  const freshCreatedAt = accepted.envelope.updatedAtMs + 1;
+  const freshPrepared = await preparedFor(staleTarget, provider(), undefined, {
+    requestId: "request-stale-safe-retry",
+    createdAt: freshCreatedAt,
+  });
   const retry = await reconstructed.retry(keyFor(ready), {
     attemptId: "attempt-stale-safe-retry",
+    createdAtMs: freshCreatedAt,
+    freshPreparation: {
+      prepared: freshPrepared,
+      provider: provider(),
+      maxOutputTokens: 1_024,
+    },
   });
   assert.equal(retry.attempt.retryOfAttemptId, ready.attempt.attemptId);
   assert.equal(retry.attempt.possibleDuplicateAcknowledgedAtMs, null);
+  assert.equal(retry.prepared.requestId, freshPrepared.requestId);
+  assert.equal(retry.prepared.targetRevision.contentHash, staleTarget.contentHash);
 });
 
 test("linked retry requires acknowledgement only when the prior dispatch is ambiguous", async () => {
@@ -947,6 +1077,7 @@ test("linked retry requires acknowledgement only when the prior dispatch is ambi
 test("recovery deletes every expired envelope before any surviving side effect", async () => {
   const repository = new MemoryRepository();
   const clock = new MutableClock();
+  repository.expiryNowMs = () => clock.value;
   const setup = new DesktopOperationRuntimeV1(runtimeDependencies({ repository, clock }));
   let expired = await persist(setup, target("expired"), provider(), {
     operationId: "operation-expired-0001",
@@ -982,9 +1113,32 @@ test("recovery deletes every expired envelope before any surviving side effect",
   assert.equal(await recovering.load(keyFor(expired)), null);
   assert.ok(await recovering.load(keyFor(live)));
   assert.equal(transportCalls, 0);
-  assert.deepEqual(result.deleted, [keyFor(expired)]);
+  assert.equal(result.deletedCount, 1);
   assert.equal(events[0], `delete:${expired.attempt.attemptId}`);
   assert.ok(events.indexOf("present") > events.indexOf(`delete:${expired.attempt.attemptId}`));
+});
+
+test("recovery processes more than one repository page without accumulating envelope snapshots", async () => {
+  const repository = new MemoryRepository();
+  const setup = new DesktopOperationRuntimeV1(runtimeDependencies({ repository }));
+  for (let index = 0; index < 19; index += 1) {
+    await persist(setup, target(`paged-recovery-${index}`), provider(), {
+      operationId: `operation-paged-recovery-${String(index).padStart(2, "0")}`,
+      attemptId: `attempt-paged-recovery-${String(index).padStart(2, "0")}`,
+    });
+  }
+  repository.listPageCalls = 0;
+  repository.maxPageRecordsReturned = 0;
+
+  const recovery = await new DesktopOperationRuntimeV1(
+    runtimeDependencies({ repository }),
+  ).recover();
+
+  assert.equal(recovery.deletedCount, 0);
+  assert.equal(recovery.recoveredCount, 19);
+  assert.equal(recovery.failureCount, 0);
+  assert.equal(repository.listPageCalls, 3);
+  assert.equal(repository.maxPageRecordsReturned, 8);
 });
 
 test("privacy deadlines delete and block direct dispatch and acceptance", async () => {
@@ -1073,7 +1227,7 @@ test("recovery refreshes the deadline immediately before a resumed side effect",
 
   assert.equal(transportCalls, 0);
   assert.equal(await recovering.load(keyFor(pending)), null);
-  assert.deepEqual(result.deleted, [keyFor(pending)]);
+  assert.equal(result.deletedCount, 1);
 });
 
 test("expiry deletion uses envelope CAS and never deletes a newer record at the same key", async () => {
@@ -1109,7 +1263,7 @@ test("expiry deletion uses envelope CAS and never deletes a newer record at the 
 
   const result = await recovering.recover();
 
-  assert.deepEqual(result.deleted, []);
+  assert.equal(result.deletedCount, 0);
   assert.equal(
     hashDesktopOperationEnvelopeV1((await recovering.load(keyFor(expired)))!),
     hashDesktopOperationEnvelopeV1(replacement),

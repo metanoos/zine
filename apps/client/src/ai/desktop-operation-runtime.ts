@@ -3,6 +3,7 @@ import {
   createDesktopOperationEnvelopeV1,
   hashCanonicalV1,
   hashDesktopOperationEnvelopeV1,
+  type CreateDesktopOperationEnvelopeV1Input,
   type DesktopOperationEnvelopeV1,
   type DesktopPreparedRequestV1,
   type OperationFaultCodeV1,
@@ -22,10 +23,23 @@ export interface DesktopOperationKeyV1 {
   attemptId: string;
 }
 
+export interface DesktopOperationRepositoryPageV1 {
+  records: readonly DesktopOperationEnvelopeV1[];
+  /** Opaque, repository-stable cursor for the next page. */
+  nextCursor: string | null;
+}
+
+export interface DesktopOperationExpiryBatchV1 {
+  deleted: number;
+  hasMore: boolean;
+}
+
 /**
  * Vault-native implementations own cloning, validation, encryption, and
  * transactionality. `replace` is an optimistic compare-and-set over the exact
- * previously observed envelope identity, not merely its timestamp.
+ * previously observed envelope identity, not merely its timestamp. Recovery
+ * pages must make forward progress without returning a record twice, and
+ * `deleteExpired` must use the repository's authoritative clock.
  */
 export interface DesktopOperationRepositoryV1 {
   create(envelope: DesktopOperationEnvelopeV1): Promise<"created" | "exists">;
@@ -35,7 +49,8 @@ export interface DesktopOperationRepositoryV1 {
     envelope: DesktopOperationEnvelopeV1,
   ): Promise<"replaced" | "conflict" | "missing">;
   load(key: DesktopOperationKeyV1): Promise<DesktopOperationEnvelopeV1 | null>;
-  list(): Promise<readonly DesktopOperationEnvelopeV1[]>;
+  listPage(cursor: string | null, limit: number): Promise<DesktopOperationRepositoryPageV1>;
+  deleteExpired(limit: number): Promise<DesktopOperationExpiryBatchV1>;
   delete(
     key: DesktopOperationKeyV1,
     expectedEnvelopeSha256: string,
@@ -137,6 +152,11 @@ export interface RetryDesktopOperationCommandV1 {
   createdAtMs?: number;
   retainForMs?: number;
   possibleDuplicateAcknowledged?: true;
+  /** Required for stale attempts; captured anew from the current editor state. */
+  freshPreparation?: Pick<
+    PersistApprovedDesktopExtendInputV1,
+    "prepared" | "provider" | "maxOutputTokens"
+  >;
 }
 
 export type DesktopOperationAcceptResultV1 =
@@ -144,9 +164,11 @@ export type DesktopOperationAcceptResultV1 =
   | { status: "stale"; envelope: DesktopOperationEnvelopeV1 };
 
 export interface DesktopOperationRecoveryResultV1 {
-  deleted: readonly DesktopOperationKeyV1[];
-  recovered: readonly DesktopOperationKeyV1[];
-  failures: readonly { key: DesktopOperationKeyV1; error: unknown }[];
+  deletedCount: number;
+  recoveredCount: number;
+  failureCount: number;
+  /** Bounded diagnostic samples; `failureCount` is the authoritative total. */
+  failureSamples: readonly { key: DesktopOperationKeyV1; error: unknown }[];
 }
 
 export type DesktopOperationTransportFailureCertaintyV1 =
@@ -182,6 +204,13 @@ export class DesktopOperationRuntimeError extends Error {
   }
 }
 
+class DesktopOperationExpiredError extends DesktopOperationRuntimeError {
+  constructor() {
+    super("operation envelope reached its privacy deadline and was deleted");
+    this.name = "DesktopOperationExpiredError";
+  }
+}
+
 /**
  * Hash only transport/output-affecting public configuration. Credential
  * references, credential-presence flags, labels, and preset bookkeeping are
@@ -213,6 +242,23 @@ export function createApprovedDesktopExtendEnvelopeV1(
     "prepared" | "provider" | "maxOutputTokens" | "operationId" | "attemptId" | "createdAtMs"
   >> & Pick<PersistApprovedDesktopExtendInputV1, "retainForMs">,
 ): DesktopOperationEnvelopeV1 {
+  return createDesktopOperationEnvelopeV1({
+    operationId: input.operationId,
+    attemptId: input.attemptId,
+    ...bindApprovedDesktopExtendPreparationV1(input),
+    createdAtMs: input.createdAtMs,
+    ...(input.retainForMs === undefined ? {} : { retainForMs: input.retainForMs }),
+  });
+}
+
+function bindApprovedDesktopExtendPreparationV1(
+  input: Pick<PersistApprovedDesktopExtendInputV1,
+    "prepared" | "provider" | "maxOutputTokens"
+  >,
+): Pick<
+  CreateDesktopOperationEnvelopeV1Input,
+  "prepared" | "provider" | "selectedContext" | "maxOutputTokens"
+> {
   const { prepared, provider } = input;
   if (prepared.operation !== "extend") fail("durable Phase 2 execution supports Extend only");
   const selected = prepared.traceContextSelection;
@@ -222,9 +268,7 @@ export function createApprovedDesktopExtendEnvelopeV1(
     fail("provider configuration changed after request approval");
   }
   const placement = locateUniqueUserContext(prepared, selected.renderedContext);
-  return createDesktopOperationEnvelopeV1({
-    operationId: input.operationId,
-    attemptId: input.attemptId,
+  return {
     prepared,
     provider: {
       protocol: provider.protocol,
@@ -238,10 +282,11 @@ export function createApprovedDesktopExtendEnvelopeV1(
       placement,
     },
     maxOutputTokens: input.maxOutputTokens,
-    createdAtMs: input.createdAtMs,
-    ...(input.retainForMs === undefined ? {} : { retainForMs: input.retainForMs }),
-  });
+  };
 }
+
+const RECOVERY_PAGE_LIMIT = 8;
+const RECOVERY_FAILURE_SAMPLE_LIMIT = 8;
 
 export class DesktopOperationRuntimeV1 {
   private readonly operationQueue = new KeyedSerialQueue();
@@ -369,60 +414,102 @@ export class DesktopOperationRuntimeV1 {
         ...(command.possibleDuplicateAcknowledged === undefined
           ? {}
           : { possibleDuplicateAcknowledged: command.possibleDuplicateAcknowledged }),
+        ...(command.freshPreparation === undefined
+          ? {}
+          : {
+              freshPreparation: bindApprovedDesktopExtendPreparationV1(
+                command.freshPreparation,
+              ),
+            }),
       });
+      if (this.now() >= next.retention.deleteByMs) {
+        fail("cannot persist a retry after its privacy deadline");
+      }
       const result = await this.dependencies.repository.create(next);
-      if (result === "created") return next;
+      if (result === "created") {
+        await this.assertLive(next);
+        return next;
+      }
       const existing = await this.dependencies.repository.load(keyFor(next));
       if (
         existing
         && hashDesktopOperationEnvelopeV1(existing) === hashDesktopOperationEnvelopeV1(next)
-      ) return existing;
+      ) {
+        await this.assertLive(existing);
+        return existing;
+      }
       fail(`retry attempt ${next.attempt.attemptId} already exists with different bytes`);
     });
   }
 
   /**
-   * Recovery is deliberately two-phase. Every expired record in the initial
-   * snapshot is deleted and awaited before any provider, review, or apply work.
+   * Recovery is deliberately two-phase and bounded. The repository drains all
+   * expired records using its authoritative clock before pages are loaded; each
+   * surviving record is still deadline-gated immediately before any side effect.
    */
   async recover(): Promise<DesktopOperationRecoveryResultV1> {
-    const snapshot = [...await this.dependencies.repository.list()];
-    const deleted: DesktopOperationKeyV1[] = [];
-    const deletedKeys = new Set<string>();
-    for (const envelope of snapshot) {
-      const key = keyFor(envelope);
-      await this.withOperation(key, async () => {
-        const current = await this.dependencies.repository.load(key);
-        if (current && await this.deleteIfExpired(current)) {
-          recordDeletedKey(key, deleted, deletedKeys);
-        }
-      });
-    }
-
-    const recovered: DesktopOperationKeyV1[] = [];
-    const failures: Array<{ key: DesktopOperationKeyV1; error: unknown }> = [];
-    for (const candidate of snapshot) {
-      const key = keyFor(candidate);
-      if (deletedKeys.has(operationQueueKey(key))) continue;
-      try {
-        await this.withOperation(key, async () => {
-          const current = await this.dependencies.repository.load(key);
-          if (!current) return;
-          if (await this.deleteIfExpired(current)) {
-            recordDeletedKey(key, deleted, deletedKeys);
-            return;
-          }
-          await this.recoverEnvelope(current);
-          recovered.push(key);
-        });
-      } catch (error) {
-        failures.push({ key, error });
+    let deletedCount = 0;
+    while (true) {
+      const batch = await this.dependencies.repository.deleteExpired(RECOVERY_PAGE_LIMIT);
+      if (!Number.isSafeInteger(batch.deleted) || batch.deleted < 0) {
+        fail("operation repository returned an invalid expired-delete count");
+      }
+      deletedCount = addRecoveryCount(deletedCount, batch.deleted);
+      if (!batch.hasMore) break;
+      if (batch.deleted === 0) {
+        fail("operation repository made no progress while deleting expired records");
       }
     }
+
+    let recoveredCount = 0;
+    let failureCount = 0;
+    const failureSamples: Array<{ key: DesktopOperationKeyV1; error: unknown }> = [];
+    let cursor: string | null = null;
+    while (true) {
+      const page = await this.dependencies.repository.listPage(cursor, RECOVERY_PAGE_LIMIT);
+      if (page.records.length > RECOVERY_PAGE_LIMIT) {
+        fail("operation repository returned an oversized recovery page");
+      }
+      if (page.nextCursor !== null && page.records.length === 0) {
+        fail("operation repository made no progress while listing recovery records");
+      }
+      if (page.nextCursor !== null && page.nextCursor === cursor) {
+        fail("operation repository repeated a recovery cursor");
+      }
+      for (const candidate of page.records) {
+        const key = keyFor(candidate);
+        try {
+          await this.withOperation(key, async () => {
+            const current = await this.dependencies.repository.load(key);
+            if (!current) return;
+            if (await this.deleteIfExpired(current)) {
+              deletedCount = addRecoveryCount(deletedCount, 1);
+              return;
+            }
+            await this.recoverEnvelope(current);
+            recoveredCount = addRecoveryCount(recoveredCount, 1);
+          });
+        } catch (error) {
+          if (error instanceof DesktopOperationExpiredError) {
+            deletedCount = addRecoveryCount(deletedCount, 1);
+            continue;
+          }
+          failureCount = addRecoveryCount(failureCount, 1);
+          if (failureSamples.length < RECOVERY_FAILURE_SAMPLE_LIMIT) {
+            failureSamples.push({ key, error });
+          }
+        }
+      }
+      if (page.nextCursor === null) break;
+      cursor = page.nextCursor;
+    }
     return Object.freeze({
-      deleted: freezeKeys(deleted),
-      recovered: freezeKeys(recovered),
-      failures: Object.freeze(failures.map((entry) => Object.freeze({ ...entry }))),
+      deletedCount,
+      recoveredCount,
+      failureCount,
+      failureSamples: Object.freeze(
+        failureSamples.map((entry) => Object.freeze({ key: Object.freeze({ ...entry.key }), error: entry.error })),
+      ),
     });
   }
 
@@ -750,7 +837,7 @@ export class DesktopOperationRuntimeV1 {
 
   private async assertLive(envelope: DesktopOperationEnvelopeV1): Promise<void> {
     if (await this.deleteIfExpired(envelope)) {
-      fail("operation envelope reached its privacy deadline and was deleted");
+      throw new DesktopOperationExpiredError();
     }
   }
 
@@ -886,19 +973,10 @@ function sameTargetRevision(
   );
 }
 
-function recordDeletedKey(
-  key: DesktopOperationKeyV1,
-  deleted: DesktopOperationKeyV1[],
-  deletedKeys: Set<string>,
-): void {
-  const id = operationQueueKey(key);
-  if (deletedKeys.has(id)) return;
-  deletedKeys.add(id);
-  deleted.push(key);
-}
-
-function freezeKeys(keys: readonly DesktopOperationKeyV1[]): readonly DesktopOperationKeyV1[] {
-  return Object.freeze(keys.map((key) => Object.freeze({ ...key })));
+function addRecoveryCount(current: number, increment: number): number {
+  const next = current + increment;
+  if (!Number.isSafeInteger(next)) fail("operation recovery count exceeded the safe integer limit");
+  return next;
 }
 
 class KeyedSerialQueue {
