@@ -312,9 +312,11 @@ supply from recently reachable keys, and vetted supply whose keys pass the
 reader's declared local corpus policy.
 
 Popular coin matches carry little information; several independently shared,
-moderately rare coins among vetted keys are more discriminating. Kademlia may
-return candidate pointers, but it does not provide trust, reputation, or global
-popularity.
+moderately rare coins among vetted keys are more discriminating. Coins are one
+user-facing opt-in covering minting, citation, indexing, and rendezvous.
+Kademlia is the under-the-hood routing component, not a separate opt-in, and
+remains under implementation. Its results may return candidate pointers, but
+they do not provide trust, reputation, or global popularity.
 
 Corpus vetting may examine internal coherence, longitudinal change, AUTHOR-only
 versus AI-attributed spans, process patterns, and conditional compression.

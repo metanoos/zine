@@ -95,8 +95,10 @@ peers, but local authoring never requires them.
 
 Underneath, Zine uses Nostr events over local and configured remote WebSocket
 relays: SHA-256 ids, Schnorr signatures, and the seven NIP-01 fields. Tor can
-expose a private relay. Global peer discovery remains planned and is dormant
-until real usage produces enough citation density to justify it.
+expose a private relay. Coins are the user-facing opt-in for minting, citation,
+indexing, and rendezvous together. Kademlia is the internal routing component,
+not a separate opt-in, and remains under implementation; global discovery also
+needs operator-provided super-peers and real citation density.
 
 ---
 
@@ -221,11 +223,12 @@ mint, cite, tag, fork, and merge.
 
 **Minting.** You select a passage of text and strike it into its own trace.
 `[[ a phrase ]]` is rewrite protection, not yet a trace — it shields the span
-from silent drift across LLM rounds. The minting pass steps a new file trace
-whose snapshot *is* that text, and rewrites the bracket to
-`[[ a phrase | nodeId ]]`. Now it's addressable forever. Minting captures
-what's there now; it doesn't invent a pre-mint history. Nothing cites without
-first being minted.
+from silent drift across LLM rounds. One explicit Mint Steps a new immutable
+file trace whose snapshot *is* that text, Publishes it, Attests it under the
+minter key, and rewrites the bracket to `[[ a phrase | nodeId ]]`. Only then
+is it a Coin, addressable forever. Minting captures what's there now; it
+doesn't invent a pre-mint history. Copying never mints, and nothing cites
+without first being minted.
 
 **Citing.** Once minted, a trace can be cited through one delta type with four
 roles:
@@ -377,8 +380,9 @@ trade is always reachability or privacy, never identity.
 
 A **super-peer** is an always-online relay holding a replica of *your published corpus*.
 It keeps cited traces reachable while your laptop is closed; it is not a
-discovery platform. Any NIP-01+NIP-33 relay suffices. OTS calendar hosting and
-DHT bootstrap remain planned extensions.
+discovery platform. Any NIP-01+NIP-33 relay suffices. OTS calendar hosting
+remains planned. Bootstrap configuration for the Coins package's Kademlia
+component is under implementation, and no bootstrap network is operated.
 
 Any NIP-01 relay that also implements parameterized-replaceable handling
 (NIP-33) is sufficient. There is no special relay class. For removal, the
@@ -397,27 +401,55 @@ other because their published traces cite coins with the same content. The
 recipient then evaluates the other signer's process evidence before deciding
 whether to admit that key.
 
+Coins are the only product opt-in in this flow. Enabling them covers Mint,
+Cite, Send-side indexing, and both mutual-peer and global rendezvous. The
+Kademlia details below explain the routing component inside that package, not
+a separately enabled feature.
+
 **A citation is always a trace edge.** `[[text]]` is local draft syntax. Mint
 first creates a trace; lowercase `q` then cites it. Inline brackets are
-explicit and bodyless tags are tacit, but both use the same edge. Planned
-global discovery derives `H = sha256(canonical(targetBody))` from a verified
+explicit and bodyless tags are tacit, but both use the same edge. Global
+discovery derives `H = sha256(canonical(targetBody))` from a verified
 target. `H` clusters independent mints; it is an index coordinate, not another
 citation type.
 
-**The planned DHT carries event pointers, not content or private addresses.** A
-Kademlia DHT would answer one question: *which published events cite content
-`H`?*
+**The DHT carries event pointers, not content or private addresses.** The
+Kademlia component is being implemented to answer one question: *which
+published events cite content `H`?*
 Each value is `{eventId, relayUrl}` for a signed carrying node on a
 stranger-readable relay. A querier fetches and verifies the carrying event,
 its `q`, and the target's `x` or body hash before evaluating the candidate.
-Private admission details are exchanged only after vetting. The DHT is
-designed but not implemented.
+Private admission details are exchanged only after vetting. The in-progress
+implementation still needs operator-provided super-peer bootstrap addresses.
+Its current configuration path is transactional: an unusable replacement is
+never left persisted with the prior node stopped.
+
+**The index is bounded and merge-safe.** The in-progress native component caps
+records at 12 KiB and 64 pointers. It validates remote keys, schemas,
+coordinates, and URLs before storage, keeps a disposable 1,024-record remote
+cache separate from capacity reserved for locally owned coordinates, and never
+lets a remote value evict an owned pointer. A Put makes an up-to-eight full
+closest-peer attempt, accepting a partial smaller-network result only after
+every discovered peer was attempted. Startup and twelve-hour republishing
+first Get and merge valid replicas; stale libp2p auto-publication is disabled.
 
 Two paths can produce a match. In the trust-bounded v1, a mutual peer who can
-read both chains sees the co-citation and brokers an introduction. The planned
-global DHT is an accelerator: publishing a carrying node to a
-stranger-readable relay would place its pointer under each verified target's
-`H`. Citation records the relation; Publish controls its reachability.
+read both chains sees the co-citation and brokers an introduction. With Coins
+enabled, the in-progress Kademlia path accelerates non-mutual discovery:
+publishing a carrying node to a stranger-readable relay places its pointer
+under each verified target's `H`. Every ordinary social `q` is processed in
+bounded batches rather than a fixed first-N slice. The signed carrying event
+stays in a durable retry outbox until all valid Coin citations are indexed,
+with retry backoff plus startup and network-recovery triggers. Citation records
+the relation; Publish controls its reachability, and an indexing failure never
+rolls Publish back.
+
+Relay verification is also bounded because a DHT pointer chooses an untrusted
+host. The in-progress reader requests exact ids, rejects unsolicited and
+oversized events, caps parallelism and total bytes, closes subscriptions and
+late WebSocket handshakes, and obeys caller cancellation plus a hard discovery
+deadline. Only events that still pass signature, citation, and Coin-hash
+verification become candidates.
 
 **The vet — process, not prose.** Fluent prose is easy to imitate, so the vet
 looks instead at the timestamped revision graph: anchors, edit timing, and the

@@ -126,7 +126,8 @@ Discussion is common; commitment is rare.
 
 Copied passages can be minted as immutable **coins** and cited by exact node
 id. Forking starts a proposal under a new owner's key; merging accepts chosen
-work into the receiving owner's chain.
+work into the receiving owner's chain. Coins are one user-facing opt-in:
+enabling them covers minting, citation, indexing, and rendezvous together.
 
 ## Sovereign by key, connected by citation
 
@@ -139,15 +140,17 @@ decides who may connect, read, or write. Reachability degrades before
 identity ever does: lose Tor and you lose metadata privacy, never your name.
 
 A **coin** is how strangers find each other. When a phrase strikes you as
-worth keeping, you mint it: one deliberate gesture — Step, Publish, and
-Attest at once — that strikes the exact text into an immutable,
-single-checkpoint zine under your key. Minting claims salience, not
-authorship or agreement: *these words carry currency for me.* Coins exist
-for rendezvous. A coin type is keyed by the exact content hash, so the
-planned Kademlia DHT can answer one question — *who else minted or cited
-these words?* — and two writers who share no platform, relay, or peer can
-surface each other. The same match works today, more slowly, through a
-mutual peer who can read both chains.
+worth keeping, you mint it: one deliberate gesture that Steps an immutable,
+single-checkpoint zine under your key, Publishes it, and Attests it. Minting
+claims salience, not authorship or agreement: *these words carry currency for
+me.* There is no unpublished Coin; an interrupted gesture is only a pending
+Mint attempt until its public minter attestation exists. Each coin's `x` key
+hashes its exact bytes. When Coins are enabled, Zine also derives the
+canonicalized `H` rendezvous coordinate and indexes published citations to
+answer one question — *which published traces cite these words?* — so two
+writers who share no platform, relay, or peer can surface each other even when
+their coin bytes differ only in Unicode normalization or whitespace. The same
+match also works, more slowly, through a mutual peer who can read both chains.
 
 The economics are deliberately spam-resistant. A coin everyone holds carries
 no signal, so there is no payoff in squatting the popular phrase; the signal
@@ -158,8 +161,15 @@ behind it — and decide whether the resonance is real. If it isn't, swipe
 left; nothing enters your `peers.json` without the process-evidence vet and
 your explicit choice.
 
-The mutual-peer path is implemented and tested; the global DHT is a dormant
-design, gated on real citation density. The
+Mint, Cite, mutual-peer matching, and process vetting are implemented and
+tested. Send-side indexing and the Kademlia routing component remain under
+implementation as part of the same Coins package; Kademlia is not a separate
+opt-in. The current code already filters bounded records, reserves owned
+capacity, merges replicas before publication and republish, verifies hostile
+relays under deadlines and cancellation, batches ordinary `q` citations, and
+persists incomplete indexing in a durable outbox. It still needs complete
+package integration and operator-provided super-peers; this repository does
+not claim an operated public network or meaningful citation density. The
 [transport](protocol/transport.md) and
 [rendezvous](protocol/rendezvous.md) specifications carry the exact rules.
 
@@ -180,7 +190,7 @@ design, gated on real citation density. The
 | Shared trace-context authoring-syntax kernel | Initial deterministic `[[…]]` / `((…))` scanner and compiler implemented with golden and generated scale corpora; task-specific evidence selection and cross-press rendering are not yet implemented |
 | Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures; Extend (continuation) and Settle (revision) now use the shared syntax kernel, exact current-session authority spans, protected-output validation, and accepted-success directive cleanup, while the other operations, durable receipts, and context binding remain deferred |
 | Hosted relay | Implemented; an operator ACL equivalent to the local relay policy remains a gap |
-| Global content-hash rendezvous over Kademlia | Specified as a sketch, not implemented |
+| Coins package: Mint, Cite, indexing, and rendezvous | Under implementation as one user-facing opt-in. Mint, Cite, mutual-peer matching, and the process vet work; the Kademlia routing and Send-indexing components have exercised slices but are not a complete product package, and no bootstrap network is operated |
 | Managed remote, organization control plane, and no-install public verifier | Commercial product hypotheses, not shipping services |
 
 The complete evidence and limitation record lives in

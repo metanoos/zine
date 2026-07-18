@@ -52,7 +52,7 @@ personal and are never escrowed.
 | Step, Publish, Attest, Mint, Cite, fork, and merge | Hosted anchoring cadence and proof retention |
 | Reader-side verification algorithms | No-install verification portal and exportable reports |
 | Self-hosted process evidence | Opt-in calibration service over a consented corpus |
-| Future open rendezvous wire | Operated bootstrap infrastructure, if usage justifies it |
+| Open Coins package, including self-hosted indexing and rendezvous | Operated Coins bootstrap infrastructure, if usage justifies it |
 
 The protocol deliberately says that any compatible NIP-01 and NIP-33 relay
 can store published traces. The commercial value is not a special relay
@@ -66,7 +66,7 @@ workflow, and calibrated interpretation around commodity storage.
 | A super-peer keeps a published corpus reachable | Managed remote, backup, retention policy, and SLA | Hosted relay code exists; no paid service or SLA is claimed |
 | Self-hosted OTS calendar is the target, not current behavior | Managed anchoring with declared cadence and proof availability | Current prototype can use a public calendar |
 | Peer-list portability across devices is unsettled | Organization key and ACL control plane | Not implemented |
-| DHT bootstrap needs operator-provided super-peers | Operated bootstrap | Deferred with the global DHT |
+| The Coins package needs operator-provided rendezvous super-peers | Operated Coins bootstrap | The Kademlia component has bounded storage, verification, and transactional configuration slices but remains under implementation inside Coins; no network is operated |
 | Verification is bounded and reader-side | Public verifier and exportable evidence report | Local bundle/report implemented; public verifier is not |
 | Timing and graph models need real calibration | Opt-in research corpus and calibrated policy models | Defaults exist; calibration does not |
 | Press-signed model-call records are operator assertions | Independent witness: transparency-log inclusion proofs and attested open-weight inference | Not implemented; the operation records reserve the countersignature seam |

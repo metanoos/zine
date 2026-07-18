@@ -330,8 +330,10 @@ peers, but local authoring never requires them.
 
 Underneath, Zine uses Nostr events over local and configured remote WebSocket
 relays: SHA-256 ids, Schnorr signatures, and the seven NIP-01 fields. Tor can
-expose a private relay. Global peer discovery remains planned and is dormant
-until real usage produces enough citation density to justify it.
+expose a private relay. Coins are the user-facing opt-in for minting, citation,
+indexing, and rendezvous together. Kademlia is the internal routing component,
+not a separate opt-in, and remains under implementation; global discovery also
+needs operator-provided super-peers and real citation density.
 
 ---
 
@@ -456,11 +458,12 @@ mint, cite, tag, fork, and merge.
 
 **Minting.** You select a passage of text and strike it into its own trace.
 `[[ a phrase ]]` is rewrite protection, not yet a trace — it shields the span
-from silent drift across LLM rounds. The minting pass steps a new file trace
-whose snapshot *is* that text, and rewrites the bracket to
-`[[ a phrase | nodeId ]]`. Now it's addressable forever. Minting captures
-what's there now; it doesn't invent a pre-mint history. Nothing cites without
-first being minted.
+from silent drift across LLM rounds. One explicit Mint Steps a new immutable
+file trace whose snapshot *is* that text, Publishes it, Attests it under the
+minter key, and rewrites the bracket to `[[ a phrase | nodeId ]]`. Only then
+is it a Coin, addressable forever. Minting captures what's there now; it
+doesn't invent a pre-mint history. Copying never mints, and nothing cites
+without first being minted.
 
 **Citing.** Once minted, a trace can be cited through one delta type with four
 roles:
@@ -612,8 +615,9 @@ trade is always reachability or privacy, never identity.
 
 A **super-peer** is an always-online relay holding a replica of *your published corpus*.
 It keeps cited traces reachable while your laptop is closed; it is not a
-discovery platform. Any NIP-01+NIP-33 relay suffices. OTS calendar hosting and
-DHT bootstrap remain planned extensions.
+discovery platform. Any NIP-01+NIP-33 relay suffices. OTS calendar hosting
+remains planned. Bootstrap configuration for the Coins package's Kademlia
+component is under implementation, and no bootstrap network is operated.
 
 Any NIP-01 relay that also implements parameterized-replaceable handling
 (NIP-33) is sufficient. There is no special relay class. For removal, the
@@ -632,27 +636,55 @@ other because their published traces cite coins with the same content. The
 recipient then evaluates the other signer's process evidence before deciding
 whether to admit that key.
 
+Coins are the only product opt-in in this flow. Enabling them covers Mint,
+Cite, Send-side indexing, and both mutual-peer and global rendezvous. The
+Kademlia details below explain the routing component inside that package, not
+a separately enabled feature.
+
 **A citation is always a trace edge.** `[[text]]` is local draft syntax. Mint
 first creates a trace; lowercase `q` then cites it. Inline brackets are
-explicit and bodyless tags are tacit, but both use the same edge. Planned
-global discovery derives `H = sha256(canonical(targetBody))` from a verified
+explicit and bodyless tags are tacit, but both use the same edge. Global
+discovery derives `H = sha256(canonical(targetBody))` from a verified
 target. `H` clusters independent mints; it is an index coordinate, not another
 citation type.
 
-**The planned DHT carries event pointers, not content or private addresses.** A
-Kademlia DHT would answer one question: *which published events cite content
-`H`?*
+**The DHT carries event pointers, not content or private addresses.** The
+Kademlia component is being implemented to answer one question: *which
+published events cite content `H`?*
 Each value is `{eventId, relayUrl}` for a signed carrying node on a
 stranger-readable relay. A querier fetches and verifies the carrying event,
 its `q`, and the target's `x` or body hash before evaluating the candidate.
-Private admission details are exchanged only after vetting. The DHT is
-designed but not implemented.
+Private admission details are exchanged only after vetting. The in-progress
+implementation still needs operator-provided super-peer bootstrap addresses.
+Its current configuration path is transactional: an unusable replacement is
+never left persisted with the prior node stopped.
+
+**The index is bounded and merge-safe.** The in-progress native component caps
+records at 12 KiB and 64 pointers. It validates remote keys, schemas,
+coordinates, and URLs before storage, keeps a disposable 1,024-record remote
+cache separate from capacity reserved for locally owned coordinates, and never
+lets a remote value evict an owned pointer. A Put makes an up-to-eight full
+closest-peer attempt, accepting a partial smaller-network result only after
+every discovered peer was attempted. Startup and twelve-hour republishing
+first Get and merge valid replicas; stale libp2p auto-publication is disabled.
 
 Two paths can produce a match. In the trust-bounded v1, a mutual peer who can
-read both chains sees the co-citation and brokers an introduction. The planned
-global DHT is an accelerator: publishing a carrying node to a
-stranger-readable relay would place its pointer under each verified target's
-`H`. Citation records the relation; Publish controls its reachability.
+read both chains sees the co-citation and brokers an introduction. With Coins
+enabled, the in-progress Kademlia path accelerates non-mutual discovery:
+publishing a carrying node to a stranger-readable relay places its pointer
+under each verified target's `H`. Every ordinary social `q` is processed in
+bounded batches rather than a fixed first-N slice. The signed carrying event
+stays in a durable retry outbox until all valid Coin citations are indexed,
+with retry backoff plus startup and network-recovery triggers. Citation records
+the relation; Publish controls its reachability, and an indexing failure never
+rolls Publish back.
+
+Relay verification is also bounded because a DHT pointer chooses an untrusted
+host. The in-progress reader requests exact ids, rejects unsolicited and
+oversized events, caps parallelism and total bytes, closes subscriptions and
+late WebSocket handshakes, and obeys caller cancellation plus a hard discovery
+deadline. Only events that still pass signature, citation, and Coin-hash
+verification become candidates.
 
 **The vet — process, not prose.** Fluent prose is easy to imitate, so the vet
 looks instead at the timestamped revision graph: anchors, edit timing, and the
@@ -711,7 +743,7 @@ room and vet, use the
 
 Zine asks readers to check claims, not to trust them. This page separates
 exercised implementation, measured research, protocol assertions, and open
-hypotheses. Last updated 2026-07-17.
+hypotheses. Last updated 2026-07-18.
 
 ## What works today
 
@@ -732,7 +764,7 @@ hypotheses. Last updated 2026-07-17.
 | Mutual-peer co-citation and process vet | Implemented and tested | `co-citation.ts`, `vet.ts`, `vet-walker.ts`, and their tests |
 | Exact and fuzzy quote matching | Implemented with uncalibrated defaults | SHA-256 coordinate plus MinHash/LSH client layer |
 | Raw-file Reify with optional trace bundle and report | Implemented on desktop | `reify.ts` materializes signed snapshots and keeps raw events under `.zine/` |
-| Global Kademlia rendezvous | Not implemented | Design sketch in the [rendezvous specification](../protocol/rendezvous.md) |
+| Coins package: Send-side indexing and Kademlia rendezvous | Under implementation inside the single Coins opt-in | Mint, Cite, mutual-peer matching, and the process vet are exercised separately above. Native tests cover bounded records, reserved owned capacity, full-attempt peer selection, merge-before-republish, listener readiness, and persistent owned pointers; connection limits are enforced by the native runtime but do not yet have a dedicated regression. Client tests cover batched `q` indexing, bounded hostile-relay verification, the durable outbox, and transactional configuration. A two-node test exercises the wire, but the integrated package is not complete and there is no operated bootstrap network, eight-node deployment result, or density evidence |
 | No-install public verifier | Not implemented | On the [roadmap](ROADMAP.md) |
 | Managed organization service | Not implemented | Hosted relay code exists; no paid service or SLA is claimed |
 
@@ -1094,9 +1126,12 @@ sampling, retention, false-positive, and false-negative behavior. The protocol
 continues to carry evidence and never promotes a model score into proof of
 humanness.
 
-Global rendezvous remains frozen beyond maintenance and security fixes until
-real published citations produce organic co-citation matches, users ask to meet
-unknown co-citers, and the value outweighs privacy and abuse costs.
+Coins remain one user-facing opt-in covering minting, citation, indexing, and
+rendezvous. Complete and harden that package, including its under-the-hood
+Kademlia component, without creating a second Kademlia product surface.
+Operating or expanding global rendezvous remains gated until real published
+citations produce organic co-citation matches, users ask to meet unknown
+co-citers, and the value outweighs privacy and abuse costs.
 
 ## Not on the roadmap
 
@@ -1104,7 +1139,9 @@ unknown co-citers, and the value outweighs privacy and abuse costs.
 - Hidden personalization or automatic promotion from file to folder/user scope.
 - More protocol fields merely to encode product inference.
 - New tool authority granted by document text.
-- More DHT design before real co-citation density.
+- A separate Kademlia feature or setting; Coins own the opt-in.
+- More routing design beyond completion and security hardening before real
+  co-citation density.
 - A proprietary relay requirement or mandatory account for local writing.
 - Claims that timing or revision shape proves a human author.
 
@@ -1180,7 +1217,7 @@ personal and are never escrowed.
 | Step, Publish, Attest, Mint, Cite, fork, and merge | Hosted anchoring cadence and proof retention |
 | Reader-side verification algorithms | No-install verification portal and exportable reports |
 | Self-hosted process evidence | Opt-in calibration service over a consented corpus |
-| Future open rendezvous wire | Operated bootstrap infrastructure, if usage justifies it |
+| Open Coins package, including self-hosted indexing and rendezvous | Operated Coins bootstrap infrastructure, if usage justifies it |
 
 The protocol deliberately says that any compatible NIP-01 and NIP-33 relay
 can store published traces. The commercial value is not a special relay
@@ -1194,7 +1231,7 @@ workflow, and calibrated interpretation around commodity storage.
 | A super-peer keeps a published corpus reachable | Managed remote, backup, retention policy, and SLA | Hosted relay code exists; no paid service or SLA is claimed |
 | Self-hosted OTS calendar is the target, not current behavior | Managed anchoring with declared cadence and proof availability | Current prototype can use a public calendar |
 | Peer-list portability across devices is unsettled | Organization key and ACL control plane | Not implemented |
-| DHT bootstrap needs operator-provided super-peers | Operated bootstrap | Deferred with the global DHT |
+| The Coins package needs operator-provided rendezvous super-peers | Operated Coins bootstrap | The Kademlia component has bounded storage, verification, and transactional configuration slices but remains under implementation inside Coins; no network is operated |
 | Verification is bounded and reader-side | Public verifier and exportable evidence report | Local bundle/report implemented; public verifier is not |
 | Timing and graph models need real calibration | Opt-in research corpus and calibrated policy models | Defaults exist; calibration does not |
 | Press-signed model-call records are operator assertions | Independent witness: transparency-log inclusion proofs and attested open-weight inference | Not implemented; the operation records reserve the countersignature seam |

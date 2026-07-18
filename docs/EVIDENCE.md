@@ -2,7 +2,7 @@
 
 Zine asks readers to check claims, not to trust them. This page separates
 exercised implementation, measured research, protocol assertions, and open
-hypotheses. Last updated 2026-07-17.
+hypotheses. Last updated 2026-07-18.
 
 ## What works today
 
@@ -23,7 +23,7 @@ hypotheses. Last updated 2026-07-17.
 | Mutual-peer co-citation and process vet | Implemented and tested | `co-citation.ts`, `vet.ts`, `vet-walker.ts`, and their tests |
 | Exact and fuzzy quote matching | Implemented with uncalibrated defaults | SHA-256 coordinate plus MinHash/LSH client layer |
 | Raw-file Reify with optional trace bundle and report | Implemented on desktop | `reify.ts` materializes signed snapshots and keeps raw events under `.zine/` |
-| Global Kademlia rendezvous | Not implemented | Design sketch in the [rendezvous specification](../protocol/rendezvous.md) |
+| Coins package: Send-side indexing and Kademlia rendezvous | Under implementation inside the single Coins opt-in | Mint, Cite, mutual-peer matching, and the process vet are exercised separately above. Native tests cover bounded records, reserved owned capacity, full-attempt peer selection, merge-before-republish, listener readiness, and persistent owned pointers; connection limits are enforced by the native runtime but do not yet have a dedicated regression. Client tests cover batched `q` indexing, bounded hostile-relay verification, the durable outbox, and transactional configuration. A two-node test exercises the wire, but the integrated package is not complete and there is no operated bootstrap network, eight-node deployment result, or density evidence |
 | No-install public verifier | Not implemented | On the [roadmap](ROADMAP.md) |
 | Managed organization service | Not implemented | Hosted relay code exists; no paid service or SLA is claimed |
 

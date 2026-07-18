@@ -49,7 +49,7 @@ trace-provenance layer:
 | `zine_step` | **Step** §8 | Step a node locally (hasn't left the machine) |
 | `zine_send` | **Send** §8 | Step pending changes, otherwise reuse the latest Step, then publish it |
 | `zine_attest` | **Attest** §5A/§8 | Append an endorsement of one sent node |
-| `zine_mint_span` | **Mint** §3.8 | Strike an extracted immutable node from an exact source span (`sourceStart` disambiguates repeated text) |
+| `zine_mint_span` | **Mint** §3.8 | Step, Publish, and minter-Attest an extracted immutable Coin from an exact source span (`sourceStart` disambiguates repeated text) |
 | `zine_delete` | §3.3 | Remove a file from the manifest (history retained) |
 
 Step records the supplied state locally. Send steps the supplied present state
@@ -63,7 +63,8 @@ immediately before Send. A Step first persists as an exact signed event in the
 profile's local state. When the loopback home relay is reachable the press
 synchronizes that outbox in order; an unavailable relay does not make Step
 fail. Publication destinations remain separate: Send deliberately publishes
-one selected file node outside the machine.
+one selected file node outside the machine. Mint is the compound exception: it
+returns only after both its Coin genesis and minter attestation are published.
 
 ## Storage and relays
 
@@ -78,11 +79,11 @@ Relays add synchronization and reachability:
 1. **Optional local home relay.** zine-mcp connects, never spawns. The default
    is the desktop sidecar at `ws://127.0.0.1:4869`; without the desktop, run
    `zine-relay` on loopback. A LAN or hosted URL is rejected as `--home-relay`
-   because private Steps cannot use a remote home. If it is down, Steps remain
+   because private Steps cannot use a remote home. If it is down, ordinary Steps remain
    durable locally and retry in the background every five seconds.
 2. **Optional publication relays.** Add one `--publish-relay <wsUrl>` per
-   non-loopback Send destination. Without one, Step/read/history work; Send and
-   Attest fail explicitly.
+   non-loopback Send destination. Without one, Step/read/history work; Send,
+   Attest, and Mint fail explicitly.
 3. **Optional source folder.** `--source-folder <folderId>` opts into an
    existing folder trace. A human-owned source is shallow-forked under the
    agent key and the source→fork mapping is reused across runs. Normal headless

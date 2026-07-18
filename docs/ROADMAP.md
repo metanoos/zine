@@ -232,9 +232,12 @@ sampling, retention, false-positive, and false-negative behavior. The protocol
 continues to carry evidence and never promotes a model score into proof of
 humanness.
 
-Global rendezvous remains frozen beyond maintenance and security fixes until
-real published citations produce organic co-citation matches, users ask to meet
-unknown co-citers, and the value outweighs privacy and abuse costs.
+Coins remain one user-facing opt-in covering minting, citation, indexing, and
+rendezvous. Complete and harden that package, including its under-the-hood
+Kademlia component, without creating a second Kademlia product surface.
+Operating or expanding global rendezvous remains gated until real published
+citations produce organic co-citation matches, users ask to meet unknown
+co-citers, and the value outweighs privacy and abuse costs.
 
 ## Not on the roadmap
 
@@ -242,7 +245,9 @@ unknown co-citers, and the value outweighs privacy and abuse costs.
 - Hidden personalization or automatic promotion from file to folder/user scope.
 - More protocol fields merely to encode product inference.
 - New tool authority granted by document text.
-- More DHT design before real co-citation density.
+- A separate Kademlia feature or setting; Coins own the opt-in.
+- More routing design beyond completion and security hardening before real
+  co-citation density.
 - A proprietary relay requirement or mandatory account for local writing.
 - Claims that timing or revision shape proves a human author.
 
