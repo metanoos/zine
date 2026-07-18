@@ -873,13 +873,13 @@
         "candidates": [
           {
             "version": 1,
-            "id": "snapshot-summary",
-            "dedupeKey": "snapshot-summary",
+            "id": "trace-process-v1:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:summary",
+            "dedupeKey": "trace-process-v1:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:summary",
             "kind": "process-fact",
             "claimClass": "mechanical",
             "source": {
               "kind": "trace",
-              "ref": "trace:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:summary",
+              "ref": "trace-process-v1:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:summary",
               "traceId": "3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e",
               "headId": "3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e",
               "nodeId": "3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e",
@@ -908,10 +908,10 @@
         "ok": false,
         "code": "CONTEXT_INCOMPLETE",
         "stage": "select",
-        "candidateId": "snapshot-summary",
-        "sourceRef": "trace:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:summary"
+        "candidateId": "trace-process-v1:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:summary",
+        "sourceRef": "trace-process-v1:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:summary"
       },
-      "scope": "selector-only"
+      "scope": "process-adapter-projectable"
     },
     {
       "name": "invalid trace failure",
@@ -935,13 +935,13 @@
         "candidates": [
           {
             "version": 1,
-            "id": "invalid-summary",
-            "dedupeKey": "invalid-summary",
+            "id": "trace-process-v1:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary",
+            "dedupeKey": "trace-process-v1:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary",
             "kind": "process-fact",
             "claimClass": "mechanical",
             "source": {
               "kind": "trace",
-              "ref": "trace:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary",
+              "ref": "trace-process-v1:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary",
               "traceId": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
               "headId": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
               "nodeId": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
@@ -972,10 +972,10 @@
         "ok": false,
         "code": "INVALID_PROCESS_EVIDENCE",
         "stage": "select",
-        "candidateId": "invalid-summary",
-        "sourceRef": "trace:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary"
+        "candidateId": "trace-process-v1:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary",
+        "sourceRef": "trace-process-v1:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary"
       },
-      "scope": "selector-only"
+      "scope": "process-adapter-projectable"
     },
     {
       "name": "trace source mismatch",
@@ -1345,7 +1345,7 @@
     }
   ],
   "scopeDefinitions": {
-    "process-adapter-projectable": "A process adapter can construct this exact selector input after authoritative verification and the shared projector.",
+    "process-adapter-projectable": "A process adapter can construct this exact selector input after authoritative verification and, for FULL evidence, the shared projector.",
     "selector-only": "This case pins selector behavior for candidate kinds or failure guards outside the verified-process projector."
   },
   "adapterRejectionMutations": [

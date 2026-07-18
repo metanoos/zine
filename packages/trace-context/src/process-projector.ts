@@ -117,7 +117,7 @@ function summaryFact(
   const times = step.transactions.map((transaction) => transaction.capturedAtMs)
     .sort((left, right) => left - right);
   const first = times[0];
-  const last = times.at(-1);
+  const last = times.length === 0 ? undefined : times[times.length - 1];
   let longestGapMs = 0;
   for (let index = 1; index < times.length; index += 1) {
     longestGapMs = Math.max(longestGapMs, times[index]! - times[index - 1]!);

@@ -125,7 +125,14 @@ test("selector parity corpus is strict portable JSON with the package-local boun
   );
   assert.deepEqual(
     corpus.cases.map((fixture) => fixture.scope),
-    ["process-adapter-projectable", ...Array<string>(8).fill("selector-only")],
+    [
+      "process-adapter-projectable",
+      ...Array<string>(4).fill("selector-only"),
+      "process-adapter-projectable",
+      "process-adapter-projectable",
+      "selector-only",
+      "selector-only",
+    ],
   );
   assert.deepEqual(Object.keys(corpus.scopeDefinitions).sort(), [
     "process-adapter-projectable",
@@ -173,6 +180,26 @@ test("native-neutral projector cases pin nonzero source ids and no-op enumeratio
     noOp.expectedCandidates.map((candidate) => candidate.fact.kind),
     ["step-summary", "transaction"],
   );
+});
+
+test("non-FULL adapter cases use the canonical neutral head-summary carrier", () => {
+  const fixtures = corpus.cases.filter((fixture) =>
+    fixture.scope === "process-adapter-projectable" && !fixture.processProjection);
+  assert.deepEqual(fixtures.map((fixture) => fixture.name), [
+    "snapshot-only failure",
+    "invalid trace failure",
+  ]);
+  for (const fixture of fixtures) {
+    const candidate = fixture.input.candidates[0];
+    assert.equal(candidate?.kind, "process-fact");
+    if (candidate?.kind !== "process-fact") continue;
+    const ref = `trace-process-v1:${candidate.source.traceId}:${candidate.source.headId}:summary`;
+    assert.equal(candidate.id, ref);
+    assert.equal(candidate.dedupeKey, ref);
+    assert.equal(candidate.source.ref, ref);
+    assert.deepEqual(candidate.reasons, ["prepared-head-process"]);
+    assert.equal(candidate.fact.kind, "step-summary");
+  }
 });
 
 test("adapter rejection descriptors resolve to strict, non-inert drift mutations", async () => {
@@ -306,7 +333,7 @@ test("protocol-derived facts independently match every applicable selector input
 });
 
 test("the adapter-projectable selector input is exactly the shared protocol projection", () => {
-  const parityCase = corpus.cases.find((fixture) => fixture.scope === "process-adapter-projectable");
+  const parityCase = corpus.cases.find((fixture) => fixture.processProjection !== undefined);
   assert.ok(parityCase?.protocolFixture);
   assert.ok(parityCase.processProjection);
   const fixture = corpus.protocolFixtures.find((item) => item.name === parityCase.protocolFixture);
