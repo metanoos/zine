@@ -104,6 +104,58 @@ test("crash pads preserve stable trace identity with the buffered head", () => {
   assert.equal(loadPad("root")?.["draft.md"]?.traceId, "genesis-1");
 });
 
+test("crash pads atomically retain an accepted desktop operation receipt", () => {
+  values.clear();
+  const receipt = {
+    version: 1 as const,
+    intentId: "artifact-intent-12345678",
+    resultingContentHash: "ab".repeat(32),
+  };
+  assert.equal(mirrorPad("root", "draft.md", {
+    content: "draft\nMODEL",
+    tags: [],
+    nodeId: "head-2",
+    traceId: "genesis-1",
+    runs: [
+      { voice: "author", text: "draft" },
+      { voice: "model", text: "\nMODEL" },
+    ],
+    desktopOperationReceipt: receipt,
+  }), true);
+
+  assert.deepEqual(loadPad("root")?.["draft.md"]?.desktopOperationReceipt, receipt);
+  mirrorPad("root", "draft.md", {
+    content: "draft\nMODEL!",
+    tags: [],
+    nodeId: "head-2",
+  });
+  assert.deepEqual(
+    loadPad("root")?.["draft.md"]?.desktopOperationReceipt,
+    receipt,
+    "the editor's synchronous follow-up mirror must not erase the apply receipt",
+  );
+});
+
+test("crash-pad receipt writes report persistence failure", () => {
+  values.clear();
+  failWrites = true;
+  try {
+    assert.equal(mirrorPad("root", "draft.md", {
+      content: "draft\nMODEL",
+      tags: [],
+      nodeId: "head-2",
+      desktopOperationReceipt: {
+        version: 1,
+        intentId: "artifact-intent-12345678",
+        resultingContentHash: "cd".repeat(32),
+      },
+    }), false);
+    assert.equal(loadPad("root"), null);
+  } finally {
+    failWrites = false;
+  }
+});
+
 test("staged file and recursive folder operations survive reload until cleared", () => {
   values.clear();
   const operationId = "ab".repeat(32);

@@ -110,6 +110,17 @@ export interface LocalFile {
    *  the live editor buffer for crash recovery, not the one-shot push stage.
    *  Absent on the primary store and on stepped/clean files. */
   kedits?: KEdit[];
+  /** Vault-local idempotency receipt for an accepted desktop MODEL result.
+   *  This lives only in the encrypted crash pad. It binds the runtime's
+   *  durable apply intent to the exact buffer write so recovery can observe
+   *  that an accepted response already landed without inserting it twice. */
+  desktopOperationReceipt?: DesktopOperationCrashPadReceiptV1;
+}
+
+export interface DesktopOperationCrashPadReceiptV1 {
+  version: 1;
+  intentId: string;
+  resultingContentHash: string;
 }
 
 export interface LocalFolder {
@@ -167,8 +178,24 @@ function isLocalFile(value: unknown): value is LocalFile {
     file.tags.every((tag) => typeof tag === "string") &&
     typeof file.nodeId === "string" &&
     (file.coinComplete === undefined || typeof file.coinComplete === "boolean") &&
+    (
+      file.desktopOperationReceipt === undefined ||
+      isDesktopOperationCrashPadReceiptV1(file.desktopOperationReceipt)
+    ) &&
     typeof file.updatedAt === "number"
   );
+}
+
+function isDesktopOperationCrashPadReceiptV1(
+  value: unknown,
+): value is DesktopOperationCrashPadReceiptV1 {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const receipt = value as Partial<DesktopOperationCrashPadReceiptV1>;
+  return receipt.version === 1
+    && typeof receipt.intentId === "string"
+    && receipt.intentId.length > 0
+    && typeof receipt.resultingContentHash === "string"
+    && /^[0-9a-f]{64}$/.test(receipt.resultingContentHash);
 }
 
 /** Persist a whole folder (overwrites). Returns false when browser storage
@@ -379,12 +406,15 @@ export function mirrorPad(
     voicePubkey?: string;
     citationIds?: string[];
     kedits?: KEdit[];
+    desktopOperationReceipt?: DesktopOperationCrashPadReceiptV1;
   },
-): void {
+): boolean {
   try {
     const raw = localStorage.getItem(padKey(folderId));
     const parsed: unknown = raw ? JSON.parse(raw) : {};
     const pad = currentLocalFiles(parsed) ?? {};
+    const desktopOperationReceipt = data.desktopOperationReceipt
+      ?? pad[relativePath]?.desktopOperationReceipt;
     pad[relativePath] = {
       kind: "file",
       content: data.content,
@@ -396,11 +426,15 @@ export function mirrorPad(
       ...(data.voicePubkey ? { voicePubkey: data.voicePubkey } : {}),
       ...(data.citationIds && data.citationIds.length > 0 ? { citationIds: data.citationIds } : {}),
       ...(data.kedits && data.kedits.length > 0 ? { kedits: data.kedits } : {}),
+      ...(desktopOperationReceipt ? { desktopOperationReceipt } : {}),
     };
     localStorage.setItem(padKey(folderId), JSON.stringify(pad));
+    return true;
   } catch {
     // Quota exceeded or disabled storage — the buffer just won't survive a
-    // crash this session. Non-fatal: the editor still works in-memory.
+    // crash this session. Ordinary editor mirrors remain best-effort; callers
+    // establishing an accepted-operation receipt must treat false as fatal.
+    return false;
   }
 }
 

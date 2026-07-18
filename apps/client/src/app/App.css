@@ -8284,6 +8284,110 @@ html[data-theme="light"] .editor-host {
   overflow: hidden;
 }
 
+/* Private desktop MODEL results stay in the press as a narrow review ledger,
+   immediately above the ordinary action rows. They are local buffers, never a
+   chat/card dashboard and never a publication status surface. */
+.desktop-extend-review {
+  flex: 0 0 auto;
+  max-height: 8.5rem;
+  overflow-y: auto;
+  border-top: 1px solid var(--rule);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+.desktop-extend-review-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 2.35rem;
+  padding: 0.3rem 0.6rem;
+  box-sizing: border-box;
+}
+.desktop-extend-review-row + .desktop-extend-review-row {
+  border-top: 1px solid var(--rule);
+}
+.desktop-extend-review-local {
+  color: var(--accent);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+}
+.desktop-extend-review-copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.45rem;
+  min-width: 0;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+.desktop-extend-review-copy strong {
+  flex: 0 0 auto;
+  color: var(--ink);
+  font-weight: 600;
+}
+.desktop-extend-review-response {
+  min-width: 0;
+  overflow: hidden;
+}
+.desktop-extend-review-response summary {
+  max-width: min(36rem, 45vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.82;
+  cursor: pointer;
+}
+.desktop-extend-review-response[open] {
+  flex-basis: 100%;
+  overflow: visible;
+}
+.desktop-extend-review-response pre {
+  max-height: 7rem;
+  margin: 0.35rem 0 0;
+  padding: 0.4rem 0.5rem;
+  overflow: auto;
+  border-left: 2px solid var(--accent);
+  background: var(--surface-sunken);
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+.desktop-extend-review-actions {
+  display: inline-flex;
+  gap: 0.3rem;
+}
+.desktop-extend-review-actions button {
+  min-height: 1.65rem;
+  padding: 0.15rem 0.55rem;
+  border: 1px solid var(--rule-strong);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.desktop-extend-review-actions button:hover:not(:disabled),
+.desktop-extend-review-actions button.primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.desktop-extend-review-actions button.caution {
+  color: var(--danger, #b44);
+}
+.desktop-extend-review-actions button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.desktop-extend-review-error {
+  margin: 0;
+  padding: 0.3rem 0.6rem;
+  color: var(--danger, #b44);
+  border-bottom: 1px solid var(--rule);
+}
+
 /* Action palette: the bottom region of the press. Four groups share stable
    identity columns at the left and an action region at the right:
      label | key | actions + status
