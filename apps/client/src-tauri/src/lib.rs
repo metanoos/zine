@@ -1916,13 +1916,10 @@ fn remove_active_onions(app: &tauri::AppHandle) -> Result<(), String> {
     if !has_ids {
         return Ok(());
     }
-    let (mut stream, mut reader) = match authenticated_tor_control(app) {
-        Ok(control) => control,
-        // Port unreachability is not proof that the prior Tor process is gone:
-        // it may still be starting after an app crash. Retain the durable IDs
-        // until an authenticated control connection confirms DEL_ONION/552.
-        Err(error) => return Err(error),
-    };
+    // Port unreachability is not proof that the prior Tor process is gone: it
+    // may still be starting after an app crash. `?` retains the durable IDs
+    // until an authenticated control connection confirms DEL_ONION/552.
+    let (mut stream, mut reader) = authenticated_tor_control(app)?;
     loop {
         let id = ACTIVE_ONION_IDS
             .lock()
@@ -2004,18 +2001,22 @@ fn remove_onion(app: tauri::AppHandle, address: String) -> Result<(), String> {
 
 /// End vault-owned reachability before the webview releases its secret
 /// session. Nothing from another vault may bind to the old database or ACL.
-#[tauri::command]
-fn lock_vault_runtime(app: tauri::AppHandle) -> Result<(), String> {
-    let _gate = VAULT_RUNTIME_GATE
-        .lock()
-        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
-    remove_active_onions(&app)?;
+fn lock_vault_runtime_under_gate(app: &tauri::AppHandle) -> Result<(), String> {
+    remove_active_onions(app)?;
     stop_owned_tor()?;
     stop_owned_relay()?;
     *ACTIVE_VAULT_RUNTIME
         .lock()
         .map_err(|_| "active vault runtime lock is poisoned".to_string())? = None;
     Ok(())
+}
+
+#[tauri::command]
+fn lock_vault_runtime(app: tauri::AppHandle) -> Result<(), String> {
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    lock_vault_runtime_under_gate(&app)
 }
 
 /// A webview reload does not reset native plugin or sidecar state. If the new
@@ -2026,6 +2027,12 @@ fn recover_webview_reload(app: tauri::AppHandle) -> Result<bool, String> {
     if WEBVIEW_RESTART_PENDING.load(Ordering::SeqCst) {
         return Ok(true);
     }
+    let _gate = VAULT_RUNTIME_GATE
+        .lock()
+        .map_err(|_| "vault runtime operation lock is poisoned".to_string())?;
+    if WEBVIEW_RESTART_PENDING.load(Ordering::SeqCst) {
+        return Ok(true);
+    }
     let active = ACTIVE_VAULT_RUNTIME
         .lock()
         .map_err(|_| "active vault runtime lock is poisoned".to_string())?
@@ -2033,7 +2040,7 @@ fn recover_webview_reload(app: tauri::AppHandle) -> Result<bool, String> {
     if !active {
         return Ok(false);
     }
-    lock_vault_runtime(app.clone())?;
+    lock_vault_runtime_under_gate(&app)?;
     WEBVIEW_RESTART_PENDING.store(true, Ordering::SeqCst);
     app.request_restart();
     Ok(true)
