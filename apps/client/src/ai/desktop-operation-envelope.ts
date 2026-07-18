@@ -659,7 +659,11 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   }
   if (status === "stale") {
     const staleFault = requireRecord(envelope.fault, "fault");
-    const expectedStage = finalTransitionFromStatus === "accepted" ? "apply" : "review";
+    const expectedStage = finalTransitionFromStatus === "accepted"
+      ? "apply"
+      : finalTransitionFromStatus === "prepared" || finalTransitionFromStatus === "approved"
+        ? "approve"
+        : "review";
     if (staleFault.stage !== expectedStage) {
       fail(`TARGET_STALE stage must be ${expectedStage} for its transition chain`);
     }
@@ -1073,12 +1077,16 @@ function validateLifecycleInvariant(
     if (certainty !== "known-not-dispatched" && certainty !== "provider-completed-without-result") {
       fail("failed certainty is invalid");
     }
+  } else if (status === "stale") {
+    if (certainty !== "known-not-dispatched" && certainty !== "response-recorded") {
+      fail("stale certainty is invalid");
+    }
   } else if (certainty !== "response-recorded") {
     fail(`${status} requires a recorded response`);
   }
-  if (["response-completed", "accepted", "stale", "rejected"].includes(status) !== (response !== null)) {
-    fail(`${status} response presence is inconsistent`);
-  }
+  const requiresResponse = ["response-completed", "accepted", "rejected"].includes(status)
+    || (status === "stale" && certainty === "response-recorded");
+  if (requiresResponse !== (response !== null)) fail(`${status} response presence is inconsistent`);
   if (status === "accepted" !== (artifactIntent !== null)) fail("accepted status alone may carry artifact intent");
   if (artifactReceipt !== null && (status !== "accepted" || artifactIntent === null)) {
     fail("artifact receipt requires an accepted artifact intent");
@@ -1092,8 +1100,11 @@ function validateLifecycleInvariant(
     const staleFault = requireRecord(fault, "fault");
     if (
       staleFault.code !== "TARGET_STALE"
-      || (staleFault.stage !== "review" && staleFault.stage !== "apply")
-    ) fail("stale requires a TARGET_STALE fault at review or apply");
+      || !["approve", "review", "apply"].includes(staleFault.stage as string)
+    ) fail("stale requires a TARGET_STALE fault at approve, review, or apply");
+    if ((staleFault.stage === "approve") !== (certainty === "known-not-dispatched")) {
+      fail("pre-dispatch stale state must remain known-not-dispatched");
+    }
   }
   if (ambiguousAbandon) {
     const abandonFault = requireRecord(fault, "fault");
@@ -1383,7 +1394,7 @@ function transitionTargetStatus(
       if (fromStatus === "response-completed") return "accepted";
       break;
     case "mark-target-stale":
-      if (fromStatus === "response-completed" || fromStatus === "accepted") return "stale";
+      if (["prepared", "approved", "response-completed", "accepted"].includes(fromStatus)) return "stale";
       break;
     case "reject-result":
       if (fromStatus === "response-completed" || fromStatus === "stale") return "rejected";

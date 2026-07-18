@@ -71,6 +71,8 @@ machine:
 
 ```text
 prepared -> approved -> dispatch-intent -> provider-io
+    |          |
+    +----------+-- expired directive authority --> stale (known not dispatched)
                               |                  |   |   +-> unknown -> abandoned
                               |                  |   +-----> failed
                               |                  +---------> response-completed
@@ -113,10 +115,16 @@ Phase 3 work.
 Accept applies the validated result and every prepared one-shot directive
 deletion in one CodeMirror transaction. It never inserts raw provider output.
 Directive authority is intentionally not persisted across App activations: the
-App keeps a per-mount authorization set for locally created attempt ids. A
-recovered directive-bearing attempt without that same-mount authorization is
-marked stale and must be re-prepared. Directive-free attempts remain
-recoverable across activations.
+App keeps a per-mount authorization set for locally created attempt ids. The
+same centralized predicate gates review, approval, provider dispatch, retry,
+and application. A recovered or directly resumed directive-bearing prepared or
+approved attempt without that same-mount authorization is durably marked stale
+with known-not-dispatched certainty before any provider effect. It carries no
+response and can only focus the exact target for re-preparation. If that
+reconciliation cannot win its compare-and-set, the UI still exposes only exact-
+target re-preparation. Unauthorized failed, cancelled, rejected, or unknown
+attempts start a fresh operation rather than reusing or linking the expired
+request. Directive-free attempts remain recoverable across activations.
 
 The public MODEL voice key frozen in the prepared request is the sole identity
 used for CodeMirror attribution, local runs, KEdits, crash-pad metadata, and
@@ -211,8 +219,10 @@ this substrate: Inspector approval persists the request before
 provider I/O, completion enters explicit local review, Accept performs the
 idempotent local editor/crash-pad transaction, and recovery resumes only safe
 local effects. The compact UI reads one bounded page at a time, retains the
-opaque continuation cursor, and exposes an explicit **More** action while
-keeping at most 64 records in memory. Selective portable commitments and
+opaque current and next cursors plus a previous-cursor stack, and replaces its
+view with exactly one native page of at most 16 records. Compact **Previous**
+and **More / Next** actions move backward and forward without accumulating
+earlier pages in memory. Selective portable commitments and
 disclosure belong to Phase 3 after the trust/schema review.
 
 ## Not included

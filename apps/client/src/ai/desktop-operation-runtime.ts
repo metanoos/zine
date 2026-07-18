@@ -17,6 +17,7 @@ import type { CompleteOptions, CompletePreparedRequest } from "./llm.js";
 import type { ProviderConfig } from "./models-store.js";
 import type { PreparedOperation } from "./prepared-operation.js";
 import { providerProfileFingerprint } from "./provider-fingerprint.js";
+import { isDesktopOperationAuthorizationSatisfiedV1 } from "./desktop-operation-authorization.js";
 
 export interface DesktopOperationKeyV1 {
   operationId: string;
@@ -129,6 +130,10 @@ export interface DesktopOperationRuntimeDependenciesV1 {
   ): DesktopCurrentTargetRevisionV1 | null | Promise<DesktopCurrentTargetRevisionV1 | null>;
   completePrepared: DesktopOperationTransportV1;
   applyArtifact: DesktopArtifactApplierV1;
+  /** Absent means directive-bearing durable attempts are unauthorized. */
+  isAttemptAuthorizedForCurrentEditorSession?: (
+    envelope: DesktopOperationEnvelopeV1,
+  ) => boolean;
   presentResult?: DesktopOperationPresenterV1;
 }
 
@@ -337,7 +342,10 @@ export class DesktopOperationRuntimeV1 {
     command: DesktopOperationCommandV1 = {},
   ): Promise<DesktopOperationEnvelopeV1> {
     return this.withOperation(key, async () => {
-      const current = await this.requireEnvelope(key);
+      const current = await this.reconcileUnauthorizedPreDispatch(
+        await this.requireEnvelope(key),
+      );
+      if (current.lifecycle.status === "stale") return current;
       return (await this.commit(current, this.transition("approve", current, command))).envelope;
     });
   }
@@ -348,6 +356,8 @@ export class DesktopOperationRuntimeV1 {
   ): Promise<DesktopOperationEnvelopeV1> {
     return this.withOperation(key, async () => {
       let current = await this.requireEnvelope(key);
+      current = await this.reconcileUnauthorizedPreDispatch(current);
+      if (current.lifecycle.status === "stale") return current;
       if (current.lifecycle.status === "approved") {
         current = (await this.commit(
           current,
@@ -406,6 +416,14 @@ export class DesktopOperationRuntimeV1 {
   ): Promise<DesktopOperationEnvelopeV1> {
     return this.withOperation(key, async () => {
       const prior = await this.requireEnvelope(key);
+      if (!this.isAuthorized(prior)) {
+        if (prior.lifecycle.status !== "stale") {
+          fail("expired directive authority requires a fresh operation");
+        }
+        if (command.freshPreparation === undefined) {
+          fail("expired directive authority requires exact-target fresh preparation");
+        }
+      }
       const ambiguous = prior.lifecycle.retryPolicy === "operator-confirmation-required";
       if (!ambiguous && command.possibleDuplicateAcknowledged === true) {
         fail("duplicate-risk acknowledgement is allowed only for an ambiguous attempt");
@@ -752,6 +770,13 @@ export class DesktopOperationRuntimeV1 {
   }
 
   private async recoverEnvelope(current: DesktopOperationEnvelopeV1): Promise<void> {
+    if (
+      (current.lifecycle.status === "prepared" || current.lifecycle.status === "approved")
+      && !this.isAuthorized(current)
+    ) {
+      await this.reconcileUnauthorizedPreDispatch(current);
+      return;
+    }
     switch (current.lifecycle.status) {
       case "dispatch-intent":
       case "provider-io":
@@ -829,6 +854,25 @@ export class DesktopOperationRuntimeV1 {
     if (!envelope) fail(`operation attempt ${key.operationId}/${key.attemptId} does not exist`);
     await this.assertLive(envelope);
     return envelope;
+  }
+
+  private isAuthorized(envelope: DesktopOperationEnvelopeV1): boolean {
+    return isDesktopOperationAuthorizationSatisfiedV1(
+      envelope,
+      this.dependencies.isAttemptAuthorizedForCurrentEditorSession,
+    );
+  }
+
+  private async reconcileUnauthorizedPreDispatch(
+    current: DesktopOperationEnvelopeV1,
+  ): Promise<DesktopOperationEnvelopeV1> {
+    if (this.isAuthorized(current)) return current;
+    if (current.lifecycle.status !== "prepared" && current.lifecycle.status !== "approved") {
+      return current;
+    }
+    return (await this.commit(current, this.transition("mark-target-stale", current, {}, {
+      diagnosticRef: this.diagnosticRef(),
+    }))).envelope;
   }
 
   private async present(

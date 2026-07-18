@@ -2,6 +2,7 @@ import type {
   DesktopOperationEnvelopeV1,
   DesktopOperationStatusV1,
 } from "./desktop-operation-envelope.js";
+import { isDesktopOperationAuthorizationSatisfiedV1 } from "./desktop-operation-authorization.js";
 
 export type DesktopOperationReviewActionV1 =
   | "accept"
@@ -30,6 +31,7 @@ export interface DesktopOperationReviewItemV1 {
  */
 export function projectDesktopOperationReviewV1(
   envelope: DesktopOperationEnvelopeV1,
+  isAuthorizedAttempt?: (envelope: DesktopOperationEnvelopeV1) => boolean,
 ): DesktopOperationReviewItemV1 | null {
   const common = {
     key: {
@@ -42,6 +44,14 @@ export function projectDesktopOperationReviewV1(
     localOnly: true as const,
     updatedAtMs: envelope.updatedAtMs,
   };
+  if (!isDesktopOperationAuthorizationSatisfiedV1(envelope, isAuthorizedAttempt)) {
+    return {
+      ...common,
+      label: "AI draft authorization expired",
+      detail: "Open the exact target and re-prepare",
+      actions: ["reprepare"],
+    };
+  }
   switch (envelope.lifecycle.status) {
     case "prepared":
       return { ...common, label: "Extend saved", detail: "Not sent", actions: ["resume", "abandon"] };
@@ -100,7 +110,7 @@ export function projectDesktopOperationReviewV1(
         ...common,
         label: "AI draft is stale",
         detail: "The target changed · re-prepare exact context",
-        actions: ["reprepare", "reject"],
+        actions: envelope.response ? ["reprepare", "reject"] : ["reprepare"],
       };
     case "rejected":
       return { ...common, label: "AI draft rejected", detail: "Nothing changed", actions: ["retry"] };
@@ -112,6 +122,7 @@ export function projectDesktopOperationReviewV1(
 /** Keep only the newest linked attempt per operation, then order newest first. */
 export function desktopOperationReviewQueueV1(
   envelopes: readonly DesktopOperationEnvelopeV1[],
+  isAuthorizedAttempt?: (envelope: DesktopOperationEnvelopeV1) => boolean,
 ): readonly DesktopOperationReviewItemV1[] {
   const newest = new Map<string, DesktopOperationEnvelopeV1>();
   for (const envelope of envelopes) {
@@ -128,7 +139,7 @@ export function desktopOperationReviewQueueV1(
     }
   }
   return [...newest.values()]
-    .map(projectDesktopOperationReviewV1)
+    .map((envelope) => projectDesktopOperationReviewV1(envelope, isAuthorizedAttempt))
     .filter((item): item is DesktopOperationReviewItemV1 => item !== null)
     .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 }

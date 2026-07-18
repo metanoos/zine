@@ -268,20 +268,22 @@ export function reduceDesktopOperationV1(
       break;
     }
     case "mark-target-stale": {
-      requireCurrent(envelope, transition.type, "response-completed", "accepted");
+      requireCurrent(envelope, transition.type, "prepared", "approved", "response-completed", "accepted");
       if (envelope.lifecycle.status === "accepted" && envelope.artifactReceipt) {
         fail("an applied artifact cannot later be marked target-stale");
       }
+      const preDispatch = envelope.lifecycle.status === "prepared"
+        || envelope.lifecycle.status === "approved";
       const fault: OperationFaultV1 = {
         version: 1,
         code: "TARGET_STALE",
-        stage: envelope.lifecycle.status === "accepted" ? "apply" : "review",
+        stage: preDispatch ? "approve" : envelope.lifecycle.status === "accepted" ? "apply" : "review",
         observedAtMs: transition.atMs,
         ...(transition.diagnosticRef ? { diagnosticRef: transition.diagnosticRef } : {}),
       };
       next = withLifecycle(envelope, transition, actionSha256, {
         status: "stale",
-        executionCertainty: "response-recorded",
+        executionCertainty: preDispatch ? "known-not-dispatched" : "response-recorded",
         retryPolicy: "safe-new-attempt",
       }, {
         fault,
@@ -292,6 +294,7 @@ export function reduceDesktopOperationV1(
     }
     case "reject-result":
       requireCurrent(envelope, transition.type, "response-completed", "stale");
+      if (!envelope.response) fail("reject-result requires a recorded response");
       next = withLifecycle(envelope, transition, actionSha256, {
         status: "rejected",
         executionCertainty: "response-recorded",

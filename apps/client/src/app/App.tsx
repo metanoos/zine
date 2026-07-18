@@ -259,6 +259,10 @@ import {
 } from "../ai/desktop-operation-review.js";
 import { prepareDesktopExtendApplyV1 } from "../ai/desktop-operation-editor-apply.js";
 import {
+  desktopOperationAttemptKeyV1,
+  isDesktopOperationAuthorizedThisSessionV1,
+} from "../ai/desktop-operation-authorization.js";
+import {
   applyEditorAuthorityChanges,
   classifyEditorTransaction,
   createEditorAuthorityState,
@@ -5952,23 +5956,27 @@ function DesktopExtendReviewStrip({
   items,
   busyKey,
   error,
+  hasPrevious,
   hasMore,
   loadingMore,
   onAction,
+  onPrevious,
   onMore,
 }: {
   items: readonly DesktopOperationReviewItemV1[];
   busyKey: string | null;
   error: string | null;
+  hasPrevious: boolean;
   hasMore: boolean;
   loadingMore: boolean;
   onAction: (
     item: DesktopOperationReviewItemV1,
     action: DesktopOperationReviewActionV1,
   ) => void;
+  onPrevious: () => void;
   onMore: () => void;
 }) {
-  if (items.length === 0 && !error && !hasMore) return null;
+  if (items.length === 0 && !error && !hasPrevious && !hasMore) return null;
   return (
     <section className="desktop-extend-review" aria-label="Local AI draft review">
       {error && <p className="desktop-extend-review-error">{error}</p>}
@@ -6005,10 +6013,17 @@ function DesktopExtendReviewStrip({
           </div>
         );
       })}
-      {hasMore && (
-        <button type="button" disabled={loadingMore} onClick={onMore}>
-          {loadingMore ? "Loading…" : "More saved Extend attempts"}
-        </button>
+      {(hasPrevious || hasMore) && (
+        <span className="desktop-extend-review-actions">
+          {hasPrevious && (
+            <button type="button" disabled={loadingMore} onClick={onPrevious}>Previous</button>
+          )}
+          {hasMore && (
+            <button type="button" disabled={loadingMore} onClick={onMore}>
+              {loadingMore ? "Loading…" : "More / Next"}
+            </button>
+          )}
+        </span>
       )}
     </section>
   );
@@ -6024,10 +6039,6 @@ function desktopReviewActionLabel(action: DesktopOperationReviewActionV1): strin
     case "reprepare": return "Re-prepare";
     case "resume": return "Resume";
   }
-}
-
-function desktopAttemptKey(operationId: string, attemptId: string): string {
-  return `${operationId}\0${attemptId}`;
 }
 
 function ActionPalette({
@@ -10291,8 +10302,11 @@ function App() {
   const [desktopOperationEnvelopes, setDesktopOperationEnvelopes] = useState<
     DesktopOperationEnvelopeV1[]
   >([]);
-  const [desktopOperationCursor, setDesktopOperationCursor] = useState<string | null>(null);
-  const [desktopOperationHasMore, setDesktopOperationHasMore] = useState(false);
+  const [desktopOperationPageCursor, setDesktopOperationPageCursor] = useState<string | null>(null);
+  const [desktopOperationNextCursor, setDesktopOperationNextCursor] = useState<string | null>(null);
+  const [desktopOperationPreviousCursors, setDesktopOperationPreviousCursors] = useState<
+    Array<string | null>
+  >([]);
   const [desktopOperationLoadingMore, setDesktopOperationLoadingMore] = useState(false);
   const [desktopOperationBusyKey, setDesktopOperationBusyKey] = useState<string | null>(null);
   const [desktopOperationError, setDesktopOperationError] = useState<string | null>(null);
@@ -10303,7 +10317,11 @@ function App() {
   const desktopAuthorizedAttemptKeysRef = useRef(new Set<string>());
   const desktopOperationQueue = useMemo(
     () => desktopOperationReviewQueueV1(desktopOperationEnvelopes.filter((envelope) =>
-      envelope.prepared.targetRevision.folderId === folder?.id)),
+      envelope.prepared.targetRevision.folderId === folder?.id), (envelope) =>
+      isDesktopOperationAuthorizedThisSessionV1(
+        envelope,
+        desktopAuthorizedAttemptKeysRef.current,
+      )),
     [desktopOperationEnvelopes, folder?.id],
   );
 
@@ -10324,6 +10342,11 @@ function App() {
         readCurrentTarget: (captured) => readDesktopCurrentTarget(captured),
         completePrepared,
         applyArtifact: (input) => applyDesktopArtifact(input),
+        isAttemptAuthorizedForCurrentEditorSession: (envelope) =>
+          isDesktopOperationAuthorizedThisSessionV1(
+            envelope,
+            desktopAuthorizedAttemptKeysRef.current,
+          ),
         presentResult: (envelope) => upsertDesktopOperationEnvelope(envelope),
       });
       desktopOperationStoreRef.current = repository;
@@ -10355,7 +10378,7 @@ function App() {
             `${shown}${result.failureCount > shown ? "+" : ""} saved AI operation(s) need recovery attention.`,
           );
         }
-        return refreshDesktopOperationEnvelopes();
+        return refreshDesktopOperationEnvelopes(null, []);
       })
       .catch(() => {
         if (!cancelled) {
@@ -10368,46 +10391,56 @@ function App() {
 
   function upsertDesktopOperationEnvelope(envelope: DesktopOperationEnvelopeV1): void {
     setDesktopOperationEnvelopes((current) => {
-      const next = current.filter((candidate) => !(
+      const existing = current.findIndex((candidate) => (
         candidate.operationId === envelope.operationId
         && candidate.attempt.attemptId === envelope.attempt.attemptId
       ));
-      return [...next, envelope].slice(-64);
+      if (existing >= 0) return current.map((candidate, index) => index === existing ? envelope : candidate);
+      return desktopOperationPageCursor === null ? [...current, envelope].slice(-16) : current;
     });
   }
 
   async function refreshDesktopOperationEnvelopes(
-    cursor: string | null = null,
-    append = false,
+    cursor: string | null = desktopOperationPageCursor,
+    previousCursors: Array<string | null> = desktopOperationPreviousCursors,
   ): Promise<void> {
     const repository = desktopOperationStoreRef.current;
     if (!repository) return;
     const page = await repository.listPage(cursor, 16);
-    setDesktopOperationEnvelopes((current) => {
-      if (!append) return [...page.records];
-      const byKey = new Map(current.map((envelope) => [
-        desktopAttemptKey(envelope.operationId, envelope.attempt.attemptId),
-        envelope,
-      ]));
-      for (const envelope of page.records) {
-        byKey.set(desktopAttemptKey(envelope.operationId, envelope.attempt.attemptId), envelope);
-      }
-      // Pagination is user-driven but the rendered/private in-memory window is
-      // still bounded. The opaque cursor remains authoritative for continuation.
-      return [...byKey.values()].slice(-64);
-    });
-    setDesktopOperationCursor(page.nextCursor);
-    setDesktopOperationHasMore(page.nextCursor !== null);
+    setDesktopOperationEnvelopes([...page.records]);
+    setDesktopOperationPageCursor(cursor);
+    setDesktopOperationNextCursor(page.nextCursor);
+    setDesktopOperationPreviousCursors(previousCursors);
   }
 
   async function loadMoreDesktopOperationEnvelopes(): Promise<void> {
-    if (!desktopOperationCursor || desktopOperationLoadingMore) return;
+    if (!desktopOperationNextCursor || desktopOperationLoadingMore) return;
     setDesktopOperationLoadingMore(true);
     setDesktopOperationError(null);
     try {
-      await refreshDesktopOperationEnvelopes(desktopOperationCursor, true);
+      await refreshDesktopOperationEnvelopes(
+        desktopOperationNextCursor,
+        [...desktopOperationPreviousCursors, desktopOperationPageCursor],
+      );
     } catch {
       setDesktopOperationError("More saved AI operations could not be loaded.");
+    } finally {
+      setDesktopOperationLoadingMore(false);
+    }
+  }
+
+  async function loadPreviousDesktopOperationEnvelopes(): Promise<void> {
+    if (desktopOperationPreviousCursors.length === 0 || desktopOperationLoadingMore) return;
+    const previous = desktopOperationPreviousCursors[desktopOperationPreviousCursors.length - 1]!;
+    setDesktopOperationLoadingMore(true);
+    setDesktopOperationError(null);
+    try {
+      await refreshDesktopOperationEnvelopes(
+        previous,
+        desktopOperationPreviousCursors.slice(0, -1),
+      );
+    } catch {
+      setDesktopOperationError("The previous saved AI operation page could not be loaded.");
     } finally {
       setDesktopOperationLoadingMore(false);
     }
@@ -10444,9 +10477,9 @@ function App() {
     const retry = await runtime.retry(key, possibleDuplicateAcknowledged
       ? { possibleDuplicateAcknowledged: true }
       : {});
-    if (desktopAuthorizedAttemptKeysRef.current.has(desktopAttemptKey(key.operationId, key.attemptId))) {
+    if (desktopAuthorizedAttemptKeysRef.current.has(desktopOperationAttemptKeyV1(key.operationId, key.attemptId))) {
       desktopAuthorizedAttemptKeysRef.current.add(
-        desktopAttemptKey(retry.operationId, retry.attempt.attemptId),
+        desktopOperationAttemptKeyV1(retry.operationId, retry.attempt.attemptId),
       );
     }
     upsertDesktopOperationEnvelope(retry);
@@ -10530,11 +10563,19 @@ function App() {
     setDesktopOperationBusyKey(busyKey);
     setDesktopOperationError(null);
     try {
-      const retry = await runtime.retry(staleKey, {
-        freshPreparation: { prepared, provider, maxOutputTokens: 4096 },
-      });
+      const prior = await runtime.load(staleKey);
+      if (!prior) throw new Error("The saved Extend attempt is no longer available");
+      const retry = prior.lifecycle.status === "stale"
+        ? await runtime.retry(staleKey, {
+            freshPreparation: { prepared, provider, maxOutputTokens: 4096 },
+          })
+        : await runtime.persistApprovedExtend({
+            prepared,
+            provider,
+            maxOutputTokens: 4096,
+          });
       desktopAuthorizedAttemptKeysRef.current.add(
-        desktopAttemptKey(retry.operationId, retry.attempt.attemptId),
+        desktopOperationAttemptKeyV1(retry.operationId, retry.attempt.attemptId),
       );
       upsertDesktopOperationEnvelope(retry);
       await dispatchDesktopOperationAttempt(retry);
@@ -11285,7 +11326,7 @@ function App() {
         maxOutputTokens: 4096,
       });
       desktopAuthorizedAttemptKeysRef.current.add(
-        desktopAttemptKey(envelope.operationId, envelope.attempt.attemptId),
+        desktopOperationAttemptKeyV1(envelope.operationId, envelope.attempt.attemptId),
       );
       upsertDesktopOperationEnvelope(envelope);
       envelope = await runtime.approve({
@@ -15197,12 +15238,10 @@ function App() {
     const target = input.intent.targetRevision;
     const liveFolder = folderRef.current;
     if (!liveFolder || liveFolder.id !== target.folderId) return { status: "deferred" };
-    if (
-      input.envelope.prepared.traceAuthoring.compiled.directives.length > 0
-      && !desktopAuthorizedAttemptKeysRef.current.has(
-        desktopAttemptKey(input.envelope.operationId, input.envelope.attempt.attemptId),
-      )
-    ) return { status: "stale" };
+    if (!isDesktopOperationAuthorizedThisSessionV1(
+      input.envelope,
+      desktopAuthorizedAttemptKeysRef.current,
+    )) return { status: "stale" };
     const modelVoicePubkey = input.envelope.prepared.modelVoicePubkey;
     const padFile = loadPad(liveFolder.id)?.[target.path];
     const receipt = padFile?.desktopOperationReceipt;
@@ -17177,9 +17216,11 @@ function App() {
                 items={desktopOperationQueue}
                 busyKey={desktopOperationBusyKey}
                 error={desktopOperationError}
-                hasMore={desktopOperationHasMore}
+                hasPrevious={desktopOperationPreviousCursors.length > 0}
+                hasMore={desktopOperationNextCursor !== null}
                 loadingMore={desktopOperationLoadingMore}
                 onAction={(item, action) => void handleDesktopOperationAction(item, action)}
+                onPrevious={() => void loadPreviousDesktopOperationEnvelopes()}
                 onMore={() => void loadMoreDesktopOperationEnvelopes()}
               />
               <ActionPalette

@@ -115,12 +115,16 @@ test("desktop Accept writes one exact crash-pad receipt before dispatching CodeM
   assert.doesNotMatch(apply, /stepFile\(|sendStep\(|publish|mint/i);
 });
 
-test("directive authority expires across App activations and recovery then fails stale", () => {
+test("directive authority gates provider dispatch and apply across App activations", () => {
   const apply = functionBody("applyDesktopArtifact", "function editFile");
+  const dispatch = functionBody("dispatchDesktopOperationAttempt", "async function retryDesktopOperation");
   assert.match(app, /desktopAuthorizedAttemptKeysRef = useRef\(new Set<string>\(\)\)/);
-  assert.match(apply, /compiled\.directives\.length > 0/);
-  assert.match(apply, /desktopAuthorizedAttemptKeysRef\.current\.has/);
+  assert.match(app, /isAttemptAuthorizedForCurrentEditorSession: \(envelope\) =>[\s\S]*isDesktopOperationAuthorizedThisSessionV1/);
+  assert.match(dispatch, /runtime\.approve\(key\)/);
+  assert.match(dispatch, /runtime\.dispatch\(key, \{ signal \}\)/);
+  assert.match(apply, /isDesktopOperationAuthorizedThisSessionV1/);
   assert.match(apply, /return \{ status: "stale" \}/);
+  assert.match(app, /desktopOperationReviewQueueV1\([\s\S]*isDesktopOperationAuthorizedThisSessionV1/);
 });
 
 test("desktop recovery defers inactive workspaces and keeps review scoped to the live folder", () => {
@@ -130,18 +134,33 @@ test("desktop recovery defers inactive workspaces and keeps review scoped to the
   assert.match(app, /targetRevision\.folderId === folder\?\.id/);
 });
 
-test("recovery errors stay generic and saved-operation pages continue through an opaque cursor", () => {
+test("recovery errors stay generic and saved operations navigate exact bounded cursor pages", () => {
   const refresh = functionBody(
     "refreshDesktopOperationEnvelopes",
     "function loadMoreDesktopOperationEnvelopes",
+  );
+  const next = functionBody(
+    "loadMoreDesktopOperationEnvelopes",
+    "async function loadPreviousDesktopOperationEnvelopes",
+  );
+  const previous = functionBody(
+    "loadPreviousDesktopOperationEnvelopes",
+    "async function dispatchDesktopOperationAttempt",
   );
   assert.match(app, /result\.failureCount > 0/);
   assert.match(app, /saved AI operation\(s\) need recovery attention/);
   assert.doesNotMatch(app, /failureSamples\[/);
   assert.match(refresh, /repository\.listPage\(cursor, 16\)/);
-  assert.match(refresh, /setDesktopOperationCursor\(page\.nextCursor\)/);
-  assert.match(refresh, /slice\(-64\)/);
-  assert.match(app, /More saved Extend attempts/);
+  assert.match(refresh, /setDesktopOperationEnvelopes\(\[\.\.\.page\.records\]\)/);
+  assert.match(refresh, /setDesktopOperationPageCursor\(cursor\)/);
+  assert.match(refresh, /setDesktopOperationNextCursor\(page\.nextCursor\)/);
+  assert.match(next, /desktopOperationNextCursor/);
+  assert.match(next, /\[\.\.\.desktopOperationPreviousCursors, desktopOperationPageCursor\]/);
+  assert.match(previous, /desktopOperationPreviousCursors\[desktopOperationPreviousCursors\.length - 1\]/);
+  assert.match(previous, /desktopOperationPreviousCursors\.slice\(0, -1\)/);
+  assert.doesNotMatch(refresh, /\.\.\.current|slice\(-64\)/);
+  assert.match(app, />Previous<\/button>/);
+  assert.match(app, /"More \/ Next"/);
 });
 
 test("stale re-prepare opens only the original workspace path and trace", () => {
@@ -150,6 +169,13 @@ test("stale re-prepare opens only the original workspace path and trace", () => 
   assert.match(action, /liveFile\.traceId !== target\.traceId/);
   assert.match(action, /activateLiveTab\(target\.path\)/);
   assert.match(action, /Restore the original workspace and trace/);
+});
+
+test("expired terminal directive re-prepare starts a fresh operation instead of a linked retry", () => {
+  const dispatch = functionBody("dispatchFreshDesktopRetry", "const [opLenses");
+  assert.match(dispatch, /prior\.lifecycle\.status === "stale"[\s\S]*runtime\.retry\(staleKey/);
+  assert.match(dispatch, /: await runtime\.persistApprovedExtend\(/);
+  assert.match(dispatch, /desktopOperationAttemptKeyV1\(retry\.operationId, retry\.attempt\.attemptId\)/);
 });
 
 test("desktop recovery constructs the native frozen-session store only after App mounts", () => {

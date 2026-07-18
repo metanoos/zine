@@ -80,6 +80,12 @@ function target(suffix = "one"): TargetFixture {
   };
 }
 
+function directiveTarget(suffix = "directive"): TargetFixture {
+  const fixture = target(suffix);
+  const text = `draft ((tighten the ${suffix} ending))`;
+  return { ...fixture, text, contentHash: HASH(text) };
+}
+
 async function selectionFor(targetFixture: TargetFixture): Promise<TraceContextSelectionSuccessV1> {
   const result = await selectTraceContextV1({
     version: 1,
@@ -190,6 +196,64 @@ async function preparedFor(
       createdAt,
     }),
     createdAt,
+  });
+}
+
+async function directivePreparedFor(
+  targetFixture = directiveTarget(),
+  providerFixture = provider(),
+): Promise<PreparedOperation> {
+  const base = await preparedFor(targetFixture, providerFixture);
+  const fromUtf16 = targetFixture.text.indexOf("((");
+  assert.ok(fromUtf16 >= 0, "directive fixture must contain authoring syntax");
+  const compiled = compileTraceAuthoringOperation({
+    operation: "extend",
+    operationInputs: base.operationInputs,
+    targetText: targetFixture.text,
+    renderedContextBlock: [
+      "=== CONTEXT ===",
+      "",
+      "--- folder structure ---",
+      `${targetFixture.path}  <- ACTIVE`,
+      "",
+      "--- file contents ---",
+      `## ${targetFixture.path}  (ACTIVE)`,
+      targetFixture.text,
+      "",
+      "=== END CONTEXT ===",
+    ].join("\n"),
+    actingAuthorId: "author-current-session",
+    authoritySpans: [{
+      id: "manual-directive-authority",
+      actorId: "author-current-session",
+      origin: "manual",
+      instructionEligible: true,
+      fromUtf16,
+      toUtf16: targetFixture.text.length,
+    }],
+    sourceRevision: {
+      traceId: targetFixture.traceId,
+      headId: targetFixture.headId,
+      path: targetFixture.path,
+      contentHash: targetFixture.contentHash,
+    },
+  });
+  const preparedRequestHash = computePreparedOperationRequestHashV1({
+    requestId: base.requestId,
+    operation: base.operation,
+    operationInputs: compiled.operationInputs,
+    messages: base.messages,
+    traceAuthoring: compiled.authoring,
+    providerFingerprint: base.providerFingerprint,
+    targetRevision: base.targetRevision,
+    dependencyFingerprint: base.provenance.dependencyFingerprint,
+    createdAt: base.createdAt,
+  });
+  return Object.freeze({
+    ...base,
+    operationInputs: Object.freeze(compiled.operationInputs),
+    traceAuthoring: compiled.authoring,
+    preparedRequestHash,
   });
 }
 
@@ -308,6 +372,7 @@ function runtimeDependencies(input: {
   completePrepared?: DesktopOperationRuntimeDependenciesV1["completePrepared"];
   applyArtifact?: DesktopArtifactApplierV1;
   presentResult?: DesktopOperationRuntimeDependenciesV1["presentResult"];
+  isAttemptAuthorizedForCurrentEditorSession?: DesktopOperationRuntimeDependenciesV1["isAttemptAuthorizedForCurrentEditorSession"];
   ids?: DesktopOperationRuntimeIdsV1;
 } = {}): DesktopOperationRuntimeDependenciesV1 & {
   repository: MemoryRepository;
@@ -328,6 +393,9 @@ function runtimeDependencies(input: {
       status: "applied",
       resultingContentHash: HASH(responseText),
     })),
+    ...(input.isAttemptAuthorizedForCurrentEditorSession
+      ? { isAttemptAuthorizedForCurrentEditorSession: input.isAttemptAuthorizedForCurrentEditorSession }
+      : {}),
     ...(input.presentResult ? { presentResult: input.presentResult } : {}),
   };
 }
@@ -340,6 +408,20 @@ async function persist(
 ): Promise<DesktopOperationEnvelopeV1> {
   return runtime.persistApprovedExtend({
     prepared: await preparedFor(targetFixture, providerFixture),
+    provider: providerFixture,
+    maxOutputTokens: 1_024,
+    ...overrides,
+  });
+}
+
+async function persistDirective(
+  runtime: DesktopOperationRuntimeV1,
+  targetFixture: TargetFixture,
+  overrides: Partial<Parameters<DesktopOperationRuntimeV1["persistApprovedExtend"]>[0]> = {},
+): Promise<DesktopOperationEnvelopeV1> {
+  const providerFixture = provider();
+  return runtime.persistApprovedExtend({
+    prepared: await directivePreparedFor(targetFixture, providerFixture),
     provider: providerFixture,
     maxOutputTokens: 1_024,
     ...overrides,
@@ -623,6 +705,167 @@ test("reconstruction handles every durable crash window without replaying provid
   assert.equal(transportCalls, 0, "recovery may never resume a persisted dispatch handshake");
   assert.equal(applyCalls, 1);
   assert.ok(presentations.includes(responseCopy.attempt.attemptId));
+});
+
+test("expired directive authority is durably stopped before every provider boundary", async () => {
+  const repository = new MemoryRepository();
+  const authorized = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => true,
+  }));
+  const prepared = await persistDirective(authorized, directiveTarget("recovered-prepared"), {
+    operationId: "operation-directive-recovered-prepared",
+    attemptId: "attempt-directive-recovered-prepared",
+  });
+  const approved = await authorized.approve(keyFor(await persistDirective(
+    authorized,
+    directiveTarget("recovered-approved"),
+    {
+      operationId: "operation-directive-recovered-approved",
+      attemptId: "attempt-directive-recovered-approved",
+    },
+  )));
+  let transportCalls = 0;
+  const unauthorized = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => false,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not dispatch";
+    },
+  }));
+
+  const recovery = await unauthorized.recover();
+  assert.equal(recovery.failureCount, 0);
+  for (const recovered of [prepared, approved]) {
+    const stale = (await unauthorized.load(keyFor(recovered)))!;
+    assert.equal(stale.lifecycle.status, "stale");
+    assert.equal(stale.lifecycle.executionCertainty, "known-not-dispatched");
+    assert.equal(stale.lifecycle.retryPolicy, "safe-new-attempt");
+    assert.equal(stale.response, null);
+    assert.equal(stale.fault?.code, "TARGET_STALE");
+    assert.equal(stale.fault?.stage, "approve");
+  }
+
+  const resumePrepared = await persistDirective(authorized, directiveTarget("resume-prepared"), {
+    operationId: "operation-directive-resume-prepared",
+    attemptId: "attempt-directive-resume-prepared",
+  });
+  assert.equal(
+    (await unauthorized.approve(keyFor(resumePrepared))).lifecycle.status,
+    "stale",
+  );
+  const resumeApproved = await authorized.approve(keyFor(await persistDirective(
+    authorized,
+    directiveTarget("resume-approved"),
+    {
+      operationId: "operation-directive-resume-approved",
+      attemptId: "attempt-directive-resume-approved",
+    },
+  )));
+  assert.equal(
+    (await unauthorized.dispatch(keyFor(resumeApproved))).lifecycle.status,
+    "stale",
+  );
+  assert.equal(transportCalls, 0);
+});
+
+test("unauthorized terminal directive attempts require a fresh operation, including duplicate-risk retry", async () => {
+  const repository = new MemoryRepository();
+  const authorized = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => true,
+  }));
+  let failed = await authorized.approve(keyFor(await persistDirective(
+    authorized,
+    directiveTarget("terminal-failed"),
+    { operationId: "operation-directive-failed", attemptId: "attempt-directive-failed" },
+  )));
+  failed = await replaceWithTransition(repository, failed, transition("record-failure", failed, {
+    certainty: "known-not-dispatched",
+    fault: {
+      version: 1,
+      code: "PROVIDER_UNAVAILABLE",
+      stage: "dispatch",
+      observedAtMs: failed.updatedAtMs + 1,
+      diagnosticRef: `diag:${HASH("test-provider-unavailable")}`,
+    },
+  }));
+  let unknown = await authorized.approve(keyFor(await persistDirective(
+    authorized,
+    directiveTarget("terminal-unknown"),
+    { operationId: "operation-directive-unknown", attemptId: "attempt-directive-unknown" },
+  )));
+  unknown = await replaceWithTransition(
+    repository,
+    unknown,
+    transition("record-dispatch-intent", unknown),
+  );
+  unknown = await replaceWithTransition(
+    repository,
+    unknown,
+    transition("mark-dispatch-unknown", unknown, {
+      diagnosticRef: `diag:${HASH("test-ambiguous")}`,
+    }),
+  );
+  let transportCalls = 0;
+  const unauthorized = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => false,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not dispatch";
+    },
+  }));
+  const freshTarget = directiveTarget("terminal-fresh");
+  const freshPreparation = {
+    prepared: await directivePreparedFor(freshTarget),
+    provider: provider(),
+    maxOutputTokens: 1_024,
+  };
+
+  await assert.rejects(
+    () => unauthorized.retry(keyFor(failed), { freshPreparation }),
+    /expired directive authority requires a fresh operation/,
+  );
+  await assert.rejects(
+    () => unauthorized.retry(keyFor(unknown), {
+      possibleDuplicateAcknowledged: true,
+      freshPreparation,
+    }),
+    /expired directive authority requires a fresh operation/,
+  );
+  assert.equal(transportCalls, 0);
+  assert.equal(repository.records.size, 2, "no linked retry attempt may be persisted");
+});
+
+test("failed authorization reconciliation never exposes resume or retry after a CAS conflict", async () => {
+  const repository = new MemoryRepository();
+  const authorized = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => true,
+  }));
+  const prepared = await persistDirective(authorized, directiveTarget("recovery-cas"), {
+    operationId: "operation-directive-recovery-cas",
+    attemptId: "attempt-directive-recovery-cas",
+  });
+  repository.replace = async () => "conflict";
+  let transportCalls = 0;
+  const unauthorized = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => false,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not dispatch";
+    },
+  }));
+
+  const recovery = await unauthorized.recover();
+  assert.equal(recovery.failureCount, 1);
+  assert.equal((await unauthorized.load(keyFor(prepared)))?.lifecycle.status, "prepared");
+  await assert.rejects(() => unauthorized.approve(keyFor(prepared)), /optimistic-CAS/);
+  assert.equal(transportCalls, 0);
+  assert.equal(repository.records.size, 1);
 });
 
 test("typed completed failures remain typed while abort and generic transport ambiguity become unknown", async () => {

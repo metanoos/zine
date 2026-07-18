@@ -1165,10 +1165,36 @@ test("target staleness is durable before review or after acceptance and never re
   assert.strictEqual(discarded.response?.text, applyStale.response?.text);
 });
 
+test("pre-dispatch target staleness is a durable response-free authorization tombstone", async () => {
+  for (const status of ["prepared", "approved"] as const) {
+    const current = await atStatus(status);
+    const stale = reduceDesktopOperationV1(
+      current,
+      transition("mark-target-stale", current.updatedAtMs + 1, {}),
+    ).envelope;
+    assert.equal(stale.lifecycle.status, "stale");
+    assert.equal(stale.lifecycle.executionCertainty, "known-not-dispatched");
+    assert.equal(stale.lifecycle.retryPolicy, "safe-new-attempt");
+    assert.equal(stale.response, null);
+    assert.equal(stale.fault?.code, "TARGET_STALE");
+    assert.equal(stale.fault?.stage, "approve");
+    assert.doesNotThrow(() => parseDesktopOperationEnvelopeV1(
+      serializeDesktopOperationEnvelopeV1(stale),
+    ));
+    assert.throws(
+      () => reduceDesktopOperationV1(
+        stale,
+        transition("reject-result", stale.updatedAtMs + 1, {}),
+      ),
+      /recorded response/,
+    );
+  }
+});
+
 test("legal transitions are idempotent and every omitted graph edge fails closed", async () => {
   const legal: Readonly<Record<DesktopOperationEnvelopeV1["lifecycle"]["status"], readonly DesktopOperationTransitionV1["type"][]>> = {
-    prepared: ["approve", "cancel", "abandon"],
-    approved: ["record-dispatch-intent", "record-failure", "cancel", "abandon"],
+    prepared: ["approve", "mark-target-stale", "cancel", "abandon"],
+    approved: ["record-dispatch-intent", "record-failure", "mark-target-stale", "cancel", "abandon"],
     "dispatch-intent": [
       "record-provider-io-may-have-started", "record-failure", "cancel",
       "mark-dispatch-unknown", "abandon",

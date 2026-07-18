@@ -68,6 +68,23 @@ function envelope(
   };
 }
 
+function directiveEnvelope(
+  status: DesktopOperationEnvelopeV1["lifecycle"]["status"],
+  retryPolicy: DesktopOperationEnvelopeV1["lifecycle"]["retryPolicy"] = "not-eligible",
+): DesktopOperationEnvelopeV1 {
+  const base = envelope(status, retryPolicy);
+  return {
+    ...base,
+    prepared: {
+      ...base.prepared,
+      traceAuthoring: {
+        authorityPersistence: "current-editor-session-only",
+        compiled: { directives: [{}] },
+      } as unknown as DesktopOperationEnvelopeV1["prepared"]["traceAuthoring"],
+    },
+  };
+}
+
 test("completed, unknown, and stale attempts expose only explicit safe actions", () => {
   assert.deepEqual(projectDesktopOperationReviewV1(envelope("response-completed"))?.actions, [
     "accept",
@@ -112,4 +129,29 @@ test("the review queue shows only the newest linked attempt", () => {
   assert.equal(queue.length, 1);
   assert.equal(queue[0]?.key.attemptId, "attempt-87654321");
   assert.equal(queue[0]?.label, "AI draft ready");
+});
+
+test("expired directive attempts expose exact-target re-prepare only", () => {
+  for (const attempt of [
+    directiveEnvelope("prepared"),
+    directiveEnvelope("approved"),
+    directiveEnvelope("failed", "safe-new-attempt"),
+    directiveEnvelope("unknown", "operator-confirmation-required"),
+  ]) {
+    const projected = projectDesktopOperationReviewV1(attempt);
+    assert.equal(projected?.label, "AI draft authorization expired");
+    assert.deepEqual(projected?.actions, ["reprepare"]);
+    assert.doesNotMatch(projected?.actions.join(" ") ?? "", /resume|retry/);
+  }
+
+  assert.deepEqual(
+    projectDesktopOperationReviewV1(directiveEnvelope("prepared"), () => true)?.actions,
+    ["resume", "abandon"],
+  );
+});
+
+test("response-free stale authorization tombstones cannot be rejected", () => {
+  const stale = directiveEnvelope("stale", "safe-new-attempt");
+  const projected = projectDesktopOperationReviewV1({ ...stale, response: null }, () => true);
+  assert.deepEqual(projected?.actions, ["reprepare"]);
 });
