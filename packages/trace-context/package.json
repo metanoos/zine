@@ -10,7 +10,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./corpus": "./corpus/authoring-syntax-v1.json",
-    "./selection-corpus": "./corpus/evidence-selection-v1.json"
+    "./selection-corpus": "./corpus/evidence-selection-v1.json",
+    "./selector-parity-corpus": "./corpus/selector-parity-v1.json"
   },
   "scripts": {
     "benchmark": "tsx benchmark/run.ts",
