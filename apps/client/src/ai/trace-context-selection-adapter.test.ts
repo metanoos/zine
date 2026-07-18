@@ -16,6 +16,7 @@ import {
 } from "./trace-context-selection-adapter.js";
 
 const SECRET = Uint8Array.from([...new Uint8Array(31), 1]);
+const OTHER_SECRET = Uint8Array.from([...new Uint8Array(31), 2]);
 const OWNER = getPublicKey(SECRET);
 const ROOT_ID = "f".repeat(64);
 const OPERATION_ID = "1".repeat(64);
@@ -77,6 +78,21 @@ async function fullChain(): Promise<readonly [Event, Event]> {
   const genesis = await fileNode("", "Draft", undefined, { at: 1_000, tx: 17 });
   const head = await fileNode("Draft", "Current 🧠 draft", genesis, { at: 2_000, tx: 41 });
   return [genesis, head];
+}
+
+function resignEvent(
+  event: Event,
+  mutate: (template: EventTemplate) => void,
+  secret: Uint8Array = SECRET,
+): Event {
+  const template: EventTemplate = {
+    kind: event.kind,
+    created_at: event.created_at,
+    tags: event.tags.map((tag) => [...tag]),
+    content: event.content,
+  };
+  mutate(template);
+  return finalizeEvent(template, secret);
 }
 
 function mutableChain(chain: readonly ProtocolEvent[]): ProtocolEvent[] {
@@ -240,6 +256,50 @@ test("ignores fabricated verdict authority and rejects unsigned head/text/hash/p
   }
 });
 
+test("rejects every correctly signed head-local integrity failure", async () => {
+  const [genesis, signedHead] = await fullChain();
+  const cases: readonly [
+    string,
+    (template: EventTemplate) => void,
+    Uint8Array?,
+  ][] = [
+    ["invalid-root-tag", (template) => {
+      template.tags = template.tags.filter((tag) => tag[0] !== "f");
+    }],
+    ["owner-changed", () => {}, OTHER_SECRET],
+    ["broken-prev", (template) => {
+      template.tags.find((tag) => tag[0] === "e" && tag[3] === "prev")![1] = "0".repeat(64);
+    }],
+    ["invalid-operation-id", (template) => {
+      const payload = JSON.parse(template.content) as Record<string, unknown>;
+      payload.operationId = "not-an-operation-id";
+      template.content = JSON.stringify(payload);
+    }],
+    ["unexpected-folder-checkpoint", (template) => {
+      const payload = JSON.parse(template.content) as Record<string, unknown>;
+      payload.folderCheckpoint = { cause: "checkpoint" };
+      template.content = JSON.stringify(payload);
+    }],
+    ["nonconforming-deltas", (template) => {
+      const payload = JSON.parse(template.content) as Record<string, unknown>;
+      payload.deltas = [];
+      template.content = JSON.stringify(payload);
+    }],
+  ];
+
+  for (const [issueCode, mutate, secret] of cases) {
+    const head = resignEvent(signedHead, mutate, secret);
+    await assert.rejects(
+      adaptDesktopTraceContextSelectionV1(input([genesis, head], {
+        policy: "text-only-v1",
+        processFacts: [],
+      })),
+      new RegExp(`valid signed snapshot: ${issueCode}`),
+      issueCode,
+    );
+  }
+});
+
 test("captures the entire signed chain before the verifier can yield", async () => {
   const signed = await fullChain();
   const mutable = mutableChain(signed);
@@ -337,12 +397,66 @@ test("maps snapshot-only process to a typed selected-trace failure and text-only
   assert.equal(textOnly.ok, true, textOnly.ok ? undefined : textOnly.error.message);
 });
 
+test("carries an incomplete ancestor's global verdict through a complete head and zero requests", async () => {
+  const genesis = await fileNode("", "Draft", undefined, { omitKedits: true, at: 1_000 });
+  const head = await fileNode("Draft", "Current draft", genesis, { at: 2_000 });
+  const requestSets: readonly (readonly DesktopProcessFactRequestV1[])[] = [
+    [],
+    [{ version: 1, kind: "step-summary", chainDistance: 0 }],
+  ];
+  let statusCandidateId: string | undefined;
+
+  for (const processFacts of requestSets) {
+    const adapted = await adaptDesktopTraceContextSelectionV1(input([genesis, head], { processFacts }));
+    assert.equal(adapted.candidates.length, 1);
+    const candidate = adapted.candidates[0]!;
+    statusCandidateId ??= candidate.id;
+    assert.equal(candidate.id, statusCandidateId);
+    assert.equal(candidate.kind, "process-fact");
+    assert.equal(candidate.source.kind, "trace");
+    if (candidate.kind === "process-fact" && candidate.source.kind === "trace") {
+      assert.equal(candidate.fact.kind, "step-summary");
+      assert.equal(candidate.source.nodeId, head.id);
+      assert.equal(candidate.source.chainDistance, 0);
+      assert.equal(candidate.source.processStatus, "snapshot-only");
+    }
+    const selected = await selectTraceContextV1(adapted);
+    assert.equal(selected.ok, false);
+    if (!selected.ok) assert.equal(selected.error.code, "CONTEXT_INCOMPLETE");
+  }
+});
+
+test("routes non-FULL transaction and change requests through the selector's typed failure", async () => {
+  const snapshot = await fileNode("", "Readable snapshot", undefined, { omitKedits: true });
+  const requests: readonly DesktopProcessFactRequestV1[] = [
+    { version: 1, kind: "transaction", chainDistance: 0, transactionIndex: 0 },
+    { version: 1, kind: "change", chainDistance: 0, transactionIndex: 0, changeIndex: 0 },
+  ];
+
+  for (const processFact of requests) {
+    const adapted = await adaptDesktopTraceContextSelectionV1(input([snapshot], {
+      processFacts: [processFact],
+    }));
+    assert.equal(adapted.candidates.length, 1);
+    const candidate = adapted.candidates[0]!;
+    assert.equal(candidate.kind, "process-fact");
+    assert.equal(candidate.source.kind, "trace");
+    if (candidate.kind === "process-fact" && candidate.source.kind === "trace") {
+      assert.equal(candidate.fact.kind, "step-summary");
+      assert.equal(candidate.source.processStatus, "snapshot-only");
+    }
+    const selected = await selectTraceContextV1(adapted);
+    assert.equal(selected.ok, false);
+    if (!selected.ok) assert.equal(selected.error.code, "CONTEXT_INCOMPLETE");
+  }
+});
+
 test("maps invalid ancestry to invalid process without trusting an unsigned target head", async () => {
   const signed = await fullChain();
   const invalidAncestor = mutableChain(signed);
   invalidAncestor[0]!.sig = "0".repeat(128);
   const adapted = await adaptDesktopTraceContextSelectionV1(input(invalidAncestor, {
-    processFacts: [{ version: 1, kind: "step-summary", chainDistance: 0 }],
+    processFacts: [],
   }));
   assert.equal(adapted.candidates[0]?.source.kind, "trace");
   if (adapted.candidates[0]?.source.kind === "trace") {
@@ -352,11 +466,25 @@ test("maps invalid ancestry to invalid process without trusting an unsigned targ
   assert.equal(selected.ok, false);
   if (!selected.ok) assert.equal(selected.error.code, "INVALID_PROCESS_EVIDENCE");
 
+  const textOnlyInput = await adaptDesktopTraceContextSelectionV1(input(invalidAncestor, {
+    policy: "text-only-v1",
+    processFacts: [{
+      version: 1,
+      kind: "change",
+      chainDistance: 99,
+      transactionIndex: 99,
+      changeIndex: 99,
+    }],
+  }));
+  assert.deepEqual(textOnlyInput.candidates, []);
+  const textOnly = await selectTraceContextV1(textOnlyInput);
+  assert.equal(textOnly.ok, true, textOnly.ok ? undefined : textOnly.error.message);
+
   const unsignedHead = mutableChain(signed);
   unsignedHead[1]!.sig = "0".repeat(128);
   await assert.rejects(
     adaptDesktopTraceContextSelectionV1(input(unsignedHead, { policy: "text-only-v1" })),
-    /head has an invalid id or signature/,
+    /valid signed snapshot: invalid-event/,
   );
 });
 
