@@ -77,14 +77,17 @@ prepared -> approved -> dispatch-intent -> provider-io
                                                             +------> stale
 ```
 
-Prepared, approved, and dispatch-intent records are known not to have reached a
-provider. `provider-io` means provider I/O may have started. A live reducer
-transition into that state emits the single provider-dispatch effect, but only
-after the caller durably stores the new envelope. Replaying the same transition
-is idempotent and emits no effect.
+Prepared and approved records are known not to have reached a provider. During
+one uninterrupted activation, `dispatch-intent` is the persisted pre-I/O
+handshake and `provider-io` means provider I/O may have started. A live reducer
+transition into `provider-io` emits the single provider-dispatch effect, but
+only after the caller durably stores the new envelope. Replaying the same
+transition is idempotent and emits no effect.
 
-Recovery from `provider-io` never emits provider dispatch. It emits only an
-instruction to record the attempt as `unknown`. Retrying an unknown or
+Across a process or activation recovery boundary, both `dispatch-intent` and
+`provider-io` are ambiguous: a later marker could have rolled back after I/O
+began. Recovery never emits provider dispatch for either state. It emits only
+an instruction to record the attempt as `unknown`. Retrying an unknown or
 provider-completed-without-result attempt requires explicit operator
 confirmation and creates a newly linked attempt. This may spend another model
 call, but it cannot silently duplicate one.
@@ -128,8 +131,7 @@ material have no field in the record.
 
 The recovery projection gives native and UI integrations closed effects for:
 
-- resuming the pre-I/O dispatch handshake;
-- converting a may-have-started attempt to unknown;
+- converting a recovered dispatch intent or may-have-started attempt to unknown;
 - presenting a completed result for review;
 - presenting a stale result for operator review without applying it;
 - replaying an accepted but unreceipted local artifact intent; and

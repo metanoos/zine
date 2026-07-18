@@ -602,10 +602,10 @@ test("reconstruction handles every durable crash window without replaying provid
   );
   assert.equal((await recoveredRuntime.load(keyFor(preparedEnvelope)))!.lifecycle.status, "prepared");
   assert.equal((await recoveredRuntime.load(keyFor(approvedEnvelope)))!.lifecycle.status, "approved");
-  assert.equal((await recoveredRuntime.load(keyFor(dispatchIntent)))!.lifecycle.status, "response-completed");
+  assert.equal((await recoveredRuntime.load(keyFor(dispatchIntent)))!.lifecycle.status, "unknown");
   assert.equal((await recoveredRuntime.load(keyFor(providerIo)))!.lifecycle.status, "unknown");
   assert.equal((await recoveredRuntime.load(keyFor(acceptedBase)))!.artifactReceipt !== null, true);
-  assert.equal(transportCalls, 1, "only the pre-I/O dispatch handshake may resume");
+  assert.equal(transportCalls, 0, "recovery may never resume a persisted dispatch handshake");
   assert.equal(applyCalls, 1);
   assert.ok(presentations.includes(responseCopy.attempt.attemptId));
 });
@@ -704,19 +704,33 @@ test("changed provider configuration fails before the durable provider-I/O bound
   );
 });
 
-test("provider-io and unknown recovery never silently redispatch", async () => {
+test("dispatch-intent, provider-io, and repeated unknown recovery never silently redispatch", async () => {
   const repository = new MemoryRepository();
   const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({ repository }));
-  let current = await runtime.approve(keyFor(await persist(runtime, target("no-redispatch"), provider())));
-  current = await replaceWithTransition(
+  let intent = await runtime.approve(keyFor(await persist(
+    runtime,
+    target("no-redispatch-intent"),
+    provider(),
+  )));
+  intent = await replaceWithTransition(
     repository,
-    current,
-    transition("record-dispatch-intent", current),
+    intent,
+    transition("record-dispatch-intent", intent),
   );
-  current = await replaceWithTransition(
+  let providerIo = await runtime.approve(keyFor(await persist(
+    runtime,
+    target("no-redispatch-provider-io"),
+    provider(),
+  )));
+  providerIo = await replaceWithTransition(
     repository,
-    current,
-    transition("record-provider-io-may-have-started", current),
+    providerIo,
+    transition("record-dispatch-intent", providerIo),
+  );
+  providerIo = await replaceWithTransition(
+    repository,
+    providerIo,
+    transition("record-provider-io-may-have-started", providerIo),
   );
   let calls = 0;
   const recovering = new DesktopOperationRuntimeV1(runtimeDependencies({
@@ -727,8 +741,15 @@ test("provider-io and unknown recovery never silently redispatch", async () => {
     },
   }));
   await recovering.recover();
-  assert.equal((await recovering.load(keyFor(current)))!.lifecycle.status, "unknown");
+  for (const recovered of [intent, providerIo]) {
+    const unknown = await recovering.load(keyFor(recovered));
+    assert.equal(unknown!.lifecycle.status, "unknown");
+    assert.equal(unknown!.lifecycle.executionCertainty, "may-have-dispatched");
+    assert.equal(unknown!.lifecycle.retryPolicy, "operator-confirmation-required");
+  }
   await recovering.recover();
+  assert.equal((await recovering.load(keyFor(intent)))!.lifecycle.status, "unknown");
+  assert.equal((await recovering.load(keyFor(providerIo)))!.lifecycle.status, "unknown");
   assert.equal(calls, 0);
 });
 

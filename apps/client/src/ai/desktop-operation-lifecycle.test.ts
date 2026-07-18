@@ -1124,7 +1124,10 @@ test("legal transitions are idempotent and every omitted graph edge fails closed
   const legal: Readonly<Record<DesktopOperationEnvelopeV1["lifecycle"]["status"], readonly DesktopOperationTransitionV1["type"][]>> = {
     prepared: ["approve", "cancel", "abandon"],
     approved: ["record-dispatch-intent", "record-failure", "cancel", "abandon"],
-    "dispatch-intent": ["record-provider-io-may-have-started", "record-failure", "cancel", "abandon"],
+    "dispatch-intent": [
+      "record-provider-io-may-have-started", "record-failure", "cancel",
+      "mark-dispatch-unknown", "abandon",
+    ],
     "provider-io": ["record-response", "record-failure", "mark-dispatch-unknown"],
     "response-completed": ["accept-result", "mark-target-stale", "reject-result"],
     accepted: ["mark-target-stale", "record-artifact-applied"],
@@ -1332,12 +1335,27 @@ test("post-marker ambiguity becomes unknown and recovery never automatically red
   }), /not retryable/);
 });
 
-test("pre-I/O dispatch intent resumes the handshake without claiming a provider call", async () => {
+test("recovered dispatch intent fails closed to unknown without provider dispatch", async () => {
   const intent = await atStatus("dispatch-intent");
   const recovery = projectDesktopOperationRecoveryV1(intent, intent.updatedAtMs + 1);
-  assert.deepEqual(recovery.automaticEffects.map((effect) => effect.kind), ["resume-dispatch-handshake"]);
+  assert.deepEqual(recovery.automaticEffects.map((effect) => effect.kind), ["record-attempt-unknown"]);
+  assert.equal(
+    recovery.automaticEffects.some((effect) => effect.kind === "dispatch-provider-request"),
+    false,
+  );
   assert.equal(intent.lifecycle.executionCertainty, "known-not-dispatched");
   assert.equal(recovery.mayAutomaticallyDispatch, false);
+
+  const unknown = apply(
+    intent,
+    transition("mark-dispatch-unknown", intent.updatedAtMs + 1, {}),
+  );
+  assert.equal(unknown.lifecycle.status, "unknown");
+  assert.equal(unknown.lifecycle.executionCertainty, "may-have-dispatched");
+  assert.equal(unknown.lifecycle.retryPolicy, "operator-confirmation-required");
+  const projectedUnknown = projectDesktopOperationRecoveryV1(unknown, unknown.updatedAtMs + 1);
+  assert.deepEqual(projectedUnknown.automaticEffects, []);
+  assert.equal(projectedUnknown.operatorAction, "confirm-possible-duplicate-or-stop");
 });
 
 test("recovery re-presents completed responses and replays only pending local artifact intents", async () => {
