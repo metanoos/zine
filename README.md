@@ -25,8 +25,9 @@ enough to evaluate the writer, not just the writing.
 
 Zine is to authorship provenance what Git is to source history: the open
 protocol and local press are the commons; durable remotes, team controls,
-verification, and research can be services around them. Self-hosting remains
-first-class.
+verification, and research can be services around them. Every press signs
+with its own keys and writes to its own relay; self-hosting is the default,
+not a fallback.
 
 The reference press is open source and BYOK. Model calls use provider
 credentials the operator controls; local authoring does not require a Zine
@@ -123,6 +124,31 @@ is common; commitment is rare.
 Copied passages can be minted as immutable **coins** and cited by exact node
 id. Forking starts a proposal under a new owner's key; merging accepts chosen
 work into the receiving owner's chain.
+
+## Sovereign by key, connected by citation
+
+Zine is peer-to-peer in the plainest sense: no platform sits between writers.
+Every press holds its own keys — separate NODE, AUTHOR, and MODEL roles — and
+writes signed history to its own relay on localhost. The NODE key can derive
+a stable `.onion` address, so a laptop can serve its published work without a
+server, and a private, never-published ACL decides who may connect, read, or
+write. Reachability degrades before identity ever does: lose Tor and you lose
+metadata privacy, never your name.
+
+Citation is how strangers connect. A minted coin is one exact passage under
+one key; a coin type — the same bytes wherever they appear — is keyed by
+content hash. Two writers who independently mint or cite the same distinctive
+words can therefore find each other without sharing a platform, a relay, or a
+peer: today through a mutual peer who can read both chains and brokers the
+introduction; later — only if organic co-citation density appears — through a
+planned Kademlia rendezvous that maps a content hash to the signed events
+citing it. Admission stays local either way: a process-evidence vet raises
+the cost of fabricated histories, a human makes the final call, and raw
+supply never becomes reputation.
+
+The mutual-peer path is implemented and tested; the global DHT is a dormant
+design. The [transport](protocol/transport.md) and
+[rendezvous](protocol/rendezvous.md) specifications carry the exact rules.
 
 ## What exists today
 
