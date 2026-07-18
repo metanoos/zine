@@ -2,7 +2,7 @@
   "format": "zine-trace-context-selector-parity",
   "version": 1,
   "contract": "package-local-non-normative-v1",
-  "runtimeBoundary": "Native desktop and MCP adapters must materialize byte-identical TraceContextSelectionInputV1 values and obtain these pinned package-local outcomes.",
+  "runtimeBoundary": "Desktop and MCP process adapters materialize byte-identical inputs only for process-adapter-projectable cases; selector-only cases pin package behavior for other candidate producers and failure guards.",
   "protocolFixtures": [
     {
       "name": "two-step-full-trace",
@@ -14,10 +14,22 @@
           "kind": 4290,
           "created_at": 1700000000,
           "tags": [
-            ["z", "file"],
-            ["F", "essay.md"],
-            ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
-            ["action", "import"]
+            [
+              "z",
+              "file"
+            ],
+            [
+              "F",
+              "essay.md"
+            ],
+            [
+              "f",
+              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ],
+            [
+              "action",
+              "import"
+            ]
           ],
           "content": "{\"snapshot\":\"draft\",\"contentHash\":\"7743ce348d9284d677a185f33295b92266cc435a5b5f775029b300066d26693a\",\"kedits\":[{\"op\":\"ins\",\"from\":0,\"to\":0,\"text\":\"draft\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000000000,\"tx\":0}],\"operationId\":\"0101010101010101010101010101010101010101010101010101010101010101\"}",
           "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
@@ -28,11 +40,28 @@
           "kind": 4290,
           "created_at": 1700000001,
           "tags": [
-            ["z", "file"],
-            ["F", "essay.md"],
-            ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
-            ["action", "edit"],
-            ["e", "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81", "", "prev"]
+            [
+              "z",
+              "file"
+            ],
+            [
+              "F",
+              "essay.md"
+            ],
+            [
+              "f",
+              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ],
+            [
+              "action",
+              "edit"
+            ],
+            [
+              "e",
+              "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "",
+              "prev"
+            ]
           ],
           "content": "{\"snapshot\":\"final\",\"contentHash\":\"2443630b4620165c8b173e7265e17526fe2787ae594364dd6d839ad58f2fc007\",\"kedits\":[{\"op\":\"repl\",\"from\":0,\"to\":5,\"text\":\"final\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000000001,\"tx\":0}],\"operationId\":\"0101010101010101010101010101010101010101010101010101010101010101\"}",
           "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
@@ -51,10 +80,22 @@
           "kind": 4290,
           "created_at": 1700000002,
           "tags": [
-            ["z", "file"],
-            ["F", "essay.md"],
-            ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
-            ["action", "import"]
+            [
+              "z",
+              "file"
+            ],
+            [
+              "F",
+              "essay.md"
+            ],
+            [
+              "f",
+              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ],
+            [
+              "action",
+              "import"
+            ]
           ],
           "content": "{\"snapshot\":\"readable\",\"contentHash\":\"9c49e2bceb8eecb24f3135db28c9482f18b3f9ef3473369b0c0ea85e7fb92d8b\",\"operationId\":\"0202020202020202020202020202020202020202020202020202020202020202\"}",
           "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
@@ -73,10 +114,22 @@
           "kind": 4290,
           "created_at": 1700000000,
           "tags": [
-            ["z", "file"],
-            ["F", "essay.md"],
-            ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
-            ["action", "import"]
+            [
+              "z",
+              "file"
+            ],
+            [
+              "F",
+              "essay.md"
+            ],
+            [
+              "f",
+              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ],
+            [
+              "action",
+              "import"
+            ]
           ],
           "content": "{\"snapshot\":\"draft\",\"contentHash\":\"7743ce348d9284d677a185f33295b92266cc435a5b5f775029b300066d26693a\",\"kedits\":[{\"op\":\"ins\",\"from\":0,\"to\":0,\"text\":\"draft\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000000000,\"tx\":0}],\"operationId\":\"0303030303030303030303030303030303030303030303030303030303030303\"}",
           "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
@@ -110,40 +163,13 @@
         "candidates": [
           {
             "version": 1,
-            "id": "full-genesis-change-0",
-            "dedupeKey": "full-genesis-change-0",
+            "id": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:summary",
+            "dedupeKey": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:summary",
             "kind": "process-fact",
             "claimClass": "mechanical",
             "source": {
               "kind": "trace",
-              "ref": "trace:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:tx:0:change:0",
-              "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
-              "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
-              "nodeId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
-              "processStatus": "full-trace",
-              "chainDistance": 1,
-              "transactionIndex": 0
-            },
-            "reasons": ["recent-target-process"],
-            "fact": {
-              "kind": "change",
-              "transactionIndex": 0,
-              "operation": "insert",
-              "range": {"fromUtf16": 0, "toUtf16": 0},
-              "insertedCodePointCount": 5,
-              "deletedCodePointCount": 0,
-              "voiceId": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-            }
-          },
-          {
-            "version": 1,
-            "id": "full-head-transaction-0",
-            "dedupeKey": "full-head-transaction-0",
-            "kind": "process-fact",
-            "claimClass": "mechanical",
-            "source": {
-              "kind": "trace",
-              "ref": "trace:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:tx:0",
+              "ref": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:summary",
               "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
               "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
               "nodeId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
@@ -151,24 +177,97 @@
               "chainDistance": 0,
               "transactionIndex": 0
             },
-            "reasons": ["prepared-head-process"],
+            "reasons": [
+              "prepared-head-process"
+            ],
+            "fact": {
+              "kind": "step-summary",
+              "transactionCount": 1,
+              "rangeCount": 1,
+              "insertedCodePointCount": 5,
+              "deletedCodePointCount": 5,
+              "firstCapturedAtMs": 1700000000001,
+              "lastCapturedAtMs": 1700000000001,
+              "spanMs": 0,
+              "longestGapMs": 0,
+              "undoCount": 0,
+              "redoCount": 0
+            }
+          },
+          {
+            "version": 1,
+            "id": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0",
+            "dedupeKey": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0",
+              "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "nodeId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "processStatus": "full-trace",
+              "chainDistance": 0,
+              "transactionIndex": 0
+            },
+            "reasons": [
+              "prepared-head-process"
+            ],
             "fact": {
               "kind": "transaction",
               "transactionIndex": 0,
               "capturedAtMs": 1700000000001,
               "changeCount": 1,
-              "voiceIds": ["79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]
+              "voiceIds": [
+                "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+              ]
             }
           },
           {
             "version": 1,
-            "id": "full-genesis-summary",
-            "dedupeKey": "full-genesis-summary",
+            "id": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0:change:0",
+            "dedupeKey": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0:change:0",
             "kind": "process-fact",
             "claimClass": "mechanical",
             "source": {
               "kind": "trace",
-              "ref": "trace:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:summary",
+              "ref": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0:change:0",
+              "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+              "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "nodeId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "processStatus": "full-trace",
+              "chainDistance": 0,
+              "transactionIndex": 0,
+              "range": {
+                "fromUtf16": 0,
+                "toUtf16": 5
+              }
+            },
+            "reasons": [
+              "prepared-head-process"
+            ],
+            "fact": {
+              "kind": "change",
+              "transactionIndex": 0,
+              "operation": "replace",
+              "range": {
+                "fromUtf16": 0,
+                "toUtf16": 5
+              },
+              "insertedCodePointCount": 5,
+              "deletedCodePointCount": 5,
+              "voiceId": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            }
+          },
+          {
+            "version": 1,
+            "id": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:summary",
+            "dedupeKey": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:summary",
+            "kind": "process-fact",
+            "claimClass": "mechanical",
+            "source": {
+              "kind": "trace",
+              "ref": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:summary",
               "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
               "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
               "nodeId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
@@ -176,7 +275,9 @@
               "chainDistance": 1,
               "transactionIndex": 0
             },
-            "reasons": ["recent-target-process"],
+            "reasons": [
+              "recent-target-process"
+            ],
             "fact": {
               "kind": "step-summary",
               "transactionCount": 1,
@@ -193,40 +294,13 @@
           },
           {
             "version": 1,
-            "id": "full-head-change-0",
-            "dedupeKey": "full-head-change-0",
+            "id": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0",
+            "dedupeKey": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0",
             "kind": "process-fact",
             "claimClass": "mechanical",
             "source": {
               "kind": "trace",
-              "ref": "trace:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:tx:0:change:0",
-              "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
-              "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
-              "nodeId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
-              "processStatus": "full-trace",
-              "chainDistance": 0,
-              "transactionIndex": 0
-            },
-            "reasons": ["prepared-head-process"],
-            "fact": {
-              "kind": "change",
-              "transactionIndex": 0,
-              "operation": "replace",
-              "range": {"fromUtf16": 0, "toUtf16": 5},
-              "insertedCodePointCount": 5,
-              "deletedCodePointCount": 5,
-              "voiceId": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-            }
-          },
-          {
-            "version": 1,
-            "id": "full-genesis-transaction-0",
-            "dedupeKey": "full-genesis-transaction-0",
-            "kind": "process-fact",
-            "claimClass": "mechanical",
-            "source": {
-              "kind": "trace",
-              "ref": "trace:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:tx:0",
+              "ref": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0",
               "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
               "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
               "nodeId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
@@ -234,49 +308,258 @@
               "chainDistance": 1,
               "transactionIndex": 0
             },
-            "reasons": ["recent-target-process"],
+            "reasons": [
+              "recent-target-process"
+            ],
             "fact": {
               "kind": "transaction",
               "transactionIndex": 0,
               "capturedAtMs": 1700000000000,
               "changeCount": 1,
-              "voiceIds": ["79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]
+              "voiceIds": [
+                "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+              ]
             }
           },
           {
             "version": 1,
-            "id": "full-head-summary",
-            "dedupeKey": "full-head-summary",
+            "id": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0:change:0",
+            "dedupeKey": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0:change:0",
             "kind": "process-fact",
             "claimClass": "mechanical",
             "source": {
               "kind": "trace",
-              "ref": "trace:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:summary",
+              "ref": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0:change:0",
               "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
               "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
-              "nodeId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+              "nodeId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
               "processStatus": "full-trace",
-              "chainDistance": 0,
-              "transactionIndex": 0
+              "chainDistance": 1,
+              "transactionIndex": 0,
+              "range": {
+                "fromUtf16": 0,
+                "toUtf16": 0
+              }
             },
-            "reasons": ["prepared-head-process"],
+            "reasons": [
+              "recent-target-process"
+            ],
             "fact": {
-              "kind": "step-summary",
-              "transactionCount": 1,
-              "rangeCount": 1,
+              "kind": "change",
+              "transactionIndex": 0,
+              "operation": "insert",
+              "range": {
+                "fromUtf16": 0,
+                "toUtf16": 0
+              },
               "insertedCodePointCount": 5,
-              "deletedCodePointCount": 5,
-              "firstCapturedAtMs": 1700000000001,
-              "lastCapturedAtMs": 1700000000001,
-              "spanMs": 0,
-              "longestGapMs": 0,
-              "undoCount": 0,
-              "redoCount": 0
+              "deletedCodePointCount": 0,
+              "voiceId": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
             }
           }
         ]
       },
-      "expected": {"ok":true,"renderedContext":"[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"final\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"full-head-summary\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"processStatus\":\"full-trace\",\"ref\":\"trace:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:summary\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"Step 46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a · 1 tx / 1 ranges · +5/−5 · first 1700000000001 · last 1700000000001 · span 0ms · longest gap 0ms · undo 0 · redo 0\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"full-head-transaction-0\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"processStatus\":\"full-trace\",\"ref\":\"trace:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:tx:0\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"tx 0 @ 1700000000001 · 1 changes · voices 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"full-head-change-0\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"processStatus\":\"full-trace\",\"ref\":\"trace:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:tx:0:change:0\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"change tx 0 · replace · range [0,5) · +5/−5 · voice 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"full-genesis-summary\",\"kind\":\"process-fact\",\"reasons\":[\"recent-target-process\"],\"source\":{\"chainDistance\":1,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"processStatus\":\"full-trace\",\"ref\":\"trace:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:summary\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"Step 44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81 · 1 tx / 1 ranges · +5/−0 · first 1700000000000 · last 1700000000000 · span 0ms · longest gap 0ms · undo 0 · redo 0\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"full-genesis-transaction-0\",\"kind\":\"process-fact\",\"reasons\":[\"recent-target-process\"],\"source\":{\"chainDistance\":1,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"processStatus\":\"full-trace\",\"ref\":\"trace:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:tx:0\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"tx 0 @ 1700000000000 · 1 changes · voices 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"full-genesis-change-0\",\"kind\":\"process-fact\",\"reasons\":[\"recent-target-process\"],\"source\":{\"chainDistance\":1,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"processStatus\":\"full-trace\",\"ref\":\"trace:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:tx:0:change:0\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"change tx 0 · insert · range [0,0) · +5/−0 · voice 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"version\":1}]","manifestSha256":"82dcabad105f8d64aaf6d947becfae810688dacb48559449aa01197ca9fa3400","selectedFacts":[{"kind":"step-summary","transactionCount":1,"rangeCount":1,"insertedCodePointCount":5,"deletedCodePointCount":5,"firstCapturedAtMs":1700000000001,"lastCapturedAtMs":1700000000001,"spanMs":0,"longestGapMs":0,"undoCount":0,"redoCount":0},{"kind":"transaction","transactionIndex":0,"capturedAtMs":1700000000001,"changeCount":1,"voiceIds":["79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]},{"kind":"change","transactionIndex":0,"operation":"replace","range":{"fromUtf16":0,"toUtf16":5},"insertedCodePointCount":5,"deletedCodePointCount":5,"voiceId":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"},{"kind":"step-summary","transactionCount":1,"rangeCount":1,"insertedCodePointCount":5,"deletedCodePointCount":0,"firstCapturedAtMs":1700000000000,"lastCapturedAtMs":1700000000000,"spanMs":0,"longestGapMs":0,"undoCount":0,"redoCount":0},{"kind":"transaction","transactionIndex":0,"capturedAtMs":1700000000000,"changeCount":1,"voiceIds":["79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]},{"kind":"change","transactionIndex":0,"operation":"insert","range":{"fromUtf16":0,"toUtf16":0},"insertedCodePointCount":5,"deletedCodePointCount":0,"voiceId":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"}],"decisions":[{"version":1,"candidateId":"full-head-summary","dedupeKey":"full-head-summary","inclusionReasons":["prepared-head-process"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"full-head-summary"},{"version":1,"candidateId":"full-head-transaction-0","dedupeKey":"full-head-transaction-0","inclusionReasons":["prepared-head-process"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"full-head-transaction-0"},{"version":1,"candidateId":"full-head-change-0","dedupeKey":"full-head-change-0","inclusionReasons":["prepared-head-process"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"full-head-change-0"},{"version":1,"candidateId":"full-genesis-summary","dedupeKey":"full-genesis-summary","inclusionReasons":["recent-target-process"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"full-genesis-summary"},{"version":1,"candidateId":"full-genesis-transaction-0","dedupeKey":"full-genesis-transaction-0","inclusionReasons":["recent-target-process"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"full-genesis-transaction-0"},{"version":1,"candidateId":"full-genesis-change-0","dedupeKey":"full-genesis-change-0","inclusionReasons":["recent-target-process"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"full-genesis-change-0"}]}
+      "expected": {
+        "ok": true,
+        "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"final\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:summary\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"processStatus\":\"full-trace\",\"ref\":\"trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:summary\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"Step 46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a · 1 tx / 1 ranges · +5/−5 · first 1700000000001 · last 1700000000001 · span 0ms · longest gap 0ms · undo 0 · redo 0\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"processStatus\":\"full-trace\",\"ref\":\"trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"tx 0 @ 1700000000001 · 1 changes · voices 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0:change:0\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"processStatus\":\"full-trace\",\"range\":{\"fromUtf16\":0,\"toUtf16\":5},\"ref\":\"trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0:change:0\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"change tx 0 · replace · range [0,5) · +5/−5 · voice 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:summary\",\"kind\":\"process-fact\",\"reasons\":[\"recent-target-process\"],\"source\":{\"chainDistance\":1,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"processStatus\":\"full-trace\",\"ref\":\"trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:summary\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"Step 44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81 · 1 tx / 1 ranges · +5/−0 · first 1700000000000 · last 1700000000000 · span 0ms · longest gap 0ms · undo 0 · redo 0\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0\",\"kind\":\"process-fact\",\"reasons\":[\"recent-target-process\"],\"source\":{\"chainDistance\":1,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"processStatus\":\"full-trace\",\"ref\":\"trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"tx 0 @ 1700000000000 · 1 changes · voices 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0:change:0\",\"kind\":\"process-fact\",\"reasons\":[\"recent-target-process\"],\"source\":{\"chainDistance\":1,\"headId\":\"46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a\",\"kind\":\"trace\",\"nodeId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"processStatus\":\"full-trace\",\"range\":{\"fromUtf16\":0,\"toUtf16\":0},\"ref\":\"trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0:change:0\",\"traceId\":\"44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81\",\"transactionIndex\":0},\"text\":\"change tx 0 · insert · range [0,0) · +5/−0 · voice 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"version\":1}]",
+        "manifestSha256": "d36bd8681c1a3c52fb1548feba2c904f69245b2cc6f299a3e2445d0299d11fa5",
+        "selectedFacts": [
+          {
+            "kind": "step-summary",
+            "transactionCount": 1,
+            "rangeCount": 1,
+            "insertedCodePointCount": 5,
+            "deletedCodePointCount": 5,
+            "firstCapturedAtMs": 1700000000001,
+            "lastCapturedAtMs": 1700000000001,
+            "spanMs": 0,
+            "longestGapMs": 0,
+            "undoCount": 0,
+            "redoCount": 0
+          },
+          {
+            "kind": "transaction",
+            "transactionIndex": 0,
+            "capturedAtMs": 1700000000001,
+            "changeCount": 1,
+            "voiceIds": [
+              "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            ]
+          },
+          {
+            "kind": "change",
+            "transactionIndex": 0,
+            "operation": "replace",
+            "range": {
+              "fromUtf16": 0,
+              "toUtf16": 5
+            },
+            "insertedCodePointCount": 5,
+            "deletedCodePointCount": 5,
+            "voiceId": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+          },
+          {
+            "kind": "step-summary",
+            "transactionCount": 1,
+            "rangeCount": 1,
+            "insertedCodePointCount": 5,
+            "deletedCodePointCount": 0,
+            "firstCapturedAtMs": 1700000000000,
+            "lastCapturedAtMs": 1700000000000,
+            "spanMs": 0,
+            "longestGapMs": 0,
+            "undoCount": 0,
+            "redoCount": 0
+          },
+          {
+            "kind": "transaction",
+            "transactionIndex": 0,
+            "capturedAtMs": 1700000000000,
+            "changeCount": 1,
+            "voiceIds": [
+              "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            ]
+          },
+          {
+            "kind": "change",
+            "transactionIndex": 0,
+            "operation": "insert",
+            "range": {
+              "fromUtf16": 0,
+              "toUtf16": 0
+            },
+            "insertedCodePointCount": 5,
+            "deletedCodePointCount": 0,
+            "voiceId": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+          }
+        ],
+        "decisions": [
+          {
+            "version": 1,
+            "candidateId": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:summary",
+            "dedupeKey": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:summary",
+            "inclusionReasons": [
+              "prepared-head-process"
+            ],
+            "disposition": "selected",
+            "reason": "policy-eligible",
+            "selectedEvidenceId": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:summary"
+          },
+          {
+            "version": 1,
+            "candidateId": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0",
+            "dedupeKey": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0",
+            "inclusionReasons": [
+              "prepared-head-process"
+            ],
+            "disposition": "selected",
+            "reason": "policy-eligible",
+            "selectedEvidenceId": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0"
+          },
+          {
+            "version": 1,
+            "candidateId": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0:change:0",
+            "dedupeKey": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0:change:0",
+            "inclusionReasons": [
+              "prepared-head-process"
+            ],
+            "disposition": "selected",
+            "reason": "policy-eligible",
+            "selectedEvidenceId": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a:transaction:0:change:0"
+          },
+          {
+            "version": 1,
+            "candidateId": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:summary",
+            "dedupeKey": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:summary",
+            "inclusionReasons": [
+              "recent-target-process"
+            ],
+            "disposition": "selected",
+            "reason": "policy-eligible",
+            "selectedEvidenceId": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:summary"
+          },
+          {
+            "version": 1,
+            "candidateId": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0",
+            "dedupeKey": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0",
+            "inclusionReasons": [
+              "recent-target-process"
+            ],
+            "disposition": "selected",
+            "reason": "policy-eligible",
+            "selectedEvidenceId": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0"
+          },
+          {
+            "version": 1,
+            "candidateId": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0:change:0",
+            "dedupeKey": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0:change:0",
+            "inclusionReasons": [
+              "recent-target-process"
+            ],
+            "disposition": "selected",
+            "reason": "policy-eligible",
+            "selectedEvidenceId": "trace-process-v1:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81:transaction:0:change:0"
+          }
+        ]
+      },
+      "scope": "process-adapter-projectable",
+      "processProjection": {
+        "version": 1,
+        "traceId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+        "headId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+        "steps": [
+          {
+            "version": 1,
+            "nodeId": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
+            "chainDistance": 1,
+            "transactions": [
+              {
+                "version": 1,
+                "sourceTransactionId": 0,
+                "capturedAtMs": 1700000000000,
+                "changes": [
+                  {
+                    "version": 1,
+                    "operation": "insert",
+                    "range": {
+                      "fromUtf16": 0,
+                      "toUtf16": 0
+                    },
+                    "insertedText": "draft",
+                    "deletedText": "",
+                    "voiceId": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "version": 1,
+            "nodeId": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
+            "chainDistance": 0,
+            "transactions": [
+              {
+                "version": 1,
+                "sourceTransactionId": 0,
+                "capturedAtMs": 1700000000001,
+                "changes": [
+                  {
+                    "version": 1,
+                    "operation": "replace",
+                    "range": {
+                      "fromUtf16": 0,
+                      "toUtf16": 5
+                    },
+                    "insertedText": "final",
+                    "deletedText": "draft",
+                    "voiceId": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
     },
     {
       "name": "text-only projection",
@@ -313,7 +596,9 @@
               "chainDistance": 0,
               "transactionIndex": 0
             },
-            "reasons": ["prepared-head-process"],
+            "reasons": [
+              "prepared-head-process"
+            ],
             "fact": {
               "kind": "step-summary",
               "transactionCount": 0,
@@ -332,8 +617,13 @@
             "dedupeKey": "hidden-preference",
             "kind": "explicit-preference",
             "claimClass": "explicit",
-            "source": {"kind": "local", "ref": "local:hidden-preference"},
-            "reasons": ["explicit-scoped-preference"],
+            "source": {
+              "kind": "local",
+              "ref": "local:hidden-preference"
+            },
+            "reasons": [
+              "explicit-scoped-preference"
+            ],
             "text": "Do not expose me."
           },
           {
@@ -349,14 +639,38 @@
               "approvedOrder": 0,
               "processStatus": "full-trace",
               "traceId": "5555555555555555555555555555555555555555555555555555555555555555",
-              "range": {"fromUtf16": 1, "toUtf16": 9}
+              "range": {
+                "fromUtf16": 1,
+                "toUtf16": 9
+              }
             },
-            "reasons": ["approved-direct-citation"],
+            "reasons": [
+              "approved-direct-citation"
+            ],
             "text": "Approved excerpt"
           }
         ]
       },
-      "expected": {"ok":true,"renderedContext":"[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"plain target\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"explicit\",\"evidenceId\":\"approved-citation\",\"kind\":\"citation\",\"reasons\":[\"approved-direct-citation\"],\"source\":{\"approvedOrder\":0,\"kind\":\"citation\",\"ref\":\"citation:approved\"},\"text\":\"Approved excerpt\",\"version\":1}]","manifestSha256":"e27afa2b919d0455c7c7b5fe775f7fef3ca4eaada24d8472de4e37ca23cfc61a","selectedFacts":[],"decisions":[{"version":1,"candidateId":"approved-citation","dedupeKey":"approved-citation","inclusionReasons":["approved-direct-citation"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"approved-citation"}]}
+      "expected": {
+        "ok": true,
+        "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"plain target\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"explicit\",\"evidenceId\":\"approved-citation\",\"kind\":\"citation\",\"reasons\":[\"approved-direct-citation\"],\"source\":{\"approvedOrder\":0,\"kind\":\"citation\",\"ref\":\"citation:approved\"},\"text\":\"Approved excerpt\",\"version\":1}]",
+        "manifestSha256": "e27afa2b919d0455c7c7b5fe775f7fef3ca4eaada24d8472de4e37ca23cfc61a",
+        "selectedFacts": [],
+        "decisions": [
+          {
+            "version": 1,
+            "candidateId": "approved-citation",
+            "dedupeKey": "approved-citation",
+            "inclusionReasons": [
+              "approved-direct-citation"
+            ],
+            "disposition": "selected",
+            "reason": "policy-eligible",
+            "selectedEvidenceId": "approved-citation"
+          }
+        ]
+      },
+      "scope": "selector-only"
     },
     {
       "name": "unicode bytes",
@@ -372,7 +686,10 @@
             "contentHash": "8888888888888888888888888888888888888888888888888888888888888888",
             "currentText": "草稿 😀 café café"
           },
-          "range": {"fromUtf16": 0, "toUtf16": 16},
+          "range": {
+            "fromUtf16": 0,
+            "toUtf16": 16
+          },
           "maxContextBytes": 4096,
           "preparedRequestMaxBytes": 8192,
           "reservedPromptBytes": 0
@@ -390,16 +707,36 @@
               "nodeId": "9999999999999999999999999999999999999999999999999999999999999999",
               "approvedOrder": 0
             },
-            "reasons": ["approved-direct-citation"],
+            "reasons": [
+              "approved-direct-citation"
+            ],
             "text": "引用：雪 “quoted”\nline"
           }
         ]
       },
-      "expected": {"ok":true,"renderedContext":"[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"草稿 😀 café café\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"explicit\",\"evidenceId\":\"unicode-citation\",\"kind\":\"citation\",\"reasons\":[\"approved-direct-citation\"],\"source\":{\"approvedOrder\":0,\"kind\":\"citation\",\"nodeId\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"ref\":\"citation:unicode\"},\"text\":\"引用：雪 “quoted”\\nline\",\"version\":1}]","manifestSha256":"8858c275e96364e6a07dcf65f6b128bad765e0c0bdeb9b907f580dac9c72b5a2","selectedFacts":[],"decisions":[{"version":1,"candidateId":"unicode-citation","dedupeKey":"unicode-citation","inclusionReasons":["approved-direct-citation"],"disposition":"selected","reason":"policy-eligible","selectedEvidenceId":"unicode-citation"}]}
+      "expected": {
+        "ok": true,
+        "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"草稿 😀 café café\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"explicit\",\"evidenceId\":\"unicode-citation\",\"kind\":\"citation\",\"reasons\":[\"approved-direct-citation\"],\"source\":{\"approvedOrder\":0,\"kind\":\"citation\",\"nodeId\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"ref\":\"citation:unicode\"},\"text\":\"引用：雪 “quoted”\\nline\",\"version\":1}]",
+        "manifestSha256": "8858c275e96364e6a07dcf65f6b128bad765e0c0bdeb9b907f580dac9c72b5a2",
+        "selectedFacts": [],
+        "decisions": [
+          {
+            "version": 1,
+            "candidateId": "unicode-citation",
+            "dedupeKey": "unicode-citation",
+            "inclusionReasons": [
+              "approved-direct-citation"
+            ],
+            "disposition": "selected",
+            "reason": "policy-eligible",
+            "selectedEvidenceId": "unicode-citation"
+          }
+        ]
+      },
+      "scope": "selector-only"
     },
     {
-      "name": "exact rendered budget edge",
-      "exactBudgetProbe": true,
+      "name": "context-limited exact budget edge",
       "input": {
         "version": 1,
         "policy": "selected-trace-v1",
@@ -413,6 +750,64 @@
             "currentText": "Edge"
           },
           "maxContextBytes": 326,
+          "preparedRequestMaxBytes": 8192,
+          "reservedPromptBytes": 17
+        },
+        "candidates": [
+          {
+            "version": 1,
+            "id": "edge-instruction",
+            "dedupeKey": "edge-instruction",
+            "kind": "operation-instruction",
+            "claimClass": "explicit",
+            "source": {
+              "kind": "operation",
+              "ref": "operation:edge"
+            },
+            "reasons": [
+              "explicit-operation-intent"
+            ],
+            "text": "Continue exactly."
+          }
+        ]
+      },
+      "expected": {
+        "ok": true,
+        "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"Edge\",\"version\":1},{\"authority\":\"instruction\",\"claimClass\":\"explicit\",\"evidenceId\":\"edge-instruction\",\"kind\":\"operation-instruction\",\"reasons\":[\"explicit-operation-intent\"],\"source\":{\"kind\":\"operation\",\"ref\":\"operation:edge\"},\"text\":\"Continue exactly.\",\"version\":1}]",
+        "manifestSha256": "3f2ea9541814c818e7e8aba163eafc9dbb83c645aaacaeca3e913818f677cf82",
+        "selectedFacts": [],
+        "decisions": [
+          {
+            "version": 1,
+            "candidateId": "edge-instruction",
+            "dedupeKey": "edge-instruction",
+            "inclusionReasons": [
+              "explicit-operation-intent"
+            ],
+            "disposition": "selected",
+            "reason": "mandatory",
+            "selectedEvidenceId": "edge-instruction"
+          }
+        ]
+      },
+      "scope": "selector-only",
+      "budgetEdge": "context-ceiling"
+    },
+    {
+      "name": "request-remainder-limited exact budget edge",
+      "input": {
+        "version": 1,
+        "policy": "selected-trace-v1",
+        "operation": {
+          "version": 1,
+          "operation": "extend",
+          "target": {
+            "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "headId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "contentHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "currentText": "Edge"
+          },
+          "maxContextBytes": 4096,
           "preparedRequestMaxBytes": 343,
           "reservedPromptBytes": 17
         },
@@ -423,13 +818,38 @@
             "dedupeKey": "edge-instruction",
             "kind": "operation-instruction",
             "claimClass": "explicit",
-            "source": {"kind": "operation", "ref": "operation:edge"},
-            "reasons": ["explicit-operation-intent"],
+            "source": {
+              "kind": "operation",
+              "ref": "operation:edge"
+            },
+            "reasons": [
+              "explicit-operation-intent"
+            ],
             "text": "Continue exactly."
           }
         ]
       },
-      "expected": {"ok":true,"renderedContext":"[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"Edge\",\"version\":1},{\"authority\":\"instruction\",\"claimClass\":\"explicit\",\"evidenceId\":\"edge-instruction\",\"kind\":\"operation-instruction\",\"reasons\":[\"explicit-operation-intent\"],\"source\":{\"kind\":\"operation\",\"ref\":\"operation:edge\"},\"text\":\"Continue exactly.\",\"version\":1}]","manifestSha256":"ecfbfcdfcd65ebd74647996f0d16fdfb599e9ce3cf753a42d4adbc4a5b34556c","selectedFacts":[],"decisions":[{"version":1,"candidateId":"edge-instruction","dedupeKey":"edge-instruction","inclusionReasons":["explicit-operation-intent"],"disposition":"selected","reason":"mandatory","selectedEvidenceId":"edge-instruction"}]}
+      "expected": {
+        "ok": true,
+        "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"Edge\",\"version\":1},{\"authority\":\"instruction\",\"claimClass\":\"explicit\",\"evidenceId\":\"edge-instruction\",\"kind\":\"operation-instruction\",\"reasons\":[\"explicit-operation-intent\"],\"source\":{\"kind\":\"operation\",\"ref\":\"operation:edge\"},\"text\":\"Continue exactly.\",\"version\":1}]",
+        "manifestSha256": "c13188feed75e60cdc979f57062f64a3930b48bcbe907b44aeddfee640eb2dc6",
+        "selectedFacts": [],
+        "decisions": [
+          {
+            "version": 1,
+            "candidateId": "edge-instruction",
+            "dedupeKey": "edge-instruction",
+            "inclusionReasons": [
+              "explicit-operation-intent"
+            ],
+            "disposition": "selected",
+            "reason": "mandatory",
+            "selectedEvidenceId": "edge-instruction"
+          }
+        ]
+      },
+      "scope": "selector-only",
+      "budgetEdge": "request-remainder"
     },
     {
       "name": "snapshot-only failure",
@@ -467,7 +887,9 @@
               "chainDistance": 0,
               "transactionIndex": 0
             },
-            "reasons": ["prepared-head-process"],
+            "reasons": [
+              "prepared-head-process"
+            ],
             "fact": {
               "kind": "step-summary",
               "transactionCount": 0,
@@ -482,7 +904,14 @@
           }
         ]
       },
-      "expected": {"ok": false, "code": "CONTEXT_INCOMPLETE", "stage": "select", "candidateId": "snapshot-summary", "sourceRef": "trace:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:summary"}
+      "expected": {
+        "ok": false,
+        "code": "CONTEXT_INCOMPLETE",
+        "stage": "select",
+        "candidateId": "snapshot-summary",
+        "sourceRef": "trace:3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e:summary"
+      },
+      "scope": "selector-only"
     },
     {
       "name": "invalid trace failure",
@@ -520,7 +949,9 @@
               "chainDistance": 0,
               "transactionIndex": 0
             },
-            "reasons": ["prepared-head-process"],
+            "reasons": [
+              "prepared-head-process"
+            ],
             "fact": {
               "kind": "step-summary",
               "transactionCount": 1,
@@ -537,7 +968,14 @@
           }
         ]
       },
-      "expected": {"ok": false, "code": "INVALID_PROCESS_EVIDENCE", "stage": "select", "candidateId": "invalid-summary", "sourceRef": "trace:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary"}
+      "expected": {
+        "ok": false,
+        "code": "INVALID_PROCESS_EVIDENCE",
+        "stage": "select",
+        "candidateId": "invalid-summary",
+        "sourceRef": "trace:5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73:summary"
+      },
+      "scope": "selector-only"
     },
     {
       "name": "trace source mismatch",
@@ -575,7 +1013,9 @@
               "chainDistance": 0,
               "transactionIndex": 0
             },
-            "reasons": ["prepared-head-process"],
+            "reasons": [
+              "prepared-head-process"
+            ],
             "fact": {
               "kind": "step-summary",
               "transactionCount": 1,
@@ -592,7 +1032,14 @@
           }
         ]
       },
-      "expected": {"ok": false, "code": "PROCESS_SOURCE_MISMATCH", "stage": "select", "candidateId": "trace-mismatch-summary", "sourceRef": "trace:mismatch:summary"}
+      "expected": {
+        "ok": false,
+        "code": "PROCESS_SOURCE_MISMATCH",
+        "stage": "select",
+        "candidateId": "trace-mismatch-summary",
+        "sourceRef": "trace:mismatch:summary"
+      },
+      "scope": "selector-only"
     },
     {
       "name": "head source mismatch",
@@ -630,7 +1077,9 @@
               "chainDistance": 0,
               "transactionIndex": 0
             },
-            "reasons": ["prepared-head-process"],
+            "reasons": [
+              "prepared-head-process"
+            ],
             "fact": {
               "kind": "step-summary",
               "transactionCount": 1,
@@ -647,7 +1096,337 @@
           }
         ]
       },
-      "expected": {"ok": false, "code": "PROCESS_SOURCE_MISMATCH", "stage": "select", "candidateId": "head-mismatch-summary", "sourceRef": "trace:head-mismatch:summary"}
+      "expected": {
+        "ok": false,
+        "code": "PROCESS_SOURCE_MISMATCH",
+        "stage": "select",
+        "candidateId": "head-mismatch-summary",
+        "sourceRef": "trace:head-mismatch:summary"
+      },
+      "scope": "selector-only"
     }
-  ]
+  ],
+  "processProjectionCases": [
+    {
+      "name": "nonzero source KEdit tx uses process-array ordinals",
+      "verificationBoundary": "native-neutral-non-cryptographic",
+      "input": {
+        "version": 1,
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "headId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "steps": [
+          {
+            "version": 1,
+            "nodeId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "chainDistance": 0,
+            "transactions": [
+              {
+                "version": 1,
+                "sourceTransactionId": 7,
+                "capturedAtMs": 1700000000100,
+                "changes": [
+                  {
+                    "version": 1,
+                    "operation": "insert",
+                    "range": {
+                      "fromUtf16": 2,
+                      "toUtf16": 2
+                    },
+                    "insertedText": "雪😀",
+                    "deletedText": "",
+                    "voiceId": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expectedCandidates": [
+        {
+          "version": 1,
+          "id": "trace-process-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:summary",
+          "dedupeKey": "trace-process-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:summary",
+          "kind": "process-fact",
+          "claimClass": "mechanical",
+          "source": {
+            "kind": "trace",
+            "ref": "trace-process-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:summary",
+            "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "headId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "nodeId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "processStatus": "full-trace",
+            "chainDistance": 0,
+            "transactionIndex": 0
+          },
+          "reasons": [
+            "prepared-head-process"
+          ],
+          "fact": {
+            "kind": "step-summary",
+            "transactionCount": 1,
+            "rangeCount": 1,
+            "insertedCodePointCount": 2,
+            "deletedCodePointCount": 0,
+            "firstCapturedAtMs": 1700000000100,
+            "lastCapturedAtMs": 1700000000100,
+            "spanMs": 0,
+            "longestGapMs": 0,
+            "undoCount": 0,
+            "redoCount": 0
+          }
+        },
+        {
+          "version": 1,
+          "id": "trace-process-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:transaction:0",
+          "dedupeKey": "trace-process-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:transaction:0",
+          "kind": "process-fact",
+          "claimClass": "mechanical",
+          "source": {
+            "kind": "trace",
+            "ref": "trace-process-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:transaction:0",
+            "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "headId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "nodeId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "processStatus": "full-trace",
+            "chainDistance": 0,
+            "transactionIndex": 0
+          },
+          "reasons": [
+            "prepared-head-process"
+          ],
+          "fact": {
+            "kind": "transaction",
+            "transactionIndex": 0,
+            "capturedAtMs": 1700000000100,
+            "changeCount": 1,
+            "voiceIds": [
+              "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            ]
+          }
+        },
+        {
+          "version": 1,
+          "id": "trace-process-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:transaction:0:change:0",
+          "dedupeKey": "trace-process-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:transaction:0:change:0",
+          "kind": "process-fact",
+          "claimClass": "mechanical",
+          "source": {
+            "kind": "trace",
+            "ref": "trace-process-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:transaction:0:change:0",
+            "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "headId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "nodeId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "processStatus": "full-trace",
+            "chainDistance": 0,
+            "transactionIndex": 0,
+            "range": {
+              "fromUtf16": 2,
+              "toUtf16": 2
+            }
+          },
+          "reasons": [
+            "prepared-head-process"
+          ],
+          "fact": {
+            "kind": "change",
+            "transactionIndex": 0,
+            "operation": "insert",
+            "range": {
+              "fromUtf16": 2,
+              "toUtf16": 2
+            },
+            "insertedCodePointCount": 2,
+            "deletedCodePointCount": 0,
+            "voiceId": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+          }
+        }
+      ]
+    },
+    {
+      "name": "no-op range omits only zero-effect change",
+      "verificationBoundary": "native-neutral-non-cryptographic",
+      "input": {
+        "version": 1,
+        "traceId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "headId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "steps": [
+          {
+            "version": 1,
+            "nodeId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "chainDistance": 0,
+            "transactions": [
+              {
+                "version": 1,
+                "sourceTransactionId": 9,
+                "capturedAtMs": 1700000000200,
+                "changes": [
+                  {
+                    "version": 1,
+                    "operation": "insert",
+                    "range": {
+                      "fromUtf16": 0,
+                      "toUtf16": 0
+                    },
+                    "insertedText": "",
+                    "deletedText": "",
+                    "voiceId": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expectedCandidates": [
+        {
+          "version": 1,
+          "id": "trace-process-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd:summary",
+          "dedupeKey": "trace-process-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd:summary",
+          "kind": "process-fact",
+          "claimClass": "mechanical",
+          "source": {
+            "kind": "trace",
+            "ref": "trace-process-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd:summary",
+            "traceId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "headId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "nodeId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "processStatus": "full-trace",
+            "chainDistance": 0,
+            "transactionIndex": 0
+          },
+          "reasons": [
+            "prepared-head-process"
+          ],
+          "fact": {
+            "kind": "step-summary",
+            "transactionCount": 1,
+            "rangeCount": 1,
+            "insertedCodePointCount": 0,
+            "deletedCodePointCount": 0,
+            "firstCapturedAtMs": 1700000000200,
+            "lastCapturedAtMs": 1700000000200,
+            "spanMs": 0,
+            "longestGapMs": 0,
+            "undoCount": 0,
+            "redoCount": 0
+          }
+        },
+        {
+          "version": 1,
+          "id": "trace-process-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd:transaction:0",
+          "dedupeKey": "trace-process-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd:transaction:0",
+          "kind": "process-fact",
+          "claimClass": "mechanical",
+          "source": {
+            "kind": "trace",
+            "ref": "trace-process-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd:transaction:0",
+            "traceId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "headId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "nodeId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "processStatus": "full-trace",
+            "chainDistance": 0,
+            "transactionIndex": 0
+          },
+          "reasons": [
+            "prepared-head-process"
+          ],
+          "fact": {
+            "kind": "transaction",
+            "transactionIndex": 0,
+            "capturedAtMs": 1700000000200,
+            "changeCount": 1,
+            "voiceIds": [
+              "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "scopeDefinitions": {
+    "process-adapter-projectable": "A process adapter can construct this exact selector input after authoritative verification and the shared projector.",
+    "selector-only": "This case pins selector behavior for candidate kinds or failure guards outside the verified-process projector."
+  },
+  "adapterRejectionMutations": [
+    {
+      "name": "verdict process drift",
+      "fixture": "two-step-full-trace",
+      "mutation": {
+        "target": "verdict.steps[1].process.transactions[0].capturedAtMs",
+        "operation": "replace",
+        "value": 9999999999999
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "verdict-process-not-bound-to-chain"
+      }
+    },
+    {
+      "name": "chain content drift after verification",
+      "fixture": "two-step-full-trace",
+      "mutation": {
+        "target": "chain[1].content",
+        "operation": "replace-snapshot-preserve-id-signature",
+        "value": "unsigned replacement"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "verified-chain-drift"
+      }
+    },
+    {
+      "name": "read head drift",
+      "fixture": "two-step-full-trace",
+      "mutation": {
+        "target": "read.headId",
+        "operation": "replace",
+        "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "read-head-mismatch"
+      }
+    },
+    {
+      "name": "process node drift",
+      "fixture": "two-step-full-trace",
+      "mutation": {
+        "target": "processProjection.steps[0].nodeId",
+        "operation": "replace",
+        "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "process-node-mismatch"
+      }
+    },
+    {
+      "name": "chain distance drift",
+      "fixture": "two-step-full-trace",
+      "mutation": {
+        "target": "processProjection.steps[0].chainDistance",
+        "operation": "replace",
+        "value": 1
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "process-distance-mismatch"
+      }
+    },
+    {
+      "name": "transaction ordinal drift",
+      "fixture": "two-step-full-trace",
+      "mutation": {
+        "target": "projectedCandidate.source.transactionIndex",
+        "operation": "replace",
+        "value": 1
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "process-ordinal-mismatch"
+      }
+    }
+  ],
+  "projectorContract": "surface-neutral-process-candidates-v1"
 }
