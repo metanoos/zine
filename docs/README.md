@@ -38,6 +38,7 @@ specification wins.
 
 ## About view
 
-The client bundles these same five Markdown files at build time. Each file has
+The client bundles the five documents in the table above at build time; the
+migration design stays repository-only until its schema cut lands. Each file has
 one `#` title and uses `##` headings for its in-app section navigation. Keep
 reader-facing prose here rather than duplicating it in React.

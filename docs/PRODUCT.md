@@ -36,6 +36,14 @@ that context. During review, it provides evidence instead of a verdict. It does
 not decide whether an author is human, whether a claim is true, or whether a
 work deserves trust.
 
+The review side compresses to one line: **evaluate the writer, not just the
+writing.** As AI assistance makes finished prose more uniform, the information
+that distinguishes a writer migrates out of the final text and into the
+process — what they asked for, rejected, protected, and rewrote. The trace is
+where that signal survives, and it cannot be captured retroactively: from a
+full trace any bounded view can be derived later, while no finished text
+recovers the process that produced it.
+
 ## Who it serves
 
 Three roles meet in every zine:

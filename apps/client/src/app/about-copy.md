@@ -37,6 +37,14 @@ that context. During review, it provides evidence instead of a verdict. It does
 not decide whether an author is human, whether a claim is true, or whether a
 work deserves trust.
 
+The review side compresses to one line: **evaluate the writer, not just the
+writing.** As AI assistance makes finished prose more uniform, the information
+that distinguishes a writer migrates out of the final text and into the
+process — what they asked for, rejected, protected, and rewrote. The trace is
+where that signal survives, and it cannot be captured retroactively: from a
+full trace any bounded view can be derived later, while no finished text
+recovers the process that produced it.
+
 ## Who it serves
 
 Three roles meet in every zine:
@@ -1142,6 +1150,21 @@ This is compatible with sovereignty because the paid layer is optional. A
 press can write to its local relay, self-host a remote, and verify events
 without phoning home.
 
+There is one service sovereignty structurally cannot self-provide:
+**independent witness**. A sovereign press can author, sign, store, and verify
+its own work, but a press-signed record of a model call is still the
+operator's assertion. A neutral party can witness request/response commitments
+in a transparency log, sign open-weight inference it actually executed, or
+host the no-install verifier where a shared proof opens for a reader who has
+installed nothing. The protocol makes writing sovereign; the company makes
+reading trustworthy.
+
+For organizations, the same boundary separates what is sold from what is
+never taken: record custody, not key custody. An organization gets relay
+custody of everything published to it, its own countersigning attestation
+over work it stands behind, and ACL-based offboarding. Author keys remain
+personal and are never escrowed.
+
 ## What is open, what is paid
 
 | Always open | Optional paid layer |
@@ -1170,6 +1193,7 @@ workflow, and calibrated interpretation around commodity storage.
 | DHT bootstrap needs operator-provided super-peers | Operated bootstrap | Deferred with the global DHT |
 | Verification is bounded and reader-side | Public verifier and exportable evidence report | Local bundle/report implemented; public verifier is not |
 | Timing and graph models need real calibration | Opt-in research corpus and calibrated policy models | Defaults exist; calibration does not |
+| Press-signed model-call records are operator assertions | Independent witness: transparency-log inclusion proofs and attested open-weight inference | Not implemented; the operation records reserve the countersignature seam |
 
 ## How pricing would work
 
@@ -1217,6 +1241,8 @@ These hold regardless of business model:
 - Attribution remains asserted or verified according to available evidence.
 - Zine never claims to prove humanness, truth, or copyright ownership.
 - Contribution to calibration datasets is explicit and opt-in.
+- Author keys are never escrowed or organization-owned; organizations receive
+  record custody and countersignature, never key custody.
 - The press does not require a company account to create or verify core
   trace events.
 

@@ -23,6 +23,13 @@ The reference product is a **press** named **Zine**. It produces file zines,
 folder zines, Root zines, editions, and coins. There is no separate project
 object: Root is the topmost folder zine.
 
+The same trace serves the reader: **evaluate the writer, not just the
+writing.** As models make finished prose increasingly uniform, the information
+that distinguishes a writer migrates out of the final text and into the
+process — what was asked for, rejected, protected, and rewritten. Capture is
+therefore asymmetric: any bounded view can be derived later from a full trace,
+while no amount of finished text recovers the process that produced it.
+
 This is a founder-conviction pivot accompanied by evidence gathering, not a
 claim already proved. The confirmatory comparison is the same writing task
 under text-only, bounded-history, and selected-trace context while holding
@@ -124,10 +131,33 @@ pre-publication disclosure boundaries are:
   provider and enters the trace; and
 - Mint, which atomically publishes the selected text as a coin.
 
-There is no private AI-operation mode and no selective omission from a
+There is no private AI-operation mode and no **undeclared** omission from a
 published trace. The writer learns this during onboarding, sees an ambient
 reminder near AI and publication controls, inspects the exact prepared context
 before dispatch, and reviews the complete local bundle before publication.
+Publish prepares the exact edition bundle locally, shows the complete
+disclosure manifest and replay, invalidates confirmation if any bundle byte
+changes, and then publishes the immutable edition atomically and idempotently.
+
+### Declared redaction
+
+Redaction is apparent, never stealthy. The event-id chain of a published trace
+is always complete; what a writer may withhold is an event's payload, through
+a signed redaction event that names the target, carries a commitment hash of
+the withheld bytes, and declares a class:
+
+- **content-withheld** — the payload is sealed behind its commitment;
+- **source-anonymized** — an external source's identity is withheld while its
+  use remains on the record; and
+- **timing-coarsened** — timestamps are bucketed to a declared resolution
+  rather than removed, limiting rhythm fingerprinting.
+
+A missing id breaks the chain, so silent omission is structurally visible.
+Readers see every hole's position, size, and class, and may weigh them; a
+sealed payload can later be revealed to a chosen audience and verified against
+its published commitment. One chain therefore supports many audience-scoped
+disclosure surfaces without parallel histories. A press must never present a
+redacted edition as unredacted; the redaction records are part of the trace.
 
 Publication scope follows zine scope:
 
@@ -249,6 +279,14 @@ reconstructable request because the provider may have received it. Observable
 partial response bytes remain evidence. Retries are linked new dispatches, not
 overwrites.
 
+Every response record is a press-signed observation and therefore an operator
+assertion. The record reserves a seam for an independent countersignature over
+the same exact bytes — a transparency-log inclusion proof witnessing the
+request/response hashes, an attested-inference signature over open-weight
+execution, or a native provider signature if one ever exists. Sovereignty can
+do everything except witness itself; the seam is where independence plugs in,
+and a record without one remains labeled asserted.
+
 ## Coins and supply
 
 Mint is manual and atomic: Step the coin's genesis, Publish it, and Attest it.
@@ -282,7 +320,21 @@ versus AI-attributed spans, process patterns, and conditional compression.
 Compression can estimate shared reusable pattern; it is not proof of
 intelligence or humanity because repetitive spam also compresses well.
 Stylometry entangles style, topic, medium, and tool use and can re-identify
-pseudonymous writers. Scores remain inspectable local heuristics.
+pseudonymous writers. Scores remain inspectable local heuristics. Research
+grounding includes
+[normalized compression distance](https://www.math.ucdavis.edu/~saito/data/acha.read.w17/cilibrasi-vitanyi_clustering-by-compression.pdf),
+the prediction/compression relationship in
+[Language Modeling Is Compression](https://proceedings.iclr.cc/paper_files/paper/2024/file/3cbf627fa24fb6cb576e04e689b9428b-Paper-Conference.pdf),
+documented
+[mode effects on measured author style](https://aclanthology.org/2021.eacl-main.97/),
+and the difficulty of
+[separating style from topic and other latent variables](https://aclanthology.org/2023.tacl-1.80/).
+
+Anchored traces also change which side time favors: a fabricated corpus is
+frozen at the capability of the models that generated it, while reader
+forensics keep improving. The
+[rendezvous specification](../protocol/rendezvous.md) records this vintage
+asymmetry and its limits.
 
 ## Publication and portable analysis
 
@@ -337,8 +389,9 @@ The pre-product cut proceeds in dependency order:
    records with exact reconstructability.
 5. Preserve `[[…]]`, implement versioned `((…))`, and remove automatic Copy
    coining.
-6. Replace Send with Publish, add append-only Withdraw/re-attest, and publish
-   complete file or recursive folder trace prefixes.
+6. Replace Send with Publish, add append-only Withdraw/re-attest, typed
+   hash-committed redaction records, and publication of complete file or
+   recursive folder trace prefixes.
 7. Make Mint manual, public, attested, and one-per-key-per-coin-type.
 8. Update indexes, portable bundles, conformance/recovery tests, UI language,
    and reader-facing documentation together.

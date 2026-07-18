@@ -373,3 +373,5 @@ an unsigned/provisional state appear accepted.
 | 2026-07-17 | Keep AI memory scoped and correctable | Operation, file, folder, and explicit user scopes follow the actual folder tree and block unresolved equal-scope conflicts. |
 | 2026-07-17 | Treat every file and folder as a zine | A zine is content plus its scoped trace; Root is the topmost folder zine and can replay the whole descendant interaction history. |
 | 2026-07-17 | Separate Steps from derived checkpoints | A deliberate file/folder/Root Step is one author gesture even when signed child-head roll-ups propagate through ancestors. |
+| 2026-07-17 | Present in-session voices by ID, not key | In-session co-authorship is asserted attribution; key language implies an independent verification that only cross-key seams provide. |
+| 2026-07-17 | Frame review as "evaluate the writer, not just the writing" | As finished prose grows more uniform, the writer's judgment survives in the trace; review surfaces should foreground process evidence over prose judgment. |

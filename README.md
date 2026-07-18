@@ -21,7 +21,8 @@ checkpoints stay local until their author sends them.
 
 The same trace serves two jobs. During writing, it can give an AI relevant
 process context that the finished prose no longer contains. Later, it can give
-people inspectable evidence of what the AI saw, changed, and contributed.
+people inspectable evidence of what the AI saw, changed, and contributed —
+enough to evaluate the writer, not just the writing.
 
 Zine is to authorship provenance what Git is to source history: the open
 protocol and local press are the commons; durable remotes, team controls,
