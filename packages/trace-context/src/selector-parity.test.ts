@@ -70,7 +70,7 @@ interface AdapterRejectionMutation {
   fixture: string;
   mutation: {
     target: string;
-    operation: string;
+    operation: "replace" | "replace-snapshot-preserve-id-signature";
     value: unknown;
   };
   expected: {
@@ -175,11 +175,11 @@ test("native-neutral projector cases pin nonzero source ids and no-op enumeratio
   );
 });
 
-test("adapter rejection descriptors pin strict drift failures", () => {
+test("adapter rejection descriptors resolve to strict, non-inert drift mutations", async () => {
   assert.deepEqual(
     corpus.adapterRejectionMutations.map((descriptor) => descriptor.mutation.target),
     [
-      "verdict.steps[1].process.transactions[0].capturedAtMs",
+      "verdict.steps[1].process.transactions[0].at",
       "chain[1].content",
       "read.headId",
       "processProjection.steps[0].nodeId",
@@ -189,11 +189,71 @@ test("adapter rejection descriptors pin strict drift failures", () => {
   );
   assert.equal(new Set(corpus.adapterRejectionMutations.map((item) => item.name)).size, 6);
   assert.equal(new Set(corpus.adapterRejectionMutations.map((item) => item.expected.reason)).size, 6);
+
+  const fixture = corpus.protocolFixtures.find((item) => item.name === "two-step-full-trace");
+  assert.ok(fixture);
+  const exactEvents = new Set(fixture.chain.map(strictCanonicalJson));
+  const verdict = await verifyFileTraceChain(
+    fixture.chain,
+    (event) => exactEvents.has(strictCanonicalJson(event)),
+    {
+      expectedTraceId: fixture.chain[0]?.id,
+      expectedNucleusId: fixture.chain.at(-1)?.id,
+    },
+  );
+  assert.equal(verdict.status, "full", JSON.stringify(verdict.issues));
+  const processProjection = deriveProjection(fixture.chain);
+  const projectedCandidate = projectTraceProcessCandidatesV1(processProjection).find(
+    (candidate) => candidate.fact.kind === "transaction" && candidate.source.chainDistance === 0,
+  );
+  assert.ok(projectedCandidate);
+  const mutationRoot: Record<string, unknown> = {
+    verdict,
+    chain: fixture.chain,
+    read: { headId: fixture.chain.at(-1)!.id },
+    processProjection,
+    projectedCandidate,
+  };
+
   for (const descriptor of corpus.adapterRejectionMutations) {
     assert.equal(descriptor.fixture, "two-step-full-trace");
     assert.equal(descriptor.expected.accepted, false);
-    assert.ok(descriptor.mutation.operation.length > 0);
+    assert.ok(
+      descriptor.mutation.operation === "replace"
+        || descriptor.mutation.operation === "replace-snapshot-preserve-id-signature",
+    );
+    const applied = applyStrictDescriptorMutation(mutationRoot, descriptor.mutation);
+    assert.notDeepEqual(applied.previousValue, applied.nextValue, descriptor.name);
+
+    if (descriptor.mutation.operation === "replace-snapshot-preserve-id-signature") {
+      const originalChain = mutationRoot.chain as readonly ProtocolEvent[];
+      const mutatedChain = applied.root.chain as readonly ProtocolEvent[];
+      assert.equal(mutatedChain[1]?.id, originalChain[1]?.id);
+      assert.equal(mutatedChain[1]?.sig, originalChain[1]?.sig);
+    }
+
+    if (descriptor.mutation.target.startsWith("processProjection.")) {
+      const invokeProjector = () => projectTraceProcessCandidatesV1(
+        applied.root.processProjection as TraceContextProcessProjectionInputV1,
+      );
+      if (descriptor.expected.reason === "process-distance-mismatch") {
+        assert.throws(invokeProjector, /distance zero must bind exactly the prepared head/);
+      } else {
+        // A prior-node id remains structurally valid to the surface-neutral
+        // projector. Its chain binding is intentionally enforced by adapters.
+        assert.doesNotThrow(invokeProjector);
+      }
+    }
   }
+
+  assert.throws(
+    () => applyStrictDescriptorMutation(mutationRoot, {
+      target: "verdict.steps[1].process.transactions[0].capturedAtMs",
+      operation: "replace",
+      value: 9999999999999,
+    }),
+    /does not resolve to an existing property/,
+  );
 });
 
 test("embedded signed fixtures remain exact protocol-owned conformance vectors", async () => {
@@ -452,4 +512,63 @@ function strictCanonicalJson(value: unknown): string {
   return `{${keys
     .map((key) => `${JSON.stringify(key)}:${strictCanonicalJson(record[key])}`)
     .join(",")}}`;
+}
+
+function applyStrictDescriptorMutation(
+  root: Record<string, unknown>,
+  mutation: AdapterRejectionMutation["mutation"],
+): {
+  root: Record<string, unknown>;
+  previousValue: unknown;
+  nextValue: unknown;
+} {
+  const cloned = structuredClone(root);
+  const path = parseDescriptorTarget(mutation.target);
+  assert.ok(path.length > 0, `${mutation.target}: mutation path must not be empty`);
+  let current: unknown = cloned;
+  for (const segment of path.slice(0, -1)) {
+    assert.ok(
+      current !== null && typeof current === "object",
+      `${mutation.target}: path stops before ${String(segment)}`,
+    );
+    const container = current as Record<string | number, unknown>;
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(container, segment),
+      `${mutation.target}: does not resolve at ${String(segment)}`,
+    );
+    current = container[segment];
+  }
+
+  assert.ok(
+    current !== null && typeof current === "object",
+    `${mutation.target}: mutation parent is not an object`,
+  );
+  const container = current as Record<string | number, unknown>;
+  const leaf = path.at(-1)!;
+  assert.ok(
+    Object.prototype.hasOwnProperty.call(container, leaf),
+    `${mutation.target}: does not resolve to an existing property`,
+  );
+  const keysBefore = Reflect.ownKeys(container);
+  const previousValue = structuredClone(container[leaf]);
+  const nextValue = structuredClone(mutation.value);
+  assert.notDeepEqual(previousValue, nextValue, `${mutation.target}: replacement must change the value`);
+  container[leaf] = nextValue;
+  assert.deepEqual(
+    Reflect.ownKeys(container),
+    keysBefore,
+    `${mutation.target}: replacement must not insert an inert property`,
+  );
+  return { root: cloned, previousValue, nextValue: container[leaf] };
+}
+
+function parseDescriptorTarget(target: string): readonly (string | number)[] {
+  const path: (string | number)[] = [];
+  for (const component of target.split(".")) {
+    const match = /^([A-Za-z_$][A-Za-z0-9_$]*)(?:\[(0|[1-9][0-9]*)\])?$/.exec(component);
+    assert.ok(match, `${target}: unsupported mutation path component ${component}`);
+    path.push(match[1]!);
+    if (match[2] !== undefined) path.push(Number(match[2]));
+  }
+  return path;
 }

@@ -1353,7 +1353,7 @@
       "name": "verdict process drift",
       "fixture": "two-step-full-trace",
       "mutation": {
-        "target": "verdict.steps[1].process.transactions[0].capturedAtMs",
+        "target": "verdict.steps[1].process.transactions[0].at",
         "operation": "replace",
         "value": 9999999999999
       },
@@ -1407,7 +1407,7 @@
       "mutation": {
         "target": "processProjection.steps[0].chainDistance",
         "operation": "replace",
-        "value": 1
+        "value": 0
       },
       "expected": {
         "accepted": false,
