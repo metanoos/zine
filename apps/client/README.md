@@ -6,8 +6,11 @@ filesystem, Tor, and native LLM commands.
 
 This client is the reference authoring and review experience for the open
 trace protocol. Zine's adoption wedge is teams tracing agent-written durable
-files, and the current build focus is native multi-AI task and correspondence
-in this client. The [headless MCP press](../mcp/README.md) remains the
+files, while the current build focus is the trace-aware writing loop: prepare a
+bounded account of text plus process, inspect its instruction/data boundary,
+approve the exact request, and return accepted MODEL work to the trace. Native
+multi-AI tasks and correspondence remain later operation families, not a
+separate product center. The [headless MCP press](../mcp/README.md) remains the
 outside-in interoperability path for MCP-capable harnesses, with claims limited
 to what that integration observes. See the
 [documentation hub](../../docs/README.md), [product framing](../../docs/PRODUCT.md),
@@ -44,6 +47,28 @@ private Scan folder, and adopting or forking a file into Root creates any
 missing destination folders and updates each ancestor manifest. Recursive
 fork-on-write through an already-foreign folder remains the separate deferred
 case documented below.
+
+## Trace-aware MODEL preparation
+
+Direct single-shot MODEL gestures freeze their target revision, mounted
+context, provider profile, voice, lens, and exact messages before approval.
+Prompt Inspector shows that prepared request and its trace-context boundary.
+
+Extend and Settle are the first operations using the shared
+`@zine/trace-context` syntax kernel. `[[…]]` remains exact quoted data.
+A complete `((…))` candidate becomes an instruction only when every byte was
+typed directly by the acting local author during the current mounted editor
+session and lies wholly inside the prepared operation range. Paste, drop,
+MODEL, undo/redo restoration, reload, mixed origin, wrong-author, malformed,
+and unknown bytes remain inert quoted data. Accepted Extend/Settle results
+validate protected content and remove consumed directives as part of the same
+editor transaction.
+
+This is a dogfood slice, not the finished context system. Authority is not yet
+persisted across reloads or moves; explicit promotion, durable consumption
+receipts and crash recovery, task-specific evidence selection, scoped memory,
+result-to-context binding, Stir/Reply/Analyze/Run adapters, and MCP parity are
+still deferred.
 
 ## Agent run recipes
 
