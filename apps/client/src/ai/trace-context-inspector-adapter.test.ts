@@ -235,3 +235,133 @@ test("non-authoring operations show exact whole-target scope without inventing c
   assert.equal(presentation.metadata.versions.compiler, "not-applied:analyze");
   assert.equal(presentation.policy, "bounded-trace-v1");
 });
+
+test("Inspector includes folder evidence for a removed path absent from current inputs", () => {
+  const body = "Current source document.";
+  const removed: DeltaLogEntry = {
+    seq: 1,
+    action: "remove",
+    steppedAt: 3_000,
+    relativePath: "removed.md",
+    source: "folder",
+    prompt: null,
+    summary: null,
+    nodeId: "folder-node-remove",
+  };
+  const renderedBlock = renderContextBlock({
+    folderLabel: "folder-1",
+    entries: [{ relativePath: "draft.md", content: body }],
+    activePath: "draft.md",
+    deltaLog: [removed],
+  });
+  const snapshot = createContextSnapshot({
+    target: {
+      kind: "file",
+      folderId: "folder-1",
+      path: "draft.md",
+      traceId: "trace-1",
+      headId: "head-1",
+      body,
+    },
+    mount: { kind: "folder", path: "" },
+    shields: [{ path: "draft.md", decision: "included", boundary: null }],
+    inputs: [{
+      path: "draft.md",
+      traceId: "trace-1",
+      headId: "head-1",
+      body,
+      citations: [],
+      deltaLog: [],
+      unstepped: false,
+    }],
+    deltaLog: [removed],
+    renderedBlock,
+    maxBytes: 8_192,
+    createdAt: 1,
+  });
+  const prepared = prepareOperation({
+    operation: "analyze",
+    operationInputs: { limelightLog: "" },
+    contextSnapshot: snapshot,
+    provider,
+    modelVoicePubkey: "b".repeat(64),
+    lensId: "forensic-process-analyst",
+    dirtyTarget: false,
+    requestId: "request-orphan-folder-row",
+    createdAt: 1,
+  });
+
+  assert.match(prepared.messages.map((message) => message.content).join("\n"), /removed\.md/);
+  const presentation = adaptPreparedOperationForTraceContextInspector(prepared);
+  assert.equal(presentation.selectedEvidence.length, 1);
+  assert.match(presentation.selectedEvidence[0]?.displayClaim ?? "", /Folder trace row #1.*remove.*removed\.md/);
+  assert.equal(presentation.selectedEvidence[0]?.scope, "folder");
+  assert.equal(presentation.selectedEvidence[0]?.source.traceId, undefined);
+  assert.equal(presentation.selectedEvidence[0]?.source.headId, undefined);
+});
+
+test("folder deltas sharing one signed node retain unique identities and honest scope", () => {
+  const body = "Current source document.";
+  const rows: DeltaLogEntry[] = [
+    {
+      seq: 1,
+      action: "remove",
+      steppedAt: 3_000,
+      relativePath: "removed.md",
+      source: "folder",
+      prompt: null,
+      summary: null,
+      nodeId: "folder-node-shared",
+    },
+    {
+      seq: 2,
+      action: "rename",
+      steppedAt: 3_000,
+      fromPath: "old.md",
+      relativePath: "new.md",
+      source: "folder",
+      prompt: null,
+      summary: null,
+      nodeId: "folder-node-shared",
+    },
+  ];
+  const snapshot = createContextSnapshot({
+    target: {
+      kind: "file", folderId: "folder-1", path: "draft.md", traceId: "trace-1",
+      headId: "head-1", body,
+    },
+    mount: { kind: "folder", path: "" },
+    shields: [{ path: "draft.md", decision: "included", boundary: null }],
+    inputs: [{
+      path: "draft.md", traceId: "trace-1", headId: "head-1", body,
+      citations: [], deltaLog: [], unstepped: false,
+    }],
+    deltaLog: rows,
+    renderedBlock: renderContextBlock({
+      folderLabel: "folder-1",
+      entries: [{ relativePath: "draft.md", content: body }],
+      activePath: "draft.md",
+      deltaLog: rows,
+    }),
+    maxBytes: 8_192,
+    createdAt: 1,
+  });
+  const prepared = prepareOperation({
+    operation: "analyze",
+    operationInputs: { limelightLog: "" },
+    contextSnapshot: snapshot,
+    provider,
+    modelVoicePubkey: "b".repeat(64),
+    lensId: "forensic-process-analyst",
+    dirtyTarget: false,
+    requestId: "request-shared-folder-row",
+    createdAt: 1,
+  });
+
+  const evidence = adaptPreparedOperationForTraceContextInspector(prepared).selectedEvidence;
+  assert.equal(new Set(evidence.map((item) => item.id)).size, 2);
+  assert.deepEqual(evidence.map((item) => item.scope), ["folder", "folder"]);
+  assert.match(evidence[1]?.displayClaim ?? "", /old\.md → new\.md/);
+  assert.equal(evidence[0]?.source.traceId, undefined);
+  assert.equal(evidence[1]?.source.headId, undefined);
+});

@@ -282,15 +282,15 @@ import {
   saveLocalFile,
   saveLocalShielded,
   stageFolderStepOperation,
-  type LocalFile,
 } from "../workspace/local-store.js";
+import { restoreCrashPadFile } from "../workspace/crash-pad-restore.js";
+import { resolvePostWriteTraceId } from "../workspace/stepped-file-identity.js";
 import {
   EMPTY_KEDIT_LOG,
   appendKEditLog,
   dropKEditLogPrefix,
   ensureMdExt,
   fileHasUnsteppedChanges,
-  keditLogFromArray,
   keditLogToArray,
   minimalTextChange,
   nextKEditTx,
@@ -320,6 +320,7 @@ import {
   type ModelContextLesson,
 } from "../ai/model-context-lesson.js";
 import {
+  getReconcilerVoice,
   getSubstrateVoice,
   getSubstrateSignerKeyId,
   setSubstrateSignerKeyId,
@@ -666,34 +667,6 @@ function resolvedMode(theme: Theme): "light" | "dark" {
 
 function flatten(runs: Run[]): string {
   return runs.map((r) => r.text).join("");
-}
-
-/** Reconstruct a FileState from a crash-pad entry overlaid on the disk-scanned
- *  state. The pad entry carries the buffer's content (a flat string) and
- *  optionally the live per-voice run list. When runs are present and flatten to
- *  the stored content, they're reused (preserving voice attribution across the
- *  crash); otherwise the content becomes a single run under the stored voice
- *  pubkey (or the AUTHOR voice as fallback). `existing` contributes kind/eventMeta
- *  that the pad doesn't track. Desktop-only in practice (the webapp has no pad). */
-function mergePadIntoFileState(existing: FileState | undefined, lf: LocalFile): FileState {
-  const runs =
-    lf.runs && lf.runs.length > 0 && flatten(lf.runs) === lf.content
-      ? lf.runs
-      : lf.content.length === 0
-        ? []
-        : [{ voice: lf.voicePubkey ?? authorVoice(), text: lf.content }];
-  return {
-    kind: existing?.kind,
-    runs,
-    nodeId: lf.nodeId || existing?.nodeId || "",
-    updatedAt: lf.updatedAt,
-    tags: lf.tags ?? existing?.tags ?? [],
-    citationIds: lf.citationIds ?? existing?.citationIds,
-    // Carry the drained keystroke log so an unstepped buffer survives a
-    // reload and lands on the next step.
-    ...(lf.kedits && lf.kedits.length > 0 ? { kedits: keditLogFromArray(lf.kedits) } : {}),
-    ...(existing?.eventMeta ? { eventMeta: existing.eventMeta } : {}),
-  };
 }
 
 /** Rough token estimate: ~4 chars/token for English/code prose. Good enough for
@@ -5923,7 +5896,7 @@ function ActionPalette({
   onStop,
   opStatus,
   tokenEstimate,
-  /** Open the prompt inspector (click on the token-count indicator). */
+  /** Open the prompt inspector for a prepared MODEL operation. */
   onInspect,
   attestPlan,
   targetInScope,
@@ -5975,11 +5948,11 @@ function ActionPalette({
   /** Status of the op-target panel, for the action row's stop/error. */
   opStatus: SummonStatus;
   /** Approximate prompt token count for an op on the target file, or null when
-   *  no folder/file is active. Shown beside the action buttons, and is the
-   *  click target that opens the prompt inspector. */
+   *  prompt preparation is unavailable. Shown as optional detail inside the
+   *  persistent prompt-inspector control. */
   tokenEstimate: number | null;
-  /** Open the prompt inspector modal (fired by clicking the token count). */
-  onInspect: () => void;
+  /** Open the prompt inspector modal, optionally selecting an operation. */
+  onInspect: (operation?: PromptOpKind) => void;
   /** Prerequisites the Attest gesture will compose before endorsement. */
   attestPlan: AttestationPlan;
   /** Whether the focused/target file is inside the scope subtree. When false,
@@ -6209,6 +6182,21 @@ function ActionPalette({
               />
             </div>
           )}
+          <button
+            type="button"
+            className="action-palette-inspect"
+            onClick={() => onInspect()}
+            title={tokenEstimate == null
+              ? "Inspect the exact prompt and any preparation blocker"
+              : `Inspect the exact prompt · approximately ${formatTokens(tokenEstimate)}`}
+          >
+            Inspect
+            {tokenEstimate != null && (
+              <span className="action-palette-inspect-estimate">
+                {formatTokens(tokenEstimate)}
+              </span>
+            )}
+          </button>
           {AI_PALETTE_ROW.actions.map((action) => {
             const isRunning = runningOp === action.id;
             // extend/stir/settle write INTO the existing file, so they obey the
@@ -6234,22 +6222,20 @@ function ActionPalette({
                       ? "Configure a model in Models to use AI operations"
                       : action.title
                 }
-                onClick={() => (isRunning ? onStop() : onOp(action.id))}
+                onClick={() => {
+                  if (isRunning) {
+                    onStop();
+                  } else if (action.kind === "operation") {
+                    onInspect(action.id);
+                  } else {
+                    onOp(action.id);
+                  }
+                }}
               >
                 {action.label}
               </button>
             );
           })}
-          {tokenEstimate != null && (
-            <button
-              type="button"
-              className="action-palette-token-count"
-              onClick={onInspect}
-              title="Click to inspect the prompt an op would send · approximate prompt size for an op on the selected file"
-            >
-              {formatTokens(tokenEstimate)}
-            </button>
-          )}
           <PaletteStatus row="model" status={opStatus} />
         </div>
       </div>
@@ -7590,6 +7576,7 @@ function useProvenance(
         content: flatten(f.runs),
         tags: f.tags,
         nodeId: f.nodeId,
+        traceId: f.traceId,
         runs: f.runs,
         citationIds: f.citationIds,
         kedits: keditLogToArray(f.kedits),
@@ -7642,6 +7629,7 @@ function useProvenance(
           content: flatten(f.runs),
           tags: f.tags,
           nodeId: f.nodeId,
+          traceId: f.traceId,
           runs: f.runs,
           citationIds: f.citationIds,
           kedits: keditLogToArray(f.kedits),
@@ -7747,6 +7735,18 @@ function useProvenance(
         force,
         operationId,
       );
+      // The head and stable trace identity are distinct after Step 0. The
+      // local workspace persists both before writeFile resolves; carry that
+      // identity into live React state instead of advancing only the head.
+      // A legacy/non-local backend may not expose the local record, so resolve
+      // the signed chain as a fallback without guessing that the newest head
+      // is the genesis.
+      const traceId = await resolvePostWriteTraceId({
+        nodeId,
+        priorTraceId: file.traceId ?? null,
+        readPersistedTraceId: () => loadLocalFolder(folder.id)?.files[path]?.traceId,
+        resolveTraceIdentity,
+      });
       lastSteppedRef.current.set(path, { content, tags: [...tags], citationIds: [...citationIds] });
       // If edits landed while the Step was in flight, immediately rebase their
       // crash-pad record onto the new head. Never clear a newer KEdit suffix.
@@ -7768,6 +7768,7 @@ function useProvenance(
           content: flatten(liveFile.runs),
           tags: liveFile.tags,
           nodeId,
+          ...(traceId ? { traceId } : {}),
           runs: liveFile.runs,
           citationIds: liveFile.citationIds,
           kedits: keditLogToArray(liveRemaining),
@@ -7790,6 +7791,7 @@ function useProvenance(
         const next: FileState = {
           ...rest,
           nodeId,
+          ...(traceId ? { traceId } : {}),
           ...(remaining.length > 0 ? { kedits: remaining } : {}),
         };
         return { ...prev, [path]: next };
@@ -9304,8 +9306,16 @@ function App() {
       true,
     );
     if (!nodeId) throw new Error(`The local source trace ${path} did not produce a node id.`);
+    const traceId = await resolvePostWriteTraceId({
+      nodeId,
+      priorTraceId: file.traceId ?? null,
+      readPersistedTraceId: () => folder
+        ? loadLocalFolder(folder.id)?.files[path]?.traceId
+        : null,
+      resolveTraceIdentity,
+    });
     seedSteppedRef.current({
-      [path]: { ...file, runs, nodeId },
+      [path]: { ...file, runs, nodeId, ...(traceId ? { traceId } : {}) },
     });
     const latest = filesRef.current[path];
     const latestRemaining = latest
@@ -9325,6 +9335,7 @@ function App() {
         content: flatten(latest.runs),
         tags: latest.tags,
         nodeId,
+        ...(traceId ? { traceId } : {}),
         runs: latest.runs,
         citationIds: latest.citationIds,
         kedits: keditLogToArray(latestRemaining),
@@ -9345,6 +9356,7 @@ function App() {
         [path]: {
           ...rest,
           nodeId,
+          ...(traceId ? { traceId } : {}),
           ...(remaining.length > 0 ? { kedits: remaining } : {}),
         },
       };
@@ -9959,8 +9971,8 @@ function App() {
     return provider;
   }
 
-  // Approximate prompt-size estimate for the token indicator beside the LLM
-  // buttons. The number reflects the payload an op would send against the
+  // Approximate prompt-size estimate shown inside the persistent Inspect
+  // control. The number reflects the payload an op would send against the
   // op-target panel's active file (the same target Extend/Settle/Stir/Reply
   // run against). The estimate uses the same assembler and provider-system
   // preparation as a live Extend call, with an empty seed; the context block
@@ -10005,15 +10017,15 @@ function App() {
   }, [folder, files, panels, activePanel, uiFocus, modelPubkey, scope, shielded, providers, opLenses]);
 
   // ─── Prompt inspector ──────────────────────────────────────────────────────
-  // Clicking the token-count indicator opens a modal showing exactly what a
-  // single-shot op would send. `inspectOp` is null when closed; non-null is
-  // the default op to show first (Extend). The inputs + context block are
+  // Clicking a single-shot MODEL action opens a modal showing exactly what that
+  // op would send; the persistent Inspect control remains an optional entry
+  // point that defaults to Extend. `inspectOp` is null when closed; non-null is
+  // the op to show first. The inputs + context block are
   // gathered once on open (against the op-target panel + scope, mirroring what
   // the live ops gather) and held in state so the modal can switch op tabs
   // without re-fetching the (memoized) context block.
   const [inspectOp, setInspectOp] = useState<PromptOpKind | null>(null);
   const [inspectContext, setInspectContext] = useState("");
-  const [inspectInputs, setInspectInputs] = useState<Partial<Record<PromptOpKind, OpInputs>>>({});
   const [inspectNotes, setInspectNotes] = useState<Partial<Record<PromptOpKind, string>>>({});
   const [inspectPrepared, setInspectPrepared] = useState<
     Partial<Record<PromptOpKind, PreparedOperation>>
@@ -10022,12 +10034,41 @@ function App() {
   const [inspectPreparationError, setInspectPreparationError] = useState<string | null>(null);
   const [approvedRequestHash, setApprovedRequestHash] = useState<string | null>(null);
   const [staleModelResult, setStaleModelResult] = useState<RecoverableModelResult | null>(null);
+  const inspectInputsRef = useRef<Partial<Record<PromptOpKind, OpInputs>>>({});
+  const inspectInputsReadyRef = useRef<Record<PromptOpKind, boolean>>({
+    extend: false,
+    settle: false,
+    stir: false,
+    reply: false,
+    analyze: false,
+  });
+  const inspectRequestedOpRef = useRef<PromptOpKind>("extend");
+  const inspectOpenSequenceRef = useRef(0);
+  const inspectPreparationSequenceRef = useRef(0);
+  const inspectIsOpenRef = useRef(false);
+  const inspectLensSelectionsRef = useRef(opLenses);
+  inspectLensSelectionsRef.current = opLenses;
 
   useEffect(() => {
     modelOperationControllerRef.current!.invalidate();
     setApprovedRequestHash(null);
     setInspectPrepared({});
-  }, [folder?.id, files, uiFocus, scope, shielded, providers, authorPubkey, modelPubkey, opLenses]);
+  }, [folder?.id, files, panels, activePanel, uiFocus, scope, shielded, providers, authorPubkey, modelPubkey, opLenses]);
+
+  useEffect(() => {
+    if (!inspectIsOpenRef.current) return;
+    inspectOpenSequenceRef.current++;
+    inspectPreparationSequenceRef.current++;
+    inspectInputsReadyRef.current = {
+      extend: false,
+      settle: false,
+      stir: false,
+      reply: false,
+      analyze: false,
+    };
+    setInspectPreparing(null);
+    setInspectPreparationError("The file or prompt context changed. Choose the action again to inspect a fresh request.");
+  }, [folder?.id, files, panels, activePanel, uiFocus, scope, shielded, providers, authorPubkey, modelPubkey]);
 
   function recordModelLessonResult(prepared: PreparedOperation, response: string): void {
     const lesson = modelLessonResume;
@@ -10132,25 +10173,34 @@ function App() {
     const loose = partitionDoc(stripped).filter((p) => p.kind === "loose").map((p) => p.text).join("\n").trim();
     const anchorCount = [...iterBrackets(stirText)].length;
     const settlePrompt = encodeSettleAnchors(stirText).promptText;
+    const operationFrom = hasSel ? sel.from : 0;
+    const operationTo = hasSel ? sel.to : doc.length;
     return {
       extend: { seed, hasSelection: hasSel, rangeFrom: hasSel ? sel.to : doc.length, rangeTo: hasSel ? sel.to : doc.length, sourceFrom: seedFrom, sourceTo: seedTo },
       settle: { loose: settlePrompt, rangeFrom: hasSel ? sel.from : 0, rangeTo: hasSel ? sel.to : doc.length, sourceFrom: hasSel ? sel.from : 0, sourceTo: hasSel ? sel.to : doc.length },
       stir: { loose, anchorCount, commands: cmds.map((c) => c.command), rangeFrom: hasSel ? sel.from : 0, rangeTo: hasSel ? sel.to : doc.length },
       // Reply/Analyze relay-backed bodies are filled by openInspector.
-      reply: { source: stirText },
+      reply: { source: stirText, sourceFrom: operationFrom, sourceTo: operationTo },
       analyze: {},
     };
   }
 
   async function prepareInspectorOperation(
     operation: PromptOpKind,
-    inputs: Partial<Record<PromptOpKind, OpInputs>> = inspectInputs,
-    lensId: OpLensId = opLenses[operation],
+    inputs: Partial<Record<PromptOpKind, OpInputs>> = inspectInputsRef.current,
+    lensId: OpLensId = inspectLensSelectionsRef.current[operation],
+    openSequence = inspectOpenSequenceRef.current,
+    requestedPreparationSequence?: number,
   ): Promise<void> {
+    const preparationSequence = requestedPreparationSequence
+      ?? ++inspectPreparationSequenceRef.current;
     const idx = opTargetPanel();
     const provider = resolveVoiceProvider(modelPubkey);
     if (!provider) {
-      setInspectPreparationError("No AI provider is configured.");
+      if (openSequence === inspectOpenSequenceRef.current) {
+        setInspectPreparationError("No AI provider is configured.");
+        setInspectPreparing(null);
+      }
       return;
     }
     setInspectPreparing(operation);
@@ -10164,9 +10214,19 @@ function App() {
         modelVoicePubkey: modelPubkey,
         lensId,
       });
+      if (
+        openSequence !== inspectOpenSequenceRef.current ||
+        preparationSequence !== inspectPreparationSequenceRef.current ||
+        inspectRequestedOpRef.current !== operation
+      ) return;
       setInspectPrepared((current) => ({ ...current, [operation]: prepared }));
       setInspectContext(prepared.contextSnapshot.renderedBlock);
     } catch (error) {
+      if (
+        openSequence !== inspectOpenSequenceRef.current ||
+        preparationSequence !== inspectPreparationSequenceRef.current ||
+        inspectRequestedOpRef.current !== operation
+      ) return;
       setInspectPrepared((current) => {
         const next = { ...current };
         delete next[operation];
@@ -10174,50 +10234,138 @@ function App() {
       });
       setInspectPreparationError(error instanceof Error ? error.message : String(error));
     } finally {
-      setInspectPreparing((current) => current === operation ? null : current);
+      if (
+        openSequence === inspectOpenSequenceRef.current &&
+        preparationSequence === inspectPreparationSequenceRef.current &&
+        inspectRequestedOpRef.current === operation
+      ) {
+        setInspectPreparing((current) => current === operation ? null : current);
+      }
     }
+  }
+
+  /** Fetch only the selected operation's ancillary relay input. Extend,
+   * Settle, and Stir can prepare immediately from the local editor; Reply's
+   * palette and Analyze's limelight history are lazy so they never delay those
+   * local operations. */
+  async function hydrateInspectorInputs(
+    operation: PromptOpKind,
+    openSequence: number,
+  ): Promise<void> {
+    if (inspectInputsReadyRef.current[operation]) return;
+    const inputs = inspectInputsRef.current;
+    if (operation === "reply") {
+      try {
+        const palette = await fetchPalette();
+        if (openSequence !== inspectOpenSequenceRef.current) return;
+        inputs.reply = {
+          ...inputs.reply,
+          traces: palette
+            .slice(0, 20)
+            .map((item) => `- "${item.text}" (nodeId ${item.nodeId})`)
+            .join("\n"),
+        };
+      } catch {
+        if (openSequence !== inspectOpenSequenceRef.current) return;
+        inputs.reply = { ...inputs.reply, traces: "" };
+        setInspectNotes((current) => ({
+          ...current,
+          reply: "The relay palette fetch failed; Reply will continue without citable traces.",
+        }));
+      }
+    } else if (operation === "analyze") {
+      try {
+        const focus = folder ? await focusTimeline(folder.id) : [];
+        if (openSequence !== inspectOpenSequenceRef.current) return;
+        inputs.analyze = {
+          ...inputs.analyze,
+          limelightLog: folder
+            ? renderLimelightLog(focus, folder.label ?? DEFAULT_ROOT_LABEL)
+            : "",
+        };
+      } catch {
+        if (openSequence !== inspectOpenSequenceRef.current) return;
+        inputs.analyze = { ...inputs.analyze, limelightLog: "" };
+        setInspectNotes((current) => ({
+          ...current,
+          analyze: "The limelight fetch failed; Analyze will continue with the trace log, Step history, and file contents.",
+        }));
+      }
+    }
+    if (openSequence !== inspectOpenSequenceRef.current) return;
+    inspectInputsRef.current = inputs;
+    inspectInputsReadyRef.current[operation] = true;
+  }
+
+  async function prepareInspectorSelection(
+    operation: PromptOpKind,
+    lensId: OpLensId = inspectLensSelectionsRef.current[operation],
+    openSequence = inspectOpenSequenceRef.current,
+  ): Promise<void> {
+    const preparationSequence = ++inspectPreparationSequenceRef.current;
+    inspectRequestedOpRef.current = operation;
+    setInspectPreparing(operation);
+    setInspectPreparationError(null);
+    await hydrateInspectorInputs(operation, openSequence);
+    if (
+      openSequence !== inspectOpenSequenceRef.current ||
+      preparationSequence !== inspectPreparationSequenceRef.current ||
+      inspectRequestedOpRef.current !== operation
+    ) return;
+    await prepareInspectorOperation(
+      operation,
+      inspectInputsRef.current,
+      lensId,
+      openSequence,
+      preparationSequence,
+    );
+  }
+
+  function closeInspector(): void {
+    inspectIsOpenRef.current = false;
+    inspectOpenSequenceRef.current++;
+    inspectPreparationSequenceRef.current++;
+    inspectInputsReadyRef.current = {
+      extend: false,
+      settle: false,
+      stir: false,
+      reply: false,
+      analyze: false,
+    };
+    setInspectPreparing(null);
+    setInspectOp(null);
   }
 
   /** Open the inspector: gather the context block + derive inputs against the
    *  op-target panel, then show the modal. Async because the context block's
    *  directory-log fetch is async (memoized). */
   async function openInspector(defaultOperation: PromptOpKind = "extend") {
+    const openSequence = ++inspectOpenSequenceRef.current;
+    inspectIsOpenRef.current = true;
     const inputs = deriveInspectInputs();
     const notes: Partial<Record<PromptOpKind, string>> = {
       settle: "Bracket spans appear as protected anchor tokens in the request and are restored byte-for-byte after the complete response.",
     };
-    const [paletteResult, focusResult] = await Promise.allSettled([
-      fetchPalette(),
-      folder ? focusTimeline(folder.id) : Promise.resolve([] as FocusEntry[]),
-    ]);
-    if (paletteResult.status === "fulfilled") {
-      inputs.reply = {
-        ...inputs.reply,
-        traces: paletteResult.value
-          .slice(0, 20)
-          .map((item) => `- "${item.text}" (nodeId ${item.nodeId})`)
-          .join("\n"),
-      };
-    } else {
-      notes.reply = "The relay palette fetch failed; Reply would continue without citable traces.";
-    }
-    if (focusResult.status === "fulfilled" && folder) {
-      inputs.analyze = {
-        limelightLog: renderLimelightLog(
-          focusResult.value,
-          folder.label ?? DEFAULT_ROOT_LABEL,
-        ),
-      };
-    } else if (focusResult.status === "rejected") {
-      notes.analyze = "The limelight fetch failed; Analyze will continue with the trace log, Step history, and file contents.";
-    }
-    setInspectInputs(inputs);
+    inspectInputsRef.current = inputs;
+    inspectInputsReadyRef.current = {
+      extend: true,
+      settle: true,
+      stir: true,
+      reply: false,
+      analyze: false,
+    };
+    inspectRequestedOpRef.current = defaultOperation;
     setInspectContext("");
     setInspectNotes(notes);
     setInspectPrepared({});
     setInspectPreparationError(null);
     setInspectOp(defaultOperation);
-    await prepareInspectorOperation(defaultOperation, inputs);
+    setInspectPreparing(defaultOperation);
+    await prepareInspectorSelection(
+      defaultOperation,
+      inspectLensSelectionsRef.current[defaultOperation],
+      openSequence,
+    );
   }
 
   /** Begin an in-place op: mark running, reserve the focused path, arm
@@ -10593,7 +10741,7 @@ function App() {
    *  that column first so the reply always lands alongside its origin.
    *  The model names the file via a leading `TITLE:` line (see
    *  RESPOND_MESSAGES); the TITLE line is stripped before the atomic apply. */
-  async function replyLLM(idx: number) {
+  async function replyLLM(idx: number, approvedRequest?: PreparedOperation) {
     if (!folder) return;
     const modelVoice = modelPubkey;
     const provider = resolveOpProvider(idx, modelVoice, "reply");
@@ -10604,19 +10752,27 @@ function App() {
     try {
       const view = panelViews.current[idx];
       const srcRel = panels[idx].active || "";
-      const sel = view?.state.selection.main;
-      const hasSel = !!sel && sel.from !== sel.to;
-      const sourceText = hasSel
-        ? view!.state.sliceDoc(sel!.from, sel!.to)
-        : (srcRel && filesRef.current[srcRel] ? flatten(filesRef.current[srcRel].runs) : "");
-      let palette: PaletteItem[] = [];
-      try {
-        palette = await fetchPalette();
-      } catch {
-        /* no palette is fine — the response just won't carry citations */
+      let inputs: OpInputs;
+      if (approvedRequest?.operation === "reply") {
+        inputs = { ...approvedRequest.operationInputs };
+      } else {
+        const sel = view?.state.selection.main;
+        const hasSel = !!sel && sel.from !== sel.to;
+        const sourceText = hasSel
+          ? view!.state.sliceDoc(sel!.from, sel!.to)
+          : (srcRel && filesRef.current[srcRel] ? flatten(filesRef.current[srcRel].runs) : "");
+        const sourceFrom = hasSel ? sel!.from : 0;
+        const sourceTo = hasSel ? sel!.to : sourceText.length;
+        let palette: PaletteItem[] = [];
+        try {
+          palette = await fetchPalette();
+        } catch {
+          /* no palette is fine — the response just won't carry citations */
+        }
+        const traces = palette.slice(0, 20).map((p) => `- "${p.text}" (nodeId ${p.nodeId})`).join("\n");
+        inputs = { source: sourceText, traces, sourceFrom, sourceTo };
       }
-      const traces = palette.slice(0, 20).map((p) => `- "${p.text}" (nodeId ${p.nodeId})`).join("\n");
-      const inputs: OpInputs = { source: sourceText, traces };
+      const sourceText = inputs.source ?? "";
       const sourceNodeId = filesRef.current[srcRel]?.nodeId || undefined;
       let llmMeta: LlmStepMeta | null = null;
       const { prepared, result } = await modelOperationControllerRef.current!.executeApproved({
@@ -10681,7 +10837,7 @@ function App() {
    *  prepared request freezes the exact trace log; the output cites every
    *  analyzed source head and remains an editable, unstepped Zine file so the
    *  human and AI can continue their review in the same traced medium. */
-  async function analyzeLLM(idx: number) {
+  async function analyzeLLM(idx: number, approvedRequest?: PreparedOperation) {
     if (!folder) return;
     const modelVoice = modelPubkey;
     const provider = resolveOpProvider(idx, modelVoice, "analyze");
@@ -10691,18 +10847,23 @@ function App() {
     summonAbort.current[idx] = controller;
     try {
       const srcRel = panels[idx].active || "";
-      // Pull the folder's focus chain (panel-occupancy history) and render it
-      // as the limelight log. focusTimeline never throws; an empty chain (folder
-      // predates focus deltas) yields "" and the Analyze prompt tells the AI
-      // to analyze only what it has.
-      let limelightLog = "";
-      try {
-        const focus: FocusEntry[] = await focusTimeline(folder.id);
-        limelightLog = renderLimelightLog(focus, folder.label ?? DEFAULT_ROOT_LABEL);
-      } catch {
-        /* no focus chain is fine — the persona covers the missing-data case */
+      let inputs: OpInputs;
+      if (approvedRequest?.operation === "analyze") {
+        inputs = { ...approvedRequest.operationInputs };
+      } else {
+        // Pull the folder's focus chain (panel-occupancy history) and render it
+        // as the limelight log. An empty chain yields "" and the Analyze prompt
+        // tells the AI to analyze only what it has.
+        let limelightLog = "";
+        try {
+          const focus: FocusEntry[] = await focusTimeline(folder.id);
+          limelightLog = renderLimelightLog(focus, folder.label ?? DEFAULT_ROOT_LABEL);
+        } catch {
+          /* no focus chain is fine — the persona covers the missing-data case */
+        }
+        inputs = { limelightLog };
       }
-      const inputs: OpInputs = { limelightLog };
+      const limelightLog = inputs.limelightLog ?? "";
       let llmMeta: LlmStepMeta | null = null;
       let sourceHeadIds: string[] = [];
       const { prepared, result } = await modelOperationControllerRef.current!.executeApproved({
@@ -10808,7 +10969,7 @@ function App() {
    *  the panel's active tab here and wait for FileEditor to mount / swap its doc
    *  before dispatching. Reply/Step/Send/Attest don't stream into the view
    *  (Reply writes a sibling file; the rest step), so they're left as-is. */
-  async function runOp(idx: number, op: OpKind) {
+  async function runOp(idx: number, op: OpKind, approvedRequest?: PreparedOperation) {
     if (!canSignWithSecrets()) {
       setOpStatus(idx, "error", "authoring is available in the unlocked desktop press", op);
       return;
@@ -10859,8 +11020,8 @@ function App() {
       void (active && isFolderTab(active) ? settleDeDupeLLM(idx) : settleLLM(idx));
     }
     else if (op === "stir") void stirLLM(idx);
-    else if (op === "reply") void replyLLM(idx);
-    else if (op === "analyze") void analyzeLLM(idx);
+    else if (op === "reply") void replyLLM(idx, approvedRequest);
+    else if (op === "analyze") void analyzeLLM(idx, approvedRequest);
     else if (op === "step" || op === "send") void deliverAsVoice(idx, op);
     else if (op === "attest") {
       // Attest opens the optional note/location modal before any prerequisite
@@ -10993,6 +11154,7 @@ function App() {
         content: nextText,
         tags: next.tags,
         nodeId: next.nodeId,
+        traceId: next.traceId,
         runs,
         citationIds: next.citationIds,
         kedits: keditLogToArray(nextLog),
@@ -11648,7 +11810,7 @@ function App() {
    *  against the freshly scanned set: any path that no longer exists (deleted /
    *  moved on disk or relay) is pruned, so a stale layout never surfaces a dead
    *  tab. Folder tabs (`folder://…`) aren't file paths, so they survive as-is. */
-  function openScanned(scanned: Record<string, FileState>, folderId: string) {
+  async function openScanned(scanned: Record<string, FileState>, folderId: string) {
     const firstPath = Object.keys(scanned).sort()[0] ?? "";
     const fallback: { panels: PanelState[]; activePanel: number; weights: number[]; tabModes: Record<string, Mode> } = {
       panels: [{ tabs: firstPath ? [firstPath] : [], active: firstPath }],
@@ -11692,9 +11854,15 @@ function App() {
     // (not scanned) is never seeded → unstepped → correct.
     const pad = loadPad(folderId);
     if (pad && Object.keys(pad).length > 0) {
+      const recoveryVoice = await getReconcilerVoice();
       const merged = { ...scanned };
       for (const [path, lf] of Object.entries(pad)) {
-        merged[path] = mergePadIntoFileState(scanned[path], lf);
+        merged[path] = restoreCrashPadFile(
+          scanned[path],
+          lf,
+          authorVoice(),
+          recoveryVoice.publicKey,
+        );
       }
       setFiles(merged);
     }
@@ -12012,7 +12180,7 @@ function App() {
         ).files;
         if (cancelled) return;
         setFiles(scanned);
-        openScanned(scanned, folder.id);
+        await openScanned(scanned, folder.id);
         setBootState("ready");
       } catch (e) {
         if (cancelled) return;
@@ -12750,6 +12918,7 @@ function App() {
               content: flatten(f.runs),
               tags: f.tags,
               nodeId: f.nodeId,
+              traceId: f.traceId,
               runs: f.runs,
               citationIds: f.citationIds,
               kedits: keditLogToArray(f.kedits),
@@ -14190,6 +14359,7 @@ function App() {
         content: nextText,
         tags: nextFile.tags,
         nodeId: nextFile.nodeId,
+        traceId: nextFile.traceId,
         runs,
         citationIds: nextFile.citationIds,
         kedits: keditLogToArray(nextLog),
@@ -14219,6 +14389,7 @@ function App() {
         content: flatten(next.runs),
         tags: next.tags,
         nodeId: next.nodeId,
+        traceId: next.traceId,
         runs: next.runs,
         citationIds: next.citationIds,
         kedits: keditLogToArray(next.kedits),
@@ -14333,7 +14504,9 @@ function App() {
           try {
             const nodeId = await backendRef.current.createFile(path);
             setFiles((prev) =>
-              prev[path] ? { ...prev, [path]: { ...prev[path], nodeId } } : prev,
+              prev[path]
+                ? { ...prev, [path]: { ...prev[path], nodeId, traceId: nodeId } }
+                : prev,
             );
           } catch (e) {
             console.warn(`[workspace] createFile failed for ${path}:`, e);
@@ -16108,7 +16281,7 @@ function App() {
                 onStop={() => stopOp(opTargetPanel())}
                 opStatus={summonStatus[opTargetPanel()] ?? { state: "idle" }}
                 tokenEstimate={tokenEstimate}
-                onInspect={() => void openInspector()}
+                onInspect={(operation) => void openInspector(operation)}
                 attestPlan={paletteAttestationPlan()}
                 targetInScope={(() => {
                   const p = panels[opTargetPanel()]?.active;
@@ -16253,20 +16426,24 @@ function App() {
                   lensSelections={opLenses}
                   onLensChange={(operation, lensId) => {
                     chooseOpLens(operation, lensId);
+                    inspectLensSelectionsRef.current = {
+                      ...inspectLensSelectionsRef.current,
+                      [operation]: lensId,
+                    };
                     modelOperationControllerRef.current!.invalidate();
                     setApprovedRequestHash(null);
                     setInspectPrepared({});
-                    void prepareInspectorOperation(operation, inspectInputs, lensId);
+                    void prepareInspectorSelection(operation, lensId);
                   }}
                   preparedOperations={inspectPrepared}
                   preparingOp={inspectPreparing}
                   preparationError={inspectPreparationError}
-                  approvedRequestHash={approvedRequestHash}
                   onOperationChange={(operation) => {
+                    inspectRequestedOpRef.current = operation;
                     setInspectOp(operation);
-                    void prepareInspectorOperation(operation);
+                    void prepareInspectorSelection(operation);
                   }}
-                  onApprove={(prepared) => {
+                  onDispatch={(prepared) => {
                     modelOperationControllerRef.current!.approve(prepared);
                     setApprovedRequestHash(prepared.preparedRequestHash);
                     if (
@@ -16275,9 +16452,11 @@ function App() {
                     ) {
                       advanceOnboarding("request-approved");
                     }
+                    closeInspector();
+                    void runOp(opTargetPanel(), prepared.operation, prepared);
                   }}
                   estimateTokens={estimateTokens}
-                  onClose={() => setInspectOp(null)}
+                  onClose={closeInspector}
                 />
               )}
               {isOnboardingActive(onboardingStage) && (

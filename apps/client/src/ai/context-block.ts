@@ -88,7 +88,7 @@ export interface DeltaSpanView {
 
 /** One entry in the directory action log — a stepped node (file or folder),
  *  summarized. `source` discriminates per-file edit/llm/import actions from
- *  folder-membership add/remove actions; `relativePath` names which doc each
+ *  folder-membership add/remove/rename actions; `relativePath` names which doc each
  *  line is about. `deltas` carries the per-span content payload for file
  *  events (so the model can read what changed, not just that something did);
  *  absent on folder events and on nodes with no content delta (genesis,
@@ -100,12 +100,15 @@ export interface DeltaLogEntry {
   /** ms-epoch. */
   steppedAt: number;
   /** Relative path of the doc this action touched. For a file event, the doc
-   *  being edited/imported/stepped; for a folder event, the member that joined
-   *  or left the directory. */
+   *  being edited/imported/stepped; for a folder event, the member that joined,
+   *  left, or became the destination of a rename. */
   relativePath: string;
-  /** Whether this is a per-file action ('file') or a folder-membership action
+  /** Previous path for a folder rename. Absent for every other action. */
+  fromPath?: string;
+  /** Whether this is a per-file action ('file') or a folder checkpoint action
    *  ('folder'). Folder events render with a structural marker and annotation
-   *  so the model can distinguish membership, child-head, and explicit Steps. */
+   *  so the model can distinguish membership, moves, child-head advances, and
+   *  explicit Steps from file edits. */
   source: 'file' | 'folder';
   prompt: string | null;
   summary: string | null;
@@ -370,6 +373,16 @@ function renderDeltaLine(d: DeltaLogEntry, prevSteppedAt: number | null, stripLa
     stripLabels || prevSteppedAt === null ? '' : formatInterval(d.steppedAt - prevSteppedAt).padStart(5);
   const tsField = interval ? `${ts}${interval}` : `${ts}     `;
   if (d.source === 'folder') {
+    // A rename carries both protocol coordinates so the model sees a move,
+    // not a fresh join. Other checkpoint causes retain main's structural
+    // vocabulary for child advances, explicit Steps, and metadata changes.
+    if (d.action === 'rename') {
+      const act = '~rename'.padEnd(7);
+      const path = d.fromPath
+        ? `${d.fromPath} → ${d.relativePath}`
+        : d.relativePath;
+      return `[#${d.seq}] ${act} ${tsField}   ${path}   (renamed)`;
+    }
     const sign = d.action === 'remove' ? '-' : d.action === 'add' ? '+' : '~';
     const note = d.action === 'remove'
       ? '(left directory)'

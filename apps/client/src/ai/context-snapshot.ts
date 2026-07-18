@@ -65,6 +65,10 @@ export interface ContextSnapshot {
   mount: { kind: "file" | "folder"; path: string } | null;
   shields: readonly ContextShieldDecision[];
   inputs: readonly ContextSnapshotInput[];
+  /** Exact all-scope chronological evidence rendered into `renderedBlock`.
+   * Per-input logs are useful source slices, but cannot represent removals for
+   * paths that no longer exist in the current workspace. */
+  deltaLog: readonly DeltaLogEntry[];
   renderedBlock: string;
   completeness: {
     complete: boolean;
@@ -80,6 +84,7 @@ export interface CreateContextSnapshotInput {
   mount: ContextSnapshot["mount"];
   shields: readonly ContextShieldDecision[];
   inputs: ReadonlyArray<Omit<ContextSnapshotInput, "contentHash"> & { contentHash?: string }>;
+  deltaLog?: readonly DeltaLogEntry[];
   renderedBlock: string;
   failures?: readonly ContextSnapshotFailure[];
   maxBytes?: number;
@@ -141,6 +146,13 @@ export function createContextSnapshot(input: CreateContextSnapshotInput): Contex
         a.seq - b.seq),
     }))
     .sort((a, b) => a.path.localeCompare(b.path));
+  const deltaLog = [...(input.deltaLog ?? inputs.flatMap((entry) => entry.deltaLog))]
+    .sort((a, b) =>
+      a.steppedAt - b.steppedAt ||
+      a.relativePath.localeCompare(b.relativePath) ||
+      a.source.localeCompare(b.source) ||
+      a.seq - b.seq ||
+      (a.nodeId ?? "").localeCompare(b.nodeId ?? ""));
   const shields = [...input.shields].sort((a, b) => a.path.localeCompare(b.path));
   const failures = [...(input.failures ?? [])].sort((a, b) =>
     a.path.localeCompare(b.path) || a.stage.localeCompare(b.stage) || a.message.localeCompare(b.message));
@@ -161,7 +173,7 @@ export function createContextSnapshot(input: CreateContextSnapshotInput): Contex
     .filter((entry) => entry.path !== target.path)
     .reduce((total, entry) => total + entry.bodyBytes, 0);
   const citationBytes = contributions.reduce((total, entry) => total + entry.citationBytes, 0);
-  const deltaLogBytes = contributions.reduce((total, entry) => total + entry.deltaLogBytes, 0);
+  const deltaLogBytes = utf8Bytes(JSON.stringify(deltaLog));
   const totalBytes = utf8Bytes(input.renderedBlock);
   const structureBytes = Math.max(
     0,
@@ -186,6 +198,7 @@ export function createContextSnapshot(input: CreateContextSnapshotInput): Contex
     mount: input.mount,
     shields,
     inputs,
+    deltaLog,
     renderedBlock: input.renderedBlock,
     completeness: { complete: failures.length === 0, failures },
     budget,
@@ -196,6 +209,7 @@ export function createContextSnapshot(input: CreateContextSnapshotInput): Contex
     mount: input.mount,
     shields,
     inputs,
+    deltaLog,
     renderedBlock: input.renderedBlock,
     completeness: { complete: failures.length === 0, failures },
     budget,

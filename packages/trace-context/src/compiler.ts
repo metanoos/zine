@@ -110,11 +110,13 @@ export function compileAuthoringSyntax(
     if (authorization.reason === "authorized") {
       drafts.push({
         candidate,
-        marker: directiveMarker(candidate),
+        marker: "",
         authority: authorization,
       });
     }
   }
+
+  assignCollisionFreeDirectiveMarkers(input.text, drafts);
 
   const maxAnchorBytes = input.localAnchorMaxBytes ?? DEFAULT_LOCAL_ANCHOR_MAX_BYTES;
   if (!Number.isInteger(maxAnchorBytes) || maxAnchorBytes <= 0) {
@@ -316,8 +318,26 @@ function classifyAuthority(
   return { reason: "authorized", spans: covering, origin: covering[0]!.origin };
 }
 
-function directiveMarker(candidate: DirectiveCandidateV1): string {
-  return `⟪ZINE_DIRECTIVE_V1_${String(candidate.ordinal).padStart(4, "0")}_${candidate.range.fromUtf16}_${candidate.range.toUtf16}⟫`;
+function directiveMarker(candidate: DirectiveCandidateV1, namespace: number): string {
+  const namespacePart = namespace === 0 ? "" : `N${namespace}_`;
+  return `⟪ZINE_DIRECTIVE_V1_${namespacePart}${String(candidate.ordinal).padStart(4, "0")}_${candidate.range.fromUtf16}_${candidate.range.toUtf16}⟫`;
+}
+
+/** Keep the original V1 marker bytes for ordinary documents, but move the
+ * whole compilation into the first deterministic namespace whose generated
+ * markers are absent from source prose. Exact control-token cleanup can then
+ * never delete literal author text that merely resembles a marker. */
+function assignCollisionFreeDirectiveMarkers(
+  text: string,
+  drafts: DirectiveDraft[],
+): void {
+  let namespace = 0;
+  while (drafts.some((draft) => text.includes(directiveMarker(draft.candidate, namespace)))) {
+    namespace += 1;
+  }
+  for (const draft of drafts) {
+    draft.marker = directiveMarker(draft.candidate, namespace);
+  }
 }
 
 function renderRangeWithMarkers(

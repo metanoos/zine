@@ -1,8 +1,8 @@
 /**
  * Prompt inspector — see exactly what a single-shot LLM op would send.
  *
- * Opens when the user clicks the `~tokens` indicator beside the op buttons
- * (App.tsx threads `onInspect` onto `.action-palette-token-count`). Shows the full
+ * Opens when the user clicks a single-shot MODEL action, selecting that action's
+ * tab. The persistent `Inspect` control remains an optional entry point. Shows the full
  * `messages[]` layout a chosen op (Extend / Settle / Stir / Reply / Analyze)
  * would send against the op-target panel's focused file and current scope:
  *
@@ -13,7 +13,7 @@
  * This is a pre-send view: there is no attempt to rebuild a past call from
  * incomplete provenance. App passes the immutable PreparedOperation itself;
  * this component renders its exact messages and returns that same object when
- * the user approves it. It never runs prompt builders.
+ * the user dispatches it. It never runs prompt builders.
  *
  * The modal is a pure presentation layer. App owns editor/parser coupling,
  * canonical gathering, preparation, invalidation, and execution.
@@ -66,9 +66,10 @@ export interface PromptInspectorProps {
   preparedOperations: Partial<Record<OpKind, PreparedOperation>>;
   preparingOp?: OpKind | null;
   preparationError?: string | null;
-  approvedRequestHash?: string | null;
   onOperationChange: (op: OpKind) => void;
-  onApprove: (prepared: PreparedOperation) => void;
+  /** Dispatch the exact prepared request currently displayed. App retains the
+   *  approval and execution trust boundary. */
+  onDispatch: (prepared: PreparedOperation) => void;
   /** Estimates total payload tokens from char count. Passed in so the modal
    *  uses the same ~4 chars/token heuristic as the action-palette indicator. */
   estimateTokens: (chars: number) => number;
@@ -99,9 +100,8 @@ export function PromptInspectorModal({
   preparedOperations,
   preparingOp,
   preparationError,
-  approvedRequestHash,
   onOperationChange,
-  onApprove,
+  onDispatch,
   estimateTokens,
   onClose,
 }: PromptInspectorProps) {
@@ -306,17 +306,14 @@ export function PromptInspectorModal({
           <button
             type="button"
             className="run-start"
-            onClick={() => onApprove(preparedOperation)}
-            disabled={approvedRequestHash === preparedOperation.preparedRequestHash}
+            onClick={() => onDispatch(preparedOperation)}
           >
-            {approvedRequestHash === preparedOperation.preparedRequestHash
-              ? "Approved for this session"
-              : `Approve ${OP_LABELS[op]}`}
+            {`Dispatch ${OP_LABELS[op]}`}
           </button>
         ) : null}
 
         <p className="run-hint">
-          Esc to close · click a tab to switch op
+          Esc to close · click a tab to switch op · Dispatch sends this exact request
         </p>
       </div>
     </div>,

@@ -174,13 +174,19 @@ function operationRangeForPrepared(prepared: PreparedOperation): TraceContextIns
 }
 
 function orderedTraceRows(prepared: PreparedOperation): readonly FrozenTraceRow[] {
-  return prepared.contextSnapshot.inputs
-    .flatMap((input) => input.deltaLog.map((entry) => ({
-      inputPath: input.path,
-      inputTraceId: input.traceId,
-      inputHeadId: input.headId,
-      entry,
-    })))
+  const inputsByPath = new Map(
+    prepared.contextSnapshot.inputs.map((input) => [input.path, input]),
+  );
+  return prepared.contextSnapshot.deltaLog
+    .map((entry) => {
+      const input = inputsByPath.get(entry.relativePath);
+      return {
+        inputPath: entry.relativePath,
+        inputTraceId: input?.traceId ?? null,
+        inputHeadId: input?.headId ?? null,
+        entry,
+      };
+    })
     .sort((left, right) =>
       left.entry.steppedAt - right.entry.steppedAt
       || left.entry.seq - right.entry.seq
@@ -198,10 +204,13 @@ function selectedEvidenceForTraceRow(
   const timestamp = Number.isFinite(entry.steppedAt)
     ? new Date(entry.steppedAt).toISOString()
     : `${entry.steppedAt}ms`;
+  const displayedPath = entry.action === "rename" && entry.fromPath
+    ? `${entry.fromPath} → ${entry.relativePath}`
+    : entry.relativePath;
   const displayClaim = [
     `${entry.source === "folder" ? "Folder" : "File"} trace row #${entry.seq}`,
     entry.action,
-    entry.relativePath,
+    displayedPath,
     timestamp,
     conformance,
     processSummary,
@@ -212,18 +221,26 @@ function selectedEvidenceForTraceRow(
     "Item size is its serialized source record; the budget below is the exact prepared-operation context total",
   ];
   return {
-    id: `trace-row:${entry.nodeId ?? `${row.inputPath}:${entry.seq}`}`,
+    id: [
+      "trace-row",
+      entry.source,
+      entry.nodeId ?? "unsigned",
+      entry.seq,
+      entry.action,
+      entry.fromPath ?? "",
+      entry.relativePath,
+    ].join(":"),
     selectionOrder,
     kind: "process-fact",
     displayClaim,
     classification: "quoted-data",
     source: {
       displayLabel: `Trace row #${entry.seq} · ${entry.relativePath}`,
-      ...(row.inputTraceId ? { traceId: row.inputTraceId } : {}),
-      ...(row.inputHeadId ? { headId: row.inputHeadId } : {}),
+      ...(entry.source === "file" && row.inputTraceId ? { traceId: row.inputTraceId } : {}),
+      ...(entry.source === "file" && row.inputHeadId ? { headId: row.inputHeadId } : {}),
       ...(entry.nodeId ? { nodeId: entry.nodeId } : {}),
     },
-    scope: "file",
+    scope: entry.source === "folder" ? "folder" : "file",
     selectionReasons,
     sensitivity: "trace-private",
     byteCost: encoder.encode(JSON.stringify(entry)).length,

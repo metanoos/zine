@@ -359,6 +359,7 @@ export function mirrorPad(
     content: string;
     tags: string[];
     nodeId: string;
+    traceId?: string;
     runs?: Run[];
     voicePubkey?: string;
     citationIds?: string[];
@@ -374,6 +375,7 @@ export function mirrorPad(
       content: data.content,
       tags: data.tags,
       nodeId: data.nodeId,
+      ...(data.traceId ? { traceId: data.traceId } : {}),
       updatedAt: Date.now(),
       ...(data.runs && data.runs.length > 0 ? { runs: data.runs } : {}),
       ...(data.voicePubkey ? { voicePubkey: data.voicePubkey } : {}),
