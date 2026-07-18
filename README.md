@@ -215,8 +215,8 @@ owning specification, the specification wins.
 
 ## Documentation map
 
-- [Documentation hub](docs/README.md): the five reader-facing documents shared
-  by the repository and the app's About view.
+- [Documentation hub](docs/README.md): the reader-facing documents shared by
+  the repository and the app's About view.
 - [Product](docs/PRODUCT.md): initial buyer, workflow, and product boundary.
 - [Protocol](docs/PROTOCOL.md): readable tour of traces, gestures,
   attribution, transport, and vetting.

@@ -135,9 +135,11 @@ There is no private AI-operation mode and no **undeclared** omission from a
 published trace. The writer learns this during onboarding, sees an ambient
 reminder near AI and publication controls, inspects the exact prepared context
 before dispatch, and reviews the complete local bundle before publication.
-Publish prepares the exact edition bundle locally, shows the complete
-disclosure manifest and replay, invalidates confirmation if any bundle byte
-changes, and then publishes the immutable edition atomically and idempotently.
+
+Publish itself is exact and atomic. It prepares the edition bundle locally,
+shows the complete disclosure manifest and replay, invalidates confirmation if
+any bundle byte changes, and then publishes the immutable edition atomically
+and idempotently.
 
 ### Declared redaction
 

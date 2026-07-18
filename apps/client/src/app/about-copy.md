@@ -1,12 +1,12 @@
 <!-- zine-about-copy:product:start -->
 # Product
 
-Zine records how a file or folder was actually made—by people, by models, or
-both—as signed, replayable history. A **zine** is that stably identified file or
-folder together with its trace; the **Root zine** is the topmost folder. Zine
-uses the trace to help the next act of writing, not only the later audit. This
-page explains the daily loop, initial buyer, and evidence still required. The
-accepted migration is collected in
+Zine records how a file or folder was actually made — by people, by AI, or
+both — as signed, replayable history. A **zine** is that stably identified file
+or folder together with its trace; the **Root zine** is the topmost folder.
+Zine uses the trace to help the next act of writing, not only the later audit.
+This page explains the daily loop, the initial buyer, and the evidence still
+required. The accepted migration direction is recorded in
 [Trace-Native Zines](TRACE_NATIVE_ZINES.md); for implemented machinery, read
 the [Protocol](PROTOCOL.md) tour.
 
@@ -49,8 +49,8 @@ recovers the process that produced it.
 
 Three roles meet in every zine:
 
-- **The writer**—a person, an agent, or both interleaved—who wants the AI to
-  respond to the work's actual trajectory rather than its latest text alone.
+- **The writer** — a person, an agent, or both interleaved — who wants the AI
+  to respond to the work's actual trajectory rather than its latest text alone.
 - **The accountable team** — whoever answers for agent-written artifacts in a
   regulated or reputation-sensitive setting: an AI platform owner, a security
   lead, an editorial or compliance owner.
@@ -254,8 +254,8 @@ process is gone. Ordinary version history does not reliably say what a model
 saw, which passages it produced, what a person accepted, or where copied
 material came from. Looking only at the final text is too late.
 
-A **zine** is a stably identified file or folder together with its high-
-fidelity **trace**. Root is the topmost folder zine, not a separate project
+A **zine** is a stably identified file or folder together with its
+high-fidelity **trace**. Root is the topmost folder zine, not a separate project
 object. You can play a file zine or a whole folder subtree and see how the work
 changed, not just where it ended. Each checkpoint is signed and self-contained,
 so another reader can inspect the evidence without trusting one editor account.
@@ -293,9 +293,9 @@ wrote what and how the text came to be.
 the editor-action log into one signed checkpoint. A folder or Root Step pins an
 exact recursive frontier after dirty descendants are durably checkpointed.
 Automatic child-head roll-ups are signed derived checkpoints, not extra author
-Steps. No event fires per keystroke. Send later publishes the exact checkpoint
-selected by the current protocol, including its high-resolution action log,
-for playback and process vetting.
+Steps. No event fires per keystroke. Send later publishes one exact
+checkpoint, including its high-resolution action log, for playback and
+process vetting.
 
 Zine is to authorship provenance what Git is to source history. The protocol
 and local press are open; each author can keep a private home relay, add a
@@ -334,8 +334,8 @@ until real usage produces enough citation density to justify it.
 
 ## Model
 
-One primitive: a **zine**, whose file or folder body is carried with an append-
-only trace of signed checkpoints. A file body is Markdown text. A folder body
+One primitive: a **zine**, whose file or folder body is carried with an
+append-only trace of signed checkpoints. A file body is Markdown text. A folder body
 is an ordered direct-membership list whose pinned child heads recursively
 define the exact subtree frontier. Root is an ordinary top-level folder zine.
 
@@ -965,7 +965,6 @@ Harden the landed recursive-zine cut while building the shared runtime:
 
 Build a non-normative package used by every press and provider adapter:
 
-
 - closed operation, evidence, correction, preference, directive, error, and
   Inspector contracts;
 - deterministic validation, selection, byte budgeting, rendering, and hashes;
@@ -995,7 +994,6 @@ boundary. Exclusion, correction, explicit promotion, persisted authority,
 durable receipts, and crash recovery are still required before the vertical
 slice is complete.
 
-
 Integrate Extend and Settle first because continuation and revision expose
 different ways trace may help. Preserve today's Stir behavior through the new
 grammar, but gate its generalized adapter separately.
@@ -1023,8 +1021,8 @@ After the trust/schema review:
 
 - bind every accepted MODEL Step to the exact approved context manifest,
   prepared request, provider configuration, attempt, and result;
-- keep private payloads local by default behind fresh salted selective-
-  disclosure commitments and profile-keyed local deduplication;
+- keep private payloads local by default behind fresh salted
+  selective-disclosure commitments and profile-keyed local deduplication;
 - add consented, local-first outcome capture with export and redaction;
 - run the preregistered text-only, bounded-history, and selected-trace study
   across multiple model families and real writing tasks; and
@@ -1155,9 +1153,8 @@ There is one service sovereignty structurally cannot self-provide:
 its own work, but a press-signed record of a model call is still the
 operator's assertion. A neutral party can witness request/response commitments
 in a transparency log, sign open-weight inference it actually executed, or
-host the no-install verifier where a shared proof opens for a reader who has
-installed nothing. The protocol makes writing sovereign; the company makes
-reading trustworthy.
+host the no-install verifier where a shared proof opens in a reader's browser.
+The protocol makes writing sovereign; the company makes reading trustworthy.
 
 For organizations, the same boundary separates what is sold from what is
 never taken: record custody, not key custody. An organization gets relay

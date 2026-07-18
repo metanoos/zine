@@ -1,11 +1,11 @@
 # Product
 
-Zine records how a file or folder was actually made—by people, by models, or
-both—as signed, replayable history. A **zine** is that stably identified file or
-folder together with its trace; the **Root zine** is the topmost folder. Zine
-uses the trace to help the next act of writing, not only the later audit. This
-page explains the daily loop, initial buyer, and evidence still required. The
-accepted migration is collected in
+Zine records how a file or folder was actually made — by people, by AI, or
+both — as signed, replayable history. A **zine** is that stably identified file
+or folder together with its trace; the **Root zine** is the topmost folder.
+Zine uses the trace to help the next act of writing, not only the later audit.
+This page explains the daily loop, the initial buyer, and the evidence still
+required. The accepted migration direction is recorded in
 [Trace-Native Zines](TRACE_NATIVE_ZINES.md); for implemented machinery, read
 the [Protocol](PROTOCOL.md) tour.
 
@@ -48,8 +48,8 @@ recovers the process that produced it.
 
 Three roles meet in every zine:
 
-- **The writer**—a person, an agent, or both interleaved—who wants the AI to
-  respond to the work's actual trajectory rather than its latest text alone.
+- **The writer** — a person, an agent, or both interleaved — who wants the AI
+  to respond to the work's actual trajectory rather than its latest text alone.
 - **The accountable team** — whoever answers for agent-written artifacts in a
   regulated or reputation-sensitive setting: an AI platform owner, a security
   lead, an editorial or compliance owner.

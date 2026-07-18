@@ -108,7 +108,6 @@ Harden the landed recursive-zine cut while building the shared runtime:
 
 Build a non-normative package used by every press and provider adapter:
 
-
 - closed operation, evidence, correction, preference, directive, error, and
   Inspector contracts;
 - deterministic validation, selection, byte budgeting, rendering, and hashes;
@@ -138,7 +137,6 @@ boundary. Exclusion, correction, explicit promotion, persisted authority,
 durable receipts, and crash recovery are still required before the vertical
 slice is complete.
 
-
 Integrate Extend and Settle first because continuation and revision expose
 different ways trace may help. Preserve today's Stir behavior through the new
 grammar, but gate its generalized adapter separately.
@@ -166,8 +164,8 @@ After the trust/schema review:
 
 - bind every accepted MODEL Step to the exact approved context manifest,
   prepared request, provider configuration, attempt, and result;
-- keep private payloads local by default behind fresh salted selective-
-  disclosure commitments and profile-keyed local deduplication;
+- keep private payloads local by default behind fresh salted
+  selective-disclosure commitments and profile-keyed local deduplication;
 - add consented, local-first outcome capture with export and redaction;
 - run the preregistered text-only, bounded-history, and selected-trace study
   across multiple model families and real writing tasks; and

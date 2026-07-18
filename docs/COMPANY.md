@@ -32,9 +32,8 @@ There is one service sovereignty structurally cannot self-provide:
 its own work, but a press-signed record of a model call is still the
 operator's assertion. A neutral party can witness request/response commitments
 in a transparency log, sign open-weight inference it actually executed, or
-host the no-install verifier where a shared proof opens for a reader who has
-installed nothing. The protocol makes writing sovereign; the company makes
-reading trustworthy.
+host the no-install verifier where a shared proof opens in a reader's browser.
+The protocol makes writing sovereign; the company makes reading trustworthy.
 
 For organizations, the same boundary separates what is sold from what is
 never taken: record custody, not key custody. An organization gets relay
