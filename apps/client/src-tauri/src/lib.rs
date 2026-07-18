@@ -1,5 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+mod kademlia;
 mod llm_proxy;
+mod rendezvous_relay;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -218,11 +220,15 @@ fn run_relay_factory_reset(bin: &str) -> Result<(), String> {
 /// Returning only after the second pass guarantees the fresh browser key can
 /// mint a new root against an empty, local-mode sidecar.
 #[tauri::command]
-async fn factory_reset(app: tauri::AppHandle) -> Result<(), String> {
+async fn factory_reset(
+    app: tauri::AppHandle,
+    kademlia_runtime: tauri::State<'_, kademlia::KademliaRuntime>,
+) -> Result<(), String> {
     // Revoke app-owned Tor reachability before deleting the ACL. Otherwise the
     // relay's deliberate local-mode reset window would be reachable through a
     // still-running onion while the new vault screen waits for user input.
     stop_owned_tor()?;
+    kademlia::reset_runtime(&app, &kademlia_runtime).await?;
     let bin = resolve_relay_binary(&app)?;
     run_relay_factory_reset(&bin)?;
     std::thread::sleep(Duration::from_millis(5_250));
@@ -1125,6 +1131,7 @@ fn read_control_reply<R: BufRead>(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(kademlia::KademliaRuntime::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -1159,6 +1166,12 @@ pub fn run() {
             remove_peer,
             add_writer,
             remove_writer,
+            kademlia::kademlia_start,
+            kademlia::kademlia_stop,
+            kademlia::kademlia_status,
+            kademlia::kademlia_publish_pointer,
+            kademlia::kademlia_lookup,
+            rendezvous_relay::rendezvous_sample_relay,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
