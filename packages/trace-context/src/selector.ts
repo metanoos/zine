@@ -28,6 +28,7 @@ const encoder = new TextEncoder();
 const CANCELLATION_YIELD_INTERVAL = 256;
 const CANCELLATION_CODE_UNIT_INTERVAL = 16 * 1_024;
 const VOICE_PUBKEY_PATTERN = /^[0-9a-f]{64}$/;
+const NON_PUBKEY_VOICE_PATTERN = /^kedit-voice-utf16-v1:(?:[0-9a-f]{4})*$/;
 
 const POLICIES: readonly TraceContextPolicyV1[] = ["text-only-v1", "selected-trace-v1"];
 
@@ -332,6 +333,123 @@ export async function selectTraceContextV1(
     renderedContext,
     decisions: compactDecisions,
   });
+}
+
+/**
+ * Re-apply selector-owned semantics to a persisted manifest. When the exact
+ * rendered context is available, this also binds evidence order, rendered
+ * byte costs, and process prose to the selector's canonical renderer.
+ */
+export function validateSelectorManifestSemanticsV1(
+  manifest: SelectedTraceContextManifestV1,
+  renderedContext?: string,
+): void {
+  let renderedSegments: unknown[] | undefined;
+  if (renderedContext !== undefined) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(renderedContext) as unknown;
+    } catch {
+      throw new Error("rendered context must be selector-owned JSON");
+    }
+    if (!Array.isArray(parsed) || parsed.length !== manifest.selected.length + 1) {
+      throw new Error("rendered context segment count does not match selected evidence");
+    }
+    if (canonicalJson(parsed) !== renderedContext) {
+      throw new Error("rendered context is not in selector canonical form");
+    }
+    renderedSegments = parsed;
+    if (canonicalJson(parsed[0]) !== renderCurrentTarget(manifest.operation.target.currentText)) {
+      throw new Error("rendered context does not contain the exact current target first");
+    }
+    if (manifest.budget.currentTargetRenderedBytes !== utf8Bytes(canonicalJson(parsed[0]))) {
+      throw new Error("current-target rendered byte cost does not match selector rendering");
+    }
+    if (manifest.budget.usedRenderedBytes !== utf8Bytes(renderedContext)) {
+      throw new Error("used rendered bytes do not match the exact rendered context");
+    }
+  }
+
+  const candidates = manifest.selected.map((selected, index): NormalizedCandidate => {
+    if (canonicalJson(selected.reasons) !== canonicalJson(uniqueSortedStrings(selected.reasons))) {
+      throw new Error(`selected[${index}] reasons are not in selector order`);
+    }
+    let normalizedFact: TraceProcessFactV1 | undefined;
+    if (selected.fact !== undefined) {
+      const normalized = normalizeProcessFact(selected.fact, `$.selected[${index}].fact`);
+      if (!normalized.ok) throw new Error(normalized.error.message);
+      if (canonicalJson(normalized.value) !== canonicalJson(selected.fact)) {
+        throw new Error(`selected[${index}] fact is not selector-normalized`);
+      }
+      normalizedFact = normalized.value;
+    }
+    const renderedSegment = renderedSegments?.[index + 1];
+    const renderedText = isRecord(renderedSegment) && typeof renderedSegment.text === "string"
+      ? renderedSegment.text
+      : "";
+    return {
+      version: 1,
+      id: selected.id,
+      dedupeKey: selected.dedupeKey,
+      kind: selected.kind,
+      claimClass: selected.claimClass,
+      source: selected.source,
+      reasons: selected.reasons,
+      ...(normalizedFact ? { fact: normalizedFact } : { text: renderedText }),
+    };
+  });
+
+  const bindingCandidates = renderedSegments
+    ? candidates
+    : candidates.filter((candidate) => candidate.kind === "process-fact");
+  const bindingError = validateSelectedEvidenceBindings({
+    version: 1,
+    policy: manifest.policy,
+    operation: manifest.operation,
+    candidates: bindingCandidates,
+    projectedInputBytes: manifest.input.projectedInputBytes,
+  });
+  if (bindingError) throw new Error(bindingError.error.message);
+
+  const groups: CandidateGroup[] = candidates.map((candidate) => ({
+    representative: candidate,
+    candidates: [candidate],
+    reasons: candidate.reasons,
+    priorityClass: priorityClass(candidate),
+  }));
+  const ordered = [...groups].sort(compareGroups);
+  for (let index = 0; index < groups.length; index += 1) {
+    if (groups[index]!.representative.id !== ordered[index]!.representative.id) {
+      throw new Error("selected evidence is not in deterministic selector order");
+    }
+  }
+
+  if (!renderedSegments) return;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index]!;
+    const selected = manifest.selected[index]!;
+    const segment = renderedSegments[index + 1];
+    if (!isRecord(segment) || typeof segment.text !== "string") {
+      throw new Error(`rendered evidence ${index} is not a selector segment`);
+    }
+    const expected = canonicalJson({
+      version: 1,
+      authority: authorityFor(candidate.kind),
+      evidenceId: candidate.id,
+      kind: candidate.kind,
+      claimClass: candidate.claimClass,
+      source: candidate.source,
+      reasons: candidate.reasons,
+      text: candidate.fact ? renderProcessFact(candidate.fact, candidate.source) : segment.text,
+    });
+    const exactSegment = canonicalJson(segment);
+    if (exactSegment !== expected) {
+      throw new Error(`rendered evidence ${index} does not match its manifest entry`);
+    }
+    if (selected.renderedByteCost !== utf8Bytes(exactSegment) + 1) {
+      throw new Error(`selected[${index}] rendered byte cost does not match selector rendering`);
+    }
+  }
 }
 
 async function validateAndNormalizeInput(
@@ -870,6 +988,7 @@ function normalizeProcessFact(
         "lastCapturedAtMs",
         "spanMs",
         "longestGapMs",
+        "timingStatus",
         "undoCount",
         "redoCount",
       ]);
@@ -879,8 +998,6 @@ function normalizeProcessFact(
         "rangeCount",
         "insertedCodePointCount",
         "deletedCodePointCount",
-        "spanMs",
-        "longestGapMs",
         "undoCount",
         "redoCount",
       ] as const) {
@@ -890,22 +1007,44 @@ function normalizeProcessFact(
       }
       const hasFirst = value.firstCapturedAtMs !== undefined;
       const hasLast = value.lastCapturedAtMs !== undefined;
+      const firstCapturedAtMs = value.firstCapturedAtMs;
+      const lastCapturedAtMs = value.lastCapturedAtMs;
+      const timingOutsideSummaryDomain = value.timingStatus === "outside-summary-domain";
+      if (value.timingStatus !== undefined && !timingOutsideSummaryDomain) {
+        return malformed(`${path}.timingStatus`, "Unsupported Step summary timing status");
+      }
       if (hasFirst !== hasLast) {
         return malformed(path, "Step summary capture times must be present or absent together");
       }
-      if (hasFirst) {
-        if (
-          !isNonNegativeSafeInteger(value.firstCapturedAtMs)
-          || !isNonNegativeSafeInteger(value.lastCapturedAtMs)
-          || value.lastCapturedAtMs < value.firstCapturedAtMs
-        ) {
-          return malformed(path, "Step summary capture times must be ordered non-negative integers");
+      if (timingOutsideSummaryDomain) {
+        if (hasFirst || value.spanMs !== 0 || value.longestGapMs !== 0) {
+          return malformed(path, "Outside-domain timing cannot report derived capture times");
         }
-        if (value.spanMs !== value.lastCapturedAtMs - value.firstCapturedAtMs) {
+      } else if (hasFirst) {
+        if (
+          typeof firstCapturedAtMs !== "number"
+          || typeof lastCapturedAtMs !== "number"
+          || !Number.isFinite(firstCapturedAtMs)
+          || !Number.isFinite(lastCapturedAtMs)
+          || lastCapturedAtMs < firstCapturedAtMs
+        ) {
+          return malformed(path, "Step summary capture times must be ordered finite numbers");
+        }
+        if (value.spanMs !== lastCapturedAtMs - firstCapturedAtMs) {
           return malformed(`${path}.spanMs`, "Step summary span must exactly match its capture times");
         }
       } else if (value.spanMs !== 0) {
         return malformed(`${path}.spanMs`, "A summary without capture times must have zero span");
+      }
+      if (typeof value.spanMs !== "number" || !Number.isFinite(value.spanMs) || value.spanMs < 0) {
+        return malformed(`${path}.spanMs`, "Step summary span must be finite and non-negative");
+      }
+      if (
+        typeof value.longestGapMs !== "number"
+        || !Number.isFinite(value.longestGapMs)
+        || value.longestGapMs < 0
+      ) {
+        return malformed(`${path}.longestGapMs`, "Step summary longest gap must be finite and non-negative");
       }
       if ((value.longestGapMs as number) > (value.spanMs as number)) {
         return malformed(`${path}.longestGapMs`, "Longest gap cannot exceed the Step span");
@@ -931,7 +1070,7 @@ function normalizeProcessFact(
           return malformed(path, "An empty Step summary cannot report transactions, ranges, edits, times, or intents");
         }
       } else {
-        if (!hasFirst) {
+        if (!hasFirst && !timingOutsideSummaryDomain) {
           return malformed(path, "A non-empty Step summary requires first and last capture times");
         }
         if (rangeCount < transactionCount) {
@@ -942,6 +1081,8 @@ function normalizeProcessFact(
         return malformed(path, "Undo and redo transactions cannot exceed the total transaction count");
       }
       if (
+        !timingOutsideSummaryDomain
+        &&
         transactionCount === 1
         && (
           value.firstCapturedAtMs !== value.lastCapturedAtMs
@@ -954,20 +1095,16 @@ function normalizeProcessFact(
           "A one-transaction Step must have identical capture times and zero span and longest gap",
         );
       }
-      if (transactionCount === 2 && longestGapMs !== value.spanMs) {
+      if (!timingOutsideSummaryDomain && transactionCount === 2 && longestGapMs !== value.spanMs) {
         return malformed(
           `${path}.longestGapMs`,
           "A two-transaction Step's only gap must equal its full span",
         );
       }
-      if (transactionCount > 2) {
-        // The sorted transaction gaps are non-negative integers whose sum is
-        // spanMs, so their maximum must be at least ceil(span / gap count).
-        // BigInt keeps this exact for safe-integer inputs without multiplying
-        // (transactionCount - 1) * longestGapMs past Number.MAX_SAFE_INTEGER.
-        const gapCount = BigInt(transactionCount - 1);
-        const spanMs = BigInt(value.spanMs as number);
-        const minimumLongestGapMs = Number((spanMs + gapCount - 1n) / gapCount);
+      if (!timingOutsideSummaryDomain && transactionCount > 2) {
+        // The sorted transaction gaps are non-negative finite numbers whose
+        // sum is spanMs, so their maximum cannot be below the average gap.
+        const minimumLongestGapMs = (value.spanMs as number) / (transactionCount - 1);
         if (longestGapMs < minimumLongestGapMs) {
           return malformed(
             `${path}.longestGapMs`,
@@ -987,6 +1124,7 @@ function normalizeProcessFact(
           ...(hasLast ? { lastCapturedAtMs: value.lastCapturedAtMs as number } : {}),
           spanMs: value.spanMs,
           longestGapMs,
+          ...(timingOutsideSummaryDomain ? { timingStatus: "outside-summary-domain" as const } : {}),
           undoCount,
           redoCount,
         }),
@@ -1002,10 +1140,11 @@ function normalizeProcessFact(
         "voiceIds",
       ]);
       if (keys) return malformed(path, keys);
-      for (const key of ["transactionIndex", "capturedAtMs"] as const) {
-        if (!isNonNegativeSafeInteger(value[key])) {
-          return malformed(`${path}.${key}`, `${key} must be a non-negative safe integer`);
-        }
+      if (!isNonNegativeSafeInteger(value.transactionIndex)) {
+        return malformed(`${path}.transactionIndex`, "transactionIndex must be a non-negative safe integer");
+      }
+      if (!Number.isFinite(value.capturedAtMs)) {
+        return malformed(`${path}.capturedAtMs`, "capturedAtMs must be finite");
       }
       if (value.intent !== undefined && value.intent !== "undo" && value.intent !== "redo") {
         return malformed(`${path}.intent`, "Transaction intent must be undo or redo");
@@ -1025,10 +1164,10 @@ function normalizeProcessFact(
         const error = validateString(value.voiceIds[index], `${path}.voiceIds[${index}]`, false);
         if (error) return error;
         const voiceId = value.voiceIds[index] as string;
-        if (!VOICE_PUBKEY_PATTERN.test(voiceId)) {
+        if (!isTraceVoiceId(voiceId)) {
           return malformed(
             `${path}.voiceIds[${index}]`,
-            "Voice id must be an exact 64-character lowercase-hex Nostr signer pubkey",
+            "Voice id must be a Nostr signer pubkey or canonical protocol-valid KEdit voice",
           );
         }
         voices.push(voiceId);
@@ -1079,10 +1218,10 @@ function normalizeProcessFact(
       }
       const voiceError = validateString(value.voiceId, `${path}.voiceId`, false);
       if (voiceError) return voiceError;
-      if (!VOICE_PUBKEY_PATTERN.test(value.voiceId as string)) {
+      if (!isTraceVoiceId(value.voiceId as string)) {
         return malformed(
           `${path}.voiceId`,
-          "Voice id must be an exact 64-character lowercase-hex Nostr signer pubkey",
+          "Voice id must be a Nostr signer pubkey or canonical protocol-valid KEdit voice",
         );
       }
       const emptyRange = range.value.fromUtf16 === range.value.toUtf16;
@@ -1500,6 +1639,7 @@ function processFactPreflightProjection(value: unknown): unknown {
         lastCapturedAtMs: value.lastCapturedAtMs,
         spanMs: value.spanMs,
         longestGapMs: value.longestGapMs,
+        timingStatus: value.timingStatus,
         undoCount: value.undoCount,
         redoCount: value.redoCount,
       };
@@ -1734,7 +1874,7 @@ function renderProcessFact(fact: TraceProcessFactV1, source: SelectedEvidenceSou
   const node = source.kind === "trace" ? source.nodeId : "unknown";
   switch (fact.kind) {
     case "step-summary":
-      return `Step ${node} · ${fact.transactionCount} tx / ${fact.rangeCount} ranges · +${fact.insertedCodePointCount}/−${fact.deletedCodePointCount} · first ${fact.firstCapturedAtMs ?? "none"} · last ${fact.lastCapturedAtMs ?? "none"} · span ${fact.spanMs}ms · longest gap ${fact.longestGapMs}ms · undo ${fact.undoCount} · redo ${fact.redoCount}`;
+      return `Step ${node} · ${fact.transactionCount} tx / ${fact.rangeCount} ranges · +${fact.insertedCodePointCount}/−${fact.deletedCodePointCount} · first ${fact.firstCapturedAtMs ?? "none"} · last ${fact.lastCapturedAtMs ?? "none"} · span ${fact.spanMs}ms · longest gap ${fact.longestGapMs}ms${fact.timingStatus ? " · timing outside summary domain" : ""} · undo ${fact.undoCount} · redo ${fact.redoCount}`;
     case "transaction":
       return `tx ${fact.transactionIndex} @ ${fact.capturedAtMs} · ${fact.intent ? `${fact.intent} · ` : ""}${fact.changeCount} changes · voices ${fact.voiceIds.join(",")}`;
     case "change":
@@ -1867,6 +2007,10 @@ function isPositiveSafeInteger(value: unknown): value is number {
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isTraceVoiceId(value: string): boolean {
+  return VOICE_PUBKEY_PATTERN.test(value) || NON_PUBKEY_VOICE_PATTERN.test(value);
 }
 
 function uniqueSortedStrings<T extends string>(values: readonly T[]): readonly T[] {

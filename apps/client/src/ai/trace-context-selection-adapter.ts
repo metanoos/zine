@@ -11,25 +11,23 @@ import {
 import {
   isUtf16Boundary,
   projectTraceProcessCandidatesV1,
+  projectTraceProcessCandidatesV1Async,
+  TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1,
+  validateTraceContextAbortSignalV1,
+  validateTraceContextAdapterMetadataV1,
+  validateTraceContextAdapterProcessBoundsV1,
   type EvidenceCandidateV1,
+  type TraceContextAdapterOperationMetadataV1,
   type TraceContextProcessProjectionInputV1,
   type TraceContextPolicyV1,
   type TraceContextSelectionInputV1,
   type TraceContextSelectionLimitsV1,
-  type TraceContextSelectionOperationV1,
   type TraceProcessFactV1,
   type TraceProcessStatusV1,
   type Utf16Range,
 } from "@zine/trace-context";
 
-export interface DesktopTraceContextOperationMetadataV1 {
-  version: 1;
-  operation: TraceContextSelectionOperationV1["operation"];
-  range?: Utf16Range;
-  maxContextBytes: number;
-  preparedRequestMaxBytes: number;
-  reservedPromptBytes: number;
-}
+export type DesktopTraceContextOperationMetadataV1 = TraceContextAdapterOperationMetadataV1;
 
 export interface DesktopTraceContextSelectionAdapterInputV1 {
   version: 1;
@@ -40,6 +38,7 @@ export interface DesktopTraceContextSelectionAdapterInputV1 {
   /** Trusted cryptographic verifier injected by the native desktop boundary. */
   verifyEvent: TraceEventVerifier;
   limits?: TraceContextSelectionLimitsV1;
+  signal?: AbortSignal;
 }
 
 export class DesktopTraceContextSelectionAdapterError extends Error {
@@ -65,15 +64,34 @@ interface VerifiedTargetProjection {
 export async function adaptDesktopTraceContextSelectionV1(
   input: DesktopTraceContextSelectionAdapterInputV1,
 ): Promise<TraceContextSelectionInputV1> {
-  requireVersion(input.version, "input");
-  requirePolicy(input.policy);
-  requireOperation(input.operation);
-  if (typeof input.verifyEvent !== "function") fail("verifyEvent must be a trusted function");
-  const policy = input.policy;
-  const operation = cloneOperation(input.operation);
-  const limits = input.limits ? { ...input.limits } : undefined;
-  const verifyEvent = input.verifyEvent;
-  const chain = cloneChain(input.chain);
+  let metadata: ReturnType<typeof validateTraceContextAdapterMetadataV1>;
+  let signal: AbortSignal | undefined;
+  try {
+    metadata = validateTraceContextAdapterMetadataV1(input);
+    signal = validateTraceContextAbortSignalV1(
+      (input as unknown as Record<string, unknown>).signal,
+    );
+  } catch (error) {
+    fail(error instanceof Error ? error.message : "input metadata is malformed");
+  }
+  const record = input as unknown as Record<string, unknown>;
+  if (typeof record.verifyEvent !== "function") fail("verifyEvent must be a trusted function");
+  if (signal?.aborted) fail("operation was cancelled");
+  const policy = metadata.policy;
+  const operation = metadata.operation;
+  const limits = metadata.limits;
+  const verifyEvent = record.verifyEvent as TraceEventVerifier;
+  const chain = cloneChain(record.chain as readonly ProtocolEvent[]);
+  try {
+    validateTraceContextAdapterProcessBoundsV1(
+      chain.map((event) => event.content),
+      policy === "selected-trace-v1"
+        ? limits?.maxCandidates ?? TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidates
+        : undefined,
+    );
+  } catch (error) {
+    fail(error instanceof Error ? error.message : "file chain exceeds process bounds");
+  }
 
   let verdict: TraceConformanceVerdict;
   try {
@@ -81,6 +99,7 @@ export async function adaptDesktopTraceContextSelectionV1(
   } catch {
     fail("trusted file-chain verification failed");
   }
+  if (signal?.aborted) fail("operation was cancelled");
   const target = requireVerifiedTarget(chain, verdict.issues);
   requireOperationRange(operation.range, target.currentText);
 
@@ -88,9 +107,15 @@ export async function adaptDesktopTraceContextSelectionV1(
   // byte accounting, hashing, or rendering. Preserve that exact boundary here.
   // Selected-trace always carries a non-FULL global verdict to the selector,
   // so completeness cannot disappear.
-  const candidates = policy === "text-only-v1"
-    ? []
-    : projectVerifiedProcessCandidates(target, chain, verdict);
+  let candidates: readonly Extract<EvidenceCandidateV1, { kind: "process-fact" }>[];
+  try {
+    candidates = policy === "text-only-v1"
+      ? []
+      : await projectVerifiedProcessCandidates(target, chain, verdict, limits, signal);
+  } catch (error) {
+    if (error instanceof DesktopTraceContextSelectionAdapterError) throw error;
+    fail(error instanceof Error ? `process projection failed: ${error.message}` : "process projection failed");
+  }
 
   return deepFreeze({
     version: 1,
@@ -105,25 +130,15 @@ export async function adaptDesktopTraceContextSelectionV1(
       reservedPromptBytes: operation.reservedPromptBytes,
     },
     candidates,
-    ...(limits ? { limits } : {}),
+    ...(limits ? { limits: { ...limits } } : {}),
   });
-}
-
-function cloneOperation(
-  operation: DesktopTraceContextOperationMetadataV1,
-): DesktopTraceContextOperationMetadataV1 {
-  return {
-    version: operation.version,
-    operation: operation.operation,
-    ...(operation.range ? { range: copyRange(operation.range) } : {}),
-    maxContextBytes: operation.maxContextBytes,
-    preparedRequestMaxBytes: operation.preparedRequestMaxBytes,
-    reservedPromptBytes: operation.reservedPromptBytes,
-  };
 }
 
 function cloneChain(value: readonly ProtocolEvent[]): ProtocolEvent[] {
   if (!Array.isArray(value) || value.length === 0) fail("signed file chain is empty");
+  if (value.length > TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidates) {
+    fail("signed file chain exceeds the bounded Step ceiling");
+  }
   const events = value as readonly ProtocolEvent[];
   return events.map((event, index) => {
     if (
@@ -197,15 +212,21 @@ function requireVerifiedTarget(
   };
 }
 
-function projectVerifiedProcessCandidates(
+async function projectVerifiedProcessCandidates(
   target: VerifiedTargetProjection,
   chain: readonly ProtocolEvent[],
   verdict: TraceConformanceVerdict,
-): readonly Extract<EvidenceCandidateV1, { kind: "process-fact" }>[] {
+  limits: TraceContextSelectionLimitsV1 | undefined,
+  signal: AbortSignal | undefined,
+): Promise<readonly Extract<EvidenceCandidateV1, { kind: "process-fact" }>[]> {
   const steps = requireBoundVerifiedSteps(chain, verdict.steps);
   if (verdict.status !== "full") {
     return [nonFullStatusCandidate(target, steps[steps.length - 1]!, verdict.status)];
   }
+  requireProjectedCandidateBound(
+    steps,
+    limits?.maxCandidates ?? TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidates,
+  );
   const projection: TraceContextProcessProjectionInputV1 = {
     version: 1,
     traceId: target.traceId,
@@ -237,7 +258,33 @@ function projectVerifiedProcessCandidates(
       };
     }),
   };
-  return projectTraceProcessCandidatesV1(projection);
+  return projectTraceProcessCandidatesV1Async(projection, {
+    ...(signal ? { signal } : {}),
+    ...(limits?.maxCandidates !== undefined ? { maxCandidates: limits.maxCandidates } : {}),
+    ...(limits?.maxInputBytes !== undefined ? { maxInputBytes: limits.maxInputBytes } : {}),
+    ...(limits?.maxCandidateInputBytes !== undefined
+      ? { maxCandidateInputBytes: limits.maxCandidateInputBytes }
+      : {}),
+  });
+}
+
+function requireProjectedCandidateBound(
+  steps: readonly TraceConformanceStep[],
+  maxCandidates: number,
+): void {
+  let count = 0;
+  for (const step of steps) {
+    count += 1;
+    if (step.process.status === "complete") {
+      for (const transaction of step.process.transactions) {
+        count += 1 + transaction.changes.filter(
+          (change) => change.inserted.length > 0 || change.deleted.length > 0,
+        ).length;
+        if (count > maxCandidates) fail("projected candidate count exceeds the selector ceiling");
+      }
+    }
+    if (count > maxCandidates) fail("projected candidate count exceeds the selector ceiling");
+  }
 }
 
 function requireBoundVerifiedSteps(
@@ -311,28 +358,6 @@ function selectorProcessStatus(status: TraceConformanceStatus): TraceProcessStat
   return status;
 }
 
-function requirePolicy(policy: TraceContextPolicyV1): void {
-  if (policy !== "text-only-v1" && policy !== "selected-trace-v1") {
-    fail("policy must be text-only-v1 or selected-trace-v1");
-  }
-}
-
-function requireOperation(operation: DesktopTraceContextOperationMetadataV1): void {
-  requireVersion(operation.version, "operation");
-  if (operation.operation !== "extend" && operation.operation !== "settle") {
-    fail("operation must be Extend or Settle");
-  }
-  if (operation.operation === "settle" && operation.range === undefined) {
-    fail("Settle requires an exact UTF-16 range");
-  }
-  if (operation.range) requireOrderedRange(operation.range, "operation range");
-  requirePositiveInteger(operation.maxContextBytes, "maxContextBytes");
-  requirePositiveInteger(operation.preparedRequestMaxBytes, "preparedRequestMaxBytes");
-  if (!Number.isSafeInteger(operation.reservedPromptBytes) || operation.reservedPromptBytes < 0) {
-    fail("reservedPromptBytes must be a non-negative safe integer");
-  }
-}
-
 function requireOperationRange(range: Utf16Range | undefined, currentText: string): void {
   if (!range) return;
   if (
@@ -342,25 +367,6 @@ function requireOperationRange(range: Utf16Range | undefined, currentText: strin
   ) {
     fail("operation range must be within the signed current text on UTF-16 code-point boundaries");
   }
-}
-
-function requireOrderedRange(range: Utf16Range, subject: string): void {
-  if (
-    !Number.isSafeInteger(range.fromUtf16)
-    || !Number.isSafeInteger(range.toUtf16)
-    || range.fromUtf16 < 0
-    || range.toUtf16 < range.fromUtf16
-  ) {
-    fail(`${subject} must be an ordered non-negative UTF-16 range`);
-  }
-}
-
-function requirePositiveInteger(value: number, subject: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) fail(`${subject} must be a positive safe integer`);
-}
-
-function requireVersion(version: number, subject: string): void {
-  if (version !== 1) fail(`${subject} version must be 1`);
 }
 
 function copyRange(range: Utf16Range): Utf16Range {

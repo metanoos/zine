@@ -9,7 +9,11 @@ import {
   type ContextSnapshot,
 } from "./context-snapshot.js";
 import { renderTraceProcessLog } from "../provenance/trace-process.js";
-import type { AuthoritySpanV1 } from "@zine/trace-context";
+import type {
+  AuthoritySpanV1,
+  TraceContextSelectionSuccessV1,
+  Utf16Range,
+} from "@zine/trace-context";
 import {
   compileTraceAuthoringOperation,
   type PreparedTraceAuthoringV1,
@@ -42,6 +46,12 @@ export interface PreparedOperation {
   contextSnapshot: ContextSnapshot;
   contextFingerprint: string;
   traceAuthoring: PreparedTraceAuthoringV1 | null;
+  /**
+   * Exact package-local selector output used for this request. This is a
+   * disposable Phase-2 preparation boundary, not a durable or protocol
+   * provenance record.
+   */
+  traceContextSelection?: TraceContextSelectionSuccessV1;
   messages: readonly ChatMessage[];
   providerId: string;
   providerFingerprint: string;
@@ -80,6 +90,18 @@ export interface PrepareOperationInput {
   authoritySpans?: readonly AuthoritySpanV1[];
 }
 
+export interface PreparedOperationRequestHashMaterialV1 {
+  requestId: string;
+  operation: OpKind;
+  operationInputs: Readonly<OpInputs>;
+  messages: readonly ChatMessage[];
+  traceAuthoring: PreparedTraceAuthoringV1 | null;
+  providerFingerprint: string;
+  targetRevision: PreparedTargetRevision;
+  dependencyFingerprint: string;
+  createdAt: number;
+}
+
 export class PreparedOperationError extends Error {
   constructor(readonly issues: readonly string[]) {
     super(issues.join("; "));
@@ -96,11 +118,30 @@ function canonical(value: unknown): string {
     .join(",")}}`;
 }
 
-function deepFreeze<T>(value: T): T {
-  if (value && typeof value === "object" && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+/** Canonical identity of the exact frozen request produced by preparation. */
+export function computePreparedOperationRequestHashV1(
+  material: PreparedOperationRequestHashMaterialV1,
+): string {
+  return contentFingerprint(canonical({
+    requestId: material.requestId,
+    operation: material.operation,
+    operationInputs: material.operationInputs,
+    messages: material.messages,
+    traceAuthoring: material.traceAuthoring,
+    providerFingerprint: material.providerFingerprint,
+    targetRevision: material.targetRevision,
+    dependencyFingerprint: material.dependencyFingerprint,
+    createdAt: material.createdAt,
+  }));
+}
+
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
+  if (!value || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value as Record<string, unknown>)) {
+    deepFreeze(child, seen);
   }
+  if (!Object.isFrozen(value)) Object.freeze(value);
   return value;
 }
 
@@ -114,6 +155,45 @@ function bytes(value: string): number {
  * object; transport receives this object and cannot rebuild its messages.
  */
 export function prepareOperation(input: PrepareOperationInput): PreparedOperation {
+  if ("traceContextSelection" in (input as unknown as Record<string, unknown>)) {
+    throw new PreparedOperationError([
+      "Caller-supplied trace-context selection is not accepted by public preparation",
+    ]);
+  }
+  return prepareOperationInternal(input, undefined, true);
+}
+
+/**
+ * Measure the exact prepared-message bytes outside a selected rendered
+ * context. The caller must run final preparation afterward; this probe cannot
+ * be approved or dispatched.
+ * @internal Canonical desktop selector boundary only.
+ */
+export function measurePreparedRequestReservedBytes(
+  input: PrepareOperationInput,
+  traceContextSelection: TraceContextSelectionSuccessV1,
+): number {
+  const measured = prepareOperationInternal(
+    { ...input, maxBytes: Number.MAX_SAFE_INTEGER },
+    traceContextSelection,
+    false,
+  );
+  return measured.budget.totalBytes - measured.budget.contextBytes;
+}
+
+/** @internal Canonical desktop adapter/selector boundary only. */
+export function prepareOperationWithSelectedTraceContext(
+  input: PrepareOperationInput,
+  traceContextSelection: TraceContextSelectionSuccessV1,
+): PreparedOperation {
+  return prepareOperationInternal(input, traceContextSelection, true);
+}
+
+function prepareOperationInternal(
+  input: PrepareOperationInput,
+  traceContextSelection: TraceContextSelectionSuccessV1 | undefined,
+  requireExactSelectorBudget: boolean,
+): PreparedOperation {
   const issues: string[] = [];
   try {
     assertUsableContextSnapshot(input.contextSnapshot);
@@ -148,6 +228,14 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
       contentHash: target.contentHash,
     },
   });
+  if (traceContextSelection) {
+    assertTraceContextSelection(
+      traceContextSelection,
+      input.operation,
+      target,
+      compiledAuthoring.authoring?.operationRange,
+    );
+  }
   const operationInputs = compiledAuthoring.operationInputs;
   if (input.operation === "analyze") {
     operationInputs.traceLog = renderTraceProcessLog(
@@ -166,7 +254,17 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
       ),
     );
   }
-  const renderedContextBlock = compiledAuthoring.renderedContextBlock;
+  const renderedContextBlock = traceContextSelection?.renderedContext
+    ?? compiledAuthoring.renderedContextBlock;
+  if (
+    traceContextSelection
+    && compiledAuthoring.authoring
+    && compiledAuthoring.renderedContextBlock !== input.contextSnapshot.renderedBlock
+  ) {
+    throw new PreparedOperationError([
+      "Selected trace context cannot silently substitute markerized authoring bytes",
+    ]);
+  }
   const assembled = assembleOpMessages(input.operation, operationInputs, {
     voicePrompt: input.voicePrompt ?? "",
     contextBlock: renderedContextBlock,
@@ -184,6 +282,23 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
       `Prepared request exceeds ${maxBytes} bytes (${totalBytes}); context contributes ${contextBytes}`,
     ]);
   }
+  if (traceContextSelection) {
+    const expectedContextBytes = traceContextSelection.manifest.budget.usedRenderedBytes;
+    if (contextBytes !== expectedContextBytes) {
+      throw new PreparedOperationError([
+        `Selected trace context byte count changed (${contextBytes} != ${expectedContextBytes})`,
+      ]);
+    }
+    const reservedPromptBytes = totalBytes - contextBytes;
+    if (
+      requireExactSelectorBudget
+      && traceContextSelection.manifest.budget.reservedPromptBytes !== reservedPromptBytes
+    ) {
+      throw new PreparedOperationError([
+        `Selected trace context reserved-byte boundary changed (${reservedPromptBytes} != ${traceContextSelection.manifest.budget.reservedPromptBytes})`,
+      ]);
+    }
+  }
 
   const providerFingerprint = providerProfileFingerprint(input.provider);
   const voicePromptHash = contentFingerprint(input.voicePrompt ?? "");
@@ -192,6 +307,9 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
     operationInputs,
     contextFingerprint: input.contextSnapshot.fingerprint,
     traceAuthoring: compiledAuthoring.authoring,
+    ...(traceContextSelection ? {
+      traceContextSelection: selectionIdentity(traceContextSelection),
+    } : {}),
     providerFingerprint,
     modelVoicePubkey: input.modelVoicePubkey,
     voicePromptHash,
@@ -207,17 +325,20 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
     headId: target.headId!,
     contentHash: target.contentHash,
   };
-  const preparedRequestHash = contentFingerprint(canonical({
+  const preparedRequestHash = computePreparedOperationRequestHashV1({
     requestId,
     operation: input.operation,
     operationInputs,
     messages,
     traceAuthoring: compiledAuthoring.authoring,
+    ...(traceContextSelection ? {
+      traceContextSelection,
+    } : {}),
     providerFingerprint,
     targetRevision,
     dependencyFingerprint,
     createdAt,
-  }));
+  });
   return deepFreeze({
     version: PREPARED_OPERATION_VERSION,
     requestId,
@@ -226,6 +347,9 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
     contextSnapshot: input.contextSnapshot,
     contextFingerprint: input.contextSnapshot.fingerprint,
     traceAuthoring: compiledAuthoring.authoring,
+    ...(traceContextSelection ? {
+      traceContextSelection,
+    } : {}),
     messages,
     providerId: input.provider.id,
     providerFingerprint,
@@ -246,6 +370,93 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
     preparedRequestHash,
     createdAt,
   });
+}
+
+function assertTraceContextSelection(
+  selection: TraceContextSelectionSuccessV1,
+  operation: OpKind,
+  target: ContextSnapshot["target"],
+  operationRange: Utf16Range | undefined,
+): void {
+  const issues: string[] = [];
+  if (selection.version !== 1 || selection.ok !== true) issues.push("trace-context selection is not a V1 success");
+  if (selection.manifest.contract !== "package-local-non-normative-v1") {
+    issues.push("trace-context selection is not package-local and non-normative");
+  }
+  if (selection.manifest.completeness.selectionComplete !== true) {
+    issues.push("trace-context selection is incomplete");
+  }
+  if (selection.manifest.operation.operation !== operation) {
+    issues.push("trace-context selection operation changed");
+  }
+  const selectedTarget = selection.manifest.operation.target;
+  if (
+    selectedTarget.traceId !== target.traceId
+    || selectedTarget.headId !== target.headId
+    || selectedTarget.contentHash !== target.contentHash
+    || selectedTarget.currentText !== target.body
+    || (selectedTarget.chosenPath !== undefined && selectedTarget.chosenPath !== target.path)
+  ) {
+    issues.push("trace-context selection target/head does not match the prepared target");
+  }
+  const selectedRange = selection.manifest.operation.range;
+  if (
+    operationRange
+    && (!selectedRange
+      || selectedRange.fromUtf16 !== operationRange.fromUtf16
+      || selectedRange.toUtf16 !== operationRange.toUtf16)
+  ) {
+    issues.push("trace-context selection range does not match the prepared operation range");
+  }
+  if (
+    contentFingerprint(`zine.trace-context.rendered-selection.v1\0${selection.renderedContext}`)
+    !== selection.manifest.hashes.renderedContextSha256
+  ) {
+    issues.push("trace-context rendered bytes do not match their frozen identity");
+  }
+  if (
+    contentFingerprint(`zine.trace-context.package-manifest.v1\0${canonicalUtf8(selection.manifest)}`)
+    !== selection.manifestSha256
+  ) {
+    issues.push("trace-context manifest does not match its frozen identity");
+  }
+  if (issues.length > 0) throw new PreparedOperationError(issues);
+}
+
+function selectionIdentity(selection: TraceContextSelectionSuccessV1): unknown {
+  return {
+    policy: selection.manifest.policy,
+    frozenInputsSha256: selection.manifest.hashes.frozenInputsSha256,
+    renderedContextSha256: selection.manifest.hashes.renderedContextSha256,
+    manifestSha256: selection.manifestSha256,
+  };
+}
+
+function canonicalUtf8(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalUtf8).join(",")}]`;
+  if (typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>)
+      .filter((key) => (value as Record<string, unknown>)[key] !== undefined)
+      .sort(compareUtf8)
+      .map((key) => `${JSON.stringify(key)}:${canonicalUtf8((value as Record<string, unknown>)[key])}`)
+      .join(",")}}`;
+  }
+  throw new TypeError(`cannot canonicalize ${typeof value}`);
+}
+
+function compareUtf8(left: string, right: string): number {
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = leftBytes[index]! - rightBytes[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
 }
 
 export class PreparedOperationApproval {

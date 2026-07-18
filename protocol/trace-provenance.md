@@ -27,7 +27,10 @@ from an exact span of another trace or minted **directly** as signer-authored
 text with no source-trace claim. File describes its wire shape, not an editable
 workspace file, so the reification discriminator remains
 `z: "file" | "folder"` with no third value; the REQUIRED `content.coin`
-envelope (§3.2) distinguishes Coins from mutable file traces.
+envelope (§3.2) distinguishes a Coin genesis from mutable file traces. Mint is
+complete only when that genesis and the same minter's `TraceAttestation` are
+published (§3.8); an unfinished local genesis is a pending Mint attempt, not an
+unpublished Coin.
 
 A **press** is the authoring interface, not a server. A **relay** is the local
 or remote Nostr server to which a press writes traces. Publication and
@@ -286,12 +289,15 @@ Citation type (both reifications) — **one delta type, four roles**:
 }
 ```
 
-- `role: "inline"` — a frozen quote: `newValue` came from a coin, not typing; `position`/`newValue` present. It accompanies the ordinary body-edit delta that installed the bracket; it does not apply a second body mutation.
+- `role: "inline"` — a frozen quote copied from the exact stepped source named
+  by `sourceEventId`; the source may be an ordinary file `TraceNode` or a Coin.
+  `position`/`newValue` are present. It accompanies the ordinary body-edit delta
+  that installed the bracket; it does not apply a second body mutation.
 - `role: "live"` — a transclusion that tracks its source's head. Reserved; not yet specified beyond the delta shape.
 - `role: "tag"` — a zine tagged onto this trace: no `position`, no `newValue`; body untouched. The only role for which `op: "remove"` is meaningful (untagging).
 - `role: "reply"` — this whole document replies to another stepped trace: no `position`, no `newValue`; body untouched.
 - `op` defaults to `"add"` and MAY be omitted.
-- Every `cite` with `op: "add"` MUST have a matching top-level `q` tag pinning `sourceEventId`; `op: "remove"` removes the corresponding `q` from the current set. `sourceEventId` is pinned to the source's nucleus **at the moment of citing**, even if the source's chain moves on. This lowercase `q` edge is the only social citation primitive. Text cannot be cited until it is a trace: `[[text]]` is draft syntax; Mint first strikes a coin, after which an inline bracket or bodyless tag may cite its node id.
+- Every `cite` with `op: "add"` MUST have a matching top-level `q` tag pinning `sourceEventId`; `op: "remove"` removes the corresponding `q` from the current set. `sourceEventId` is pinned to the source's nucleus **at the moment of citing**, even if the source's chain moves on. This lowercase `q` edge is the only social citation primitive. Text cannot be cited until it belongs to a stepped trace: `[[text]]` is draft syntax, while a resolved bracket may cite an ordinary stepped source or a Coin. Mint is optional affirmative curation, not a citation prerequisite.
 - `sourceContentHash`, if present, is the hash of the cited span/body as it appears in the source — lets a verifier catch a fabricated citation without reconstructing the source (§3.9). The hash is SHA-256 of the exact UTF-8 bytes of the span, per §2 — **no normalization**. It is NOT the rendezvous coordinate `H`, which NFC-normalizes and collapses whitespace (`rendezvous.md` §1.2); the two induce different equivalence classes on the same text.
 
 Only `insert`, `delete`, and `replace` participate in `applyDeltas`. Citation and observation deltas describe why or how a body/relationship changed; readers MUST NOT splice their `position`/`newValue` into the snapshot a second time.
@@ -324,7 +330,7 @@ Press-local selection and mounting remain separate from this observation. An Exp
 | `fork` | Genesis seeded from another trace's node under a different owner | `forked-from`, no `prev` |
 | `edit` | Ordinary change | `prev` |
 | `external` | File changed outside the traced editor — disk drift detected at next app open or poll, or an external process / MCP tool wrote it. Signed by the external actor's voice (a per-machine reconciler key for bare drift, a per-actor key for MCP callers), never the authoring key. The authoring key only signs changes the editor's own transactions produced. `authors` is omitted, so reconstruction attributes the bytes to the external voice's pubkey (Tier-2 signer attribution, §3.6) — honestly low-trust: the signer claims only "the machine's state moved," not "the human typed this." Per-actor distinction is carried by the signer pubkey, not this tag. | `prev`; signed by the external voice |
-| `paste` | Pasted content, possibly minted elsewhere | `prev`, `q` if sourced |
+| `paste` | Pasted content, possibly sourced from another Step | `prev`, `q` if sourced |
 | `cite` | Primary purpose is a citation — inline quote, tag, or reply | `prev`, `q` |
 | `llm` | Checkpoint around an LLM call | `prev`, `prompt` |
 | `merge` | Owner accepts content from one or more other chains into this one | `merge-parent` × N |
@@ -406,39 +412,59 @@ Attribution is carried at two layers, in priority order: per-delta (primary) and
 
 An `action: llm` node's `prompt` is the instruction only — what a human typed or an agent decided to ask. Everything else the model saw (folder content, a roster, pinned traces) is NOT duplicated into the node: the node's `q` tags cite whatever was in scope, each cited node already self-sufficient, and `injectRule` names the deterministic procedure that expands those citations into the literal submitted prompt. The `llm` field records the model configuration (`model`, `temperature`, `maxTokens`, `provider`) so a reader knows which call answered.
 
+LLM nodes preserve ordinary social citations and structural prompt dependencies as `q` tags, so older readers retain the graph. To distinguish their roles, a writer that can enumerate the complete structural set MUST retain the legacy `["scope", "llm"]` marker, emit `["scope", "llm", "targets-v1"]`, and emit one `["scope", "llm", "<node-id>"]` tag for every structural-only target. If one target has both an ordinary social role and a structural scope role, the social role wins: the writer emits its `q` tag but MUST NOT list it in the structural-only set. A reader that recognizes `targets-v1` excludes only those enumerated ids from social citation processing. A reader that sees any `scope:llm` marker without a recognized, complete, well-formed target-set version MUST exclude every `q` edge on that node from social processing. This fail-closed legacy rule prevents an old or unknown encoding from publishing private prompt scope.
+
 **A rule is an immutable single-node trace carrying a named-algorithm manifest.** `injectRule` carries the event id of a rule trace whose body is a JSON manifest `{ "algorithm": "<name>-v<n>", "params": { … } }` — NOT executable code. The algorithm is a named, versioned, deterministic procedure shipped in the reader's binary (e.g. `ctx-block-v1`); the manifest names which one and its parameters (which context-block variant, whether sibling text is included, the role preamble). Rule immutability is guaranteed by the protocol itself, not by registry discipline: evolving a rule means stepping a new rule trace carrying a new manifest and citing the new id. Two readers implementing the same algorithm version produce byte-identical reconstruction; a reader that doesn't know the algorithm degrades — the scope `q`-tags still show *what* was in scope, but the assembled prompt can't be rebuilt. There is no executable code on the relay: execution-from-relay is rejected on the same trust posture as §3.9/§R5 (verifiable, not trustless).
 
 Given `prompt` + the rule manifest + the cited nuclei, a reader whose binary implements `algorithm` can reconstruct the exact context a past call received: memetic lineage as a simulation, not a stored transcript. The manifest MAY cite a Query spec (§R9) as one of its params, so a rule can draw its scope from a query rather than a fixed folder.
 
-### 3.8 Coining, brackets, forking
+### 3.8 Citations, coining, brackets, forking
 
 **Bracket syntax** (in file bodies):
 
 ```
 [[ some phrase ]]              unresolved — rewrite-protected, not yet a trace
-[[ some phrase | eventId ]]    resolved — coined, permanently addressable, frozen
+[[ some phrase | eventId ]]    resolved — cited, version-pinned, frozen
 ```
 
 Everything outside brackets is fluid by default. A bare bracket is rewrite protection only: it shields a span from silent drift across LLM rounds without minting anything. A selection deletion that fully contains brackets removes the loose text but spares each complete bracket; Cut and paste/type-over operate on the complete selection. Clicking bracketed text selects the whole occurrence, and Backspace twice unwraps it to ordinary text (dropping any resolved citation suffix without deleting the visible phrase). A bare bracket is NEVER auto-resolved by coincidental text match — resolution is always an explicit act.
 
+A resolved bracket cites the exact `TraceNode` named by `eventId`. That node may
+be an ordinary stepped file version whose author the quoting writer disagrees
+with, or a Coin deliberately minted for salience. Readers determine Coin status
+from the target's verified `content.coin` envelope and same-minter attestation,
+never from bracket syntax. Citation expresses composition, not endorsement.
+
 **Extracted coining pass** (client- or CLI-triggered), for each unresolved bracket:
 
 1. Read the current span text.
-2. Step a new file-reified `TraceNode`, `action: import`, `snapshot` = that text, no `prev`, as a direct member of the Press's dedicated **Mint folder**. This one genesis Step strikes the coin; a coin never gains a later `prev` node. The Mint folder is an independent folder trace mounted beside Root by the press; it is not a member of Root and therefore cannot leak its inventory when Root is Sent. Mint folder genesis and membership Steps remain local until explicitly Sent. The coin has a single-segment `F` name. The reference naming policy is `<YYYY-MM-DD_HHmmss>-<smart-title>.md` in the Press's local time, at second precision, with a numeric collision suffix when necessary. `content.coin.origin` MUST be `kind: "extracted"` and carry the exact source node, full source-snapshot hash, and UTF-16 span range. Tags `extracted-from` (mirroring the source node) and `x` (Coin body hash) are both REQUIRED.
-3. Rewrite the bracket in place to `[[ text | newNodeId ]]`. That edit is an ordinary `cite` delta (`role: "inline"`, `sourceEventId: newNodeId`) on the origin document's next step, mirrored as a top-level `q` tag.
+2. Step a new file-reified `TraceNode`, `action: import`, `snapshot` = that text, no `prev`, addressed to the Press's dedicated **Mint folder**. A coin never gains a later `prev` node. The Mint folder is an independent folder trace mounted beside Root by the press; it is not a member of Root and therefore cannot leak its inventory when Root is Sent. Mint folder genesis and membership Steps remain local. The Coin genesis has a single-segment `F` name. The reference naming policy is `<YYYY-MM-DD_HHmmss>-<smart-title>.md` in the Press's local time, at second precision, with a numeric collision suffix when necessary. `content.coin.origin` MUST be `kind: "extracted"` and carry the exact source node, full source-snapshot hash, and UTF-16 span range. Tags `extracted-from` (mirroring the source node) and `x` (Coin body hash) are both REQUIRED.
+3. Publish that exact signed genesis to at least one configured external relay.
+4. Publish a `TraceAttestation` targeting that genesis under the same minter key. The Mint gesture MUST NOT report success until both public writes succeed. Republishing the exact signed pair is idempotent; a press SHOULD retain that pair while completion is pending instead of minting a sibling.
+5. After completion, record the Coin as a local Mint-folder member and rewrite the bracket in place to `[[ text | newNodeId ]]`. An unfinished attempt MUST NOT appear in Coin inventory. The rewrite is an ordinary `cite` delta (`role: "inline"`, `sourceEventId: newNodeId`) on the origin document's next step, mirrored as a top-level `q` tag.
 
 **Direct coining.** A press MAY expose a Mint composer that strikes signer-
 authored text without first creating a mutable source trace. It follows the
-same one-node, `action: import`, named Mint-member, local-Step, and `x` rules,
+same one-node, `action: import`, named Mint-member, compound Mint, and `x` rules,
 but its `content.coin.origin` is `{ "kind": "direct" }` and it MUST NOT emit
 `extracted-from`. The node MUST carry the composer's KEdits applied from the
 empty string. If the phrase entered through a single non-editor operation, the
 node carries that one atomic insertion. Those KEdits do not create a `prev`
 history; they validate the genesis transition to the final snapshot.
 
-Coining captures what's there *now* as a fresh trace; it does not reconstruct a pre-mint chain for the text. Once struck, the coin's identity and sole nucleus are stable — later rounds cite the same trace. Coining is a local Step, not a Send: the coin becomes a social signal only if its own node is Sent or a Sent container carries a `q` citation to it. Sending a container does not recursively publish the cited coin or the private Mint folder. A coin MAY be reified as a plain text file, but that is an exported materialization, not another Step or a conversion of the coin into a mutable file trace. A cosmetic alias MAY still be attached via `TraceOpinion` (§5); it does not replace the structural `F` name.
+Coining captures what's there *now* as a fresh trace; it does not reconstruct a pre-mint chain for the text. Once struck, the coin's identity and sole nucleus are stable — later rounds cite the same trace. **Mint is one deliberate compound gesture: genesis Step, Publish, and same-minter Attest.** The Coin genesis is public; the private Mint folder and its membership checkpoints are not recursively published. A Sent container carrying a `q` citation to a valid Coin is the separate rendezvous-interest signal (§8 and `rendezvous.md` §1); ordinary Step citations never enter Coin rendezvous. A coin MAY be reified as a plain text file, but that is an exported materialization, not another Step or a conversion of the coin into a mutable file trace. A cosmetic alias MAY still be attached via `TraceOpinion` (§5); it does not replace the structural `F` name.
 
-**Provenance-aware copy.** Copying unbracketed text between two files in one press is a shorthand extracted-coining gesture. If the source buffer differs from its latest Step, the press first Steps that exact source snapshot locally; it then strikes an extracted coin whose envelope records the nucleus, full snapshot hash, and exact range, with `extracted-from` mirroring that nucleus. The clipboard MUST retain an ordinary plain-text representation for interoperability and MAY carry a press-private coin reference. Pasting that reference into another traced file installs `[[ text | coinId ]]`; the target's next Step carries both the cumulative `q` edge and a gesture-local `cite role: "inline"` delta. The source document is not rewritten to cite the coin merely because its text was copied. If the private reference is missing, stale, unverifiable, or stripped by another application, paste degrades to ordinary text and MUST NOT assert source provenance. Materialization happens at Copy, not Paste: waiting until Paste could pin a different source state if the source changed between gestures.
+**Provenance-aware copy.** Copying never mints. When text is copied from a
+verified stepped source, a press MAY place ordinary `text/plain` plus a private
+citation envelope on the clipboard. The envelope pins the exact source node,
+selected UTF-16 range, span hash, and any source runs needed to preserve
+attribution. Pasting it into another traced file installs `[[ text | nodeId ]]`;
+the target's next Step carries both the cumulative `q` edge and a gesture-local
+`cite role: "inline"` delta. A quote that already cites a Coin keeps that Coin as
+its target. If the private envelope is missing, stale, unverifiable, or stripped
+by another application, paste degrades to ordinary text and MUST NOT assert
+source provenance. Creating a new Coin always requires the explicit compound
+Mint gesture above.
 
 **Resilience across edits.** A resolved bracket survives an edit iff its old-content position range overlaps no span in the diff the step already computes — an interval-overlap test, no fetch. Splits survive (both halves keep citing the same id), textual merges survive (two adjacent citations), and any overlapping edit destroys the bracket: the `| eventId` suffix drops, the text reverts to fluid, the cited trace itself is untouched. This is local continuity only — whether a citation was honest is §3.9's separate, reader-triggered check.
 
@@ -537,6 +563,11 @@ a later-missing target makes verification unavailable, not the attestation's
 signature invalid. A reader MUST verify the target is kind 4290 and, when `p`
 is present, that its signer matches.
 
+For a Coin genesis, the first attestation signed by that same genesis key is
+the completion record of Mint. Third-party attestations remain ordinary
+endorsements and cannot complete another key's Mint. Readers MUST NOT count a
+bare `content.coin` genesis without its minter attestation as Coin supply.
+
 ## 6. Tagging
 
 A tag and a bracket are the same `q` out-edge, differing only in manifestation: a resolved bracket is a `cite role: "inline"` — rendered, part of the body; a tag is a `cite role: "tag"` — real, discoverable, never touching the body. A tag always names a zine, never a bare string, and tagging emits **both** tags in one gesture:
@@ -605,15 +636,31 @@ Checkpoints are produced by:
   content tree and the exact descendant trace frontier.
 - **Tag change (file or folder).** `snapshot` unchanged from `prev`; deltas carry the `cite role: "tag"`; `q` tags updated; `contentHash` unaffected.
 - **LLM invocation.** Stepped immediately (`action: llm`) with the prompt, before any write-back becomes its own node.
-- **Minting.** Each resolved bracket steps its own trace (§3.8).
+- **MINT.** Each explicit Mint Steps one immutable genesis, Publishes that exact
+  node, and Attests it under the minter key before reporting success (§3.8).
+  This deliberate compound gesture is the exception to the ordinary separation
+  between local Step, discussion-oriented Send, and optional Attest below.
 - **Fork.** Opening another owner's folder, or fork-on-write of a member (§3.8).
 - **SEND (the discussion stance).** Send means "I want to talk about this" — not "I stand behind this" (that's Attest). If the working state has changed since the latest Step, Send first appends one Step carrying those changes. If the state is already current, Send reuses the latest Step. It then fans that node out to all write-enabled external relays. Sending unchanged state never manufactures a checkpoint.
 
   What Send changes is reachability: the node leaves the author's machine and becomes fetchable by others. Step alone stays local (drafts, experiments, dead ends, things recorded but not yet worth discussing). The author curates what leaves their machine through the Step/Send distinction — but the filter is "is this ready to discuss," not "is this finished." Most of what is Sent is never Attested; discussion is common, commitment is rare.
 
+  When Coins are enabled, global rendezvous indexing is a durable side effect,
+  not part of Send's relay-publication transaction. Before relay publication,
+  the reference press queues the exact signed carrying-event id in a durable
+  outbox; inability to queue fails closed before Send. A crash before relay
+  publication leaves an unresolvable record that remains queued until an
+  idempotent retry makes the event fetchable. The press retries incomplete
+  indexing with backoff, after startup, and on network recovery. It inspects
+  every ordinary social `q` target in bounded batches but indexes only targets
+  that verify as Coins; one failed
+  coordinate or relay does not starve later targets or events. DHT failure
+  never revokes or rolls back the already-Sent node. `rendezvous.md` §2.2 owns
+  the queue bound, public-relay proof, and pointer publication semantics.
+
 - **ATTEST (the commitment stance).** Attest means "I stand behind this" — a deliberate commitment, distinct from Send's "let's discuss." It is a separate speech act, not a downstream stage of Send: an author Sends freely (discussion is common) and Attests rarely (commitment is deliberate). Most Sent content is never Attested, and that is healthy — most discussions shouldn't become positions. Attest emits one append-only `TraceAttestation` (kind 4294) targeting the exact sent node; it does not step or mutate either author's trace chain (§5A).
 
-  The Send→Attest gap is the structural distinction between tentative and committed, not just an opportunity for feedback. An author Sends to open discussion, a peer reads and responds, and the author Attests only if and when the work earns commitment. Attesting a node that was never Sent would be claiming a public position for something no one can fetch — a lie by construction. Attest without prior Send is therefore invalid. Minting and citing remain local until the carrying trace is Sent; Send is what makes its ordinary `q` edges discoverable. Attest is not a rendezvous-interest gesture (`rendezvous.md` §1, §6).
+  The Send→Attest gap is the structural distinction between tentative and committed, not just an opportunity for feedback. An author Sends to open discussion, a peer reads and responds, and the author Attests only if and when the work earns commitment. Attesting a node that was never Sent would be claiming a public position for something no one can fetch — a lie by construction. Attest without prior Send is therefore invalid. Mint is the deliberate exception that composes Step, publication, and minter-Attest into one gesture; the Mint attestation declares Coin supply, not rendezvous interest. A carrying trace's `q` edges become reachable when that trace is Sent; only valid Coin targets become discoverable through Coins rendezvous (`rendezvous.md` §1, §6).
 
   **Anteriority anchor (optional, inherited).** Attest's process anteriority is
   inherited transitively from the cited Step. An implementation MAY also
@@ -674,7 +721,16 @@ A reader's gesture that is **lighter than a fork/quote but heavier than a reacti
 
 **Why regular (non-replaceable), like TraceNode.** An annotation's history is its payload (same as TraceNode, opposite of TraceOpinion). It accumulates by chaining or by flat emission; it does not collapse on re-emit. Ordering is therefore `created_at`-independent — if chained, via `prev`; if flat, via relay event order with reader-side reconciliation.
 
-**Target an immutable anchor — the §R4 rule, inherited.** Annotation does not introduce a new passage-addressing mode. It inherits the rule citations already follow (§R4): nothing addresses a passage without first striking a coin. A whole node is already stepped, immutable, and self-sufficient, so a whole-savepoint annotation cites the node directly. A passage-level annotation cites a **coin** — the reader first strikes it under their own key (`extracted-from` the source node, exactly the §3.8 coining pass), then annotates that coin's sole nucleus. There is no bare `(node, position)` coordinate pointer: such a pointer would be the one weak-addressing exception in a protocol that has refused cheap shortcuts at every turn (no auto-resolve on text match §3.8; no positional `tags[0]` §R11.4; no executable rules §R11.2). Coining keeps §R4 pure — one way to address a passage, whether you cite it, quote it, or annotate it.
+**Target an immutable anchor.** Annotation does not carry an in-body quotation
+whose bytes can corroborate a span, so it deliberately keeps a stricter target
+rule than inline citation. A whole node is already stepped, immutable, and
+self-sufficient, so a whole-savepoint annotation cites the node directly. A
+passage-level annotation cites a **coin** — the reader first strikes it under
+their own key (`extracted-from` the source node, exactly the §3.8 coining pass),
+then annotates that coin's sole nucleus. There is no bare `(node, position)`
+coordinate pointer. Ordinary inline quotation may cite a stepped source without
+Mint because the signed citing body carries the quoted bytes; a bodyless
+passage annotation still needs its own immutable passage anchor.
 
 **Why `e target`, not `q`.** Annotation is commentary, not composition. `q` is the single composition edge (§R4); an annotation does not combine the target into its body. `e target` puts annotation in the family of non-`q` lineage edges alongside `forked-from` and `extracted-from` — all `e`-tagged, all denoting "points at" rather than "composes."
 
@@ -735,7 +791,12 @@ Coining never auto-resolves against an existing trace, even on exact text match 
 
 A folder containing a file, an anthology composing quotes, and a document citing a span are one edge — a `q` from composer's nucleus to component's. A folder is simply a trace whose body *is* its out-edge list; there is no separate membership relation. What varies is only whether the composer's body is a set, a sequence, or interspersed prose.
 
-Two asymmetric primitives underpin it: **coining** (striking an addressable coin from a passage) and **citing** (referencing its sole nucleus). A citation requires a resolved bracket; a bracket does not require a citation — bare brackets protect without coining. Nothing cites passage text without first striking a coin.
+Two asymmetric primitives underpin it: **citing** (pinning an exact stepped
+source as neutral composition) and **coining** (striking a new public,
+same-minter-attested trace to affirm that a passage carries salience). An inline
+citation requires a resolved bracket; a bracket does not require a citation —
+bare brackets protect without citing or coining. Mint may create the source a
+citation targets, but ordinary quotation does not require it.
 
 Fork sits outside composition on purpose: a fork is *seeded from* a source once, not *built from* it, so it emits no `q` — lineage flows through `forked-from`. Conflating them would pollute `q`'s fan-in signal (deliberate reuse) with derivation lineage. "Composition is the single relationship by which traces *combine*" survives because a fork doesn't combine; it spawns. `extracted-from` and `forked-from` are the same shape at two granularities: span → immutable leaf; whole node → mutable trace under a new owner.
 
@@ -743,7 +804,20 @@ Fork sits outside composition on purpose: a fork is *seeded from* a source once,
 
 Deltas are unsigned sub-fields of a signed node; the signature lives at the step boundary. Per-delta **attribution** rides inside that already-stepped node as an `author` field on each body-edit delta (§3.3, §3.6) — it is *not* a per-delta event. The distinction is load-bearing: an earlier draft of this rationale conflated "attribution at delta granularity" with "signing at delta granularity" and rejected the package. They are unbound. Per-delta signing was rejected and stays rejected (below); per-delta attribution was adopted in §R11.21.
 
-Cross-author text legitimately enters a document by exactly three routes — quote (`extracted-from` a node the author signed), merge (the merge-parent *is* a node the author signed), fork (`forked-from`, same) — so every honest *cross-author* run has signed corroboration one seam edge away. The `authors` map is a denormalized reading aid over lineage that already exists in signed form, and its `src` pointer gives that verification a single-fetch shortcut. The only genuine forgery is a run with no corresponding lineage, and that is *detectable* rather than *preventable* — hence the verification rule (§3.6), which gives attribution precisely the epistemic status citations already have: asserted, cheaply checkable, degradable. The protocol already rejected trustlessness for citations in favor of bounded verification; attribution holds itself to the same standard, not a stronger one.
+Cross-author text legitimately enters a document by exactly three routes — quote
+(`q` pins the source node the author signed), merge (the merge-parent *is* a
+node the author signed), or fork (`forked-from`, same) — so every honest
+*cross-author* run has signed corroboration one seam edge away. An extracted
+Coin adds an `extracted-from` seam from Coin to its source but is not required
+for quotation. The `authors` map is a denormalized reading aid over lineage that
+already exists in signed form, and its `src` pointer gives that verification a
+single-fetch shortcut. The only genuine forgery is a run with no corresponding
+lineage, and that is *detectable* rather than *preventable* — hence the
+verification rule (§3.6), which gives attribution precisely the epistemic
+status citations already have: asserted, cheaply checkable, degradable. The
+protocol already rejected trustlessness for citations in favor of bounded
+verification; attribution holds itself to the same standard, not a stronger
+one.
 
 **But the seam model does not cover the human–AI loop.** The strongest motivation for per-delta attribution is the case `authors`' verification model cannot touch: in-session co-authorship, where the human types, invokes an LLM, and the model's output is spliced into the buffer and stepped on the *same* chain under a key the same human controls. There is no merge-parent, no `extracted-from`, no seam to walk. The AI's text enters via an in-process function call, not via incorporation from a foreign chain. For that case — which is the default for any tool whose premise is human+AI co-authorship — `authors`' verification machinery offers no advantage over plain per-delta `author`: both are signer-asserted, neither is seam-verifiable, and per-delta is cheaper (O(1) per delta, independent per delta, no sum-check, no reconstruction). The earlier draft's reasoning preferred the heavy reconstruction over simple attribution on the grounds that reconstruction preserved verifiability; that preference is sound *where seams exist* and unsound *where they don't*. The human–AI loop is the latter, and it is the common case.
 
@@ -784,9 +858,10 @@ carrying event; structural `scope:llm` q-tags are excluded because prompt
 context is not social use. Attestations remain a separately labeled count.
 Current aggregates are explicitly partial: they cover events reachable from
 configured read relays (including any super-peer configured for reads), not a
-global population. The planned Kademlia layer returns event pointers for exact
-rendezvous keys; it does not compute popularity totals, rankings, or map
-clusters. Those remain reader-side reductions over fetched, verified events.
+global population. The Kademlia component inside the enabled Coins package
+returns event pointers for exact rendezvous keys; it does not compute
+popularity totals, rankings, or map clusters. Those remain reader-side
+reductions over fetched, verified events.
 
 ## R10. Known costs, accepted
 
@@ -864,10 +939,21 @@ would strengthen both.
 ## R11. Design history (reversals)
 
 Entry numbers are **stable and never renumbered** — normative sections and
-`rendezvous.md` cite entries as §R11.N. Entries 29 down to 15 carry stable
+`rendezvous.md` cite entries as §R11.N. Entries 30 down to 15 carry stable
 numbers and are listed newest first; the block numbered 1–14 below them is the
 original list, retained with its original numbers rather than reordered into
 the newer scheme.
+
+30. **Ordinary quotation decoupled from Mint.** Citation is neutral composition,
+so a resolved inline bracket may pin any verified stepped source without
+creating or attesting a Coin. Provenance-aware copy may carry a private source
+envelope and paste an auto-bracketed citation; loss of that envelope degrades to
+plain text and never invents provenance. Coin status is derived from the target
+event plus its same-minter attestation, not from bracket syntax. Mint remains an
+explicit compound genesis Step + Publish + Attest gesture expressing salience,
+and only citations whose targets verify as Coins enter Coins rendezvous. This
+supersedes §R11.26's Coin-gated inline-citation posture while retaining its
+lowercase-`q` unification and retirement of orphan-text `Q`.
 
 29. **One reader verdict vocabulary adopted across human and machine surfaces.** The KEdit invariant in §R11.28 was easy to weaken accidentally if Replay called a malformed log “replayable,” Analyze called it “invalid evidence,” and handoff merely said “signature valid.” Readers now derive one of `FULL TRACE`, `SNAPSHOT ONLY`, or `INVALID` (§3.5). The middle state is load-bearing: missing or uncheckable process never destroys a self-contained signed snapshot, while a readable snapshot never promotes absent process into evidence. This adds no event field and changes no wire format; it standardizes the derived result exposed by Replay, Analyze, handoff/Reify, and machine inspection.
 
@@ -877,7 +963,7 @@ the newer scheme.
 
   History actions need semantic identity as well as their concrete inverse mutations. Without `intent`, Cmd/Ctrl+Z is indistinguishable from manually deleting the same range, and redo is indistinguishable from retyping it. Writers therefore preserve the editor's direct `undo`/`redo` transaction annotation. A node-local `tx` groups every range in one editor transaction because multi-cursor and grouped history changes share one pre-state coordinate space; replay applies the group atomically. KEdits without `tx` are invalid and discarded. This supersedes only the blanket rejection of batched keystroke metadata in §R5/§R11.21; per-keystroke events remain rejected.
 
-26. **Citations unified on trace-targeting `q`; orphan-text `Q` retired.** A citation now always targets a first-class trace node with lowercase `q`. `[[text]]` by itself is draft syntax and emits no social signal. Mint creates a trace for the selected text and records its `x` content hash plus `extracted-from` origin; explicit inline quotation and tacit/bodyless tagging are two manifestations of the same `q` edge, not two citation types. Send controls reachability of the carrying trace and therefore of its citations. The prior uppercase-`Q`/`role: "content"` design in §R11.22(b) is superseded; writers MUST NOT emit it and readers MUST ignore it. The planned DHT may derive a content-addressed rendezvous key from the cited target's verified `x` hash; that key is an index coordinate, not a second citation primitive. See `rendezvous.md` §1–§2.
+26. **Citations unified on trace-targeting `q`; orphan-text `Q` retired (Coin-gating superseded by §R11.30).** A citation now always targets a first-class trace node with lowercase `q`. `[[text]]` by itself is draft syntax and emits no social signal. Mint creates a trace for the selected text and records its `x` content hash plus `extracted-from` origin; explicit inline quotation and tacit/bodyless tagging are two manifestations of the same `q` edge, not two citation types. Send controls reachability of the carrying trace and therefore of its citations. The prior uppercase-`Q`/`role: "content"` design in §R11.22(b) is superseded; writers MUST NOT emit it and readers MUST ignore it. At this entry inline quotation still required Mint; §R11.30 later allowed ordinary stepped sources while keeping only valid Coin targets eligible for DHT rendezvous. See `rendezvous.md` §1–§2.
 
 25. **Attest separated from the revision chain as `TraceAttestation` (kind 4294).** The prior encoding made Attest an `action: "attest"` kind-4290 node. That reused an append-only class, but violated what that class means: a TraceNode MUST carry a real body, content hash, trace identity, and (for non-genesis nodes) an ownership-consistent `prev` edge. Attesting a folder or another author's node had no truthful snapshot or `prev`, while self-attestation created a no-content revision and accidentally moved the very head it was describing. The fix keeps the correct half of the old decision — attestations are regular and append-only because their history is the payload — while separating the wrong half: kind 4294 targets the exact sent node with an `e` edge and carries only endorsement metadata (§5A). It neither joins nor advances the target chain. This also lands the asynchronous cross-author endorsement deferred in §R5 without making merge bilateral.
 
@@ -899,13 +985,13 @@ the newer scheme.
 
 23. **`affirm` renamed to `attest`; NIP-03 artifact renamed to `anchor` (noun/verb split).** Lands `rendezvous.md` §R7. The publication gesture is now `attest` (was `affirm`, was `sign` — see §R11.19 for the earlier steps). Semantic case: *attest* connotes outward bearing-witness, putting on the record — which is what the gesture does (cite + optional geohash + declare). *Affirm* connoted inward agreement. The rename also resolves a collision the gesture's old name created once it owned the clean word: NIP-03 calls kind-1040 an "attestation," so to keep the gesture word and the artifact word distinct, the artifact became the `anchor` (`stampAndPublishAttestation` → `submitAnchor`, `attestation.ts` → `anchor.ts`, `OTS_ATTESTATION_KIND` → `OTS_ANCHOR_KIND`, `upgradePendingAttestations` → `upgradePendingAnchors`). The gesture owns `attest`; the OTS sub-mechanism owns `anchor`. At this point the existing kind-4290 action value was renamed; §R11.25 later corrected that wire shape to dedicated kind 4294. Sweep covered the `attestNode`/`canAttest`/`attestAsVoice` client symbols, `AttestModal.tsx`, `.op-attest` CSS, and `zine_attest` MCP tool.
 
-22. **Anteriority moved from Attest to Step; an earlier content-cite rendezvous design was introduced.** Three coupled changes were introduced by the rendezvous companion doc (`rendezvous.md`). Part (a) remains current; part (b) was later superseded by §R11.26; part (c) remains planned with the revised trace-target derivation.
+22. **Anteriority moved from Attest to Step; an earlier content-cite rendezvous design was introduced.** Three coupled changes were introduced by the rendezvous companion doc (`rendezvous.md`). Part (a) remains current; part (b) was later superseded by §R11.26; part (c) moved into implementation after this decision with the revised trace-target derivation and remains in progress.
 
   (a) **Distributed anteriority on Step (reverses §R11.20(b)).** The anteriority submission moves from Attest to Step. The step remains immediate; a pending OTS receipt stays local until a later sweep obtains a completed Bitcoin-attested proof, at which point a new kind-1040 event may be published. This makes dense time evidence possible without blocking Cmd+S. The evidence raises the cost of fabricating an old process; it does not prove humanness. See §8 (Step trigger), `rendezvous.md` §3 + §R3. Attest's anteriority is inherited transitively from the cited Step; Attest MAY keep its own completed-proof anchor for "when endorsed" as distinct from "when content existed."
 
   (b) **Superseded by §R11.26.** The earlier fifth `role: "content"` and uppercase `Q` tag tried to cite unminted text directly. It is retained here only as design history; current writers MUST NOT emit it.
 
-  (c) **Rendezvous layer (companion doc; planned).** A Kademlia DHT is designed, not implemented, to answer "which Sent events cite a trace whose verified content coordinate is `H`?" It carries fetchable event pointers (`H → {eventId, relayUrl}`), never content or a private-ACL onion. A querier verifies the carrying event's `q` edge and the cited target's `x`/body hash before its signer enters the process-evidence admission filter. Mutual-peer exact-target co-citation is the trust-bounded v1; the future global path publishes pointers as a side effect of Send, with no separate "attest interest" gesture. See `rendezvous.md` Parts I/II.
+  (c) **Rendezvous layer (companion doc; under implementation; target eligibility narrowed by §R11.30).** A Kademlia DHT inside the opt-in Coins package answers "which Sent events cite a valid Coin whose verified content coordinate is `H`?" It carries fetchable event pointers (`H → {eventId, relayUrl}`), never content or a private-ACL onion. A querier verifies the carrying event's `q` edge plus the cited Coin's envelope, `x`/body hash, and same-minter attestation before its signer enters the process-evidence admission filter. Mutual-peer exact-Coin co-citation remains the trust-bounded path; the global path publishes pointers as a side effect of Send, with no separate "attest interest" gesture and no separate Kademlia opt-in. See `rendezvous.md` Parts I/II.
 
 21. **Per-delta attribution adopted; per-delta signing stays rejected.** Body-edit deltas now carry an OPTIONAL `author` index naming the voice that produced that span's text (§3.3), resolved through a node-local `voices` table (§3.2); when absent or out of range, the delta defaults to the node signer (`event.pubkey`). This makes per-character attribution recoverable in one forward pass over a single node's deltas — O(content), independent of chain depth — without an `authors` map, a sum-check, or a reconstruction tier. Per-delta is the primary attribution path; `authors` (§3.6) is the secondary carrier retained for `src`-pointer verification of cross-author runs (merge/fork/quote seam edges).
 
@@ -950,7 +1036,7 @@ the newer scheme.
 
 18. **Removal uses a NIP-09 kind-5 request at the relay layer, not a `TraceNode` action.** A removal request for a published zine is the trace author publishing a standard NIP-09 event (§10) signed by the same key, carrying `e`/`a` tags for the author's nodes. Compatible relays SHOULD delete or stop publishing matching events, but NIP-09 does not guarantee deletion, mandate tombstones, or require permanent refusal of re-publication. The request is deliberately *not* a new `action` row in §3.4: the action table describes chain nodes, while retention is orthogonal to the append-only chain and belongs in the non-normative relay/operator layer. Rejected alternative: a custom replaceable `revoke` marker kind. It would create a second protocol representation for a request Nostr already carries, while still being unable to erase reader caches or compel other relays. Same-author authority matches the single-owner-per-trace model (§3.8); non-author moderation remains in the operator/admin layer. See §R13.
 
-17. **`reaction` field on `TraceOpinion`; `TraceAnnotation` deferred as §11.** Two adjacent product questions — "can a reader react lighter than fork/quote?" and "can a reader reply to a specific passage, SoundCloud-timed?" — resolved in two different places because the protocol already separates the two underlying classes. (a) A like/star/emoji is structurally an opinion: per-author, singular-current, no-cooperation, last-write-wins. It inherits `TraceOpinion`'s two-axis subject unchanged; the only gap was a content field for the token, so `reaction` (§5) is an additive field, not a new kind or axis. Rejected alternatives: a new reaction *kind* (duplicates the opinion class for one extra field), or a third opinion subject axis (dilutes the §R6 split). (b) A comment/marginal note/reply is NOT an opinion — it accumulates (many per author) and is version-pinned, so it cannot ride the replaceable singular-current class without breaking §R6's central trade. It also shouldn't be forced into `cite role: "reply"`, which makes the reply itself a whole chained trace (genesis + ownership + snapshot) — correct weight for a long-form response, wrong weight for "nice paragraph." `TraceAnnotation` (§11) is sketched as a regular (non-replaceable) kind holding the middle ground: cites an **immutable anchor** (a whole node, or a coin for passage-level), carries an optional `sourceContentHash` for verifiability, accumulates freely. It inherits §R4's rule — nothing addresses a passage without first striking a coin — so there is no bare `(node, position)` coordinate pointer; passage-level annotation strikes the coin first, exactly as citation does. The `e target` edge (not `q`) places annotation in the non-composition lineage family alongside `forked-from` and `extracted-from`. Its shape is argued here and the kind number held; implementation is deferred alongside head-following-vs-version-pinning, thread nesting, and retention policy.
+17. **`reaction` field on `TraceOpinion`; `TraceAnnotation` deferred as §11 (comparison to citation superseded by §R11.30).** Two adjacent product questions — "can a reader react lighter than fork/quote?" and "can a reader reply to a specific passage, SoundCloud-timed?" — resolved in two different places because the protocol already separates the two underlying classes. (a) A like/star/emoji is structurally an opinion: per-author, singular-current, no-cooperation, last-write-wins. It inherits `TraceOpinion`'s two-axis subject unchanged; the only gap was a content field for the token, so `reaction` (§5) is an additive field, not a new kind or axis. Rejected alternatives: a new reaction *kind* (duplicates the opinion class for one extra field), or a third opinion subject axis (dilutes the §R6 split). (b) A comment/marginal note/reply is NOT an opinion — it accumulates (many per author) and is version-pinned, so it cannot ride the replaceable singular-current class without breaking §R6's central trade. It also shouldn't be forced into `cite role: "reply"`, which makes the reply itself a whole chained trace (genesis + ownership + snapshot) — correct weight for a long-form response, wrong weight for "nice paragraph." `TraceAnnotation` (§11) is sketched as a regular (non-replaceable) kind holding the middle ground: cites an **immutable anchor** (a whole node, or a coin for passage-level), carries an optional `sourceContentHash` for verifiability, accumulates freely. Passage-level annotation retains its Coin anchor because, unlike inline citation, it carries no in-body quoted bytes; there is no bare `(node, position)` coordinate pointer. The `e target` edge (not `q`) places annotation in the non-composition lineage family alongside `forked-from` and `extracted-from`. Its shape is argued here and the kind number held; implementation is deferred alongside head-following-vs-version-pinning, thread nesting, and retention policy.
 
 16. **Merge is unilateral by the receiving chain's owner.** Closed the product-semantic half of the merge open questions: a merge node is signed only by the owner of the chain being extended; the merge-parent author neither co-signs nor is notified; parent chains persist (merge does not consume the fork); selective acceptance is the ordinary snapshot, not a cherry-pick special case; either direction (source←fork or fork←upstream) is the same shape. Endorsement stays a separate optional event if wanted later — never a merge prerequisite. Rationale: same load-bearing principle as citation and attribution (§R5) — incorporating content has never needed the source's cooperation; forcing bilateral reconciliation onto the wire would reintroduce co-sign coordination and break "merge while they're asleep." What remains deferred is client-side three-way conflict UI and branch detection, not wire semantics. See §3.8 **Merging**.
 

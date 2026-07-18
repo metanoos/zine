@@ -4,8 +4,13 @@ import { afterEach, beforeEach, test } from "node:test";
 import {
   activateVaultStorage,
   activeVaultStorageId,
+  activeVaultStorageMigratesLegacy,
   deactivateVaultStorage,
+  fenceVaultStorageSession,
+  subscribeVaultStorage,
   vaultStorage,
+  vaultStorageGeneration,
+  vaultStorageSessionAcceptsWork,
 } from "./vault-storage.js";
 
 class FakeStorage implements Storage {
@@ -145,4 +150,48 @@ test("late desktop callbacks cannot write plaintext after storage deactivation",
   assert.equal(localStorage.getItem("zine.root"), null);
   vaultStorage.setItem("zine-theme", "dark");
   assert.equal(localStorage.getItem("zine-theme"), "dark");
+});
+
+test("activation, fencing, and deactivation publish monotonic vault session changes", () => {
+  const initialGeneration = vaultStorageGeneration();
+  const changes: Array<{
+    id: string | null;
+    generation: number;
+    migratesLegacy: boolean;
+    acceptsWork: boolean;
+  }> = [];
+  const unsubscribe = subscribeVaultStorage(() => {
+    changes.push({
+      id: activeVaultStorageId(),
+      generation: vaultStorageGeneration(),
+      migratesLegacy: activeVaultStorageMigratesLegacy(),
+      acceptsWork: vaultStorageSessionAcceptsWork(),
+    });
+  });
+
+  activateVaultStorage("vault-one", KEY_ONE, true);
+  fenceVaultStorageSession();
+  deactivateVaultStorage();
+  unsubscribe();
+
+  assert.deepEqual(changes, [
+    {
+      id: "vault-one",
+      generation: initialGeneration + 1,
+      migratesLegacy: true,
+      acceptsWork: true,
+    },
+    {
+      id: "vault-one",
+      generation: initialGeneration + 2,
+      migratesLegacy: true,
+      acceptsWork: false,
+    },
+    {
+      id: null,
+      generation: initialGeneration + 3,
+      migratesLegacy: false,
+      acceptsWork: false,
+    },
+  ]);
 });

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+const contextGather = readFileSync(new URL("../ai/context-gather.ts", import.meta.url), "utf8");
 const inspector = readFileSync(new URL("../ai/PromptInspectorModal.tsx", import.meta.url), "utf8");
 
 function functionBody(name: string, next: string): string {
@@ -88,8 +89,8 @@ test("Inspector prepares local operations without waiting on ancillary relay rea
   const source = functionBody("openInspector", "/** Begin an in-place op");
   const hydrate = functionBody("hydrateInspectorInputs", "async function prepareInspectorSelection");
   assert.match(source, /setInspectOp\(defaultOperation\)[\s\S]*prepareInspectorSelection\(/);
-  assert.doesNotMatch(source, /fetchPalette\(|focusTimeline\(|Promise\.allSettled/);
-  assert.match(hydrate, /operation === "reply"[\s\S]*fetchPalette\(/);
+  assert.doesNotMatch(source, /renderSteppedTraceReferences\(|focusTimeline\(|Promise\.allSettled/);
+  assert.match(hydrate, /operation === "reply"[\s\S]*renderSteppedTraceReferences\(/);
   assert.match(hydrate, /operation === "analyze"[\s\S]*focusTimeline\(/);
   assert.match(source, /inspectOpenSequenceRef\.current/);
 });
@@ -107,4 +108,23 @@ test("Reply freezes the selected source range into Inspector and execution input
   assert.match(derive, /reply: \{ source: stirText, sourceFrom: .*sourceTo:/s);
   assert.match(reply, /approvedRequest\?\.operation === "reply"[\s\S]*approvedRequest\.operationInputs/);
   assert.match(reply, /inputs = \{ source: sourceText, traces, sourceFrom, sourceTo \}/);
+});
+
+test("Reply exposes exact stepped traces independently of the Coins discovery opt-in", () => {
+  const inventory = functionBody("renderSteppedTraceReferences", "async function hydrateInspectorInputs");
+  const reply = functionBody("replyLLM", "function analyzeLLM");
+
+  assert.match(inventory, /traceCandidates/);
+  assert.match(inventory, /lastSteppedRef\.current\.get/);
+  assert.match(inventory, /stepped\.slice\(0, 512\)/);
+  assert.doesNotMatch(inventory, /kademliaEnabledSnapshot|coinsEnabled/);
+  assert.match(reply, /const traces = renderSteppedTraceReferences\(srcRel\)/);
+  assert.doesNotMatch(reply, /Coins were disabled|!kademliaEnabledSnapshot/);
+  assert.doesNotMatch(app, /opLenses, coinsEnabled\]\);/);
+  assert.doesNotMatch(app, /authorPubkey, modelPubkey, coinsEnabled\]\);/);
+});
+
+test("operation-specific citation inventory remains outside the prompt context tree", () => {
+  assert.match(app, /function renderSteppedTraceReferences/);
+  assert.match(contextGather, /request a local stepped-trace inventory/);
 });

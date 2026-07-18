@@ -38,6 +38,15 @@ test("mintedPath adds a suffix when an identical same-second name exists", () =>
   );
 });
 
+test("Mint operation identities reserve distinct same-second paths across writers", () => {
+  const date = new Date(2026, 6, 15, 14, 32, 10);
+  const first = mintedPath("Same phrase", date, new Set(), "a".repeat(64));
+  const second = mintedPath("Same phrase", date, new Set(), "b".repeat(64));
+  assert.notEqual(first, second);
+  assert.equal(systemPathDisplayName(first), "same-phrase.md");
+  assert.equal(systemPathDisplayName(second), "same-phrase.md");
+});
+
 test("forkPathForMint removes Mint's timestamp and avoids collisions", () => {
   const source = `${MINT}/2026-07-15_143210-same-phrase.md`;
   assert.equal(

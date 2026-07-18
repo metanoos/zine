@@ -12,6 +12,8 @@ export interface SnapshotDependencies {
   operationInputsHash: string;
   /** Current-session editor authority can change prompt instruction bytes. */
   authoringAuthorityHash?: string;
+  /** Signed selector material/policy changes invalidate cached approval input. */
+  traceContextBoundaryHash?: string;
   promptLayerVersions: readonly string[];
 }
 

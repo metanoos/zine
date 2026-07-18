@@ -15,6 +15,8 @@ export interface TreeEntry {
   type: "file" | "folder";
   /** Local-only activity timestamp; never part of trace identity. */
   updatedAt?: number;
+  /** Mint files become Coin rows only after their transaction completed. */
+  coinComplete?: boolean;
 }
 
 export interface TreeNode {
@@ -27,7 +29,7 @@ export interface TreeNode {
   /** True only for the four synthetic top-level region nodes. */
   isRoot?: boolean;
   /** Stable semantic glyph for system regions and immutable Mint children. */
-  systemKind?: "root" | "mint" | "minted" | "scan" | "oblivion";
+  systemKind?: "root" | "mint" | "minted" | "mint-pending" | "scan" | "oblivion";
   /** Generated local timestamp retained for ordering but hidden from labels. */
   systemTimestamp?: string;
   /** Latest local activity at this node or anywhere beneath it. */
@@ -105,7 +107,7 @@ export function buildTree(
   order: DirectorySortOrder = "name-asc",
 ): TreeNode[] {
   const root: TreeNode = { name: "", path: basePath, type: "folder", children: [] };
-  for (const { path, type, updatedAt } of entries) {
+  for (const { path, type, updatedAt, coinComplete } of entries) {
     const relativePath = basePath && path.startsWith(basePath + "/")
       ? path.slice(basePath.length + 1)
       : path;
@@ -125,7 +127,7 @@ export function buildTree(
           type: leafType,
           children: leafType === "folder" ? [] : undefined,
           ...(markFilesAsMinted && leafType === "file"
-            ? { systemKind: "minted" as const }
+            ? { systemKind: coinComplete ? "minted" as const : "mint-pending" as const }
             : {}),
         };
         cur.children!.push(child);

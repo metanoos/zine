@@ -4,6 +4,7 @@ import {
   useId,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 
 import {
@@ -11,6 +12,15 @@ import {
   fetchEventById,
   type CoinOrigin,
 } from "./provenance.js";
+import {
+  discoverCoinCitations,
+  type VerifiedRendezvousCandidate,
+} from "./rendezvous.js";
+import {
+  kademliaEnabledSnapshot,
+  subscribeKademliaConfig,
+} from "../networking/kademlia.js";
+import { isTauri } from "../identity/identity.js";
 
 export interface CoinViewProps {
   name: string;
@@ -23,6 +33,16 @@ export function CoinView({ name, phrase, nodeId }: CoinViewProps) {
   const titleId = useId();
   const descriptionId = useId();
   const [origin, setOrigin] = useState<CoinOrigin | null | undefined>(undefined);
+  const coinsEnabled = useSyncExternalStore(
+    subscribeKademliaConfig,
+    kademliaEnabledSnapshot,
+    () => false,
+  );
+  const rendezvousEnabled = isTauri() && coinsEnabled;
+  const [candidates, setCandidates] = useState<VerifiedRendezvousCandidate[]>([]);
+  const [rendezvousState, setRendezvousState] = useState<"off" | "loading" | "done" | "error">(
+    rendezvousEnabled ? "loading" : "off",
+  );
 
   useEffect(() => {
     if (!nodeId) {
@@ -42,6 +62,34 @@ export function CoinView({ name, phrase, nodeId }: CoinViewProps) {
       cancelled = true;
     };
   }, [nodeId]);
+
+  useEffect(() => {
+    if (!rendezvousEnabled || !phrase) {
+      setCandidates([]);
+      setRendezvousState("off");
+      return;
+    }
+    let cancelled = false;
+    const controller = new AbortController();
+    setRendezvousState("loading");
+    void discoverCoinCitations(phrase, { signal: controller.signal })
+      .then((next) => {
+        if (!cancelled) {
+          setCandidates(next);
+          setRendezvousState("done");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCandidates([]);
+          setRendezvousState("error");
+        }
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [phrase, rendezvousEnabled]);
 
   const originLabel = origin === undefined
     ? "Loading…"
@@ -100,10 +148,69 @@ export function CoinView({ name, phrase, nodeId }: CoinViewProps) {
             <dt>Signed node</dt>
             <dd><code>{nodeId}</code></dd>
           </div>
+          <div>
+            <dt>Rendezvous</dt>
+            <dd>
+              {rendezvousState === "off"
+                ? "Off"
+                : rendezvousState === "loading"
+                  ? "Searching…"
+                  : rendezvousState === "error"
+                    ? "Unavailable"
+                    : `${candidates.length} verified ${candidates.length === 1 ? "candidate" : "candidates"}`}
+            </dd>
+          </div>
         </dl>
+
+        {candidates.length > 0 && (
+          <ul className="coin-rendezvous-list" aria-label="Verified global citation candidates">
+            {candidates.map((candidate) => (
+              <li key={candidate.eventId}>
+                <code title={candidate.signerPubkey}>{candidate.signerPubkey.slice(0, 12)}…</code>
+                <span>
+                  {candidate.targetNodeIds.includes(nodeId)
+                    ? "cited this exact Coin"
+                    : "cited matching Coin text"}
+                </span>
+                <code title={candidate.relayUrls.join("\n")}>
+                  via {candidate.relayUrls.length} {candidate.relayUrls.length === 1 ? "relay" : "relays"}
+                </code>
+              </li>
+            ))}
+          </ul>
+        )}
 
         <p className="coin-modal-hint">
           Coins are read-only. Drag this Coin from Mint into Root to fork an editable copy.
+          {rendezvousEnabled && " Rendezvous candidates are discovery pointers, not Coin supply, trust, or reputation."}
+        </p>
+      </div>
+    </article>
+  );
+}
+
+/** Read-only quarantine surface for Mint-path files created before (or left
+ * behind by) the transactional publication boundary. They are deliberately
+ * not described as Coins and never start rendezvous discovery. */
+export function IncompleteMintView({ name, phrase }: Pick<CoinViewProps, "name" | "phrase">) {
+  const titleId = useId();
+  const descriptionId = useId();
+  return (
+    <article
+      className="coin-view incomplete-mint-view"
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
+    >
+      <div className="coin-view-content">
+        <header className="coin-view-header">
+          <p className="coin-modal-kicker">Incomplete Mint artifact</p>
+          <h2 id={titleId} className="coin-view-title">{name}</h2>
+        </header>
+        <blockquote id={descriptionId} className="coin-modal-phrase">{phrase}</blockquote>
+        <p className="coin-modal-hint">
+          This local artifact has no durable record that its signed genesis and same-minter
+          attestation were published. It is not a Coin and is excluded from citation and
+          rendezvous. Mint the passage again to complete the public transaction.
         </p>
       </div>
     </article>
@@ -112,6 +219,7 @@ export function CoinView({ name, phrase, nodeId }: CoinViewProps) {
 
 export interface DirectCoinComposerViewProps {
   phrase: string;
+  enabled: boolean;
   busy: boolean;
   error: string | null;
   onPhraseChange: (phrase: string) => void;
@@ -122,6 +230,7 @@ export interface DirectCoinComposerViewProps {
 /** Session-owned direct-Coin draft rendered inside a normal panel tab. */
 export function DirectCoinComposerView({
   phrase,
+  enabled,
   busy,
   error,
   onPhraseChange,
@@ -131,7 +240,7 @@ export function DirectCoinComposerView({
   const titleId = useId();
   const hintId = useId();
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const canMint = phrase.trim().length > 0 && !busy;
+  const canMint = enabled && phrase.trim().length > 0 && !busy;
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -160,7 +269,7 @@ export function DirectCoinComposerView({
             value={phrase}
             placeholder="Write the exact passage to mint…"
             rows={7}
-            disabled={busy}
+            disabled={busy || !enabled}
             aria-label="Coin text"
             aria-invalid={!!error}
             onChange={(event) => onPhraseChange(event.target.value)}
@@ -172,7 +281,9 @@ export function DirectCoinComposerView({
             }}
           />
           <p id={hintId} className="coin-modal-hint">
-            This mints the text as one immutable Coin signed by the active pen. It makes no source-trace claim.
+            {enabled
+              ? "Mint, publish, and attest this exact text as a public immutable Coin signed by the active pen. The text will be public through configured publication relays. It makes no source-trace claim."
+              : "Enable Coins in Networking to mint this passage."}
           </p>
           {error && <p className="create-error" role="alert">{error}</p>}
           <div className="coin-modal-actions">

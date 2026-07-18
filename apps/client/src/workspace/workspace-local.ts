@@ -308,6 +308,7 @@ function localToFiles(
       content: string;
       tags: string[];
       nodeId: string;
+      coinComplete?: boolean;
       updatedAt: number;
       traceId?: string;
       runs?: Run[];
@@ -334,6 +335,7 @@ function localToFiles(
       kind: "file",
       runs,
       nodeId: f.nodeId,
+      ...(f.coinComplete ? { coinComplete: true } : {}),
       updatedAt: f.updatedAt,
       ...(f.traceId ? { traceId: f.traceId } : {}),
       tags: f.tags,

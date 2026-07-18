@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import {
+  captureDesktopOperationJournalSessionV1,
+  clearDesktopOperationJournalSessionV1,
+} from "../ai/desktop-operation-journal-session.js";
+
 export interface VaultSummary {
   id: string;
   name: string;
@@ -21,7 +26,11 @@ export async function discardEmptyVaultRecord(id: string): Promise<void> {
 }
 
 export async function activateVaultRuntime(id: string, workspaceKey: Uint8Array): Promise<void> {
-  await invoke("activate_vault_runtime", { id, workspaceKey: Array.from(workspaceKey) });
+  const activation = await invoke("activate_vault_runtime", {
+    id,
+    workspaceKey: Array.from(workspaceKey),
+  });
+  captureDesktopOperationJournalSessionV1(activation);
 }
 
 export async function startVaultRelay(): Promise<void> {
@@ -29,9 +38,12 @@ export async function startVaultRelay(): Promise<void> {
 }
 
 export async function recoverWebviewReload(): Promise<boolean> {
-  return invoke<boolean>("recover_webview_reload");
+  const restarting = await invoke<boolean>("recover_webview_reload");
+  if (restarting) clearDesktopOperationJournalSessionV1();
+  return restarting;
 }
 
 export async function lockVaultRuntime(): Promise<void> {
   await invoke("lock_vault_runtime");
+  clearDesktopOperationJournalSessionV1();
 }

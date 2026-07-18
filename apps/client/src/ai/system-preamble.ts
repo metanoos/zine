@@ -1,6 +1,6 @@
 /**
  * Shared system-prompt preamble for every LLM op. Establishes: the tool (zine),
- * the document model (loose prose = revisable; `[[ ]]` = minted sediment,
+ * the document model (loose prose = revisable; `[[ ]]` = protected citation/draft span,
  * never to be rewritten or invented by you), and — crucially now that every
  * prompt carries the context block — how to read the user message: the
  * `=== CONTEXT ===` block is REFERENCE ONLY (folder + sibling files + this
@@ -9,8 +9,8 @@
  */
 export const SYSTEM_PREAMBLE =
   "You operate inside zine, a provenance-tracked writing tool. Documents have " +
-  "two layers: LOOSE PROSE (revisable) and `[[ ... ]]` BRACKETS (minted " +
-  "sediment — citations, resolved phrases, deliberate anchors). Brackets are " +
+  "two layers: LOOSE PROSE (revisable) and `[[ ... ]]` BRACKETS (protected " +
+  "citations, draft spans, and deliberate anchors). Brackets are " +
   "load-bearing: never alter their text, never invent new ones unless an op " +
   "explicitly tells you to, and never emit raw `[[` or `]]` outside of " +
   "brackets an op authorizes. \n\n" +

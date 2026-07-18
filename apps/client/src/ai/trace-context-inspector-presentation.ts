@@ -209,6 +209,12 @@ export interface TraceContextInspectorMetadataV1 {
     readonly promptLayers: readonly string[];
   };
   readonly fingerprint: string;
+  /** Exact package-local identities when V1 selection, rather than the legacy snapshot, was used. */
+  readonly selectionIdentities?: {
+    readonly frozenInputsSha256: string;
+    readonly renderedContextSha256: string;
+    readonly manifestSha256: string;
+  };
 }
 
 export interface TraceContextInspectorPresentationV1 {

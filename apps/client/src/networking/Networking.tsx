@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import {
   loadRelays,
@@ -41,8 +41,17 @@ import {
 import { detectCoCitations, type CoCitation } from "../provenance/co-citation.js";
 import { addFollow, loadFollows, removeFollow, type FollowEntry } from "./follows-store.js";
 import { PubkeyDisplay } from "../identity/PubkeyDisplay.js";
+import {
+  applyKademliaConfig,
+  kademliaEnabledSnapshot,
+  kademliaStatus,
+  loadKademliaConfig,
+  subscribeKademliaConfig,
+  type KademliaConfig,
+  type KademliaStatus,
+} from "./kademlia.js";
 
-type NetworkCategory = "node" | "seeds" | "following" | "peers" | "co-citations";
+type NetworkCategory = "node" | "seeds" | "coins" | "following" | "peers" | "co-citations";
 
 const NETWORK_CATEGORIES: Array<{
   id: NetworkCategory;
@@ -51,6 +60,7 @@ const NETWORK_CATEGORIES: Array<{
 }> = [
   { id: "node", label: "Node", description: "This press and its doors" },
   { id: "seeds", label: "Seeds", description: "Durable relay copies" },
+  { id: "coins", label: "Coins", description: "Mint, cite, and discover" },
   { id: "following", label: "Following", description: "Whose work you read" },
   { id: "peers", label: "Peers", description: "Trusted access" },
   {
@@ -63,7 +73,7 @@ const NETWORK_CATEGORIES: Array<{
 /**
  * The networking view — one surface for how this machine talks to the network.
  *
- * Five categories, one selected at a time:
+ * Six categories, one selected at a time:
  *
  *   - Node: this machine and every way to reach it. The owner-key picker
  *     (which keychain key owns the relay — signs NIP-42 AUTH, is the `owner`
@@ -75,6 +85,9 @@ const NETWORK_CATEGORIES: Array<{
  *     independent read/write toggles. The Node is primary; seeds are durability
  *     backups — durable, always-online services peers can read when your
  *     desktop is offline.
+ *
+ *   - Coins: the one product opt-in for Mint, Cite, indexing, and rendezvous.
+ *     Listen/bootstrap fields remain an advanced operator configuration.
  *
  *   - Peers (desktop only): who can reach your node — the networked-mode gate
  *     and the pubkey allowlist. On the webapp this is desktop-only, so the
@@ -248,6 +261,15 @@ export function NetworkingView() {
           </div>
 
           <div
+            id="network-panel-coins"
+            role="region"
+            aria-labelledby="network-category-coins"
+            hidden={activeCategory !== "coins"}
+          >
+            <CoinsSection />
+          </div>
+
+          <div
             id="network-panel-following"
             role="region"
             aria-labelledby="network-category-following"
@@ -278,6 +300,155 @@ export function NetworkingView() {
         </div>
       </div>
     </section>
+  );
+}
+
+function CoinsSection() {
+  const desktop = isTauri();
+  const [draft, setDraft] = useState<KademliaConfig>(() => loadKademliaConfig());
+  const [bootstrapText, setBootstrapText] = useState(() => draft.bootstrapPeers.join("\n"));
+  const [status, setStatus] = useState<KademliaStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => subscribeKademliaConfig(() => {
+    const committed = loadKademliaConfig();
+    setDraft(committed);
+    setBootstrapText(committed.bootstrapPeers.join("\n"));
+  }), []);
+
+  useEffect(() => {
+    if (!desktop) return;
+    let cancelled = false;
+    const refresh = () => {
+      void kademliaStatus()
+        .then((next) => {
+          if (!cancelled) setStatus(next);
+        })
+        .catch((cause) => {
+          if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+        });
+    };
+    refresh();
+    const interval = window.setInterval(refresh, 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [desktop]);
+
+  async function applyConfig() {
+    const candidate = {
+      ...draft,
+      bootstrapPeers: bootstrapText.split(/\r?\n/),
+    };
+    setBusy(true);
+    setError(null);
+    try {
+      const applied = await applyKademliaConfig(candidate);
+      setDraft(applied.config);
+      setBootstrapText(applied.config.bootstrapPeers.join("\n"));
+      setStatus(applied.status);
+      if (applied.config.enabled) {
+        void import("../provenance/provenance.js")
+          .then(({ flushRendezvousPublicationOutbox }) =>
+            flushRendezvousPublicationOutbox())
+          .catch((cause) => {
+            console.warn("[rendezvous] indexing outbox retry failed after enable:", cause);
+          });
+      }
+    } catch (cause) {
+      const restored = loadKademliaConfig();
+      setDraft(restored);
+      setBootstrapText(restored.bootstrapPeers.join("\n"));
+      try {
+        setStatus(await kademliaStatus());
+      } catch {
+        // Keep the original apply failure actionable; polling will retry status.
+      }
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!desktop) {
+    return (
+      <div className="networking-section">
+        <h2 className="networking-section-title">Coins</h2>
+        <p className="networking-section-sub">
+          Coins are a desktop opt-in. This browser surface remains relay-only
+          and does not join the rendezvous network.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="networking-section">
+      <h2 className="networking-section-title">Coins</h2>
+      <p className="networking-section-sub">
+        One opt-in covers Mint, Cite, Send-side indexing, and rendezvous. Mint
+        publishes the exact Coin text and a same-minter attestation through
+        configured publication relays. Sending a trace that cites a Coin can create
+        globally visible signer interest. The rendezvous index carries only
+        event and relay pointers, never Coin text, private onions, supply, or reputation;
+        every result is verified against its relay.
+      </p>
+
+      <label className="relay-toggle kademlia-enabled">
+        <input
+          type="checkbox"
+          checked={draft.enabled}
+          onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}
+        />
+        <span>Enable Coins</span>
+      </label>
+
+      <details className="networking-subsection">
+        <summary>Advanced rendezvous configuration</summary>
+        <label className="kademlia-field">
+          <span>Listen multiaddr</span>
+          <input
+            className="relay-add-input"
+            type="text"
+            value={draft.listenAddress}
+            onChange={(event) => setDraft({ ...draft, listenAddress: event.target.value })}
+            spellCheck={false}
+          />
+        </label>
+
+        <label className="kademlia-field">
+          <span>Super-peer bootstrap multiaddrs · one per line</span>
+          <textarea
+            className="relay-add-input kademlia-bootstrap"
+            value={bootstrapText}
+            placeholder="/dns4/seed.example/tcp/4001/p2p/12D3KooW…"
+            onChange={(event) => setBootstrapText(event.target.value)}
+            spellCheck={false}
+            rows={4}
+          />
+        </label>
+      </details>
+
+      <button type="button" className="settings-add-btn" disabled={busy} onClick={applyConfig}>
+        {busy ? "Applying…" : "Apply Coins settings"}
+      </button>
+
+      {error && <p className="peers-error" role="alert">{error}</p>}
+      {status && (
+        <dl className="coin-modal-meta kademlia-status">
+          <div><dt>State</dt><dd>{status.running ? "running" : "stopped"}</dd></div>
+          {status.peerId && <div><dt>Peer ID</dt><dd><code>{status.peerId}</code></dd></div>}
+          <div><dt>Peers</dt><dd>{status.connectedPeers} connected · {status.routingPeers} routed</dd></div>
+          <div><dt>Owned coordinates</dt><dd>{status.storedCoordinates}</dd></div>
+          {status.listeners.map((listener) => (
+            <div key={listener}><dt>Listening</dt><dd><code>{listener}</code></dd></div>
+          ))}
+          {status.lastError && <div><dt>Last network error</dt><dd>{status.lastError}</dd></div>}
+        </dl>
+      )}
+    </div>
   );
 }
 
@@ -937,7 +1108,7 @@ function PeersSection() {
 /**
  * Co-citations section — the v1 rendezvous surface (protocol/rendezvous.md §4).
  *
- * For each pair of peers who both cited the same trace,
+ * For each pair of peers who both cited the same completed Coin,
  * shows an introduction card: the two pubkeys, how many passages they share,
  * and a sample of the shared text. The introducer brokers but does not admit —
  * adding either peer to the other's list stays a separate human act in the
@@ -949,15 +1120,32 @@ function PeersSection() {
  * v1 boundary noted in co-citation.ts.
  */
 function CoCitationsSection() {
+  const coinsEnabled = useSyncExternalStore(
+    subscribeKademliaConfig,
+    kademliaEnabledSnapshot,
+    kademliaEnabledSnapshot,
+  );
   const [matches, setMatches] = useState<CoCitation[]>([]);
   const [status, setStatus] = useState<"idle" | "scanning" | "done" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isTauri()) return;
+    if (!coinsEnabled) {
+      setMatches([]);
+      setStatus("idle");
+      setError(null);
+      return;
+    }
     let cancelled = false;
+    let running = false;
+    let activeSweep: AbortController | null = null;
 
     const run = async () => {
+      if (running || cancelled) return;
+      running = true;
+      const controller = new AbortController();
+      activeSweep = controller;
       setStatus("scanning");
       setError(null);
       try {
@@ -969,7 +1157,7 @@ function CoCitationsSection() {
           }
           return;
         }
-        const results = await detectCoCitations(peers);
+        const results = await detectCoCitations(peers, 100, controller.signal);
         if (!cancelled) {
           setMatches(results);
           setStatus("done");
@@ -979,6 +1167,9 @@ function CoCitationsSection() {
           setError(e instanceof Error ? e.message : String(e));
           setStatus("error");
         }
+      } finally {
+        if (activeSweep === controller) activeSweep = null;
+        running = false;
       }
     };
 
@@ -986,16 +1177,17 @@ function CoCitationsSection() {
     const interval = window.setInterval(run, 5 * 60 * 1000);
     return () => {
       cancelled = true;
+      activeSweep?.abort(new Error("co-citation view closed"));
       window.clearInterval(interval);
     };
-  }, []);
+  }, [coinsEnabled]);
 
   if (!isTauri()) {
     return (
       <div className="networking-section">
         <h2 className="networking-section-title">Co-citations</h2>
         <p className="networking-section-sub">
-          Possible introductions between peers who cited the same traces.
+          Possible introductions between peers who cited the same completed Coins.
         </p>
         <p className="networking-desktop-note">
           Co-citations are scanned in the desktop app, where peer chains are
@@ -1009,7 +1201,7 @@ function CoCitationsSection() {
     <div className="networking-section">
       <h2 className="networking-section-title">Co-citations</h2>
       <p className="networking-section-sub">
-        Pairs of your peers who cited the same traces — a signal they might
+        Pairs of your peers who cited the same completed Coins — a signal they might
         know each other. You broker the intro; adding them stays your call in
         Peers above.
       </p>
@@ -1037,7 +1229,7 @@ function CoCitationsSection() {
                   {m.peerA.slice(0, 12)}…
                 </span>
                 <span className="cocitation-shared-count">
-                  {m.targetIds.length} shared {m.targetIds.length === 1 ? "trace" : "traces"}
+                  {m.targetIds.length} shared {m.targetIds.length === 1 ? "Coin" : "Coins"}
                 </span>
                 <span className="cocitation-pubkey" title={m.peerB}>
                   {m.peerB.slice(0, 12)}…
@@ -1045,7 +1237,7 @@ function CoCitationsSection() {
               </div>
               {m.samples.slice(0, 3).map((s) => (
                 <blockquote key={s.nodeId} className="cocitation-sample">
-                  {s.text ?? `trace ${s.nodeId.slice(0, 12)}…`}
+                  {s.text ?? `Coin ${s.nodeId.slice(0, 12)}…`}
                 </blockquote>
               ))}
               {m.samples.length > 3 && (

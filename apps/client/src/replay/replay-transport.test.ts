@@ -32,7 +32,10 @@ test("Play loads and starts in one click, then remains reachable as Pause", () =
 
 test("the first Step reports its in-flight state instead of accepting fake retries", () => {
   assert.match(source, /disabled=\{isRunning \|\| !enabled\}/);
-  assert.match(source, /\{isRunning \? "Stepping…" : primaryAction\.label\}/);
+  assert.match(
+    source,
+    /\{isRunning \? \(runningOp === "mint" \? "Minting…" : "Stepping…"\) : primaryAction\.label\}/,
+  );
   assert.match(source, /onClick=\{\(\) => onOp\("step"\)\}/);
 });
 

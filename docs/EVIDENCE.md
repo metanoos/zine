@@ -2,28 +2,28 @@
 
 Zine asks readers to check claims, not to trust them. This page separates
 exercised implementation, measured research, protocol assertions, and open
-hypotheses. Last updated 2026-07-17.
+hypotheses. Last updated 2026-07-18.
 
 ## What works today
 
 | Capability | State | How to check |
 |---|---|---|
 | Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke; folder heads carry direct manifests and propagate recursively toward Root |
-| Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, membership transition, hash, lineage, and operation id; client tests exercise add versus advance, explicit folder/Root Step plumbing, durable retry ids, nested AI context, and Replay roll-up collapse. Fixed cross-runtime folder vectors and explicit crash-boundary real-relay fixtures remain hardening work |
+| Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, membership transition, hash, lineage, and operation id; client and MCP tests share fixed cross-runtime folder vectors, and the real-relay smoke exercises interrupted and retried recursive checkpoints. Client tests also cover add versus advance, explicit folder/Root Step plumbing, durable retry ids, nested AI context, and Replay roll-up collapse |
 | Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
 | Step, Publish (wire name Send), Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
 | Passphrase-gated desktop vault sessions with independent Roots, encrypted webview workspaces, relay databases, ACLs, signing keys, and provider secrets | Implemented on desktop; browser remains read-only | Vault lifecycle and encrypted-storage tests, registry recovery tests, key/model store tests, and the Tauri Stronghold shell |
-| Headless MCP press with its own voice key and permanent profile Root | Implemented | Offline stdio smoke proves zero-folder cold start, exact signed-event outbox, raw node reads, and Root/key reuse; isolated real-relay integration flushes a queued event unchanged, preserves optional source forks, and exercises external Send |
-| Prepared desktop MODEL operations and approval gating | Implemented for direct single-shot gestures; not yet enforced on every live model call | `prepared-operation.test.ts`, `context-snapshot.test.ts`, `model-operation-executor.test.ts`, and `llm-prepared.test.ts`; the separate agent loop still uses its own transport, and `preparedRequestHash` is not yet stored in Step metadata |
-| Current text plus structured trace context in desktop prompts | Implemented as a client-local compatibility baseline | Direct operations gather current file/folder text and a chronological process log through `context-block.ts`, `context-snapshot.ts`, and `prepared-operation.ts`; there is no shared task-specific selector, scoped memory, cross-press fixture contract, or durable context binding yet |
-| Shared authoring-syntax kernel and a desktop adapter for the Extend (continuation) and Settle (revision) operations | Initial deterministic slice implemented; authority is current-editor-session-only | `packages/trace-context` pins UTF-16 parsing, protected precedence, exact operation clipping, authority failures, directive markers, local excerpts, malformed syntax, and generated 0/100/1,000/10,000-candidate scale fixtures. Desktop tests cover manual versus paste/drop/MODEL/undo/reload authority, exact prepared identity, protected-output rejection, atomic accepted-success cleanup, and inert legacy behavior. Persisted authority, promotion, durable consumption receipts, crash recovery, other operations, and MCP parity remain deferred |
+| Headless MCP press with its own voice key and permanent profile Root | Implemented | Offline stdio smoke proves zero-folder cold start, exact signed-event outbox, raw node reads, and Root/key reuse; isolated real-relay integration flushes a queued event unchanged, preserves optional source forks, and exercises external Publish |
+| Prepared desktop MODEL operations and approval gating | Implemented for direct single-shot gestures; not yet enforced on every live model call | Canonical selected context, exact prepared identity, explicit approval, cancellation, and stale-result recovery are exercised across the five direct operations. The separate agent loop still uses its own transport, and `preparedRequestHash` is not yet stored in Step metadata |
+| Current text plus structured trace context in desktop prompts | Shared deterministic selection and cross-press projection implemented | Desktop and MCP adapters share selection corpora, bounds, cancellation, and projection invariants. Durable context binding in signed Step metadata and scoped memory remain deferred |
+| Shared authoring-syntax kernel and a desktop adapter for the Extend (continuation) and Settle (revision) operations | Initial deterministic slice implemented; authority is current-editor-session-only | `packages/trace-context` pins UTF-16 parsing, protected precedence, exact operation clipping, authority failures, directive markers, local excerpts, malformed syntax, and generated 0/100/1,000/10,000-candidate scale fixtures. Desktop tests cover manual versus paste/drop/MODEL/undo/reload authority, exact prepared identity, protected-output rejection, atomic accepted-success cleanup, and inert legacy behavior. Persisted authority, promotion, durable consumption receipts, crash recovery, other operations, and MCP authoring-syntax enforcement remain deferred |
 | Per-delta human/model attribution | Implemented | Attribution regression suite; trust status remains asserted unless corroborated through a signed seam |
 | Fork and merge | Implemented for owned recursive destinations and current top-level foreign flows | Nested Scan/adoption/fork tests plus merge and ownership tests; recursive fork-on-write through an already-foreign folder remains deferred |
-| Mutual-peer co-citation and process vet | Implemented and tested | `co-citation.ts`, `vet.ts`, `vet-walker.ts`, and their tests |
+| Valid-Coin mutual-peer co-citation and process vet | Implemented and tested | Signed TraceHeads are author-bound and resolved through verified chains; only cryptographically completed Coins survive intersection. `vet.ts`, `vet-walker.ts`, and their tests cover the process vet |
 | Exact and fuzzy quote matching | Implemented with uncalibrated defaults | SHA-256 coordinate plus MinHash/LSH client layer |
 | Raw-file Reify with optional trace bundle and report | Implemented on desktop | `reify.ts` materializes signed snapshots and keeps raw events under `.zine/` |
-| Global Kademlia rendezvous | Not implemented | Design sketch in the [rendezvous specification](../protocol/rendezvous.md) |
+| Coins package: Publish-side indexing and Kademlia rendezvous | Integrated and exercised inside the single Coins discovery opt-in | Ordinary Cite is core composition outside the opt-in. Native tests cover bounded records, strict peer compatibility, deterministic replica ranking, reserved owned capacity, merge-before-republish, cancellation, listener readiness, and persistent owned pointers. Client tests cover valid-Coin gating, hostile-relay verification, the durable outbox, transactional configuration, recovery, and privacy fences. There is no operated bootstrap network, eight-node deployment result, or density evidence |
 | No-install public verifier | Not implemented | On the [roadmap](ROADMAP.md) |
 | Managed organization service | Not implemented | Hosted relay code exists; no paid service or SLA is claimed |
 
@@ -50,7 +50,7 @@ Nothing above needs to be taken on faith. From a repository checkout:
 ```sh
 npm run check          # client, MCP, relay, and Rust tests
 npm run verify         # check + client build + isolated relay smoke
-npm run verify:relay   # real Step/Send/Attest/Mint/Cite flow
+npm run verify:relay   # real Step/Publish/Attest/Mint/Cite flow
 ```
 
 ## Foundational product bet
@@ -149,7 +149,8 @@ The normative trust posture is in
   corpus affinity after controlling for topic and popularity.
 - Longitudinal coherence or conditional-compression features adding calibrated
   vetting value without being mistaken for proof of humanity or identity.
-- Organic co-citation density sufficient to justify global rendezvous work.
+- Organic co-citation density sufficient to justify operating or expanding
+  global rendezvous.
 - Clean-machine release installation on every supported desktop platform.
 
 These gaps are roadmap gates, not details to hide. A claim moves off this

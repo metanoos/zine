@@ -215,7 +215,7 @@ test("classifyQEdge: folder node q-citing our node → null (membership, not cit
   assert.equal(classifyQEdge(e, "ourNode"), null);
 });
 
-test("classifyQEdge: LLM-scope node q-citing our node → null (in-context, not citation)", () => {
+test("classifyQEdge: legacy LLM scope fails closed", () => {
   // An action:llm node that had our trace in scope: flagged scope:llm. Provenance
   // about the call, not a citation of the content.
   const e = fileEvent(
@@ -223,6 +223,41 @@ test("classifyQEdge: LLM-scope node q-citing our node → null (in-context, not 
     { deltas: [], prompt: "rewrite this" },
   );
   assert.equal(classifyQEdge(e, "ourNode"), null);
+});
+
+test("classifyQEdge: targets-v1 keeps ordinary q and removes structural LLM scope", () => {
+  const ordinary = "1".repeat(64);
+  const structural = "2".repeat(64);
+  const e = fileEvent(
+    [
+      ["q", ordinary, ""],
+      ["q", structural, ""],
+      ["scope", "llm"],
+      ["scope", "llm", "targets-v1"],
+      ["scope", "llm", structural],
+      ["action", "llm"],
+    ],
+    { deltas: [], prompt: "rewrite this" },
+  );
+
+  assert.equal(classifyQEdge(e, ordinary), "cite");
+  assert.equal(classifyQEdge(e, structural), null);
+});
+
+test("classifyQEdge: malformed targets-v1 LLM scope fails closed", () => {
+  const ordinary = "1".repeat(64);
+  const e = fileEvent(
+    [
+      ["q", ordinary, ""],
+      ["scope", "llm"],
+      ["scope", "llm", "targets-v1"],
+      ["scope", "llm", "not-an-event-id"],
+      ["action", "llm"],
+    ],
+    { deltas: [], prompt: "rewrite this" },
+  );
+
+  assert.equal(classifyQEdge(e, ordinary), null);
 });
 
 test("structural q refs do not make an empty inbound snapshot incomplete", async () => {

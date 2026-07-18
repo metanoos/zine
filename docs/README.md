@@ -5,10 +5,10 @@ company perspectives. They are the shared reader-facing source for this
 repository and the app's About view.
 
 The organizing product thesis is that current content discards information
-useful to both collaborators and reviewers. A zine is a file or folder together
-with its trace. Zine preserves that trace so an
-AI can work with selected, inspectable process context while people retain
-portable evidence of what happened. The [Evidence](EVIDENCE.md) page
+useful to both collaborators and reviewers. A zine is a file or folder
+together with its trace. Zine preserves that trace so an AI can work with
+selected, inspectable process context while people retain portable evidence
+of what happened. The [Evidence](EVIDENCE.md) page
 distinguishes that foundational bet from what the repository has actually
 demonstrated.
 
@@ -19,6 +19,11 @@ demonstrated.
 | [Evidence](EVIDENCE.md) | What is implemented, measured, asserted, and still unknown |
 | [Roadmap](ROADMAP.md) | How the trace-context runtime, evaluation, and later team layers are sequenced |
 | [Company](COMPANY.md) | How an open sovereign protocol can support an optional paid layer |
+
+Implementation architecture: [Desktop operation lifecycle](DESKTOP_OPERATION_LIFECYCLE.md)
+defines the private/local Phase 2 envelope, crash semantics, and integration
+boundary for the first recoverable Extend operation. It is not a protocol
+specification or an implemented-storage claim.
 
 ## Accepted migration direction
 

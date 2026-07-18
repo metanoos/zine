@@ -1,6 +1,7 @@
 import { renderTraceProcessSummary } from "../provenance/trace-process.js";
 import { traceConformanceLabel } from "../provenance/trace-conformance.js";
 import type { DeltaLogEntry } from "./context-block.js";
+import type { SelectedEvidenceV1 } from "@zine/trace-context";
 import {
   PROMPT_LAYER_VERSIONS,
   type PreparedOperation,
@@ -103,17 +104,21 @@ export function adaptPreparedOperationForTraceContextInspector(
       ...(error.relatedRange ? { relatedRange: copyRange(error.relatedRange) } : {}),
     })) ?? [];
 
-  const traceRows = orderedTraceRows(prepared);
-  const selectedEvidence = traceRows.map((row, index) =>
-    selectedEvidenceForTraceRow(row, index));
-  const excludedEvidence = excludedEvidenceForSnapshot(prepared);
+  const selection = prepared.traceContextSelection;
+  const traceRows = selection ? [] : orderedTraceRows(prepared);
+  const selectedEvidence = selection
+    ? selection.manifest.selected.map(selectedEvidenceForSelection)
+    : traceRows.map((row, index) => selectedEvidenceForTraceRow(row, index));
+  const excludedEvidence = selection
+    ? excludedEvidenceForSelection(selection.decisions)
+    : excludedEvidenceForSnapshot(prepared);
   const snapshot = prepared.contextSnapshot;
 
   return freezeTraceContextInspectorPresentationV1({
     version: 1,
-    // Current context is a bounded chronological snapshot. It is not the
-    // roadmap's future task-selected policy, even when the history is empty.
-    policy: "bounded-trace-v1",
+    // Selection-backed preparations project their frozen package policy;
+    // legacy preparations retain the bounded chronological snapshot label.
+    policy: selection?.manifest.policy ?? "bounded-trace-v1",
     operation: prepared.operation,
     targetRevision: {
       traceId: prepared.targetRevision.traceId,
@@ -130,37 +135,46 @@ export function adaptPreparedOperationForTraceContextInspector(
     excludedEvidence,
     metadata: {
       completeness: {
-        complete: snapshot.completeness.complete,
-        failures: snapshot.completeness.failures.map((failure) => ({
+        complete: selection ? selection.manifest.completeness.selectionComplete : snapshot.completeness.complete,
+        failures: selection ? [] : snapshot.completeness.failures.map((failure) => ({
           code: `SNAPSHOT_${failure.stage.toUpperCase()}`,
           displayLabel: `${failure.path || "Root"}: ${failure.message}`,
         })),
       },
       budget: {
-        effectiveContextBytes: snapshot.budget.maxBytes,
+        effectiveContextBytes: selection?.manifest.budget.effectiveContextBytes ?? snapshot.budget.maxBytes,
         // PreparedOperation owns the exact context bytes sent. This can differ
         // from the immutable raw snapshot after directive markerization.
         usedContextBytes: prepared.budget.contextBytes,
-        candidateCount: traceRows.length,
+        candidateCount: selection?.manifest.budget.candidateCount ?? traceRows.length,
         selectedCount: selectedEvidence.length,
-        // The current snapshot fails closed when its hard byte budget is
-        // exceeded. It does not silently truncate selected trace rows.
-        truncated: false,
+        // Package selection reports its own deterministic truncation; the
+        // legacy snapshot path still fails closed rather than truncating.
+        truncated: selection?.manifest.budget.truncated ?? false,
       },
       versions: {
         compiler: authoring
           ? `trace-authoring-adapter:v${authoring.version}/kernel:v${authoring.kernelVersion}`
           : `not-applied:${prepared.operation}`,
-        selector: "context-snapshot:v1/bounded-chronological",
-        renderer: "context-block:v1",
+        selector: selection ? "@zine/trace-context:selectTraceContextV1" : "context-snapshot:v1/bounded-chronological",
+        renderer: selection?.manifest.contract ?? "context-block:v1",
         promptLayers: [...PROMPT_LAYER_VERSIONS],
       },
-      fingerprint: prepared.contextFingerprint,
+      fingerprint: selection?.manifest.hashes.frozenInputsSha256 ?? prepared.contextFingerprint,
+      ...(selection ? {
+        selectionIdentities: {
+          frozenInputsSha256: selection.manifest.hashes.frozenInputsSha256,
+          renderedContextSha256: selection.manifest.hashes.renderedContextSha256,
+          manifestSha256: selection.manifestSha256,
+        },
+      } : {}),
     },
   });
 }
 
 function operationRangeForPrepared(prepared: PreparedOperation): TraceContextInspectorRangeV1 {
+  const selectedRange = prepared.traceContextSelection?.manifest.operation.range;
+  if (selectedRange) return copyRange(selectedRange);
   if (prepared.traceAuthoring) return copyRange(prepared.traceAuthoring.operationRange);
   const bodyLength = prepared.contextSnapshot.target.body.length;
   return {
@@ -171,6 +185,59 @@ function operationRangeForPrepared(prepared: PreparedOperation): TraceContextIns
       ?? prepared.operationInputs.rangeTo
       ?? bodyLength,
   };
+}
+
+function selectedEvidenceForSelection(
+  evidence: SelectedEvidenceV1,
+  selectionOrder: number,
+): TraceContextInspectorSelectedEvidenceV1 {
+  const source = evidence.source;
+  return {
+    id: evidence.id,
+    selectionOrder,
+    kind: evidence.kind === "explicit-preference"
+      ? "preference"
+      : evidence.kind === "operation-instruction" ? "instruction" : evidence.kind,
+    displayClaim: evidence.fact
+      ? `${evidence.fact.kind}: ${JSON.stringify(evidence.fact)}`
+      : `${evidence.kind} (${evidence.id})`,
+    classification: evidence.authority,
+    source: {
+      displayLabel: source.ref,
+      ...("traceId" in source ? { traceId: source.traceId } : {}),
+      ...("headId" in source ? { headId: source.headId } : {}),
+      ...("nodeId" in source ? { nodeId: source.nodeId } : {}),
+      ...("range" in source && source.range ? { sourceRange: copyRange(source.range) } : {}),
+    },
+    scope: source.kind === "operation" ? "operation" : "file",
+    selectionReasons: [...evidence.reasons],
+    sensitivity: evidence.kind === "citation" ? "public" : "trace-private",
+    byteCost: evidence.renderedByteCost,
+    byteCostLabel: "rendered context bytes",
+    canExclude: false,
+  };
+}
+
+function excludedEvidenceForSelection(
+  decisions: NonNullable<PreparedOperation["traceContextSelection"]>["decisions"],
+): readonly TraceContextInspectorExcludedEvidenceSummaryV1[] {
+  const budget = decisions.filter((decision) =>
+    decision.disposition === "excluded" && decision.reason === "budget-exceeded");
+  const duplicate = decisions.filter((decision) => decision.disposition === "collapsed");
+  return [
+    ...(budget.length > 0 ? [{
+      reason: "budget" as const,
+      count: budget.length,
+      displayLabel: "Candidates outside the exact rendered-context budget",
+      firstRejectedSource: { displayLabel: budget[0]!.candidateId },
+    }] : []),
+    ...(duplicate.length > 0 ? [{
+      reason: "duplicate" as const,
+      count: duplicate.length,
+      displayLabel: "Duplicate candidates collapsed by the selector",
+      firstRejectedSource: { displayLabel: duplicate[0]!.candidateId },
+    }] : []),
+  ];
 }
 
 function orderedTraceRows(prepared: PreparedOperation): readonly FrozenTraceRow[] {

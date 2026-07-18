@@ -20,7 +20,7 @@
     "prepack": "npm run build",
     "start": "node dist/server.js",
     "test": "tsx --test src/*.test.ts && npm run test:package",
-    "test:coverage": "node --import=tsx --test --experimental-test-coverage --test-coverage-lines=87 --test-coverage-branches=62 --test-coverage-functions=80 --test-coverage-include=src/**/*.ts --test-coverage-exclude=src/**/*.test.ts src/*.test.ts && npm run test:package",
+    "test:coverage": "node --import=tsx --test --experimental-test-coverage --test-coverage-lines=85 --test-coverage-branches=62 --test-coverage-functions=80 --test-coverage-include=src/**/*.ts --test-coverage-exclude=src/**/*.test.ts src/*.test.ts && npm run test:package",
     "test:package": "node scripts/package-smoke.mjs",
     "test:relay": "tsc -p tsconfig.integration.json && tsx integration/relay-smoke.ts && tsx integration/recursive-checkpoint-recovery.ts"
   },

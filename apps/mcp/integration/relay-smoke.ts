@@ -44,6 +44,20 @@ function jsonToolResult(result: unknown): Record<string, unknown> {
   return JSON.parse(block.text) as Record<string, unknown>;
 }
 
+function toolText(result: unknown): string {
+  const content = (result as { content?: unknown }).content;
+  assert.ok(Array.isArray(content), "tool returned no content array");
+  return content
+    .filter(
+      (item: unknown): item is { type: "text"; text: string } =>
+        !!item && typeof item === "object" &&
+        (item as { type?: unknown }).type === "text" &&
+        typeof (item as { text?: unknown }).text === "string",
+    )
+    .map((block) => block.text)
+    .join("\n");
+}
+
 function canonicalEvent(event: Event): Event {
   return JSON.parse(JSON.stringify(event)) as Event;
 }
@@ -74,11 +88,12 @@ async function main(): Promise<void> {
   const { initializeMcpKeySession } = await import("../src/tools.js");
   const { replaceExternalRelays } = await import("../../client/src/networking/relay-config.js");
   const {
+    attestationCountsFromEvents,
     attestNode,
     coinOriginFromEvent,
+    completeCoinMint,
     diffToDeltas,
     eventMeta,
-    fetchAttestationCounts,
     fetchChain,
     fetchEventById,
     fetchManifest,
@@ -113,8 +128,22 @@ async function main(): Promise<void> {
     signer: Uint8Array,
   ): Promise<Event[]> => {
     const relay = new Relay(url);
-    relay.onauth = async (template) => finalizeEvent(template, signer) as never;
+    let authResolve!: () => void;
+    const authDone = new Promise<void>((resolve) => { authResolve = resolve; });
+    relay.onauth = async (template) => {
+      authResolve();
+      return finalizeEvent(template, signer) as never;
+    };
     await relay.connect();
+    // `connect()` resolves at WebSocket-open, before a networked relay's AUTH
+    // challenge/response round trip is necessarily complete. Match the shared
+    // client connection posture so an immediate read cannot race to an empty
+    // unauthorized result.
+    const challenged = await Promise.race([
+      authDone.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 2_500)),
+    ]);
+    if (challenged) await relay.auth(relay.onauth!);
     try {
       const attempt = () => new Promise<{ events: Event[]; closeReason: string }>((resolve) => {
         const events: Event[] = [];
@@ -341,6 +370,8 @@ async function main(): Promise<void> {
   assert.equal(firstManifest[0]?.latestNodeId, first.id);
 
   let attestationId: string | null = null;
+  let mcpMintNodeId: string | null = null;
+  let mcpMintAttestationId: string | null = null;
   if (externalRelay) {
     await assert.rejects(
       () => attestNode(first.id, voice.publicKey, { signer: voice.secretKey }),
@@ -402,6 +433,14 @@ async function main(): Promise<void> {
   assert.equal(verifyEvent(coin), true, "Mint signature is invalid");
   assert.ok(coin.tags.some((tag) => tag[0] === "x"), "Mint is missing its body hash");
   assert.ok(coin.tags.some((tag) => tag[0] === "e" && tag[1] === second.id && tag[3] === "extracted-from"));
+  const coinAttestation = await completeCoinMint(coin, voice.secretKey);
+  assert.equal(verifyEvent(coinAttestation), true, "Mint attestation signature is invalid");
+  assert.ok(
+    coinAttestation.tags.some(
+      (tag) => tag[0] === "e" && tag[1] === coin.id && tag[3] === "target",
+    ),
+    "Mint attestation does not target the Coin genesis",
+  );
 
   const directPhrase = "written directly in Mint";
   const directCoin = await publishDirectCoin({
@@ -428,7 +467,12 @@ async function main(): Promise<void> {
     false,
     "direct Coin must not claim an extraction source",
   );
-  await sendStep(directCoin, voice.secretKey);
+  const directCoinAttestation = await completeCoinMint(directCoin, voice.secretKey);
+  assert.equal(
+    verifyEvent(directCoinAttestation),
+    true,
+    "direct Mint attestation signature is invalid",
+  );
   assert.equal((await fetchEventById(directCoin.id))?.id, directCoin.id);
 
   const thirdText = `${secondText}\n\n[[ signed relay | ${coin.id} ]]`;
@@ -552,6 +596,32 @@ async function main(): Promise<void> {
       assert.match(exactRootId, /^[0-9a-f]{64}$/);
       assert.equal(info.ownerPubkey, voice.publicKey);
 
+      const stalePath = "stale-mint-source.md";
+      const staleSnapshot = "same snapshot, newer node\n";
+      const staleOrigin = jsonToolResult(await client.callTool({
+        name: "zine_step",
+        arguments: { relativePath: stalePath, content: staleSnapshot },
+      }));
+      const currentOrigin = jsonToolResult(await client.callTool({
+        name: "zine_step",
+        arguments: { relativePath: stalePath, content: staleSnapshot },
+      }));
+      assert.notEqual(staleOrigin.nodeId, currentOrigin.nodeId);
+      const staleMint = await client.callTool({
+        name: "zine_mint_span",
+        arguments: {
+          originPath: stalePath,
+          phrase: "same snapshot",
+          originNodeId: staleOrigin.nodeId,
+          sourceStart: 0,
+        },
+      });
+      assert.equal(staleMint.isError, true);
+      assert.match(
+        toolText(staleMint),
+        /current local node does not match originNodeId/,
+      );
+
       const exactPath = "exact-handoff.md";
       const exactSnapshots = [
         "private genesis\n",
@@ -584,6 +654,64 @@ async function main(): Promise<void> {
       }));
       assert.equal(resent.nodeId, sent.nodeId, "unchanged Send must reuse the selected Step");
 
+      const minted = jsonToolResult(await client.callTool({
+        name: "zine_mint_span",
+        arguments: {
+          originPath: exactPath,
+          phrase: "selected public",
+          originNodeId: sent.nodeId,
+          sourceStart: 0,
+        },
+      }));
+      mcpMintNodeId = String(minted.mintedNodeId);
+      mcpMintAttestationId = String(minted.attestationId);
+      assert.match(mcpMintNodeId, /^[0-9a-f]{64}$/);
+      assert.match(mcpMintAttestationId, /^[0-9a-f]{64}$/);
+      assert.equal(minted.published, true);
+      const sourceCitationNodeId = String(minted.sourceNodeId);
+      assert.match(sourceCitationNodeId, /^[0-9a-f]{64}$/);
+      const resolvedSource = `[[ selected public | ${mcpMintNodeId} ]] handoff\n`;
+      exactNodeIds.push(sourceCitationNodeId);
+      exactSnapshots.push(resolvedSource);
+
+      assert.ok(attestationId);
+      const publicMint = await queryRelay(
+        externalRelay,
+        {
+          ids: [
+            mcpMintNodeId,
+            mcpMintAttestationId,
+            attestationId,
+            coinAttestation.id,
+            directCoinAttestation.id,
+          ],
+        },
+        voice.secretKey,
+      );
+      const publicMintById = new Map(publicMint.map((event) => [event.id, event]));
+      assert.equal(
+        publicMintById.get(mcpMintNodeId)?.kind,
+        4290,
+        "MCP Mint did not publish its Coin genesis",
+      );
+      assert.ok(
+        publicMintById.get(mcpMintAttestationId)?.tags.some(
+          (tag) =>
+            tag[0] === "e" &&
+            tag[1] === mcpMintNodeId &&
+            tag[3] === "target",
+        ),
+        "MCP Mint did not publish its minter attestation",
+      );
+      const attestationCounts = attestationCountsFromEvents(
+        publicMint,
+        [first.id, coin.id, directCoin.id, mcpMintNodeId],
+      );
+      assert.equal(attestationCounts.get(first.id), 1, "Attest was not durably queryable");
+      assert.equal(attestationCounts.get(coin.id), 1, "extracted Mint attestation was not queryable");
+      assert.equal(attestationCounts.get(directCoin.id), 1, "direct Mint attestation was not queryable");
+      assert.equal(attestationCounts.get(mcpMintNodeId), 1, "MCP Mint attestation was not queryable");
+
       const history = jsonToolResult(await client.callTool({
         name: "zine_get_history",
         arguments: { relativePath: exactPath },
@@ -591,10 +719,34 @@ async function main(): Promise<void> {
       assert.equal((history.conformance as { status?: string }).status, "full");
       const rows = history.history as Array<{
         nodeId: string;
-        payload: { snapshot?: string; kedits?: KEdit[] };
+        payload: {
+          snapshot?: string;
+          kedits?: KEdit[];
+          deltas?: Array<{
+            type?: string;
+            role?: string;
+            sourceEventId?: string;
+            newValue?: string;
+          }>;
+        };
         event: Event;
       }>;
       assert.deepEqual(rows.map((row) => row.nodeId), exactNodeIds);
+      assert.equal(rows.at(-1)?.payload.snapshot, resolvedSource);
+      assert.ok(
+        rows.at(-1)?.event.tags.some((tag) => tag[0] === "q" && tag[1] === mcpMintNodeId),
+        "MCP Mint source Step did not carry its paired q citation",
+      );
+      assert.ok(
+        rows.at(-1)?.payload.deltas?.some(
+          (delta) =>
+            delta.type === "cite" &&
+            delta.role === "inline" &&
+            delta.sourceEventId === mcpMintNodeId &&
+            delta.newValue === "selected public",
+        ),
+        "MCP Mint source Step did not carry its inline citation delta",
+      );
       let priorSnapshot = "";
       for (let index = 0; index < rows.length; index += 1) {
         const row = rows[index]!;
@@ -624,13 +776,11 @@ async function main(): Promise<void> {
         name: "zine_get_handoff",
         arguments: { relativePath: exactPath },
       }));
-      assert.equal(handoff.sent, true);
-      assert.deepEqual(handoff.locator, sent.locator);
-      assert.equal(handoff.encoded, sent.encoded);
+      assert.equal(handoff.sent, false);
       const locator = handoff.locator as Record<string, unknown>;
       assert.equal(locator.rootId, exactRootId);
       assert.equal(locator.traceId, exactNodeIds[0]);
-      assert.equal(locator.nodeId, exactNodeIds[2]);
+      assert.equal(locator.nodeId, sourceCitationNodeId);
       assert.equal(locator.relativePath, exactPath);
       assert.equal(locator.ownerPubkey, voice.publicKey);
 
@@ -665,9 +815,6 @@ async function main(): Promise<void> {
       await client.close();
       await transport.close();
     }
-
-    const counts = await fetchAttestationCounts([first.id]);
-    assert.equal(counts.get(first.id), 1, "Attest was not durably queryable");
   }
 
   process.stdout.write(`${JSON.stringify({
@@ -679,7 +826,11 @@ async function main(): Promise<void> {
     steps: chain.length,
     attestationId,
     coinId: coin.id,
+    coinAttestationId: coinAttestation.id,
     directCoinId: directCoin.id,
+    directCoinAttestationId: directCoinAttestation.id,
+    mcpMintNodeId,
+    mcpMintAttestationId,
     externalRelayExercised: Boolean(externalRelay),
   })}\n`);
 }

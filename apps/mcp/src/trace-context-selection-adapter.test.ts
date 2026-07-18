@@ -15,6 +15,7 @@ import {
 } from "../../../packages/trace-context/src/index.js";
 import {
   adaptVerifiedMcpFileForTraceContextSelectionV1,
+  McpTraceContextSelectionAdapterError,
   type McpTraceContextSelectionAdapterInputV1,
 } from "./trace-context-selection-adapter.js";
 
@@ -415,6 +416,91 @@ test("deterministic enumeration keeps no-op summaries and transactions but omits
     },
   ]);
   assert.equal(headFacts.some((fact) => fact.kind === "change"), false);
+});
+
+test("projects every protocol-valid FULL KEdit domain value through the MCP boundary", async () => {
+  const snapshot = "AB";
+  const contentHash = await sha256(snapshot);
+  const chain = [event(HEAD_ID, [], snapshot, contentHash, [
+    {
+      op: "ins", from: 0, to: 0, text: "A", voice: "legacy writer",
+      t: -Number.MAX_VALUE, tx: 0,
+    },
+    {
+      op: "ins", from: 1, to: 1, text: "B", voice: "\ud800",
+      t: Number.MAX_VALUE, tx: Number.MAX_SAFE_INTEGER + 1,
+    },
+  ], "5".repeat(64))];
+  const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1({
+    version: 1,
+    policy: "selected-trace-v1",
+    operation: ADAPTER_CASES[0].operation,
+    chain,
+    verifyEvent: exactVectorVerifier(chain),
+  });
+  assert.equal(adapted.candidates.length, 5);
+  assert.equal(adapted.candidates[0]?.kind, "process-fact");
+  if (adapted.candidates[0]?.kind === "process-fact"
+    && adapted.candidates[0].fact.kind === "step-summary") {
+    assert.equal(adapted.candidates[0].fact.timingStatus, "outside-summary-domain");
+  }
+  const selected = await selectTraceContextV1(adapted);
+  assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
+});
+
+test("rejects malformed metadata, malformed chain shapes, bounds, and cancellation with typed errors", async () => {
+  const fixture = await fullFixture();
+  const malformed: unknown[] = [
+    null,
+    { ...fixture.input, policy: "unknown" },
+    {
+      ...fixture.input,
+      operation: { ...ADAPTER_CASES[0].operation, operation: "settle" },
+    },
+    {
+      ...fixture.input,
+      chain: [{ ...fixture.input.chain[0], tags: null }],
+    },
+    {
+      ...fixture.input,
+      operation: {
+        ...ADAPTER_CASES[0].operation,
+        preparedRequestMaxBytes: 1,
+        reservedPromptBytes: 2,
+      },
+    },
+  ];
+  for (const value of malformed) {
+    await assert.rejects(
+      adaptVerifiedMcpFileForTraceContextSelectionV1(
+        value as McpTraceContextSelectionAdapterInputV1,
+      ),
+      McpTraceContextSelectionAdapterError,
+    );
+  }
+
+  let verifierCalls = 0;
+  await assert.rejects(
+    adaptVerifiedMcpFileForTraceContextSelectionV1({
+      ...fixture.input,
+      limits: { version: 1, maxCandidates: 7 },
+      verifyEvent: (event) => {
+        verifierCalls += 1;
+        return fixture.input.verifyEvent(event);
+      },
+    }),
+    /candidate count exceeds the selector ceiling/,
+  );
+  assert.equal(verifierCalls, 0, "candidate bounds must run before cryptographic verification");
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    adaptVerifiedMcpFileForTraceContextSelectionV1({
+      ...fixture.input,
+      signal: controller.signal,
+    }),
+    /operation was cancelled/,
+  );
 });
 
 interface Fixture {

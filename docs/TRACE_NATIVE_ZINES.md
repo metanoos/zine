@@ -192,14 +192,19 @@ An intentional highlight is authored as protected data:
 [[important passage]]
 ```
 
-The brackets survive storage, copying, replay, and interchange. Model
-operations preserve the protected bytes. Bracketing, quoting, copying,
-pasting, selecting, and including text in model context never mint
-automatically. Only explicit Mint resolves the span:
+The brackets survive storage, copying, replay, and interchange. AI operations
+preserve the protected bytes. Bracketing, quoting, copying, pasting, selecting,
+and including text in AI context never mint automatically. Provenance-aware
+paste may resolve a bracket to the exact stepped source without creating a
+Coin:
 
 ```text
-[[important passage | coinId]]
+[[important passage | sourceStepId]]
 ```
+
+Only a separate explicit Mint creates a Coin through a genesis Step, Publish,
+and same-minter Attest. Citation is neutral composition and may preserve a
+source the writer disagrees with; Mint is affirmative curation for salience.
 
 `((…))` is a one-shot instruction candidate for the interpreting AI. An
 authorized directive is removed from quoted data, placed in the author
@@ -312,9 +317,12 @@ supply from recently reachable keys, and vetted supply whose keys pass the
 reader's declared local corpus policy.
 
 Popular coin matches carry little information; several independently shared,
-moderately rare coins among vetted keys are more discriminating. Kademlia may
-return candidate pointers, but it does not provide trust, reputation, or global
-popularity.
+moderately rare coins among vetted keys are more discriminating. Coins are one
+user-facing discovery opt-in covering Mint, valid-Coin indexing, and
+rendezvous; ordinary citation remains available without it.
+Kademlia is the under-the-hood routing component, not a separate opt-in, and
+remains under implementation. Its results may return candidate pointers, but
+they do not provide trust, reputation, or global popularity.
 
 Corpus vetting may examine internal coherence, longitudinal change, AUTHOR-only
 versus AI-attributed spans, process patterns, and conditional compression.
@@ -383,13 +391,13 @@ The pre-product cut proceeds in dependency order:
    ids, `advance` delta, and kernel conformance tests.
 2. **Landed:** protocol kernel, desktop/MCP writers, client readers, replay,
    and durable local operation recovery.
-3. **Landed:** explicit folder/Root Step with descendant flushing; fixed
-   cross-runtime folder vectors and crash-boundary real-relay fixtures remain
-   hardening work.
+3. **Landed:** explicit folder/Root Step with descendant flushing, fixed
+   cross-runtime folder vectors, and interrupted/retried recursive checkpoint
+   recovery against a real relay.
 4. Introduce first-class AI attempt, dispatch, response/effect, and disposition
    records with exact reconstructability.
-5. Preserve `[[…]]`, implement versioned `((…))`, and remove automatic Copy
-   coining.
+5. Preserve `[[…]]`, implement versioned `((…))`, and make provenance-aware
+   Copy/Paste cite the exact source Step without automatic Mint.
 6. Replace Send with Publish, add append-only Withdraw/re-attest, typed
    hash-committed redaction records, and publication of complete file or
    recursive folder trace prefixes.

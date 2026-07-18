@@ -74,18 +74,24 @@ discovery platform or a network reader. Any NIP-01+NIP-33 relay suffices. Add
 one to the relay set with `write: true`; `publishToMany` already fans each
 stepped trace to it.
 
-Two super-peer extensions are planned for the rendezvous layer
-(`rendezvous.md`); neither is implemented by the current prototype:
+Two super-peer extensions belong to the rendezvous layer (`rendezvous.md`):
 
 - **OTS calendar host.** The prototype currently submits Step ids to a public
   OpenTimestamps calendar. A configurable self-hosted calendar on the
   super-peer is the intended sovereignty-preserving deployment, but the
   protocol must not claim hashes remain on author-owned infrastructure until
   that configuration exists.
-- **DHT bootstrap.** The planned Kademlia DHT (`rendezvous.md` §2.3) needs seed nodes
-  to join. The author's own super-peer(s) serve as bootstrap, keeping the
-  network's trust character coherent: you join through the same infra that
-  already holds a replica of your published corpus.
+- **Coins rendezvous bootstrap.** The Kademlia component inside the opt-in
+  Coins package remains under implementation (`rendezvous.md` §2.3). Its
+  current desktop path accepts operator-provided libp2p multiaddrs. The
+  author's own super-peer(s) serve as bootstrap, keeping the network's trust
+  character coherent: you join through the same infra that already holds a
+  replica of your published corpus. Applying a replacement configuration is
+  transactional: the native runtime validates it before persistence and
+  restores the prior runtime/configuration on failure. The current DHT server
+  also applies bounded connection and idle-time limits; record filtering,
+  cache reservation, and publication semantics belong to `rendezvous.md`
+  §2.2. No public bootstrap network is operated here.
 
 The third slot of a `q` or `e` tag carries a relay hint. It can name the
 author's `.onion` while the desktop is online or a durable super-peer URL. A
@@ -236,9 +242,9 @@ boundary, not friction. This is the change from "embedded server for one" to
 - **Iroh/libp2p direct sync.** An optional P2P fast lane for when two presses are
   mutually online — a latency/privacy optimization, not a correctness
   requirement (self-sufficiency §R1 makes it unnecessary for correctness).
-  The planned rendezvous DHT would introduce libp2p in the Rust backend
-  (`rendezvous.md` §2.2); a direct-sync fast lane could later reuse it. Both
-  are deferred and the dependency is not present today.
+  The in-progress Coins rendezvous component introduces libp2p in the Rust
+  backend (`rendezvous.md` §2.2); a direct-sync fast lane could later reuse it.
+  Direct sync remains deferred.
 - **Peer-list portability across devices.** The private local ACL is per-device.
   Multi-device sync of the peer list (not the key — that's NIP-46's job) is
   unsettled; a stepped trace on the owner's own relay is the likely vehicle.

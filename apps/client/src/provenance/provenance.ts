@@ -1,7 +1,10 @@
 import { finalizeEvent, getPublicKey, verifyEvent } from "nostr-tools/pure";
 import type { Event, EventTemplate } from "nostr-tools";
 import type { Filter } from "nostr-tools";
-import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+import {
+  subscribeVaultStorage,
+  vaultStorage as localStorage,
+} from "../storage/vault-storage.js";
 import { Relay } from "nostr-tools/relay";
 import {
   createTraceOperationId,
@@ -17,7 +20,11 @@ import {
 
 export type { KEdit, KEditIntent } from "@zine/protocol";
 
-import { loadOrCreateVoice, resolveRelayUrl } from "../identity/identity.js";
+import { isTauri, loadOrCreateVoice, resolveRelayUrl } from "../identity/identity.js";
+import {
+  loadKademliaConfig,
+  subscribeKademliaConfig,
+} from "../networking/kademlia.js";
 import {
   isLoopbackRelayUrl,
   publicationRelays,
@@ -37,6 +44,14 @@ import {
   pendingLocalEventsMatching,
   removeLocalEvent,
 } from "./event-outbox.js";
+import {
+  captureRendezvousOutboxSession,
+  drainRendezvousEvents,
+  enqueueRendezvousEvent,
+  isRendezvousOutboxSessionCurrent,
+  pendingRendezvousEvents,
+  type RendezvousOutboxSession,
+} from "./rendezvous-outbox.js";
 
 /**
  * Bridge between the editor and the local relay. Publishes and fetches the
@@ -380,6 +395,11 @@ export interface PublishEditInput {
    *  doesn't leave the machine. The user later Sends (pushToExternalRelays)
    *  if they want the node reachable by others. Default false. */
   localOnly?: boolean;
+  /** Sign and return the exact event without recording the Step anywhere.
+   * Compound Mint uses this narrow preflight so its transaction journal is the
+   * first durability boundary. The prepared event is stepped later by
+   * `completeCoinMint`; ordinary callers should leave this false. */
+  prepareOnly?: boolean;
   /** Per-character attribution for `snapshot`, serialized into the node's
    *  `authors` field (protocol §FileTraceNode Content). Concatenating the runs'
    *  text in order MUST reproduce `snapshot` exactly; readers validate this and
@@ -755,13 +775,13 @@ async function publishWithAuth(relay: Relay, event: Event): Promise<string> {
  * than any other. The call rejects only when *every* relay failed (or when the
  * set was empty to begin with), so a save is never a silent no-op.
  */
-export async function publishToMany(relays: Relay[], event: Event): Promise<void> {
+export async function publishToMany(relays: Relay[], event: Event): Promise<Relay[]> {
   if (relays.length === 0) {
     throw new Error("no relays available to publish to");
   }
   const results = await Promise.allSettled(relays.map((r) => publishWithAuth(r, event)));
-  const ok = results.some((r) => r.status === "fulfilled");
-  if (!ok) {
+  const publishedRelays = relays.filter((_, index) => results[index]?.status === "fulfilled");
+  if (publishedRelays.length === 0) {
     const msgs = results
       .map((r, i) =>
         r.status === "rejected" ? `${relays[i].url}: ${String(r.reason)}` : null,
@@ -770,6 +790,7 @@ export async function publishToMany(relays: Relay[], event: Event): Promise<void
       .join("; ");
     throw new Error(`publish failed on every relay${msgs ? ` (${msgs})` : ""}`);
   }
+  return publishedRelays;
 }
 
 // --- Voice identity declarations (kind 34292) ----------------------------
@@ -858,6 +879,9 @@ export interface LlmStepMeta {
   replyingTo?: string;
 }
 
+/** Complete-set wire version for per-target structural LLM scope markers. */
+export const LLM_SCOPE_TARGETS_VERSION = "targets-v1";
+
 /** §3.7 metadata waiting for the write-back Step, isolated by destination
  * path so concurrent panel operations cannot consume one another's call data. */
 const pendingLlmMeta = new Map<string, LlmStepMeta>();
@@ -893,6 +917,20 @@ export function applyPendingLlmMeta(input: PublishEditInput): void {
 
 /** Builds, signs, and publishes a kind-4290 FileTraceNode. Returns the signed
  *  event (its `id` is the new node id the caller should track as prevEventId). */
+/** Record one already-signed immutable event as an exact local Step. The local
+ * outbox is written before the home relay is touched, so callers can retry the
+ * same bytes after an offline or partial attempt. */
+async function stepSignedEventLocally(event: Event): Promise<Relay[]> {
+  if (!verifyEvent(event)) {
+    throw new Error(`cannot Step invalid signed event ${event.id}`);
+  }
+  enqueueLocalEvent(event);
+  const homeRelay = await getRelayRetrying(resolveRelayUrl(), 1);
+  if (!homeRelay) return [];
+  await flushLocalEventOutboxThrough(homeRelay);
+  return pendingLocalEventById(event.id) ? [] : [homeRelay];
+}
+
 export async function publishEdit(input: PublishEditInput): Promise<Event> {
   if (!Array.isArray(input.kedits)) {
     throw new Error("cannot publish a file Step without its required KEdit array");
@@ -979,17 +1017,22 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   // (quoted AND tagged, or tagged AND replied-to) never emits two q-tags.
   // NIP-18 quote shape, read back by `eventMeta` (citationCount +
   // citationTargets) and ranked on by the Times view.
-  const qTargets = [
+  const socialQTargets = [
     ...(input.citations ?? []),
     ...(input.replyingTo ? [input.replyingTo] : []),
     ...(input.citationIds ?? []),
+  ];
+  const structuralScopeTargets = [
     // §3.7: an action:llm node also cites its full scope (folder members' heads,
     // the active file's nucleus, the rule trace) so a reader can reconstruct the
-    // submitted prompt. Folded into the same dedup so a node cited as a body
-    // bracket AND in scope emits one q-tag, not two.
+    // submitted prompt.
     ...(input.scopeCitations ?? []),
     ...(input.injectRule ? [input.injectRule] : []),
   ];
+  // Fold both roles into the same q dedup so a node cited as a body bracket AND
+  // in scope emits one q-tag, not two. The role-specific markers below retain
+  // enough information for new readers to distinguish that shared edge.
+  const qTargets = [...socialQTargets, ...structuralScopeTargets];
   if (qTargets.length > 0) {
     const seen = new Set<string>();
     for (const nodeId of qTargets) {
@@ -1002,10 +1045,27 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
       tags.push(["q", nodeId, ""]);
     }
   }
-  // §3.7 advisory marker: this node carries LLM scope citations + a rule, so
-  // readers reconstructing an LLM call can find these nodes by tag rather than
-  // by content-shape sniffing. Non-normative — `q` semantics are unchanged.
-  if (input.injectRule) tags.push(["scope", "llm"]);
+  // §3.7: retain the two-field marker for old readers, then advertise a
+  // complete per-target structural set for readers that understand targets-v1.
+  // A q target with both social and structural roles stays social: it is omitted
+  // from this set, while its single q edge remains unchanged.
+  if (input.injectRule) {
+    tags.push(["scope", "llm"]);
+    tags.push(["scope", "llm", LLM_SCOPE_TARGETS_VERSION]);
+    const socialTargets = new Set(socialQTargets.filter(Boolean));
+    const scopedTargets = new Set<string>();
+    for (const nodeId of structuralScopeTargets) {
+      if (
+        !HEX_64.test(nodeId) ||
+        socialTargets.has(nodeId) ||
+        scopedTargets.has(nodeId)
+      ) {
+        continue;
+      }
+      scopedTargets.add(nodeId);
+      tags.push(["scope", "llm", nodeId]);
+    }
+  }
 
   // Emit `authors` only when the caller's run list concatenates exactly to
   // `snapshot` — buildAuthors drops empty runs but doesn't re-check alignment,
@@ -1091,25 +1151,14 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   };
 
   const signed = finalizeEvent(template, signer);
+  if (input.prepareOnly) return signed;
   // Step (localOnly): publish to the home relay only — the node is recorded but
   // hasn't left the machine. A newly-created Step under Send fans out to all
   // write-enabled relays. Sending unchanged state uses sendStep on the existing
   // node instead of creating another checkpoint.
   let publishedRelays: Relay[];
   if (input.localOnly) {
-    // localStorage is the first durability boundary. Queue the exact signed
-    // event before touching the relay so an offline Step can return a stable id
-    // and later synchronization publishes those same bytes rather than minting
-    // a sibling replacement.
-    enqueueLocalEvent(signed);
-    const homeUrl = resolveRelayUrl();
-    const homeRelay = await getRelayRetrying(homeUrl, 1);
-    if (homeRelay) {
-      await flushLocalEventOutboxThrough(homeRelay);
-      publishedRelays = pendingLocalEventById(signed.id) ? [] : [homeRelay];
-    } else {
-      publishedRelays = [];
-    }
+    publishedRelays = await stepSignedEventLocally(signed);
   } else {
     const relays = await getWriteRelays();
     await publishToMany(relays, signed);
@@ -1211,35 +1260,226 @@ export function isCoinEvent(event: Event): boolean {
   return coinOriginFromEvent(event) !== null;
 }
 
+let rendezvousOutboxFlushQueue: Promise<unknown> = Promise.resolve();
+const RENDEZVOUS_RETRY_MIN_MS = 5_000;
+const RENDEZVOUS_RETRY_MAX_MS = 5 * 60_000;
+let rendezvousRetryTimer: ReturnType<typeof setTimeout> | undefined;
+let rendezvousRetryDelayMs = RENDEZVOUS_RETRY_MIN_MS;
+let rendezvousRetrySession: RendezvousOutboxSession | undefined;
+const rendezvousFlushControllers = new Set<AbortController>();
+
+function sameRendezvousSession(
+  left: RendezvousOutboxSession | undefined,
+  right: RendezvousOutboxSession,
+): boolean {
+  return !!left && left.scope === right.scope && left.generation === right.generation;
+}
+
+function scheduleRendezvousOutboxRetry(
+  session: RendezvousOutboxSession = captureRendezvousOutboxSession(),
+): void {
+  if (
+    rendezvousRetryTimer ||
+    !isRendezvousOutboxSessionCurrent(session) ||
+    !isTauri() ||
+    !loadKademliaConfig().enabled
+  ) return;
+  const delayMs = rendezvousRetryDelayMs;
+  rendezvousRetryDelayMs = Math.min(
+    RENDEZVOUS_RETRY_MAX_MS,
+    rendezvousRetryDelayMs * 2,
+  );
+  rendezvousRetrySession = session;
+  rendezvousRetryTimer = setTimeout(() => {
+    rendezvousRetryTimer = undefined;
+    rendezvousRetrySession = undefined;
+    if (!isRendezvousOutboxSessionCurrent(session)) return;
+    void flushRendezvousPublicationOutbox().catch((error) => {
+      console.warn("[rendezvous] scheduled indexing retry failed:", error);
+      scheduleRendezvousOutboxRetry(session);
+    });
+  }, delayMs);
+}
+
+function resetRendezvousOutboxRetry(session?: RendezvousOutboxSession): void {
+  if (session && rendezvousRetrySession && !sameRendezvousSession(rendezvousRetrySession, session)) {
+    return;
+  }
+  if (rendezvousRetryTimer) clearTimeout(rendezvousRetryTimer);
+  rendezvousRetryTimer = undefined;
+  rendezvousRetrySession = undefined;
+  rendezvousRetryDelayMs = RENDEZVOUS_RETRY_MIN_MS;
+}
+
+/** The shared vault fence fires before native shutdown. Abort active network
+ * waits immediately; queued tasks retain their captured generation and become
+ * inert when they reach the serialized drain. */
+subscribeVaultStorage(() => {
+  resetRendezvousOutboxRetry();
+  const reason = new Error("vault session changed during rendezvous indexing");
+  reason.name = "AbortError";
+  for (const controller of rendezvousFlushControllers) controller.abort(reason);
+});
+
+// Disabling the sole Coins opt-in is an immediate privacy fence, not merely a
+// guard for the next drain. Stop retry scheduling and cancel every native or
+// relay read already in flight; durable outbox rows remain for a later opt-in.
+subscribeKademliaConfig(() => {
+  if (loadKademliaConfig().enabled) return;
+  resetRendezvousOutboxRetry();
+  const reason = new Error("Coins disabled during rendezvous indexing");
+  reason.name = "AbortError";
+  for (const controller of rendezvousFlushControllers) controller.abort(reason);
+});
+
+/** Retry durable Send-side indexing without allowing one event's unavailable
+ * relay to starve independent work. Disabled presses retain queued work until
+ * the next enabled startup/network-recovery pass completes the indexing. */
+export async function flushRendezvousPublicationOutbox(): Promise<{
+  pending: number;
+  completed: number;
+}> {
+  const session = captureRendezvousOutboxSession();
+  if (!isTauri()) return { pending: 0, completed: 0 };
+  if (!loadKademliaConfig().enabled) {
+    return {
+      pending: (await pendingRendezvousEvents(undefined, session)).length,
+      completed: 0,
+    };
+  }
+  const task = rendezvousOutboxFlushQueue.then(async () => {
+    if (!isRendezvousOutboxSessionCurrent(session)) {
+      return {
+        pending: (await pendingRendezvousEvents(undefined, session)).length,
+        completed: 0,
+      };
+    }
+    const controller = new AbortController();
+    rendezvousFlushControllers.add(controller);
+    try {
+      const { publishSentCoinCitations } = await import("./rendezvous.js");
+      const result = await drainRendezvousEvents(async (eventId) => {
+        // Configuration or vault authority can change while an earlier event is
+        // in flight. Never let the old task remove or reschedule another vault's
+        // durable work.
+        if (
+          controller.signal.aborted ||
+          !isRendezvousOutboxSessionCurrent(session) ||
+          !isTauri() ||
+          !loadKademliaConfig().enabled
+        ) return false;
+        try {
+          const event = await fetchEventById(eventId);
+          if (!event) {
+            console.warn(
+              `[rendezvous] Send ${eventId} remains queued because its carrying event is not fetchable`,
+            );
+            return false;
+          }
+          if (controller.signal.aborted || !isRendezvousOutboxSessionCurrent(session)) {
+            return false;
+          }
+          const report = await publishSentCoinCitations(event, { signal: controller.signal });
+          if (
+            controller.signal.aborted ||
+            !isRendezvousOutboxSessionCurrent(session) ||
+            !isTauri() ||
+            !loadKademliaConfig().enabled
+          ) return false;
+          if (!report.complete) {
+            console.warn(
+              `[rendezvous] Send ${event.id} remains queued for indexing:`,
+              report.failures,
+            );
+          }
+          return report.complete;
+        } catch (error) {
+          if (!controller.signal.aborted && isRendezvousOutboxSessionCurrent(session)) {
+            console.warn(`[rendezvous] Send ${eventId} remains queued for indexing:`, error);
+          }
+          throw error;
+        }
+      }, undefined, session);
+      if (isRendezvousOutboxSessionCurrent(session)) {
+        if (result.pending > 0) scheduleRendezvousOutboxRetry(session);
+        else resetRendezvousOutboxRetry(session);
+      }
+      return result;
+    } finally {
+      rendezvousFlushControllers.delete(controller);
+    }
+  });
+  rendezvousOutboxFlushQueue = task.then(() => undefined, () => undefined);
+  return task;
+}
+
+/** Eligible carrying events enter a durable outbox before relay publication; a
+ * fresh verifier must prove strangers can fetch the carrying node and cited
+ * Coin before the event leaves that queue. A crash before publication simply
+ * leaves an unresolvable record for a later Send/recovery pass to retry. */
+async function queueRendezvousPublication(event: Event): Promise<boolean> {
+  if (
+    eventMeta(event).citationTargets.length === 0 ||
+    !isTauri() ||
+    !loadKademliaConfig().enabled
+  ) return false;
+  await enqueueRendezvousEvent(event);
+  return true;
+}
+
+function scheduleRendezvousPublication(event: Event): void {
+  void flushRendezvousPublicationOutbox().catch((error) => {
+    console.warn(`[rendezvous] indexing flush failed for Send ${event.id}:`, error);
+    scheduleRendezvousOutboxRetry();
+  });
+}
+
+function rendezvousQueueFailure(eventId: string, error: unknown): Error {
+  return new Error(
+    `Send ${eventId} was not published because its Coin rendezvous indexing ` +
+      `could not be queued durably. Free local storage and retry Send: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+  );
+}
+
 /** Send: push an already-stepped node to all write-enabled external relays.
  *  This is the deliberate "let this leave my machine" gesture (protocol §8) —
  *  the node was stepped locally (by a Step), and now the author chooses to make
  *  it reachable by others. Idempotent: re-sending a node that's already on a
  *  relay is a no-op (the relay dedupes by event id). */
-export async function sendStep(event: Event, signer?: Uint8Array): Promise<void> {
+export async function sendStep(event: Event, signer?: Uint8Array): Promise<Relay[]> {
   const relays = await getPublicationRelays();
   if (relays.length === 0) {
     throw new Error(
       "no publication relays available — configure a non-loopback write relay before Send",
     );
   }
-  await publishToMany(relays, event);
-  if (isCoinEvent(event)) return;
+  let rendezvousQueued = false;
   try {
-    const traceId = await resolveTraceIdentity(event.id);
-    if (traceId) {
-      await publishTraceHead(
-        traceId,
-        event.id,
-        signer ?? authoringVoice().secretKey,
-        relays,
-      );
-    }
+    rendezvousQueued = await queueRendezvousPublication(event);
   } catch (error) {
-    // The immutable Step has already been sent. As in publishEdit, a head-cache
-    // failure must not turn successful distribution into a duplicate Step.
-    console.warn(`[provenance] sent Step ${event.id} without TraceHead:`, error);
+    throw rendezvousQueueFailure(event.id, error);
   }
+  const publishedRelays = await publishToMany(relays, event);
+  if (rendezvousQueued) scheduleRendezvousPublication(event);
+  if (!isCoinEvent(event)) {
+    try {
+      const traceId = await resolveTraceIdentity(event.id);
+      if (traceId) {
+        await publishTraceHead(
+          traceId,
+          event.id,
+          signer ?? authoringVoice().secretKey,
+          relays,
+        );
+      }
+    } catch (error) {
+      // The immutable Step has already been sent. As in publishEdit, a head-cache
+      // failure must not turn successful distribution into a duplicate Step.
+      console.warn(`[provenance] sent Step ${event.id} without TraceHead:`, error);
+    }
+  }
+  return publishedRelays;
 }
 
 /** Publish one exact historical node without moving the trace's replaceable
@@ -1253,7 +1493,14 @@ export async function sendHistoricalStep(event: Event): Promise<void> {
       "no publication relays available — configure a non-loopback write relay before Send",
     );
   }
+  let rendezvousQueued = false;
+  try {
+    rendezvousQueued = await queueRendezvousPublication(event);
+  } catch (error) {
+    throw rendezvousQueueFailure(event.id, error);
+  }
   await publishToMany(relays, event);
+  if (rendezvousQueued) scheduleRendezvousPublication(event);
 }
 
 /** Publish the ordered local signed-event outbox to the current home relay.
@@ -1386,14 +1633,17 @@ export async function fetchAttestationCounts(
 /** Attest: append an immutable endorsement of a published TraceNode
  *  (protocol §5A/§8). An attestation is deliberately not a kind-4290 revision:
  *  it has no snapshot, deltas, trace identity, or `prev` edge to fabricate. */
-export async function attestNode(
+async function attestNodeToRelays(
   citedNodeId: string,
   citedOwnerPubkey: string | undefined,
   input: {
     signer?: Uint8Array;
     message?: string;
     geohash?: string;
+    /** Fixed by compound gestures that must retry idempotently. */
+    createdAtSec?: number;
   },
+  publicationRelays?: Relay[],
 ): Promise<Event> {
   const target = await fetchSentTraceNode(citedNodeId);
   if (!target) {
@@ -1408,12 +1658,18 @@ export async function attestNode(
   }
   const signer = input.signer ?? authoringVoice().secretKey;
   const template = buildAttestationTemplate(citedNodeId, target.pubkey, {
-    createdAtSec: Math.floor(Date.now() / 1000),
+    createdAtSec: input.createdAtSec ?? Math.floor(Date.now() / 1000),
     ...(input.message ? { message: input.message } : {}),
     ...(input.geohash ? { geohash: input.geohash } : {}),
   });
   const signed = finalizeEvent(template, signer);
-  await publishToMany(await getWriteRelays(), signed);
+  const relays = publicationRelays ?? await getPublicationRelays();
+  if (relays.length === 0) {
+    throw new Error(
+      "no publication relays available — configure a non-loopback write relay before Attest",
+    );
+  }
+  await publishToMany(relays, signed);
   // §R11.22: Attest no longer stamps on its own behalf. The load-bearing
   // anteriority has moved to Step (the frequent gesture builds distributed
   // anteriority — see protocol/rendezvous.md §3); the attest node's
@@ -1423,9 +1679,74 @@ export async function attestNode(
   return signed;
 }
 
-/** Strike one permanently-addressable, immutable kind-4290 Coin (protocol
+export async function attestNode(
+  citedNodeId: string,
+  citedOwnerPubkey: string | undefined,
+  input: {
+    signer?: Uint8Array;
+    message?: string;
+    geohash?: string;
+    /** Fixed by compound gestures that must retry idempotently. */
+    createdAtSec?: number;
+  },
+): Promise<Event> {
+  return attestNodeToRelays(citedNodeId, citedOwnerPubkey, input);
+}
+
+/** Complete the public phases of Mint for one already-durable Coin genesis.
+ *
+ * Mint is one author gesture but two append-only event types: publish the exact
+ * Coin Step, then publish the minter's Attestation of that node. The
+ * attestation timestamp is fixed to the Coin Step so retrying this helper signs
+ * the same event id instead of inflating supply with duplicate endorsements.
+ * The caller must not report Mint success until this function returns. */
+export async function completeCoinMint(
+  coin: Event,
+  signer?: Uint8Array,
+): Promise<Event> {
+  if (!verifyEvent(coin) || !isCoinEvent(coin)) {
+    throw new Error("cannot complete Mint for an invalid or non-Coin event");
+  }
+  const mintSigner = signer ?? authoringVoice().secretKey;
+  if (getPublicKey(mintSigner) !== coin.pubkey) {
+    throw new Error("cannot complete Mint with a signer other than the Coin owner");
+  }
+  let coinRelays: Relay[];
+  try {
+    await stepSignedEventLocally(coin);
+  } catch (error) {
+    throw new Error(
+      `Mint could not Step Coin ${coin.id}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    // Retain the exact relays that accepted the Coin. The completion
+    // attestation is restricted to this set, so success proves that at least
+    // one public relay contains both halves of the Mint pair even when relay
+    // failures differ by event.
+    coinRelays = await sendStep(coin, mintSigner);
+  } catch (error) {
+    throw new Error(
+      `Mint could not publish Coin ${coin.id}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  try {
+    return await attestNodeToRelays(coin.id, coin.pubkey, {
+      signer: mintSigner,
+      createdAtSec: coin.created_at,
+    }, coinRelays);
+  } catch (error) {
+    throw new Error(
+      `Mint published Coin ${coin.id} but could not publish its minter attestation: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/** Step the immutable kind-4290 genesis used by the compound Mint gesture
  *  §3.8). `coin.origin` is the durable discriminator shared by direct and
  *  extracted Coins; extracted Coins additionally retain their queryable edge.
+ *  User-facing Mint callers must also record Mint membership and invoke
+ *  `completeCoinMint` before reporting success.
  */
 export async function publishCoin(input: {
   folderId: string;
@@ -1435,8 +1756,10 @@ export async function publishCoin(input: {
   signer?: Uint8Array;
   /** Direct-composer edit history. Genesis still has no prev/delta history. */
   kedits?: KEdit[];
-  /** Mint is local speech until Send. Defaults true for the authoring gesture. */
+  /** The Coin Step is durably local until `completeCoinMint` publishes it. */
   localOnly?: boolean;
+  /** Sign only. Used so the pending-Mint journal can commit before Step. */
+  prepareOnly?: boolean;
   operationId?: string;
 }): Promise<Event> {
   if (!input.phrase) throw new Error("A Coin cannot have an empty body.");
@@ -1476,6 +1799,7 @@ export async function publishCoin(input: {
     summary: "coin",
     signer,
     localOnly: input.localOnly ?? true,
+    prepareOnly: input.prepareOnly,
     bodyHashTag: contentHash,
     coinOrigin: input.origin,
     authors: [{ voice: getPublicKey(signer), text: input.phrase }],
@@ -1518,8 +1842,10 @@ export async function publishHardenedSpan(input: {
   /** REQUIRED: exact UTF-16 range occupied by `phrase` in that snapshot. */
   sourceRange: { start: number; end: number };
   signer?: Uint8Array;
-  /** Mint is local speech until Send. Defaults true for the authoring gesture. */
+  /** The Coin Step is durably local until `completeCoinMint` publishes it. */
   localOnly?: boolean;
+  /** Sign only. Used so the pending-Mint journal can commit before Step. */
+  prepareOnly?: boolean;
   operationId?: string;
 }): Promise<Event> {
   return publishCoin({
@@ -1534,6 +1860,7 @@ export async function publishHardenedSpan(input: {
     },
     signer: input.signer,
     localOnly: input.localOnly ?? true,
+    prepareOnly: input.prepareOnly,
     operationId: input.operationId,
   });
 }
@@ -1546,6 +1873,9 @@ export async function publishDirectCoin(input: {
   signer?: Uint8Array;
   kedits?: KEdit[];
   localOnly?: boolean;
+  /** Sign only. Used so the pending-Mint journal can commit before Step. */
+  prepareOnly?: boolean;
+  operationId?: string;
 }): Promise<Event> {
   return publishCoin({
     ...input,
@@ -1556,8 +1886,7 @@ export async function publishDirectCoin(input: {
 /** sha256 of `text` as lowercase hex. workspace.ts has the same helper; we
  *  keep a local copy here so provenance doesn't grow a workspace import just
  *  for hashing. Identical bytes → identical hash, so hashes interoperate.
- *  Exported because the alpha tune affordance needs to hash a palette item's
- *  body into the same contentHash the alpha chain keys on. */
+ *  Exported for readers that verify or derive content coordinates. */
 export async function sha256HexLocal(text: string): Promise<string> {
   const data = new TextEncoder().encode(text);
   const hash = await crypto.subtle.digest("SHA-256", data);
@@ -2208,6 +2537,40 @@ export function eventMeta(event: Event): EventMeta {
     steppedAtMs,
     createdAtSec: event.created_at ?? 0,
   };
+}
+
+/**
+ * Return only q targets that may participate in social citation features.
+ *
+ * Legacy LLM scope markers cannot distinguish ordinary citations from prompt
+ * dependencies, so they fail closed. The additive targets-v1 form is accepted
+ * only when its legacy marker and complete structural target set are both
+ * well-formed; this keeps every social consumer on one compatibility policy.
+ */
+export function socialCitationTargets(event: Event): string[] {
+  const targets = [...new Set(eventMeta(event).citationTargets)];
+  const scopeTags = event.tags.filter(
+    (tag) => tag[0] === "scope" && tag[1] === "llm",
+  );
+  if (scopeTags.length === 0) return targets;
+
+  const hasLegacyMarker = scopeTags.some((tag) => tag.length === 2);
+  const hasCompleteTargetSet = scopeTags.some(
+    (tag) => tag.length === 3 && tag[2] === LLM_SCOPE_TARGETS_VERSION,
+  );
+  if (!hasLegacyMarker || !hasCompleteTargetSet) return [];
+
+  const targetSet = new Set(targets);
+  const structuralTargets = new Set<string>();
+  for (const tag of scopeTags) {
+    if (tag.length === 2) continue;
+    if (tag.length !== 3) return [];
+    const value = tag[2] ?? "";
+    if (value === LLM_SCOPE_TARGETS_VERSION) continue;
+    if (!HEX_64.test(value) || !targetSet.has(value)) return [];
+    structuralTargets.add(value);
+  }
+  return targets.filter((id) => !structuralTargets.has(id));
 }
 
 // --- cited-trace name resolution (for the citation-chip row) -------------
@@ -3780,78 +4143,6 @@ export async function mergeFile(input: {
   });
 }
 
-// --- palette (kind 34291 = TraceOpinion) ---------------------------------
-//
-// The palette is the user's curated set of coins — the "module of
-// trace-nodes" the protocol flags as an open question (spec §OQ). Each item
-// points at a minted kind-4290 node by id and caches its text for display;
-// the node itself (with its own snapshot) is the source of truth.
-//
-// Per spec §1/§5, kind 34291 is TraceOpinion — a parameterized-replaceable,
-// per-author opinion. The palette rides on this kind as a client convention:
-// `d = pubkey` keys the whole curated set as one replaceable index per author.
-// This is the same PR-as-index posture the spec endorses for mutable
-// current-state (§R2): the palette is not immutable history, so replaceable
-// semantics are correct. (Alpha opinions use the same kind with `d = "x:…"`.)
-
-const TRACE_OPINION_KIND = 34291;
-
-/** One entry in a voice's palette. `text` is a cache of the coin's
- *  inner content for display; the authoritative content is the referenced
- *  node's snapshot. `label` is an optional user-authored display name set by
- *  "rename tag" in the panel — it lives only on the palette index, never on
- *  the minted node, so the snapshot body stays fixed. */
-export interface PaletteItem {
-  nodeId: string;
-  text: string;
-  originPath: string;
-  mintedAt: number;
-  label?: string;
-}
-
-/** Read the current palette for the active voice. Empty if none published. */
-export async function fetchPalette(): Promise<PaletteItem[]> {
-  const relays = await getReadRelays();
-  const voice = authoringVoice();
-  const event = await queryLatestMany(relays, { kinds: [TRACE_OPINION_KIND], "#d": [voice.publicKey] });
-  if (!event) return [];
-  const parsed = JSON.parse(event.content) as { items: PaletteItem[] };
-  return parsed.items ?? [];
-}
-
-/** Publish a fresh palette (replaces the whole list). Applies the same
- *  forced-forward `created_at` rule as the manifest (spec:112) — two appends
- *  in the same wall-clock second must still order deterministically. */
-export async function publishPalette(items: PaletteItem[]): Promise<Event> {
-  const relays = await getWriteRelays();
-  const voice = authoringVoice();
-  const previous = await fetchPaletteEvent(voice.publicKey);
-  const createdAt = Math.max(Math.floor(Date.now() / 1000), (previous?.created_at ?? 0) + 1);
-
-  const template: EventTemplate = {
-    kind: TRACE_OPINION_KIND,
-    created_at: createdAt,
-    tags: [["d", voice.publicKey], ...items.map((i) => ["e", i.nodeId])],
-    content: JSON.stringify({ items }),
-  };
-  const signed = finalizeEvent(template, voice.secretKey);
-  await publishToMany(relays, signed);
-  return signed;
-}
-
-async function fetchPaletteEvent(pubkey: string): Promise<Event | null> {
-  const relays = await getReadRelays();
-  return queryLatestMany(relays, { kinds: [TRACE_OPINION_KIND], "#d": [pubkey] });
-}
-
-/** Append `item` to the palette (deduped by nodeId). Called from the minting
- *  pass — every resolved bracket lands here — so minting = palette add. */
-export async function appendToPalette(item: PaletteItem): Promise<void> {
-  const current = await fetchPalette();
-  if (current.some((i) => i.nodeId === item.nodeId)) return; // idempotent
-  await publishPalette([...current, item]);
-}
-
 /** All uncited heads in a prev-graph: events whose id no other event in the
  *  set cites as `prev`. Zero → empty set; one → linear chain; two+ → concurrent
  *  branches (protocol open question: branch detection). Pure — used by
@@ -4261,9 +4552,9 @@ export function filterInboundCitationRefs(
  *
  * Tags vs cites: the `q` tag is the single composition edge (spec §R4) — a `q`
  * into our chain IS a citation, the same fact the outbound reader
- * (`eventMeta.citationTargets`) reads off every `q`. We exclude the two
- * non-citation `q` sources (folder membership on `z:folder` nodes; LLM scope on
- * `scope:llm`-marked nodes), then classify each remaining edge: "tag" if the
+ * (`eventMeta.citationTargets`) reads off every `q`. We exclude folder
+ * membership on `z:folder` nodes and structural-only LLM scope targets, then
+ * classify each remaining edge: "tag" if the
  * citing node has an active `cite role:"tag"` delta for our node, else "cite"
  * — which covers inline bracket quotes (emitted as `q` + body insert, with no
  * cite delta) and replies. Relying on the cite delta to *detect* the edge would
@@ -4339,9 +4630,9 @@ export async function findInboundSnapshot(
   // the write path only emits `cite` deltas for `tag` and `reply`, NOT for
   // `inline` bracket quotes (which emit a `q` + a body insert, no cite delta).
   // So a cite-delta-only approach would silently miss every coin
-  // quoted in someone's body — the common case. Instead: exclude the two
-  // non-citation `q` sources (folder membership, LLM scope), then classify each
-  // remaining edge by whether it carries a `role:"tag"` cite delta.
+  // quoted in someone's body — the common case. Instead: exclude folder
+  // membership and structural-only LLM scope, then classify each remaining
+  // edge by whether it carries a `role:"tag"` cite delta.
   let qRefs: Event[] = [];
   try {
     qRefs = await queryReferencingByQ([...ourIds]);
@@ -4369,8 +4660,8 @@ export async function findInboundSnapshot(
  *  signal: `"tag"` if the citing node has an active `cite role:"tag"` delta for
  *  it, `"cite"` otherwise (covers inline bracket quotes and replies, which emit
  *  a `q` but no `tag` delta), or `null` when the edge is not an inbound
- *  citation — folder membership (`z:folder`), LLM scope (`scope:llm`), or the
- *  node simply doesn't `q`-cite `targetId`. Pure — unit-tested.
+ *  citation — folder membership (`z:folder`), structural-only LLM scope, or
+ *  the node simply doesn't socially `q`-cite `targetId`. Pure — unit-tested.
  *
  *  This mirrors the outbound reader (`eventMeta.citationTargets` reads every
  *  `q` as a citation); it does NOT rely on the cite delta to *detect* the edge,
@@ -4381,12 +4672,10 @@ export function classifyQEdge(e: Event, targetId: string): TraceInbound["kind"] 
   // citations. A folder that includes this file as a member is composition at
   // the folder level — out of scope for a per-file inbound tracker.
   if (!isFileNode(e)) return null;
-  // LLM-scope nodes: their `q` edges name the call's in-scope traces (spec
-  // §3.7), flagged with a `scope:llm` marker. An LLM call that had this trace
-  // in context is provenance about the call, not a citation of the content.
-  if (e.tags.some((t) => t[0] === "scope" && t[1] === "llm")) return null;
-  // Does this event actually q-cite targetId?
-  const cites = e.tags.some((t) => t[0] === "q" && t[1] === targetId);
+  // Does this event carry an ordinary social q edge to targetId? The shared
+  // parser removes versioned structural-only LLM scope and treats legacy or
+  // malformed scope encodings as entirely private.
+  const cites = socialCitationTargets(e).includes(targetId);
   if (!cites) return null;
   // A tag, specifically? An active `cite role:"tag"` add for targetId. A
   // removed tag (op:"remove") is no longer an inbound edge → falls through to
@@ -4523,6 +4812,11 @@ export async function loadMergeSides(
 // is intentionally ignored — Stacks is the operator's editorial output, not a
 // popularity contest. Crowd signal lives in alpha (the +alpha opinion axis).
 
+// These client-convention indexes ride on the protocol's parameterized-
+// replaceable TraceOpinion kind. Coin inventory does not: Mint membership is
+// the authoritative collection.
+const TRACE_OPINION_KIND = 34291;
+
 /** One named stack definition. `id` is a stable opaque slug; `order` is the
  *  author's preferred section order; `title` is the section heading. */
 export interface StackDef {
@@ -4532,9 +4826,9 @@ export interface StackDef {
 }
 
 /** Build, sign, and publish the author's stack definitions as one replaceable
- *  kind-34291 event (`d = "sd:" + pubkey`). Last-write-wins per author. The
- *  whole set is republished on any change (the same posture as `publishPalette`
- *  — NIP-33 replaceable-as-a-whole). */
+ *  kind-34291 event (`d = "sd:" + pubkey`). Last-write-wins per author; the
+ *  whole set is republished on any change using NIP-33 replaceable-as-a-whole
+ *  semantics. */
 export async function publishStackDefs(defs: StackDef[]): Promise<Event> {
   const relays = await getWriteRelays();
   const signer = authoringVoice();
@@ -4950,13 +5244,107 @@ export function reconstructRunsUpTo(chain: Event[], throughIndex: number): Run[]
   return reconstructRunsFromChain(chain.slice(0, end));
 }
 
+/** Hard limits for reads from an untrusted, dynamically discovered relay. */
+export interface RelaySampleBounds {
+  /** When set, any event not explicitly requested closes and rejects the sample. */
+  requestedIds?: readonly string[];
+  maxUniqueEvents: number;
+  maxTotalBytes: number;
+  maxEventBytes: number;
+  maxContentLength: number;
+  maxTags: number;
+  maxTagValues: number;
+  maxTagValueLength: number;
+  signal?: AbortSignal;
+}
+
+export interface BoundedRelaySampleCollector {
+  accept(event: Event): { accepted: boolean; error?: string };
+  events(): Event[];
+}
+
+const utf8Encoder = new TextEncoder();
+
+/**
+ * Memory-safe collector for hostile relay input. Total bytes count every frame,
+ * including duplicates, so a relay cannot evade the cap by replaying one id.
+ */
+export function createBoundedRelaySampleCollector(
+  bounds: RelaySampleBounds,
+): BoundedRelaySampleCollector {
+  const requested = bounds.requestedIds ? new Set(bounds.requestedIds) : null;
+  const byId = new Map<string, Event>();
+  let totalBytes = 0;
+
+  return {
+    accept(event) {
+      if (
+        !event || typeof event !== "object" || typeof event.id !== "string" ||
+        typeof event.content !== "string" || !Array.isArray(event.tags)
+      ) {
+        return { accepted: false, error: "relay returned a malformed event" };
+      }
+      if (requested && !requested.has(event.id)) {
+        return { accepted: false, error: `relay returned unrequested event ${event.id}` };
+      }
+      if (event.content.length > bounds.maxContentLength) {
+        return { accepted: false, error: `relay event ${event.id} content exceeds limit` };
+      }
+      if (event.tags.length > bounds.maxTags) {
+        return { accepted: false, error: `relay event ${event.id} tag count exceeds limit` };
+      }
+      for (const tag of event.tags) {
+        if (
+          !Array.isArray(tag) || tag.length > bounds.maxTagValues ||
+          tag.some((value) => typeof value !== "string" || value.length > bounds.maxTagValueLength)
+        ) {
+          return { accepted: false, error: `relay event ${event.id} has oversized tags` };
+        }
+      }
+
+      let eventBytes: number;
+      try {
+        eventBytes = utf8Encoder.encode(JSON.stringify(event)).byteLength;
+      } catch {
+        return { accepted: false, error: `relay event ${event.id} is not serializable` };
+      }
+      if (eventBytes > bounds.maxEventBytes) {
+        return { accepted: false, error: `relay event ${event.id} exceeds byte limit` };
+      }
+      totalBytes += eventBytes;
+      if (totalBytes > bounds.maxTotalBytes) {
+        return { accepted: false, error: "relay sample exceeds total byte limit" };
+      }
+      if (byId.has(event.id)) return { accepted: false };
+      if (byId.size >= bounds.maxUniqueEvents) {
+        return { accepted: false, error: "relay sample exceeds unique event limit" };
+      }
+      byId.set(event.id, event);
+      return { accepted: true };
+    },
+    events() {
+      return [...byId.values()];
+    },
+  };
+}
+
+function abortReason(signal?: AbortSignal): Error {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error("operation aborted");
+  error.name = "AbortError";
+  return error;
+}
+
 function queryAttempt(
   relay: Relay,
   filter: Filter,
   perRelayMs: number,
+  bounds?: RelaySampleBounds,
 ): Promise<{ events: Event[]; closeReason: string }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const found: Event[] = [];
+    const collector = bounds ? createBoundedRelaySampleCollector(bounds) : null;
+    let rejection: Error | null = null;
     // Always settle: on EOSE we close + resolve immediately, and a safety
     // timer closes + resolves with whatever landed. The timer is the whole
     // point — without it a half-open WS (sub accepted, EOSE never arrives)
@@ -4966,20 +5354,39 @@ function queryAttempt(
     // flight per query no matter what the relay does.
     const sub = relay.subscribe([filter], {
       onevent(evt: Event) {
-        found.push(evt);
+        if (!collector) {
+          found.push(evt);
+          return;
+        }
+        const result = collector.accept(evt);
+        if (result.error) {
+          rejection = new Error(result.error);
+          sub.close("bounded-sample-rejected");
+        }
       },
       oneose() {
         sub.close();
       },
     });
     const timer = setTimeout(() => sub.close("timeout"), perRelayMs);
+    const abort = () => {
+      rejection = abortReason(bounds?.signal);
+      sub.close("aborted");
+    };
+    bounds?.signal?.addEventListener("abort", abort, { once: true });
     // onclose fires exactly once for either close() path (EOSE or timeout);
     // clean the timer up and resolve with what we have so the queryMany/
     // fetchEventById callers never wait past perRelayMs for any relay.
     sub.onclose = (reason) => {
       clearTimeout(timer);
-      resolve({ events: found, closeReason: reason });
+      bounds?.signal?.removeEventListener("abort", abort);
+      if (rejection) {
+        reject(rejection);
+      } else {
+        resolve({ events: collector?.events() ?? found, closeReason: reason });
+      }
     };
+    if (bounds?.signal?.aborted) abort();
   });
 }
 
@@ -4993,8 +5400,13 @@ function queryAttempt(
  * first read — exactly the MCP startup path when it inspects a human folder
  * before it has published anything.
  */
-async function queryOnce(relay: Relay, filter: Filter, perRelayMs = 4000): Promise<Event[]> {
-  const first = await queryAttempt(relay, filter, perRelayMs);
+async function queryOnce(
+  relay: Relay,
+  filter: Filter,
+  perRelayMs = 4000,
+  bounds?: RelaySampleBounds,
+): Promise<Event[]> {
+  const first = await queryAttempt(relay, filter, perRelayMs, bounds);
   if (!first.closeReason.startsWith("auth-required:") || !relay.onauth) {
     return first.events;
   }
@@ -5014,19 +5426,34 @@ async function queryOnce(relay: Relay, filter: Filter, perRelayMs = 4000): Promi
     }
   }
   if (!authenticated) return first.events;
-  return (await queryAttempt(relay, filter, perRelayMs)).events;
+  return (await queryAttempt(relay, filter, perRelayMs, bounds)).events;
 }
 
 /**
  * Query many relays in parallel and merge results by event id (dedup). One
  * slow/dead relay can't stall the merge — each relay gets its own timeout
  * (inherited from the sampler's posture). Empty/failed relays contribute
- * nothing. This is the read-side equivalent of publishToMany: the local
- * sidecar and external relays are treated as a federated set.
+ * nothing. Optional bounds are enforced once per relay and again across the
+ * merged result, so callers handling hostile fan-out do not have to trust the
+ * remote relay's interpretation of `filter.limit`. This is the read-side
+ * equivalent of publishToMany: the local sidecar and external relays are
+ * treated as a federated set.
  */
-export async function queryMany(relays: Relay[], filter: Filter, perRelayMs = 4000): Promise<Event[]> {
+export async function queryMany(
+  relays: Relay[],
+  filter: Filter,
+  perRelayMs = 4000,
+  bounds?: RelaySampleBounds,
+): Promise<Event[]> {
   const local = pendingLocalEventsMatching(filter);
-  if (relays.length === 0) return local;
+  const collector = bounds ? createBoundedRelaySampleCollector(bounds) : null;
+  const byId = new Map<string, Event>();
+  const add = (event: Event) => {
+    if (collector && !collector.accept(event).accepted) return;
+    byId.set(event.id, event);
+  };
+  for (const event of local) add(event);
+  if (relays.length === 0) return collector?.events() ?? [...byId.values()];
   // Each relay gets its own perRelayMs timeout inside queryOnce, and the
   // subscription is always closed (on EOSE or on timeout) so no sub leaks onto
   // the session-cached WebSocket. Timeouts/failures are best-effort: a down
@@ -5034,25 +5461,17 @@ export async function queryMany(relays: Relay[], filter: Filter, perRelayMs = 40
   // MUST share this posture — previously it rethrew the timeout, which
   // surfaced as Unhandled Promise Rejection from auto-beginReplay on folder
   // load when the sidecar was slow/unreachable.
-  const byId = new Map<string, Event>(local.map((event) => [event.id, event]));
   await Promise.all(
     relays.map(async (relay) => {
       try {
-        const events = await queryOnce(relay, filter, perRelayMs);
-        for (const e of events) byId.set(e.id, e);
+        const events = await queryOnce(relay, filter, perRelayMs, bounds);
+        for (const event of events) add(event);
       } catch {
         // best-effort: a down relay just contributes no events
       }
     }),
   );
-  return [...byId.values()];
-}
-
-/** Latest across many relays by `created_at`, or null if none matched. */
-async function queryLatestMany(relays: Relay[], filter: Filter): Promise<Event | null> {
-  const events = await queryMany(relays, filter);
-  if (events.length === 0) return null;
-  return events.reduce((latest, e) => (e.created_at > latest.created_at ? e : latest));
+  return collector?.events() ?? [...byId.values()];
 }
 
 // --- sampler: federated read across a set of relays ---------------------
@@ -5074,6 +5493,7 @@ export async function sampleRelays(
   urls: string[],
   filter: Filter,
   perRelayMs = 4000,
+  bounds?: RelaySampleBounds,
 ): Promise<{ hits: SampleHit[]; errors: { url: string; error: string }[] }> {
   const errors: { url: string; error: string }[] = [];
   const byId = new Map<string, SampleHit>();
@@ -5081,9 +5501,17 @@ export async function sampleRelays(
   await Promise.all(
     urls.map(async (url) => {
       let relay: Relay | null = null;
+      let connection: Promise<Relay> | null = null;
       try {
-        relay = await withTimeout(Relay.connect(url), perRelayMs, `connect ${url}`);
-        const events = await queryOnce(relay, filter, perRelayMs);
+        if (bounds?.signal?.aborted) throw abortReason(bounds.signal);
+        connection = Relay.connect(url);
+        relay = await withTimeoutAndSignal(
+          connection,
+          perRelayMs,
+          `connect ${url}`,
+          bounds?.signal,
+        );
+        const events = await queryOnce(relay, filter, perRelayMs, bounds);
         for (const event of events) {
           const existing = byId.get(event.id);
           if (existing) {
@@ -5094,6 +5522,17 @@ export async function sampleRelays(
         }
       } catch (e) {
         errors.push({ url, error: e instanceof Error ? e.message : String(e) });
+        // Promise.race cannot cancel a WebSocket handshake. If connect wins
+        // after our timeout/abort, close that late socket as soon as it lands.
+        if (!relay && connection) {
+          void connection.then(async (lateRelay) => {
+            try {
+              await lateRelay.close();
+            } catch {
+              // ignore — best-effort cleanup of a connection we no longer own
+            }
+          }).catch(() => undefined);
+        }
       } finally {
         try {
           await relay?.close();
@@ -5105,6 +5544,24 @@ export async function sampleRelays(
   );
 
   return { hits: [...byId.values()], errors };
+}
+
+function withTimeoutAndSignal<T>(
+  promise: Promise<T>,
+  ms: number,
+  message: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return withTimeout(promise, ms, message);
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  let abort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    abort = () => reject(abortReason(signal));
+    signal.addEventListener("abort", abort, { once: true });
+  });
+  return Promise.race([withTimeout(promise, ms, message), aborted]).finally(() => {
+    if (abort) signal.removeEventListener("abort", abort);
+  });
 }
 
 /** Rejects with `msg` after `ms` if `p` hasn't settled. */

@@ -39,6 +39,11 @@ export interface LocalFile {
   /** The latest kind-4290 node id stepped for this file (relay chain head), or
    *  "" if not yet pushed. Used as prevEventId on the next relay push. */
   nodeId: string;
+  /** Set only after the Mint transaction has stepped and published the signed
+   *  Coin genesis, published its same-minter TraceAttestation, and persisted
+   *  Mint membership. Missing means an incomplete/legacy Mint artifact, never
+   *  a Coin. The marker is local transaction state and never enters the trace. */
+  coinComplete?: boolean;
   /** One-shot bootstrap intent for a preloaded starter document. Its first
    *  relay flush publishes and persists an empty genesis before appending the
    *  preloaded body as Step 1. Kept until the body step lands so a crash between
@@ -161,17 +166,21 @@ function isLocalFile(value: unknown): value is LocalFile {
     Array.isArray(file.tags) &&
     file.tags.every((tag) => typeof tag === "string") &&
     typeof file.nodeId === "string" &&
+    (file.coinComplete === undefined || typeof file.coinComplete === "boolean") &&
     typeof file.updatedAt === "number"
   );
 }
 
-/** Persist a whole folder (overwrites). */
-function saveLocalFolder(folder: LocalFolder): void {
+/** Persist a whole folder (overwrites). Returns false when browser storage
+ * rejects the write so transaction coordinators can keep their retry journal. */
+function saveLocalFolder(folder: LocalFolder): boolean {
   try {
     localStorage.setItem(key(folder.id), JSON.stringify(folder));
+    return true;
   } catch {
     // Quota exceeded or disabled storage — the editor still works in-memory
     // for this session; persistence just won't survive a reload. Non-fatal.
+    return false;
   }
 }
 
@@ -187,6 +196,7 @@ export function saveLocalFile(
     content: string;
     tags: string[];
     nodeId: string;
+    coinComplete?: boolean;
     traceId?: string;
     pendingMove?: LocalFile["pendingMove"];
     runs?: Run[];
@@ -200,13 +210,16 @@ export function saveLocalFile(
     pendingOperationId?: string;
   },
   label?: string,
-): void {
+): boolean {
   const existing = loadLocalFolder(folderId) ?? { id: folderId, label, files: {} };
   existing.files[relativePath] = {
     kind: data.kind ?? existing.files[relativePath]?.kind ?? "file",
     content: data.content,
     tags: data.tags,
     nodeId: data.nodeId,
+    ...((data.coinComplete ?? existing.files[relativePath]?.coinComplete)
+      ? { coinComplete: true }
+      : {}),
     ...(data.traceId ?? existing.files[relativePath]?.traceId
       ? { traceId: data.traceId ?? existing.files[relativePath]?.traceId }
       : {}),
@@ -228,7 +241,7 @@ export function saveLocalFile(
     ...(data.pendingOperationId ? { pendingOperationId: data.pendingOperationId } : {}),
   };
   if (label !== undefined) existing.label = label;
-  saveLocalFolder(existing);
+  return saveLocalFolder(existing);
 }
 
 /** Remove a file from a local folder (tombstone). Synchronous. */

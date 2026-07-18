@@ -532,6 +532,68 @@ test("enumerates a verified no-op transaction without a zero-effect change fact"
   assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
 });
 
+test("projects every protocol-valid FULL KEdit domain value through the desktop boundary", async () => {
+  const node = await fileNode("", "AB", undefined, {
+    kedits: [
+      {
+        op: "ins", from: 0, to: 0, text: "A", voice: "legacy writer",
+        t: -Number.MAX_VALUE, tx: 0,
+      },
+      {
+        op: "ins", from: 1, to: 1, text: "B", voice: "\ud800",
+        t: Number.MAX_VALUE, tx: Number.MAX_SAFE_INTEGER + 1,
+      },
+    ],
+  });
+  const adapted = await adaptDesktopTraceContextSelectionV1(input([node]));
+  assert.equal(adapted.candidates.length, 5);
+  assert.equal(adapted.candidates[0]?.kind, "process-fact");
+  if (adapted.candidates[0]?.kind === "process-fact") {
+    assert.equal(adapted.candidates[0].fact.kind, "step-summary");
+    if (adapted.candidates[0].fact.kind === "step-summary") {
+      assert.equal(adapted.candidates[0].fact.timingStatus, "outside-summary-domain");
+    }
+  }
+  const selected = await selectTraceContextV1(adapted);
+  assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
+});
+
+test("rejects malformed metadata, malformed chain shapes, bounds, and cancellation with adapter errors", async () => {
+  const chain = await fullChain();
+  const malformed: unknown[] = [
+    null,
+    { ...input(chain), policy: "unknown" },
+    { ...input(chain), operation: operation({ operation: "settle", range: undefined }) },
+    { ...input(chain), chain: [{ ...chain[0], tags: null }] },
+    { ...input(chain), operation: operation({ preparedRequestMaxBytes: 1, reservedPromptBytes: 2 }) },
+  ];
+  for (const value of malformed) {
+    await assert.rejects(
+      adaptDesktopTraceContextSelectionV1(value as DesktopTraceContextSelectionAdapterInputV1),
+      DesktopTraceContextSelectionAdapterError,
+    );
+  }
+
+  let verifierCalls = 0;
+  await assert.rejects(
+    adaptDesktopTraceContextSelectionV1(input(chain, {
+      limits: { version: 1, maxCandidates: 5 },
+      verifyEvent: (event) => {
+        verifierCalls += 1;
+        return verifyEvent(event as Event);
+      },
+    })),
+    /candidate count exceeds the selector ceiling/,
+  );
+  assert.equal(verifierCalls, 0, "candidate bounds must run before cryptographic verification");
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    adaptDesktopTraceContextSelectionV1(input(chain, { signal: controller.signal })),
+    /operation was cancelled/,
+  );
+});
+
 const projectableParityCases = parityCorpus.cases.filter(
   (parityCase) => parityCase.scope === "process-adapter-projectable",
 );

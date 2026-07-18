@@ -16,26 +16,23 @@ import {
   type TraceEventVerifier,
 } from "@zine/protocol";
 import {
-  projectTraceProcessCandidatesV1,
+  projectTraceProcessCandidatesV1Async,
+  TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1,
+  validateTraceContextAbortSignalV1,
+  validateTraceContextAdapterMetadataV1,
+  validateTraceContextAdapterProcessBoundsV1,
   type EvidenceCandidateV1,
+  type TraceContextAdapterOperationMetadataV1,
   type TraceContextProcessProjectionInputV1,
   type TraceContextPolicyV1,
   type TraceContextSelectionInputV1,
   type TraceContextSelectionLimitsV1,
-  type TraceContextSelectionOperationV1,
   type TraceProcessFactV1,
   type TraceProcessStatusV1,
   type Utf16Range,
 } from "../../../packages/trace-context/src/index.js";
 
-export interface McpTraceContextOperationMetadataV1 {
-  version: 1;
-  operation: TraceContextSelectionOperationV1["operation"];
-  range?: Utf16Range;
-  maxContextBytes: number;
-  preparedRequestMaxBytes: number;
-  reservedPromptBytes: number;
-}
+export type McpTraceContextOperationMetadataV1 = TraceContextAdapterOperationMetadataV1;
 
 export interface McpTraceContextSelectionAdapterInputV1 {
   version: 1;
@@ -46,6 +43,7 @@ export interface McpTraceContextSelectionAdapterInputV1 {
   /** Trusted cryptographic verifier injected by the owning MCP runtime. */
   verifyEvent: TraceEventVerifier;
   limits?: TraceContextSelectionLimitsV1;
+  signal?: AbortSignal;
 }
 
 interface CapturedAdapterInput {
@@ -55,6 +53,14 @@ interface CapturedAdapterInput {
   chain: readonly ProtocolEvent[];
   verifyEvent: TraceEventVerifier;
   limits?: TraceContextSelectionLimitsV1;
+  signal?: AbortSignal;
+}
+
+export class McpTraceContextSelectionAdapterError extends Error {
+  constructor(message: string) {
+    super(`MCP trace-context adapter: ${message}`);
+    this.name = "McpTraceContextSelectionAdapterError";
+  }
 }
 
 interface DerivedRead {
@@ -79,27 +85,60 @@ export async function adaptVerifiedMcpFileForTraceContextSelectionV1(
   input: McpTraceContextSelectionAdapterInputV1,
 ): Promise<TraceContextSelectionInputV1> {
   const captured = captureInput(input);
-  requireVersion(captured.version, "input");
-  requireVersion(captured.operation.version, "operation");
-  if (captured.chain.length === 0) fail("fetched file chain is empty");
+  if (captured.signal?.aborted) fail("operation was cancelled");
+  try {
+    validateTraceContextAdapterProcessBoundsV1(
+      captured.chain.map((event) => event.content),
+      captured.policy === "selected-trace-v1"
+        ? captured.limits?.maxCandidates ?? TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidates
+        : undefined,
+    );
+  } catch (error) {
+    fail(error instanceof Error ? error.message : "file chain exceeds process bounds");
+  }
 
   const verification = await verifyCapturedChain(captured.chain, captured.verifyEvent);
+  if (captured.signal?.aborted) fail("operation was cancelled");
   const read = deriveRead(captured.chain, verification);
   if (captured.operation.range) {
     requireOperationRange(captured.operation.range, read.currentText);
   }
-  const candidates = captured.policy === "text-only-v1"
-    ? []
-    : verification.verdict.status === "full"
-    ? projectTraceProcessCandidatesV1(
-        fullProcessProjection(read, captured.chain, verification.verdict),
-      )
-    : [statusCandidate(
-        read,
-        captured.chain,
-        verification.verdict,
-        verification.verdict.status === "snapshot-only" ? "snapshot-only" : "invalid",
-      )];
+  let candidates: readonly Extract<EvidenceCandidateV1, { kind: "process-fact" }>[];
+  try {
+    candidates = captured.policy === "text-only-v1"
+      ? []
+      : verification.verdict.status === "full"
+      ? await projectTraceProcessCandidatesV1Async(
+          fullProcessProjection(
+            read,
+            captured.chain,
+            verification.verdict,
+            captured.limits?.maxCandidates
+              ?? TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidates,
+          ),
+          {
+            ...(captured.signal ? { signal: captured.signal } : {}),
+            ...(captured.limits?.maxCandidates !== undefined
+              ? { maxCandidates: captured.limits.maxCandidates }
+              : {}),
+            ...(captured.limits?.maxInputBytes !== undefined
+              ? { maxInputBytes: captured.limits.maxInputBytes }
+              : {}),
+            ...(captured.limits?.maxCandidateInputBytes !== undefined
+              ? { maxCandidateInputBytes: captured.limits.maxCandidateInputBytes }
+              : {}),
+          },
+        )
+      : [statusCandidate(
+          read,
+          captured.chain,
+          verification.verdict,
+          verification.verdict.status === "snapshot-only" ? "snapshot-only" : "invalid",
+        )];
+  } catch (error) {
+    if (error instanceof McpTraceContextSelectionAdapterError) throw error;
+    fail(error instanceof Error ? `process projection failed: ${error.message}` : "process projection failed");
+  }
   requireDistinctCandidates(candidates);
 
   const output: TraceContextSelectionInputV1 = {
@@ -126,35 +165,61 @@ export async function adaptVerifiedMcpFileForTraceContextSelectionV1(
   return deepFreeze(output);
 }
 
-function captureInput(input: McpTraceContextSelectionAdapterInputV1): CapturedAdapterInput {
-  const chain = input.chain.map((event) => cloneEvent(event));
-  const captured: CapturedAdapterInput = {
-    version: input.version,
-    policy: input.policy,
-    operation: {
-      version: input.operation.version,
-      operation: input.operation.operation,
-      ...(input.operation.range ? { range: copyRange(input.operation.range) } : {}),
-      maxContextBytes: input.operation.maxContextBytes,
-      preparedRequestMaxBytes: input.operation.preparedRequestMaxBytes,
-      reservedPromptBytes: input.operation.reservedPromptBytes,
-    },
+function captureInput(input: unknown): CapturedAdapterInput {
+  let metadata: ReturnType<typeof validateTraceContextAdapterMetadataV1>;
+  let signal: AbortSignal | undefined;
+  try {
+    metadata = validateTraceContextAdapterMetadataV1(input);
+    signal = validateTraceContextAbortSignalV1(
+      (input as Record<string, unknown>).signal,
+    );
+  } catch (error) {
+    fail(error instanceof Error ? error.message : "input metadata is malformed");
+  }
+  const record = input as Record<string, unknown>;
+  if (typeof record.verifyEvent !== "function") fail("verifyEvent must be a trusted function");
+  if (!Array.isArray(record.chain) || record.chain.length === 0) fail("fetched file chain is empty");
+  if (record.chain.length > TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidates) {
+    fail("fetched file chain exceeds the bounded Step ceiling");
+  }
+  const chain = record.chain.map((event, index) => cloneEvent(event, index));
+  const captured = deepFreeze({
+    version: 1,
+    policy: metadata.policy,
+    operation: metadata.operation,
     chain,
-    verifyEvent: input.verifyEvent,
-    ...(input.limits ? { limits: { ...input.limits } } : {}),
-  };
-  return deepFreeze(captured);
+    verifyEvent: record.verifyEvent as TraceEventVerifier,
+    ...(metadata.limits ? { limits: { ...metadata.limits } } : {}),
+  } satisfies Omit<CapturedAdapterInput, "signal">);
+  return Object.freeze({ ...captured, ...(signal ? { signal } : {}) });
 }
 
-function cloneEvent(event: ProtocolEvent): ProtocolEvent {
+function cloneEvent(event: unknown, index: number): ProtocolEvent {
+  if (
+    event === null
+    || typeof event !== "object"
+    || typeof (event as { id?: unknown }).id !== "string"
+    || typeof (event as { pubkey?: unknown }).pubkey !== "string"
+    || !Number.isSafeInteger((event as { created_at?: unknown }).created_at)
+    || !Number.isSafeInteger((event as { kind?: unknown }).kind)
+    || typeof (event as { content?: unknown }).content !== "string"
+    || typeof (event as { sig?: unknown }).sig !== "string"
+    || !Array.isArray((event as { tags?: unknown }).tags)
+    || (event as { tags: unknown[] }).tags.some(
+      (tag) => !Array.isArray(tag) || tag.some((part) => typeof part !== "string"),
+    )
+  ) {
+    fail(`fetched file chain event ${index} is malformed`);
+  }
+  const valid = event as ProtocolEvent;
   return {
-    id: event.id,
-    pubkey: event.pubkey,
-    created_at: event.created_at,
-    kind: event.kind,
-    tags: event.tags.map((tag) => [...tag]),
-    content: event.content,
-    sig: event.sig,
+    id: valid.id,
+    pubkey: valid.pubkey,
+    created_at: valid.created_at,
+    kind: valid.kind,
+    tags: valid.tags.map((tag) => [...tag]),
+    content: valid.content,
+    sig: valid.sig,
   };
 }
 
@@ -169,10 +234,15 @@ async function verifyCapturedChain(
     verificationByEvent.set(identity, verified);
     return verified;
   };
-  const verdict = await verifyFileTraceChain(chain, recordingVerifier, {
-    expectedNucleusId: chain[chain.length - 1]!.id,
-    expectedTraceId: chain[0]!.id,
-  });
+  let verdict: TraceConformanceVerdict;
+  try {
+    verdict = await verifyFileTraceChain(chain, recordingVerifier, {
+      expectedNucleusId: chain[chain.length - 1]!.id,
+      expectedTraceId: chain[0]!.id,
+    });
+  } catch {
+    fail("trusted file-chain verification failed");
+  }
   const head = chain[chain.length - 1]!;
   return {
     verdict,
@@ -195,6 +265,11 @@ function deriveRead(
   if (headIntegrityIssue) {
     fail(`fetched head is not a valid signed snapshot: ${headIntegrityIssue.code}`);
   }
+  if (head.kind !== 4290) fail("verified head is not a TraceNode");
+  const reifications = head.tags.filter((tag) => tag[0] === "z");
+  if (reifications.length !== 1 || reifications[0]?.[1] !== "file") {
+    fail("verified head is not exactly one file TraceNode");
+  }
   if (verification.verdict.steps.length !== chain.length) {
     fail("internal verification did not cover the captured chain");
   }
@@ -205,11 +280,20 @@ function deriveRead(
   }
   let payload: { snapshot?: unknown; contentHash?: unknown };
   try {
-    payload = JSON.parse(head.content) as typeof payload;
-  } catch {
+    const parsed = JSON.parse(head.content) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      fail("verified head payload is not an object");
+    }
+    payload = parsed as typeof payload;
+  } catch (error) {
+    if (error instanceof McpTraceContextSelectionAdapterError) throw error;
     fail("verified head payload is not valid JSON");
   }
-  if (typeof payload.snapshot !== "string" || typeof payload.contentHash !== "string") {
+  if (
+    typeof payload.snapshot !== "string"
+    || typeof payload.contentHash !== "string"
+    || payload.contentHash.length === 0
+  ) {
     fail("verified head does not carry an exact text snapshot and content hash");
   }
   return {
@@ -275,11 +359,13 @@ function fullProcessProjection(
   read: DerivedRead,
   chain: readonly ProtocolEvent[],
   verdict: TraceConformanceVerdict,
+  maxCandidates: number,
 ): TraceContextProcessProjectionInputV1 {
   if (verdict.status !== "full") fail("FULL process projection requires a FULL verified verdict");
   if (read.traceId !== chain[0]?.id || read.headId !== chain[chain.length - 1]?.id) {
     fail("verified read does not bind the captured trace and head");
   }
+  requireProjectedCandidateBound(verdict.steps, maxCandidates);
   let previousSnapshot = "";
   const steps = chain.map((event, stepIndex) => {
     const step = verdict.steps[stepIndex];
@@ -318,6 +404,25 @@ function fullProcessProjection(
     };
   });
   return { version: 1, traceId: read.traceId, headId: read.headId, steps };
+}
+
+function requireProjectedCandidateBound(
+  steps: readonly TraceConformanceStep[],
+  maxCandidates: number,
+): void {
+  let count = 0;
+  for (const step of steps) {
+    count += 1;
+    if (step.process.status === "complete") {
+      for (const transaction of step.process.transactions) {
+        count += 1 + transaction.changes.filter(
+          (change) => change.inserted.length > 0 || change.deleted.length > 0,
+        ).length;
+        if (count > maxCandidates) fail("projected candidate count exceeds the selector ceiling");
+      }
+    }
+    if (count > maxCandidates) fail("projected candidate count exceeds the selector ceiling");
+  }
 }
 
 function requireMatchingProcess(
@@ -383,10 +488,6 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-function requireVersion(version: number, subject: string): void {
-  if (version !== 1) fail(`${subject} version must be 1`);
-}
-
 function requireOperationRange(range: Utf16Range, currentText: string): void {
   if (!Number.isSafeInteger(range.fromUtf16)
     || !Number.isSafeInteger(range.toUtf16)
@@ -413,5 +514,5 @@ function copyRange(range: Utf16Range): Utf16Range {
 }
 
 function fail(message: string): never {
-  throw new Error(`MCP trace-context adapter: ${message}`);
+  throw new McpTraceContextSelectionAdapterError(message);
 }

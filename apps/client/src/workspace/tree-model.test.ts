@@ -47,6 +47,21 @@ test("mint contents can use their generated timestamp as activity", () => {
   ]);
 });
 
+test("Mint paths become Coin rows only after transaction completion", () => {
+  const [, , mint] = buildDirectoryTree([
+    { path: "mint/2026-07-15_120000-complete.md", type: "file", coinComplete: true },
+    { path: "mint/2026-07-15_110000-legacy.md", type: "file" },
+  ], "root");
+
+  assert.deepEqual(
+    mint.children?.map((node) => [treeNodeDisplayName(node), node.systemKind]),
+    [
+      ["complete.md", "minted"],
+      ["legacy.md", "mint-pending"],
+    ],
+  );
+});
+
 test("oblivion hides timestamp buckets and keeps retained paths as identity", () => {
   const [, , , oblivion] = buildDirectoryTree([
     { path: "oblivion/2026-07-14_090000/old.md", type: "file" },

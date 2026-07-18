@@ -131,13 +131,13 @@ test("reply system tail snapshot", () => {
   const tail = defaultSystem("reply").slice(SYSTEM_PREAMBLE.length + 2);
   assert.ok(tail.startsWith("YOUR ROLE — Reply: the replier."));
   assert.ok(tail.includes("TITLE: <short descriptive name>"));
-  assert.ok(tail.includes("--- available minted traces ---"));
+  assert.ok(tail.includes("--- available stepped traces ---"));
 });
 
 test("edit system tail snapshot", () => {
   const tail = defaultSystem("edit").slice(SYSTEM_PREAMBLE.length + 2);
   assert.ok(tail.startsWith("YOUR ROLE — edit."));
-  assert.ok(tail.includes("minted sediment — preserve them verbatim"));
+  assert.ok(tail.includes("protected citations or draft spans — preserve them verbatim"));
 });
 
 // ─── variable infix behavior ────────────────────────────────────────────────
@@ -192,8 +192,8 @@ test("Analyze requires transaction evidence anchors and prohibits psychological 
 test("replyMessages: traces block is omitted when empty", () => {
   const withTraces = replyMessages("src", "TRACE1")[1].content;
   const noTraces = replyMessages("src", "")[1].content;
-  assert.ok(withTraces.startsWith("--- available minted traces ---\nTRACE1"));
-  assert.ok(!noTraces.includes("available minted traces"));
+  assert.ok(withTraces.startsWith("--- available stepped traces ---\nTRACE1"));
+  assert.ok(!noTraces.includes("available stepped traces"));
 });
 
 test("settleDedupeMessages: each file is numbered and headered", () => {
