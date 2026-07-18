@@ -410,6 +410,94 @@ test("Step summaries enforce exact one/two-transaction timing and per-range edit
   }
 });
 
+test("Step summaries enforce the n-transaction longest-gap lower bound without overflow", async () => {
+  const invalidFacts: readonly TraceProcessFactV1[] = [
+    {
+      kind: "step-summary",
+      transactionCount: 3,
+      rangeCount: 3,
+      insertedCodePointCount: 3,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 0,
+      lastCapturedAtMs: 10,
+      spanMs: 10,
+      longestGapMs: 0,
+      undoCount: 0,
+      redoCount: 0,
+    },
+    {
+      kind: "step-summary",
+      transactionCount: 4,
+      rangeCount: 4,
+      insertedCodePointCount: 4,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 0,
+      lastCapturedAtMs: 10,
+      spanMs: 10,
+      longestGapMs: 3,
+      undoCount: 0,
+      redoCount: 0,
+    },
+  ];
+  for (const [index, fact] of invalidFacts.entries()) {
+    const result = await selectTraceContextV1(selectionInput([
+      processFact(`gap-lower-bound-reject-${index}`, fact),
+    ]));
+    assert.equal(result.ok, false, `gap lower-bound rejection ${index}`);
+    if (!result.ok) {
+      assert.equal(result.error.code, "MALFORMED_INPUT", `gap lower-bound rejection ${index}`);
+    }
+  }
+
+  const validFacts: readonly TraceProcessFactV1[] = [
+    {
+      kind: "step-summary",
+      transactionCount: 4,
+      rangeCount: 4,
+      insertedCodePointCount: 4,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 0,
+      lastCapturedAtMs: 10,
+      spanMs: 10,
+      longestGapMs: 4,
+      undoCount: 0,
+      redoCount: 0,
+    },
+    {
+      kind: "step-summary",
+      transactionCount: 3,
+      rangeCount: 3,
+      insertedCodePointCount: 3,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 7,
+      lastCapturedAtMs: 7,
+      spanMs: 0,
+      longestGapMs: 0,
+      undoCount: 0,
+      redoCount: 0,
+    },
+    {
+      kind: "step-summary",
+      transactionCount: Number.MAX_SAFE_INTEGER,
+      rangeCount: Number.MAX_SAFE_INTEGER,
+      insertedCodePointCount: Number.MAX_SAFE_INTEGER,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 0,
+      lastCapturedAtMs: Number.MAX_SAFE_INTEGER,
+      spanMs: Number.MAX_SAFE_INTEGER,
+      longestGapMs: 2,
+      undoCount: 0,
+      redoCount: 0,
+    },
+  ];
+  for (const [index, fact] of validFacts.entries()) {
+    const result = await selectTraceContextV1(selectionInput([
+      processFact(`gap-lower-bound-accept-${index}`, fact),
+    ]));
+    assertSuccess(result);
+  }
+});
+
 test("canonical signer pubkeys render in full as opaque mechanical identifiers", async () => {
   const result = await selectTraceContextV1(selectionInput([processFact("voices", {
     kind: "transaction",

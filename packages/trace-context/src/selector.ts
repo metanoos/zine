@@ -953,6 +953,21 @@ function normalizeProcessFact(
           "A two-transaction Step's only gap must equal its full span",
         );
       }
+      if (transactionCount > 2) {
+        // The sorted transaction gaps are non-negative integers whose sum is
+        // spanMs, so their maximum must be at least ceil(span / gap count).
+        // BigInt keeps this exact for safe-integer inputs without multiplying
+        // (transactionCount - 1) * longestGapMs past Number.MAX_SAFE_INTEGER.
+        const gapCount = BigInt(transactionCount - 1);
+        const spanMs = BigInt(value.spanMs as number);
+        const minimumLongestGapMs = Number((spanMs + gapCount - 1n) / gapCount);
+        if (longestGapMs < minimumLongestGapMs) {
+          return malformed(
+            `${path}.longestGapMs`,
+            "Longest gap is too small for the Step span and transaction count",
+          );
+        }
+      }
       return {
         ok: true,
         value: deepFreeze({
