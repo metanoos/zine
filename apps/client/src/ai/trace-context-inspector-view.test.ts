@@ -253,7 +253,8 @@ test("SSR renders honest empty states without implying missing trace data was se
   assert.match(html, /No protected ranges intersect this operation/);
   assert.match(html, /No directive-looking quoted data was found/);
   assert.match(html, /No authoring-syntax compilation errors affect this operation/);
-  assert.match(html, /No trace evidence was selected; this preparation is text-only/);
+  assert.match(html, /No trace evidence was selected for this operation/);
+  assert.doesNotMatch(html, /this preparation is text-only/);
   assert.match(html, /No context candidates were excluded/);
   assert.match(html, /Context gathering complete/);
   assert.match(html, /0 \/ 2,048 bytes · not truncated/);

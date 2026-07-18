@@ -384,7 +384,7 @@ export function TraceContextInspectorView({
       <section className="trace-context-inspector-section trace-context-inspector-evidence" aria-labelledby={`${headingId}-evidence`}>
         <h3 id={`${headingId}-evidence`}>Selected context evidence</h3>
         {groups.selectedEvidence.length === 0 ? (
-          <EmptyState>No trace evidence was selected; this preparation is text-only.</EmptyState>
+          <EmptyState>No trace evidence was selected for this operation.</EmptyState>
         ) : (
           <ol className="trace-context-inspector-list trace-context-inspector-evidence-list">
             {groups.selectedEvidence.map((evidence) => (
