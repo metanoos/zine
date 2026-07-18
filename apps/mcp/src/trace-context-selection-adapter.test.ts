@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  verifyFileTraceChain,
-  type ProtocolEvent,
-} from "@zine/protocol";
+import type { ProtocolEvent, TraceEventVerifier } from "@zine/protocol";
 import {
   selectTraceContextV1,
   type TraceContextSelectionInputV1,
@@ -12,7 +9,7 @@ import {
 } from "../../../packages/trace-context/src/index.js";
 import {
   adaptVerifiedMcpFileForTraceContextSelectionV1,
-  type McpBoundProcessFactV1,
+  type McpProcessFactRequestV1,
   type McpTraceContextSelectionAdapterInputV1,
 } from "./trace-context-selection-adapter.js";
 
@@ -23,52 +20,6 @@ const VOICE_ID = "d".repeat(64);
 const ROOT_ID = "e".repeat(64);
 const PATH = "draft.md";
 const CURRENT_TEXT = "Draft revised";
-
-const HEAD_SUMMARY: TraceProcessFactV1 = {
-  kind: "step-summary",
-  transactionCount: 1,
-  rangeCount: 1,
-  insertedCodePointCount: 0,
-  deletedCodePointCount: 0,
-  firstCapturedAtMs: 300,
-  lastCapturedAtMs: 300,
-  spanMs: 0,
-  longestGapMs: 0,
-  undoCount: 0,
-  redoCount: 0,
-};
-
-const CHANGE_SUMMARY: TraceProcessFactV1 = {
-  kind: "step-summary",
-  transactionCount: 1,
-  rangeCount: 1,
-  insertedCodePointCount: 8,
-  deletedCodePointCount: 0,
-  firstCapturedAtMs: 200,
-  lastCapturedAtMs: 200,
-  spanMs: 0,
-  longestGapMs: 0,
-  undoCount: 0,
-  redoCount: 0,
-};
-
-const CHANGE_TRANSACTION: TraceProcessFactV1 = {
-  kind: "transaction",
-  transactionIndex: 0,
-  capturedAtMs: 200,
-  changeCount: 1,
-  voiceIds: [VOICE_ID],
-};
-
-const CHANGE_FACT: TraceProcessFactV1 = {
-  kind: "change",
-  transactionIndex: 0,
-  operation: "insert",
-  range: { fromUtf16: 5, toUtf16: 5 },
-  insertedCodePointCount: 8,
-  deletedCodePointCount: 0,
-  voiceId: VOICE_ID,
-};
 
 const ADAPTER_CASES = [
   {
@@ -94,17 +45,14 @@ const ADAPTER_CASES = [
   },
 ] as const;
 
-test("maps verified MCP Extend/Settle fixtures into exact selector inputs", async (t) => {
-  const fixture = await verifiedFixture();
+test("internally verifies one immutable chain and derives exact Extend/Settle selector inputs", async (t) => {
+  const fixture = await fullFixture();
   for (const adapterCase of ADAPTER_CASES) {
     await t.test(adapterCase.name, async () => {
-      const adapterInput: McpTraceContextSelectionAdapterInputV1 = {
-        ...fixture,
-        version: 1,
-        policy: "selected-trace-v1",
+      const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1({
+        ...fixture.input,
         operation: adapterCase.operation,
-      };
-      const adapted = adaptVerifiedMcpFileForTraceContextSelectionV1(adapterInput);
+      });
       const expected: TraceContextSelectionInputV1 = {
         version: 1,
         policy: "selected-trace-v1",
@@ -114,7 +62,7 @@ test("maps verified MCP Extend/Settle fixtures into exact selector inputs", asyn
           target: {
             traceId: GENESIS_ID,
             headId: HEAD_ID,
-            contentHash: fixture.read.contentHash,
+            contentHash: fixture.currentHash,
             currentText: CURRENT_TEXT,
             chosenPath: PATH,
           },
@@ -126,241 +74,208 @@ test("maps verified MCP Extend/Settle fixtures into exact selector inputs", asyn
           reservedPromptBytes: adapterCase.operation.reservedPromptBytes,
         },
         candidates: [
-          expectedCandidate(HEAD_ID, 0, 0, HEAD_SUMMARY, "summary"),
-          expectedCandidate(CHANGE_ID, 1, 0, CHANGE_SUMMARY, "summary"),
-          expectedCandidate(CHANGE_ID, 1, 0, CHANGE_TRANSACTION, "transaction:0"),
-          expectedCandidate(CHANGE_ID, 1, 0, CHANGE_FACT, "transaction:0:change:0", {
-            fromUtf16: 5,
-            toUtf16: 5,
+          expectedCandidate(HEAD_ID, 0, 0, "summary", headSummary()),
+          expectedCandidate(CHANGE_ID, 1, 0, "summary", changeSummary()),
+          expectedCandidate(CHANGE_ID, 1, 0, "transaction:0", {
+            kind: "transaction",
+            transactionIndex: 0,
+            capturedAtMs: 200,
+            changeCount: 1,
+            voiceIds: [VOICE_ID],
           }),
+          expectedCandidate(CHANGE_ID, 1, 0, "transaction:0:change:0", {
+            kind: "change",
+            transactionIndex: 0,
+            operation: "insert",
+            range: { fromUtf16: 5, toUtf16: 5 },
+            insertedCodePointCount: 8,
+            deletedCodePointCount: 0,
+            voiceId: VOICE_ID,
+          }, { fromUtf16: 5, toUtf16: 5 }),
         ],
-        limits: {
-          version: 1,
-          maxCandidates: 32,
-          maxInputBytes: 128 * 1_024,
-        },
+        limits: { version: 1, maxCandidates: 32, maxInputBytes: 128 * 1_024 },
       };
       assert.deepEqual(adapted, expected);
-      assert.deepEqual(JSON.parse(JSON.stringify(adapted)), expected);
-
       const selection = await selectTraceContextV1(adapted);
-      assert.equal(
-        selection.ok,
-        true,
-        selection.ok ? undefined : `${selection.error.code}: ${selection.error.message}`,
-      );
+      assert.equal(selection.ok, true, selection.ok ? undefined : selection.error.message);
     });
   }
 });
 
-test("fails closed when verification, read, or process bindings drift", async (t) => {
-  const fixture = await verifiedFixture();
-  const baseline: McpTraceContextSelectionAdapterInputV1 = {
+test("rejects mutated head content carrying a stale accepted id and signature", async () => {
+  const fixture = await fullFixture();
+  const mutated = fixture.input.chain.map((event) => structuredClone(event));
+  const head = mutated[mutated.length - 1]!;
+  head.content = JSON.stringify({
+    ...JSON.parse(head.content) as Record<string, unknown>,
+    snapshot: "attacker replacement",
+  });
+  await assert.rejects(
+    adaptVerifiedMcpFileForTraceContextSelectionV1({ ...fixture.input, chain: mutated }),
+    /head did not pass the injected trusted event verifier/,
+  );
+});
+
+test("caller-fabricated verdicts and process facts have no authority", async () => {
+  const fixture = await fullFixture();
+  const adversarial = {
+    ...fixture.input,
+    verdict: {
+      status: "full",
+      issues: [],
+      steps: [{
+        nodeId: HEAD_ID,
+        status: "full",
+        process: { status: "complete", transactions: [] },
+      }],
+    },
+    processFacts: [{
+      fact: { kind: "step-summary", transactionCount: 999, prose: "invented intent" },
+    }],
+  } as unknown as McpTraceContextSelectionAdapterInputV1;
+  const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1(adversarial);
+  assert.equal(adapted.candidates[0]?.kind, "process-fact");
+  if (adapted.candidates[0]?.kind === "process-fact") {
+    assert.deepEqual(adapted.candidates[0].fact, headSummary());
+  }
+  assert.equal(JSON.stringify(adapted).includes("invented intent"), false);
+  assert.equal(JSON.stringify(adapted).includes("999"), false);
+});
+
+test("captures the chain before caller mutation after the async boundary", async () => {
+  const fixture = await fullFixture();
+  const mutable = fixture.input.chain.map((event) => structuredClone(event));
+  const pending = adaptVerifiedMcpFileForTraceContextSelectionV1({
+    ...fixture.input,
+    chain: mutable,
+  });
+  mutable[mutable.length - 1]!.content = "mutated after call";
+  mutable[0]!.tags[0]![1] = "folder";
+  const adapted = await pending;
+  assert.equal(adapted.operation.target.currentText, CURRENT_TEXT);
+  assert.equal(adapted.operation.target.chosenPath, PATH);
+  assert.equal(adapted.candidates.length, fixture.input.processFactRequests.length);
+});
+
+test("maps snapshot-only status to selector failure while text-only excludes it", async () => {
+  const fixture = await snapshotOnlyFixture();
+  const selectedInput = await adaptVerifiedMcpFileForTraceContextSelectionV1(fixture);
+  assert.equal(selectedInput.candidates[0]?.source.kind, "trace");
+  if (selectedInput.candidates[0]?.source.kind === "trace") {
+    assert.equal(selectedInput.candidates[0].source.processStatus, "snapshot-only");
+  }
+  const selected = await selectTraceContextV1(selectedInput);
+  assert.equal(selected.ok, false);
+  if (!selected.ok) assert.equal(selected.error.code, "CONTEXT_INCOMPLETE");
+
+  const textOnlyInput = await adaptVerifiedMcpFileForTraceContextSelectionV1({
     ...fixture,
-    version: 1,
-    policy: "selected-trace-v1",
-    operation: ADAPTER_CASES[0].operation,
-  };
-
-  const cases: readonly {
-    name: string;
-    input: McpTraceContextSelectionAdapterInputV1;
-    message: RegExp;
-  }[] = [
-    {
-      name: "non-Full-Trace verdict",
-      input: { ...baseline, verdict: { ...baseline.verdict, status: "snapshot-only" } },
-      message: /verdict must be full/,
-    },
-    {
-      name: "verdict-to-chain mismatch",
-      input: {
-        ...baseline,
-        verdict: {
-          ...baseline.verdict,
-          steps: baseline.verdict.steps.map((step, index) =>
-            index === 1 ? { ...step, nodeId: "f".repeat(64) } : step),
-        },
-      },
-      message: /does not bind the supplied chain/,
-    },
-    {
-      name: "read snapshot mismatch",
-      input: { ...baseline, read: { ...baseline.read, currentText: "drifted" } },
-      message: /current text does not bind/,
-    },
-    {
-      name: "target head mismatch",
-      input: {
-        ...baseline,
-        processFacts: baseline.processFacts.map((binding, index) =>
-          index === 0 ? { ...binding, headId: "f".repeat(64) } : binding),
-      },
-      message: /exact target trace and head/,
-    },
-    {
-      name: "node-distance mismatch",
-      input: {
-        ...baseline,
-        processFacts: baseline.processFacts.map((binding, index) =>
-          index === 1 ? { ...binding, chainDistance: 2 } : binding),
-      },
-      message: /node and distance/,
-    },
-    {
-      name: "transaction binding mismatch",
-      input: {
-        ...baseline,
-        processFacts: baseline.processFacts.map((binding, index) =>
-          index === 2 ? { ...binding, transactionIndex: 1 } : binding),
-      },
-      message: /transaction index does not bind/,
-    },
-    {
-      name: "closed fact mismatch",
-      input: {
-        ...baseline,
-        processFacts: baseline.processFacts.map((binding, index) =>
-          index === 1
-            ? {
-                ...binding,
-                fact: { ...CHANGE_SUMMARY, insertedCodePointCount: 7 },
-              }
-            : binding),
-      },
-      message: /closed process fact does not exactly match/,
-    },
-    {
-      name: "caller-authored process prose",
-      input: {
-        ...baseline,
-        processFacts: baseline.processFacts.map((binding, index) =>
-          index === 1
-            ? {
-                ...binding,
-                fact: { ...CHANGE_SUMMARY, prose: "the writer intended this" } as TraceProcessFactV1,
-              }
-            : binding),
-      },
-      message: /closed process fact does not exactly match/,
-    },
-  ];
-
-  for (const fixtureCase of cases) {
-    await t.test(fixtureCase.name, () => {
-      assert.throws(
-        () => adaptVerifiedMcpFileForTraceContextSelectionV1(fixtureCase.input),
-        fixtureCase.message,
-      );
-    });
-  }
+    policy: "text-only-v1",
+  });
+  const textOnly = await selectTraceContextV1(textOnlyInput);
+  assert.equal(textOnly.ok, true, textOnly.ok ? undefined : textOnly.error.message);
+  if (textOnly.ok) assert.equal(textOnly.manifest.selected.length, 0);
 });
 
-test("represents verified no-op ranges only through selector-supported facts", async () => {
-  const fixture = await verifiedFixture();
-  const noOpChange: McpBoundProcessFactV1 = {
-    version: 1,
-    traceId: GENESIS_ID,
-    headId: HEAD_ID,
-    nodeId: HEAD_ID,
-    chainDistance: 0,
-    transactionIndex: 0,
-    changeIndex: 0,
-    fact: {
-      kind: "change",
+test("maps invalid ancestry to selector failure when the signed head remains valid", async () => {
+  const fixture = await fullFixture();
+  const exactVerifier = fixture.input.verifyEvent;
+  const invalidAncestorVerifier: TraceEventVerifier = (event) =>
+    event.id !== GENESIS_ID && exactVerifier(event);
+  const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1({
+    ...fixture.input,
+    verifyEvent: invalidAncestorVerifier,
+  });
+  assert.equal(adapted.candidates[0]?.source.kind, "trace");
+  if (adapted.candidates[0]?.source.kind === "trace") {
+    assert.equal(adapted.candidates[0].source.processStatus, "invalid");
+  }
+  const selected = await selectTraceContextV1(adapted);
+  assert.equal(selected.ok, false);
+  if (!selected.ok) assert.equal(selected.error.code, "INVALID_PROCESS_EVIDENCE");
+});
+
+test("no-op ranges support derived summaries and transactions but not change facts", async () => {
+  const fixture = await fullFixture();
+  const summaryAndTransaction = await adaptVerifiedMcpFileForTraceContextSelectionV1({
+    ...fixture.input,
+    processFactRequests: [
+      request(HEAD_ID, 0, "step-summary"),
+      request(HEAD_ID, 0, "transaction", 0),
+    ],
+  });
+  assert.deepEqual(summaryAndTransaction.candidates.map((candidate) => {
+    assert.equal(candidate.kind, "process-fact");
+    return candidate.kind === "process-fact" ? candidate.fact : undefined;
+  }), [
+    headSummary(),
+    {
+      kind: "transaction",
       transactionIndex: 0,
-      operation: "insert",
-      range: { fromUtf16: 0, toUtf16: 0 },
-      insertedCodePointCount: 0,
-      deletedCodePointCount: 0,
-      voiceId: VOICE_ID,
+      capturedAtMs: 300,
+      changeCount: 1,
+      voiceIds: [VOICE_ID],
     },
-  };
-  assert.throws(
-    () => adaptVerifiedMcpFileForTraceContextSelectionV1({
-      ...fixture,
-      version: 1,
-      policy: "selected-trace-v1",
-      operation: ADAPTER_CASES[0].operation,
-      processFacts: [noOpChange],
+  ]);
+
+  await assert.rejects(
+    adaptVerifiedMcpFileForTraceContextSelectionV1({
+      ...fixture.input,
+      processFactRequests: [request(HEAD_ID, 0, "change", 0, 0)],
     }),
     /no-op range has no selector change-fact shape/,
   );
-  assert.doesNotThrow(() => adaptVerifiedMcpFileForTraceContextSelectionV1({
-    ...fixture,
+});
+
+interface Fixture {
+  input: McpTraceContextSelectionAdapterInputV1;
+  currentHash: string;
+}
+
+async function fullFixture(): Promise<Fixture> {
+  const draftHash = await sha256("Draft");
+  const currentHash = await sha256(CURRENT_TEXT);
+  const chain: ProtocolEvent[] = [
+    event(GENESIS_ID, [], "Draft", draftHash, [{
+      op: "ins", from: 0, to: 0, text: "Draft", voice: VOICE_ID, t: 100, tx: 0,
+    }], "1".repeat(64)),
+    event(CHANGE_ID, [["e", GENESIS_ID, "", "prev"]], CURRENT_TEXT, currentHash, [{
+      op: "ins", from: 5, to: 5, text: " revised", voice: VOICE_ID, t: 200, tx: 0,
+    }], "2".repeat(64)),
+    event(HEAD_ID, [["e", CHANGE_ID, "", "prev"]], CURRENT_TEXT, currentHash, [{
+      op: "ins", from: 0, to: 0, text: "", voice: VOICE_ID, t: 300, tx: 0,
+    }], "3".repeat(64)),
+  ];
+  return {
+    currentHash,
+    input: {
+      version: 1,
+      policy: "selected-trace-v1",
+      operation: ADAPTER_CASES[0].operation,
+      chain,
+      verifyEvent: exactVectorVerifier(chain),
+      processFactRequests: [
+        request(HEAD_ID, 0, "step-summary"),
+        request(CHANGE_ID, 1, "step-summary"),
+        request(CHANGE_ID, 1, "transaction", 0),
+        request(CHANGE_ID, 1, "change", 0, 0),
+      ],
+      limits: { version: 1, maxCandidates: 32, maxInputBytes: 128 * 1_024 },
+    },
+  };
+}
+
+async function snapshotOnlyFixture(): Promise<McpTraceContextSelectionAdapterInputV1> {
+  const snapshot = "Readable signed snapshot";
+  const contentHash = await sha256(snapshot);
+  const chain = [event(HEAD_ID, [], snapshot, contentHash, undefined, "4".repeat(64))];
+  return {
     version: 1,
     policy: "selected-trace-v1",
     operation: ADAPTER_CASES[0].operation,
-    processFacts: [fixture.processFacts[0]!],
-  }));
-});
-
-async function verifiedFixture(): Promise<Pick<
-  McpTraceContextSelectionAdapterInputV1,
-  "read" | "chain" | "verdict" | "processFacts" | "limits"
->> {
-  const draftHash = await sha256("Draft");
-  const currentHash = await sha256(CURRENT_TEXT);
-  const chain: readonly ProtocolEvent[] = [
-    event(GENESIS_ID, [], "Draft", draftHash, [{
-      op: "ins",
-      from: 0,
-      to: 0,
-      text: "Draft",
-      voice: VOICE_ID,
-      t: 100,
-      tx: 0,
-    }], "1".repeat(64)),
-    event(CHANGE_ID, [["e", GENESIS_ID, "", "prev"]], CURRENT_TEXT, currentHash, [{
-      op: "ins",
-      from: 5,
-      to: 5,
-      text: " revised",
-      voice: VOICE_ID,
-      t: 200,
-      tx: 0,
-    }], "2".repeat(64)),
-    event(HEAD_ID, [["e", CHANGE_ID, "", "prev"]], CURRENT_TEXT, currentHash, [{
-      op: "ins",
-      from: 0,
-      to: 0,
-      text: "",
-      voice: VOICE_ID,
-      t: 300,
-      tx: 0,
-    }], "3".repeat(64)),
-  ];
-  const verdict = await verifyFileTraceChain(chain, () => true, {
-    expectedOwnerPubkey: VOICE_ID,
-    expectedRootId: ROOT_ID,
-    expectedRelativePath: PATH,
-    expectedNucleusId: HEAD_ID,
-    expectedTraceId: GENESIS_ID,
-  });
-  assert.equal(verdict.status, "full", JSON.stringify(verdict.issues));
-  const processFacts: readonly McpBoundProcessFactV1[] = [
-    binding(HEAD_ID, 0, 0, HEAD_SUMMARY),
-    binding(CHANGE_ID, 1, 0, CHANGE_SUMMARY),
-    binding(CHANGE_ID, 1, 0, CHANGE_TRANSACTION),
-    { ...binding(CHANGE_ID, 1, 0, CHANGE_FACT), changeIndex: 0 },
-  ];
-  return {
-    read: {
-      version: 1,
-      traceId: GENESIS_ID,
-      headId: HEAD_ID,
-      contentHash: currentHash,
-      currentText: CURRENT_TEXT,
-      chosenPath: PATH,
-    },
     chain,
-    verdict,
-    processFacts,
-    limits: {
-      version: 1,
-      maxCandidates: 32,
-      maxInputBytes: 128 * 1_024,
-    },
+    verifyEvent: exactVectorVerifier(chain),
+    processFactRequests: [request(HEAD_ID, 0, "step-summary")],
   };
 }
 
@@ -369,7 +284,7 @@ function event(
   previousTags: string[][],
   snapshot: string,
   contentHash: string,
-  kedits: readonly Record<string, unknown>[],
+  kedits: readonly Record<string, unknown>[] | undefined,
   operationId: string,
 ): ProtocolEvent {
   return {
@@ -377,31 +292,84 @@ function event(
     pubkey: VOICE_ID,
     created_at: 1,
     kind: 4_290,
-    tags: [
-      ["z", "file"],
-      ["f", ROOT_ID],
-      ["F", PATH],
-      ...previousTags,
-    ],
-    content: JSON.stringify({ snapshot, contentHash, operationId, kedits }),
-    sig: "signature",
+    tags: [["z", "file"], ["f", ROOT_ID], ["F", PATH], ...previousTags],
+    content: JSON.stringify({
+      snapshot,
+      contentHash,
+      operationId,
+      ...(kedits === undefined ? {} : { kedits }),
+    }),
+    sig: `signature:${id}`,
   };
 }
 
-function binding(
+function request(
   nodeId: string,
   chainDistance: number,
-  transactionIndex: number,
-  fact: TraceProcessFactV1,
-): McpBoundProcessFactV1 {
+  kind: McpProcessFactRequestV1["kind"],
+  transactionIndex?: number,
+  changeIndex?: number,
+): McpProcessFactRequestV1 {
+  if (kind === "step-summary") return { version: 1, kind, nodeId, chainDistance };
+  if (kind === "transaction") {
+    return { version: 1, kind, nodeId, chainDistance, transactionIndex: transactionIndex! };
+  }
   return {
     version: 1,
-    traceId: GENESIS_ID,
-    headId: HEAD_ID,
+    kind,
     nodeId,
     chainDistance,
-    transactionIndex,
-    fact,
+    transactionIndex: transactionIndex!,
+    changeIndex: changeIndex!,
+  };
+}
+
+function exactVectorVerifier(chain: readonly ProtocolEvent[]): TraceEventVerifier {
+  const accepted = new Set(chain.map(eventIdentity));
+  return (candidate) => accepted.has(eventIdentity(candidate));
+}
+
+function eventIdentity(event: ProtocolEvent): string {
+  return JSON.stringify([
+    event.id,
+    event.pubkey,
+    event.created_at,
+    event.kind,
+    event.tags,
+    event.content,
+    event.sig,
+  ]);
+}
+
+function headSummary(): TraceProcessFactV1 {
+  return {
+    kind: "step-summary",
+    transactionCount: 1,
+    rangeCount: 1,
+    insertedCodePointCount: 0,
+    deletedCodePointCount: 0,
+    firstCapturedAtMs: 300,
+    lastCapturedAtMs: 300,
+    spanMs: 0,
+    longestGapMs: 0,
+    undoCount: 0,
+    redoCount: 0,
+  };
+}
+
+function changeSummary(): TraceProcessFactV1 {
+  return {
+    kind: "step-summary",
+    transactionCount: 1,
+    rangeCount: 1,
+    insertedCodePointCount: 8,
+    deletedCodePointCount: 0,
+    firstCapturedAtMs: 200,
+    lastCapturedAtMs: 200,
+    spanMs: 0,
+    longestGapMs: 0,
+    undoCount: 0,
+    redoCount: 0,
   };
 }
 
@@ -409,9 +377,9 @@ function expectedCandidate(
   nodeId: string,
   chainDistance: number,
   transactionIndex: number,
-  fact: TraceProcessFactV1,
   suffix: string,
-  range?: { fromUtf16: number; toUtf16: number },
+  fact: TraceProcessFactV1,
+  range?: Utf16Range,
 ): TraceContextSelectionInputV1["candidates"][number] {
   const ref = `mcp-trace:${GENESIS_ID}:${nodeId}:${suffix}`;
   return {
@@ -434,6 +402,11 @@ function expectedCandidate(
     reasons: [chainDistance === 0 ? "prepared-head-process" : "recent-target-process"],
     fact,
   };
+}
+
+interface Utf16Range {
+  fromUtf16: number;
+  toUtf16: number;
 }
 
 async function sha256(value: string): Promise<string> {
