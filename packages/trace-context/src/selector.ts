@@ -921,15 +921,6 @@ function normalizeProcessFact(
         if (rangeCount < transactionCount) {
           return malformed(`${path}.rangeCount`, "A non-empty Step must report at least one range per transaction");
         }
-        if (insertedCodePointCount + deletedCodePointCount === 0) {
-          return malformed(path, "A non-empty Step must report at least one inserted or deleted code point");
-        }
-        if (rangeCount > insertedCodePointCount + deletedCodePointCount) {
-          return malformed(
-            `${path}.rangeCount`,
-            "Every reported range must insert or delete at least one code point",
-          );
-        }
       }
       if (undoCount + redoCount > transactionCount) {
         return malformed(path, "Undo and redo transactions cannot exceed the total transaction count");

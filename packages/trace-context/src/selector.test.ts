@@ -5,6 +5,12 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import corpusJson from "../corpus/evidence-selection-v1.json" with { type: "json" };
+import type { ProtocolEvent } from "../../protocol/src/event.js";
+import type { KEdit } from "../../protocol/src/kedit.js";
+import {
+  summarizeTraceProcess,
+  traceProcessFromEvent,
+} from "../../protocol/src/trace-process.js";
 import {
   selectTraceContextV1,
   TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1,
@@ -309,7 +315,7 @@ test("process facts reject impossible summaries, signer identities, and count re
   }
 });
 
-test("Step summaries enforce exact one/two-transaction timing and per-range edit bounds", async () => {
+test("Step summaries enforce exact one/two-transaction timing", async () => {
   const invalidFacts: readonly TraceProcessFactV1[] = [
     {
       kind: "step-summary",
@@ -334,19 +340,6 @@ test("Step summaries enforce exact one/two-transaction timing and per-range edit
       lastCapturedAtMs: 3,
       spanMs: 2,
       longestGapMs: 1,
-      undoCount: 0,
-      redoCount: 0,
-    },
-    {
-      kind: "step-summary",
-      transactionCount: 1,
-      rangeCount: 2,
-      insertedCodePointCount: 1,
-      deletedCodePointCount: 0,
-      firstCapturedAtMs: 1,
-      lastCapturedAtMs: 1,
-      spanMs: 0,
-      longestGapMs: 0,
       undoCount: 0,
       redoCount: 0,
     },
@@ -405,6 +398,61 @@ test("Step summaries enforce exact one/two-transaction timing and per-range edit
   for (const [index, fact] of validBoundaryFacts.entries()) {
     const result = await selectTraceContextV1(selectionInput([
       processFact(`aggregate-boundary-${index}`, fact),
+    ]));
+    assertSuccess(result);
+  }
+});
+
+test("Step summaries accept protocol-valid no-op KEdit ranges", async () => {
+  const noOp = protocolStepSummary("a", "a", [{
+    op: "ins",
+    from: 0,
+    to: 0,
+    text: "",
+    voice: VOICE_A,
+    t: 7,
+    tx: 0,
+  }]);
+  assert.deepEqual(noOp, {
+    kind: "step-summary",
+    transactionCount: 1,
+    rangeCount: 1,
+    insertedCodePointCount: 0,
+    deletedCodePointCount: 0,
+    firstCapturedAtMs: 7,
+    lastCapturedAtMs: 7,
+    spanMs: 0,
+    longestGapMs: 0,
+    undoCount: 0,
+    redoCount: 0,
+  });
+
+  const mixed = protocolStepSummary("a", "ax", [
+    {
+      op: "ins",
+      from: 0,
+      to: 0,
+      text: "",
+      voice: VOICE_A,
+      t: 9,
+      tx: 0,
+    },
+    {
+      op: "ins",
+      from: 1,
+      to: 1,
+      text: "x",
+      voice: VOICE_A,
+      t: 9,
+      tx: 0,
+    },
+  ]);
+  assert.equal(mixed.rangeCount, 2);
+  assert.equal(mixed.insertedCodePointCount + mixed.deletedCodePointCount, 1);
+
+  for (const [index, fact] of [noOp, mixed].entries()) {
+    const result = await selectTraceContextV1(selectionInput([
+      processFact(`protocol-no-op-${index}`, fact),
     ]));
     assertSuccess(result);
   }
@@ -952,5 +1000,37 @@ function zeroStepSummary(): Extract<TraceProcessFactV1, { kind: "step-summary" }
     longestGapMs: 0,
     undoCount: 0,
     redoCount: 0,
+  };
+}
+
+function protocolStepSummary(
+  previousSnapshot: string,
+  snapshot: string,
+  kedits: readonly KEdit[],
+): Extract<TraceProcessFactV1, { kind: "step-summary" }> {
+  const event: ProtocolEvent = {
+    id: "event",
+    pubkey: VOICE_A,
+    created_at: 0,
+    kind: 4_290,
+    tags: [],
+    content: JSON.stringify({ snapshot, kedits }),
+    sig: "signature",
+  };
+  const process = traceProcessFromEvent(event, previousSnapshot);
+  assert.equal(process.status, "complete", process.reason);
+  const summary = summarizeTraceProcess(process);
+  return {
+    kind: "step-summary",
+    transactionCount: summary.transactions,
+    rangeCount: summary.ranges,
+    insertedCodePointCount: summary.inserted,
+    deletedCodePointCount: summary.deleted,
+    ...(summary.firstAt !== null ? { firstCapturedAtMs: summary.firstAt } : {}),
+    ...(summary.lastAt !== null ? { lastCapturedAtMs: summary.lastAt } : {}),
+    spanMs: summary.spanMs,
+    longestGapMs: summary.longestGapMs,
+    undoCount: summary.undo,
+    redoCount: summary.redo,
   };
 }
