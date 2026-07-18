@@ -138,19 +138,29 @@ server, and a private, never-published ACL decides who may connect, read, or
 write. Reachability degrades before identity ever does: lose Tor and you lose
 metadata privacy, never your name.
 
-Citation is how strangers connect. A minted coin is one exact passage under
-one key; a coin type — the same bytes wherever they appear — is keyed by
-content hash. Two writers who independently mint or cite the same distinctive
-words can therefore find each other without sharing a platform, a relay, or a
-peer: today through a mutual peer who can read both chains and brokers the
-introduction; later — only if organic co-citation density appears — through a
-planned Kademlia rendezvous that maps a content hash to the signed events
-citing it. Admission stays local either way: a process-evidence vet raises
-the cost of fabricated histories, a human makes the final call, and raw
-supply never becomes reputation.
+A **coin** is how strangers find each other. When a phrase strikes you as
+worth keeping, you mint it: one deliberate gesture — Step, Publish, and
+Attest at once — that strikes the exact text into an immutable,
+single-checkpoint zine under your key. Minting claims salience, not
+authorship or agreement: *these words carry currency for me.* Coins exist
+for rendezvous. A coin type is keyed by the exact content hash, so the
+planned Kademlia DHT can answer one question — *who else minted or cited
+these words?* — and two writers who share no platform, relay, or peer can
+surface each other. The same match works today, more slowly, through a
+mutual peer who can read both chains.
+
+The economics are deliberately spam-resistant. A coin everyone holds carries
+no signal, so there is no payoff in squatting the popular phrase; the signal
+is several independently shared, moderately rare coins, and raw supply never
+becomes reputation. A match is only an introduction, never a connection: you
+and your AI read the stranger's published zines — the writing and the trace
+behind it — and decide whether the resonance is real. If it isn't, swipe
+left; nothing enters your `peers.json` without the process-evidence vet and
+your explicit choice.
 
 The mutual-peer path is implemented and tested; the global DHT is a dormant
-design. The [transport](protocol/transport.md) and
+design, gated on real citation density. The
+[transport](protocol/transport.md) and
 [rendezvous](protocol/rendezvous.md) specifications carry the exact rules.
 
 ## What exists today
