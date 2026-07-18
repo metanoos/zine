@@ -23,6 +23,7 @@ const OTHER_SECRET = Uint8Array.from([
   0, 0, 0, 0, 0, 0, 0, 2,
 ]);
 const ROOT = "f".repeat(64);
+const TEST_OPERATION_ID = "1".repeat(64);
 
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -54,6 +55,7 @@ async function fileNode(
     content: JSON.stringify({
       snapshot,
       contentHash: contentHash ?? await sha256Hex(snapshot),
+      operationId: TEST_OPERATION_ID,
       kedits: previousSnapshot === snapshot
         ? []
         : [{

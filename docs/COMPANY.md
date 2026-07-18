@@ -27,6 +27,20 @@ This is compatible with sovereignty because the paid layer is optional. A
 press can write to its local relay, self-host a remote, and verify events
 without phoning home.
 
+There is one service sovereignty structurally cannot self-provide:
+**independent witness**. A sovereign press can author, sign, store, and verify
+its own work, but a press-signed record of a model call is still the
+operator's assertion. A neutral party can witness request/response commitments
+in a transparency log, sign open-weight inference it actually executed, or
+host the no-install verifier where a shared proof opens in a reader's browser.
+The protocol makes writing sovereign; the company makes reading trustworthy.
+
+For organizations, the same boundary separates what is sold from what is
+never taken: record custody, not key custody. An organization gets relay
+custody of everything published to it, its own countersigning attestation
+over work it stands behind, and ACL-based offboarding. Author keys remain
+personal and are never escrowed.
+
 ## What is open, what is paid
 
 | Always open | Optional paid layer |
@@ -35,7 +49,7 @@ without phoning home.
 | Local trace-context compiler, inspection, and BYOK model use | Organization context policy, retention, and review administration |
 | Local desktop and MCP presses | Organization onboarding, support, and policy controls |
 | Self-hosted compatible relays | Team key, writer, peer, and ACL management |
-| Step, Send, Attest, Mint, Cite, fork, and merge | Hosted anchoring cadence and proof retention |
+| Step, Publish, Attest, Mint, Cite, fork, and merge | Hosted anchoring cadence and proof retention |
 | Reader-side verification algorithms | No-install verification portal and exportable reports |
 | Self-hosted process evidence | Opt-in calibration service over a consented corpus |
 | Future open rendezvous wire | Operated bootstrap infrastructure, if usage justifies it |
@@ -55,6 +69,7 @@ workflow, and calibrated interpretation around commodity storage.
 | DHT bootstrap needs operator-provided super-peers | Operated bootstrap | Deferred with the global DHT |
 | Verification is bounded and reader-side | Public verifier and exportable evidence report | Local bundle/report implemented; public verifier is not |
 | Timing and graph models need real calibration | Opt-in research corpus and calibrated policy models | Defaults exist; calibration does not |
+| Press-signed model-call records are operator assertions | Independent witness: transparency-log inclusion proofs and attested open-weight inference | Not implemented; the operation records reserve the countersignature seam |
 
 ## How pricing would work
 
@@ -102,6 +117,8 @@ These hold regardless of business model:
 - Attribution remains asserted or verified according to available evidence.
 - Zine never claims to prove humanness, truth, or copyright ownership.
 - Contribution to calibration datasets is explicit and opt-in.
+- Author keys are never escrowed or organization-owned; organizations receive
+  record custody and countersignature, never key custody.
 - The press does not require a company account to create or verify core
   trace events.
 

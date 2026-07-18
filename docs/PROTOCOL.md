@@ -21,10 +21,10 @@ process is gone. Ordinary version history does not reliably say what a model
 saw, which passages it produced, what a person accepted, or where copied
 material came from. Looking only at the final text is too late.
 
-A **trace** is a file or folder that keeps a high-fidelity edit history. You
-can play it back and see how the work changed, not just where it ended. Each
-deliberate checkpoint is signed and self-contained, so another reader can
-inspect the evidence without trusting one editor account.
+A **zine** is a file or folder together with its high-fidelity **trace**. You
+can play a file zine or a whole folder subtree and see how the work changed,
+not just where it ended. Each checkpoint is signed and self-contained,
+so another reader can inspect the evidence without trusting one editor account.
 
 That history gives human and LLM readers something plain text loses: process.
 You cannot fully explain your taste in phrasing, especially when a sentence is
@@ -55,9 +55,14 @@ The model writes into the same files you do, so its work enters the record as
 well. Fonts and colors distinguish interleaved voices. The result shows who
 wrote what and how the text came to be.
 
-`Ctrl/Cmd+S` places a **Step** in the trace. Each Step batches the editor-action
-log into a signed checkpoint; no event fires per keystroke. Send later
-publishes that exact checkpoint, including its high-resolution action log, for
+`Ctrl/Cmd+S` places a **Step** in the selected zine's trace. A file Step batches
+the editor-action log into one signed checkpoint. A folder Step — up to the
+topmost Root — pins an exact recursive frontier after dirty descendants are
+durably checkpointed.
+Automatic child-head roll-ups are signed derived checkpoints, not extra author
+Steps. No event fires per keystroke. Publish — still named Send on the wire
+and in the current implementation until the schema cut — later makes one
+exact checkpoint reachable, including its high-resolution action log, for
 playback and process vetting.
 
 Zine is to authorship provenance what Git is to source history. The protocol
@@ -77,10 +82,10 @@ An authorized `(( double-parenthesis directive ))` is intended as a one-shot
 instruction to a prepared AI operation. That directive grammar and its local
 manual-origin authority are press behavior, not new wire semantics.
 
-**Zine** is the press; a **zine** is a published trace whose exact sent
-version you have attested. The attestation is a separate, signed commitment
-and may include a note or location. Step history may also carry completed
-Bitcoin time anchors.
+**Zine** is the reference press; a **zine** is any file or folder together with
+its trace, whether local or reachable. Publishing changes reachability and
+attestation records a separate signed commitment; neither creates the zine.
+Step history may also carry completed Bitcoin time anchors.
 
 Forking begins a proposal under your key. Merging accepts chosen work into
 your chain. To fork is to propose; to merge is to accept.
@@ -97,9 +102,11 @@ until real usage produces enough citation density to justify it.
 
 ## Model
 
-One primitive: a **trace**, a body carried on an append-only chain of signed
-checkpoints. Its body is either file text or an ordered folder membership
-list. Files and folders are both traces.
+One primitive: a **zine**, whose file or folder body is carried with an
+append-only trace of signed checkpoints. A file body is Markdown text. A folder body
+is an ordered direct-membership list whose pinned child heads recursively
+define the exact subtree frontier. **Root**, the topmost folder, is an
+ordinary folder zine; there is no separate project object.
 
 Each checkpoint is a **node** (Nostr kind `4290`, a signed event). Two things
 make a node unlike an ordinary revision:
@@ -130,11 +137,10 @@ words can find each other (`#x`) without being mistaken for one citing the
 other. The contentHash is addressing; the genesis id is identity. Never
 confuse them.
 
-A **coin** is an immutable, single-node file trace struck from a passage. It
+A **coin** is an immutable, single-node file zine struck from a passage. It
 can be exported as plain text. Editing it creates a mutable fork and leaves the
 coin untouched. A **press** is the editor, not a server. A **relay** stores the
-press's Nostr events, locally on `127.0.0.1` or remotely. A **zine** is a
-published trace, usually a folder.
+press's Nostr events, locally on `127.0.0.1` or remotely.
 
 > Run your own press = write in your own copy of the interface. It is
 > sovereign by default, because it already steps to a relay of its own.
@@ -149,22 +155,31 @@ genesis.
 
 Three words define the author-facing protocol.
 
-**Step.** `Cmd+S` signs one checkpoint and writes it to the local relay. A Step
-is frequent, deliberate, and local. Every explicit Step creates exactly one
-checkpoint, even when the body is unchanged. Background observations may join
-it, but no event fires per keystroke. This bounded cadence makes full snapshots
-affordable. The protocol uses *Step*, not *save*, to keep it distinct from Send.
+**Step.** `Cmd+S` deliberately checkpoints the selected zine and writes the
+result to the local relay. A file Step creates one explicit checkpoint, even
+when its body is unchanged. A folder or Root Step checkpoints dirty descendants
+and then creates exactly one explicit checkpoint on the selected folder.
+Signed `child-advance` checkpoints propagate changed child heads through
+ancestors, but Replay collapses those derived nodes beneath the one originating
+gesture. Background observations may join a checkpoint, but no event fires per
+keystroke. This bounded cadence makes full snapshots affordable. The protocol
+uses *Step*, not *save*, to keep it distinct from Publish.
 
-**Send.** Open the current state for discussion. If the buffer has changed,
-Send first Steps it; otherwise it reuses the latest Step. It then fans that
-node out to write-enabled external relays. Most Steps are never Sent, so
-drafts, experiments, and dead ends remain local. Send publishes everything the
-checkpoint carries, including its high-resolution editor-action log when
+Direct membership changes are structural checkpoints. An existing child's new
+head is an `advance`, never another `add`. Cross-parent moves share one operation
+id across source removal, target addition, and ancestor propagation so readers
+can recognize and recover an incomplete multi-event gesture.
+
+**Publish.** Open the current state for discussion. If the buffer has changed,
+Publish first Steps it; otherwise it reuses the latest Step. It then fans that
+node out to write-enabled external relays. Most Steps are never published, so
+drafts, experiments, and dead ends remain local. Publish discloses everything
+the checkpoint carries, including its high-resolution editor-action log when
 present. That log enables typo-level playback and process vetting, while its
-timing rhythm can also fingerprint an author. Send is therefore a content and
-identity disclosure.
+timing rhythm can also fingerprint an author. Publish is therefore a content
+and identity disclosure.
 
-**Attest.** Mark one *sent* node as a position you stand behind. Attestation is
+**Attest.** Mark one *published* node as a position you stand behind. Attestation is
 optional and later: discussion is common; commitment is rare. A local-only
 node cannot be attested because readers could not fetch the claimed position.
 On the wire, Attest creates an append-only `TraceAttestation`. It targets the
@@ -172,13 +187,13 @@ exact node without advancing that node's chain.
 
 ```
 Step → local checkpoint
-Send → Step the present state + make it reachable for discussion
-Sent node ── optional, later ──→ Attest (stand behind this version)
+Publish → Step the present state + make it reachable for discussion
+Published node ── optional, later ──→ Attest (stand behind this version)
 ```
 
-Send may create a Step; Attest targets a previously Sent node. This is a
-partial order, not a funnel where every Step becomes Sent and every Send
-becomes Attested.
+Publish may create a Step; Attest targets a previously published node. This
+is a partial order, not a funnel where every Step becomes published and every
+published node becomes attested.
 
 **Distributed anteriority: experimental Step anchors.** A Step may submit its
 node id to OpenTimestamps without blocking. The pending receipt stays local.
@@ -272,8 +287,8 @@ misrepresented as physical typing.
 The snapshot remains the self-contained materialized body, so a node can still
 be read in one fetch. But a missing, malformed, or replay-mismatched KEdit log
 is not a valid Full Trace: readers may show the signed body only with the
-process record marked nonconforming. A Step keeps this record local; Send
-publishes it, including intermediate text and timing that may be identifying.
+process record marked nonconforming. A Step keeps this record local; Publish
+discloses it, including intermediate text and timing that may be identifying.
 
 **Per-delta attribution (primary).** A body-edit delta may carry an `author`
 index into the node's local `voices` table. Without it, the delta belongs to
@@ -378,7 +393,7 @@ the spec keeps non-normative on purpose.
 ## Rendezvous & vetting
 
 Two people who have never met, share no peer, and share no relay may find each
-other because their Sent traces cite coins with the same content. The
+other because their published traces cite coins with the same content. The
 recipient then evaluates the other signer's process evidence before deciding
 whether to admit that key.
 
@@ -390,7 +405,8 @@ target. `H` clusters independent mints; it is an index coordinate, not another
 citation type.
 
 **The planned DHT carries event pointers, not content or private addresses.** A
-Kademlia DHT would answer one question: *which Sent events cite content `H`?*
+Kademlia DHT would answer one question: *which published events cite content
+`H`?*
 Each value is `{eventId, relayUrl}` for a signed carrying node on a
 stranger-readable relay. A querier fetches and verifies the carrying event,
 its `q`, and the target's `x` or body hash before evaluating the candidate.
@@ -399,9 +415,9 @@ designed but not implemented.
 
 Two paths can produce a match. In the trust-bounded v1, a mutual peer who can
 read both chains sees the co-citation and brokers an introduction. The planned
-global DHT is an accelerator: Sending a carrying node to a stranger-readable
-relay would publish its pointer under each verified target's `H`. Citation
-records the relation; Send controls its reachability.
+global DHT is an accelerator: publishing a carrying node to a
+stranger-readable relay would place its pointer under each verified target's
+`H`. Citation records the relation; Publish controls its reachability.
 
 **The vet — process, not prose.** Fluent prose is easy to imitate, so the vet
 looks instead at the timestamped revision graph: anchors, edit timing, and the
@@ -434,8 +450,8 @@ The pipeline uses distinct verbs because the commitments are distinct:
 | stage | gesture | claim |
 |---|---|---|
 | cite | mint if needed, then cite a trace | "this trace is in relation to mine" |
-| discuss | send the carrying node | "make this fetchable" |
-| publish | attest a sent node | "this is my position" |
+| discuss | publish the carrying node | "make this fetchable" |
+| commit | attest a published node | "this is my position" |
 | admission | add a peer locally | "this key may read my relay" |
 
 ---

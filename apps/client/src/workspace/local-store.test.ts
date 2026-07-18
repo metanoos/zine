@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { loadLocalFolder, loadPad, mirrorPad, saveLocalFile } from "./local-store.js";
+import {
+  clearFolderStepOperation,
+  loadLocalFolder,
+  loadPad,
+  mirrorPad,
+  pendingFolderStepOperation,
+  saveLocalFile,
+  stageFolderStepOperation,
+} from "./local-store.js";
 
 const values = new Map<string, string>();
 // @ts-expect-error minimal storage surface for pure persistence tests
@@ -52,4 +60,22 @@ test("crash pads preserve stable trace identity with the buffered head", () => {
 
   assert.equal(loadPad("root")?.["draft.md"]?.nodeId, "head-2");
   assert.equal(loadPad("root")?.["draft.md"]?.traceId, "genesis-1");
+});
+
+test("staged file and recursive folder operations survive reload until cleared", () => {
+  values.clear();
+  const operationId = "ab".repeat(32);
+  saveLocalFile("root", "draft.md", {
+    content: "draft",
+    tags: [],
+    nodeId: "",
+    pendingOperationId: operationId,
+  });
+  stageFolderStepOperation("root", "notes", operationId);
+
+  assert.equal(loadLocalFolder("root")?.files["draft.md"]?.pendingOperationId, operationId);
+  assert.equal(pendingFolderStepOperation("root", "notes"), operationId);
+  clearFolderStepOperation("root", "notes");
+  assert.equal(pendingFolderStepOperation("root", "notes"), null);
+  assert.equal(loadLocalFolder("root")?.files["draft.md"]?.pendingOperationId, operationId);
 });

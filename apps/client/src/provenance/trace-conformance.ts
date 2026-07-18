@@ -4,9 +4,11 @@ import { verifyEvent } from "nostr-tools/pure";
 import {
   inspectFileTraceNucleus as inspectProtocolFileTraceNucleus,
   verifyFileTraceChain as verifyProtocolFileTraceChain,
+  verifyFolderTraceChain as verifyProtocolFolderTraceChain,
   type FileTraceInspection as ProtocolFileTraceInspection,
   type TraceConformanceVerdict,
   type VerifyFileTraceOptions,
+  type VerifyFolderTraceOptions,
 } from "@zine/protocol";
 
 export {
@@ -20,6 +22,7 @@ export type {
   TraceConformanceStep,
   TraceConformanceVerdict,
   VerifyFileTraceOptions,
+  VerifyFolderTraceOptions,
 } from "@zine/protocol";
 
 export type TraceEventLoader = (nodeId: string) => Promise<Event | null>;
@@ -33,6 +36,13 @@ export function verifyFileTraceChain(
   options: VerifyFileTraceOptions = {},
 ): Promise<TraceConformanceVerdict> {
   return verifyProtocolFileTraceChain(chain, verifyEvent, options);
+}
+
+export function verifyFolderTraceChain(
+  chain: readonly Event[],
+  options: VerifyFolderTraceOptions = {},
+): Promise<TraceConformanceVerdict> {
+  return verifyProtocolFolderTraceChain(chain, verifyEvent, options);
 }
 
 export async function inspectFileTraceNucleus(

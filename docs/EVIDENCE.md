@@ -8,15 +8,16 @@ hypotheses. Last updated 2026-07-17.
 
 | Capability | State | How to check |
 |---|---|---|
-| Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke |
+| Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke; folder heads carry direct manifests and propagate recursively toward Root |
+| Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, membership transition, hash, lineage, and operation id; client tests exercise add versus advance, explicit folder/Root Step plumbing, durable retry ids, nested AI context, and Replay roll-up collapse. Fixed cross-runtime folder vectors and explicit crash-boundary real-relay fixtures remain hardening work |
 | Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
-| Step, Send, Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
+| Step, Publish (wire name Send), Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
 | Desktop Stronghold storage for signing and provider secrets | Implemented on desktop; browser remains read-only | `secret-store.test.ts`, `secret-migration.test.ts`, key/model store tests, and the Tauri Stronghold shell |
 | Headless MCP press with its own voice key and permanent profile Root | Implemented | Offline stdio smoke proves zero-folder cold start, exact signed-event outbox, raw node reads, and Root/key reuse; isolated real-relay integration flushes a queued event unchanged, preserves optional source forks, and exercises external Send |
 | Prepared desktop MODEL operations and approval gating | Implemented for direct single-shot gestures; not yet enforced on every live model call | `prepared-operation.test.ts`, `context-snapshot.test.ts`, `model-operation-executor.test.ts`, and `llm-prepared.test.ts`; the separate agent loop still uses its own transport, and `preparedRequestHash` is not yet stored in Step metadata |
-| Current text plus structured trace context in desktop prompts | Implemented as a client-local compatibility baseline | Direct operations gather current file/folder text and a chronological process log through `context-block.ts`, `context-snapshot.ts`, and `prepared-operation.ts`; there is no shared task-specific evidence selector, scoped memory, cross-press rendered-manifest contract, or durable context binding yet |
-| Shared authoring-syntax kernel and desktop Extend/Settle adapter | Initial deterministic slice implemented; authority is current-editor-session-only | `packages/trace-context` pins UTF-16 parsing, protected precedence, exact operation clipping, authority failures, directive markers, local excerpts, malformed syntax, and generated 0/100/1,000/10,000-candidate scale fixtures. Desktop tests cover manual versus paste/drop/MODEL/undo/reload authority, exact prepared identity, protected-output rejection, atomic accepted-success cleanup, and inert legacy behavior. Persisted authority, promotion, durable consumption receipts, crash recovery, other operations, and MCP parity remain deferred |
+| Current text plus structured trace context in desktop prompts | Implemented as a client-local compatibility baseline | Direct operations gather current file/folder text and a chronological process log through `context-block.ts`, `context-snapshot.ts`, and `prepared-operation.ts`; there is no shared task-specific selector, scoped memory, cross-press fixture contract, or durable context binding yet |
+| Shared authoring-syntax kernel and a desktop adapter for the Extend (continuation) and Settle (revision) operations | Initial deterministic slice implemented; authority is current-editor-session-only | `packages/trace-context` pins UTF-16 parsing, protected precedence, exact operation clipping, authority failures, directive markers, local excerpts, malformed syntax, and generated 0/100/1,000/10,000-candidate scale fixtures. Desktop tests cover manual versus paste/drop/MODEL/undo/reload authority, exact prepared identity, protected-output rejection, atomic accepted-success cleanup, and inert legacy behavior. Persisted authority, promotion, durable consumption receipts, crash recovery, other operations, and MCP parity remain deferred |
 | Per-delta human/model attribution | Implemented | Attribution regression suite; trust status remains asserted unless corroborated through a signed seam |
 | Fork and merge | Implemented for owned recursive destinations and current top-level foreign flows | Nested Scan/adoption/fork tests plus merge and ownership tests; recursive fork-on-write through an already-foreign folder remains deferred |
 | Mutual-peer co-citation and process vet | Implemented and tested | `co-citation.ts`, `vet.ts`, `vet-walker.ts`, and their tests |
@@ -51,9 +52,12 @@ npm run verify:relay   # real Step/Send/Attest/Mint/Cite flow
 
 Zine is pivoting around this thesis:
 
-> For at least some writing tasks, an AI given current text plus relevant,
-> inspectable trace evidence will help the writer better than an AI given the
-> current text alone.
+> For at least some writing tasks, an AI given current scoped content plus
+> relevant, inspectable trace evidence will help the writer better than an AI
+> given the current content alone.
+
+At file scope, current content is Markdown text. At folder or Root scope, it is
+the recursive content tree pinned by that zine's exact child frontier.
 
 This is a founder-conviction product decision and an unproven empirical claim.
 “Better” means outcomes such as counterbalanced writer preference, less editing
@@ -119,6 +123,8 @@ The normative trust posture is in
 ## What we have not proven yet
 
 - Trace-aware assistance beating text-only assistance on real writing outcomes.
+- Folder- or Root-level content plus trace improving cross-file work over an
+  equal-budget collection of current file text alone.
 - Selected trace beating an equal-budget bounded chronological history.
 - File-local memory adding longitudinal value beyond selected trace alone.
 - Writers reliably understanding, correcting, and trusting selected context.
@@ -134,6 +140,10 @@ The normative trust posture is in
 - A second independent implementation of the wire format.
 - A consented corpus large enough to calibrate timing, revision-shape, and
   fuzzy-match models.
+- Independently minting the same distinctive coin type predicting broader
+  corpus affinity after controlling for topic and popularity.
+- Longitudinal coherence or conditional-compression features adding calibrated
+  vetting value without being mistaken for proof of humanity or identity.
 - Organic co-citation density sufficient to justify global rendezvous work.
 - Clean-machine release installation on every supported desktop platform.
 

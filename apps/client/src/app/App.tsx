@@ -1,6 +1,7 @@
 import { Component, Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MutableRefObject, ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { createTraceOperationId, isTraceOperationId } from "@zine/protocol";
 import {
   Compartment,
   EditorState,
@@ -41,6 +42,7 @@ import {
   publishEdit,
   publishDirectCoin,
   publishHardenedSpan,
+  operationIdFromNode,
   sha256HexLocal,
   sendHistoricalStep,
   sendStep,
@@ -269,7 +271,18 @@ import {
   type LocalFolderTree,
   type StagedMerge,
 } from "../workspace/workspace-local.js";
-import { loadLocalFolder, saveLocalFile, mirrorPad, clearPadPath, loadPad, loadLocalShielded, saveLocalShielded } from "../workspace/local-store.js";
+import {
+  clearFolderStepOperation,
+  clearPadPath,
+  loadLocalFolder,
+  loadLocalShielded,
+  loadPad,
+  mirrorPad,
+  pendingFolderStepOperation,
+  saveLocalFile,
+  saveLocalShielded,
+  stageFolderStepOperation,
+} from "../workspace/local-store.js";
 import { restoreCrashPadFile } from "../workspace/crash-pad-restore.js";
 import { resolvePostWriteTraceId } from "../workspace/stepped-file-identity.js";
 import {
@@ -360,6 +373,7 @@ import {
 } from "../replay/replay-timing.js";
 import {
   buildReplayTimeline,
+  collapseDerivedFolderCheckpoints,
   emptyReplayDisplay,
   folderReplayState,
   replayFrameIndexAtOrBefore,
@@ -376,6 +390,7 @@ import {
   combineTraceConformance,
   traceConformanceLabel,
   verifyFileTraceChain,
+  verifyFolderTraceChain,
   type TraceConformanceVerdict,
 } from "../provenance/trace-conformance.js";
 import {
@@ -533,7 +548,7 @@ interface CoinClipboardTicket {
 // text as of this step (the chain replayed genesis→this node), precomputed at
 // `beginReplay` so stepping is O(1) per step. The step list is ordered by
 // `steppedAtMs` ascending and interleaves every file's steps AND every folder
-// membership event (kind 4292: add/remove/rename).
+// folder checkpoint (kind 4290: add/remove/rename/advance).
 interface ReplayStep {
   event: Event;
   relativePath: string;
@@ -553,7 +568,7 @@ interface ReplayStep {
   changeRange: { from: number; to: number } | null;
   /** Present when this is a folder node carrying a structural membership
    *  change. It labels the Step without turning the folder into a document. */
-  membership?: { type: "add" | "remove" | "rename"; path: string };
+  membership?: { type: "add" | "remove" | "rename" | "advance"; path: string };
   /** Signed folder membership plus buffered focus observations. Structural
    *  replay state only: folders never become panel tabs. */
   folder?: ReplayFolderState;
@@ -966,9 +981,18 @@ function folderMembershipFromEvent(
     (candidate) =>
       candidate.type === "add" ||
       candidate.type === "remove" ||
-      candidate.type === "rename",
+      candidate.type === "rename" ||
+      candidate.type === "advance",
   );
-  if (!delta || (delta.type !== "add" && delta.type !== "remove" && delta.type !== "rename")) {
+  if (
+    !delta ||
+    (
+      delta.type !== "add" &&
+      delta.type !== "remove" &&
+      delta.type !== "rename" &&
+      delta.type !== "advance"
+    )
+  ) {
     return undefined;
   }
   const relativePath = delta.type === "rename" ? delta.toPath : delta.relativePath;
@@ -1779,6 +1803,7 @@ function Sidebar({
   onMintCoin,
   onScan,
   onReify,
+  onStepFolder,
   creating,
   createError,
   onCreateStart,
@@ -1836,6 +1861,8 @@ function Sidebar({
   onScan: (kind: "file" | "folder") => void;
   /** Reify one explicitly chosen tree file or folder to the filesystem. */
   onReify: (target: ScopeRef) => void;
+  /** Recursively flush dirty descendants, then append one explicit folder Step. */
+  onStepFolder: (path: string) => void;
   creating: Creating | null;
   createError: string | null;
   onCreateStart: (kind: "file" | "folder", parent?: string) => void;
@@ -2506,6 +2533,22 @@ function Sidebar({
               );
             }
 
+            if (menu.stepFolder) {
+              groups.push(
+                <button
+                  key="step-folder"
+                  type="button"
+                  className="ctx-menu-item"
+                  onClick={() => {
+                    setCtxMenu(null);
+                    onStepFolder(path);
+                  }}
+                >
+                  {path === ROOT ? "Step Root" : "Step Folder"}
+                </button>,
+              );
+            }
+
             const inScan = topLevelSelected().filter(
               (path) => isScan(path) && path !== SCAN,
             );
@@ -2865,7 +2908,15 @@ function replayActionLabel(
         : step.membership.type;
     } else {
       const path = step.folder.path === ROOT ? rootLabel : step.folder.path;
-      detail = folderReplay ? `${path}/ · Genesis` : "Genesis";
+      const cause = step.meta.folderCheckpoint?.cause;
+      const label = cause === "explicit-step"
+        ? "Explicit Step"
+        : cause === "metadata-change"
+          ? "Metadata"
+          : cause === "child-advance"
+            ? "Child advance"
+            : "Genesis";
+      detail = folderReplay ? `${path}/ · ${label}` : label;
     }
   } else if (frame?.reachesStep && frame.path) {
     detail = folderReplay ? frame.path : undefined;
@@ -7587,7 +7638,13 @@ function useProvenance(
     }
   }
 
-  async function stepFile(path: string, signer?: Uint8Array, localOnly?: boolean, force?: boolean): Promise<string | undefined> {
+  async function stepFile(
+    path: string,
+    signer?: Uint8Array,
+    localOnly?: boolean,
+    force?: boolean,
+    operationId?: string,
+  ): Promise<string | undefined> {
     if (!folder) return;
     // Private system entries are immutable in place. Mint and Scan become
     // editable only through a lineage-preserving fork into Root; Oblivion must
@@ -7676,6 +7733,7 @@ function useProvenance(
         kedits.length > 0 ? kedits : undefined,
         localOnly,
         force,
+        operationId,
       );
       // The head and stable trace identity are distinct after Step 0. The
       // local workspace persists both before writeFile resolves; carry that
@@ -7765,6 +7823,7 @@ function useProvenance(
       kedits?: KEdit[],
       localOnly?: boolean,
       force?: boolean,
+      operationId?: string,
     ) => Promise<string>
   >(async () => "");
   // Seed the last-stepped map for files loaded from disk/relay. Called from
@@ -8616,8 +8675,8 @@ function App() {
   // Thread the backend's write fn into the hook so stepFile routes through the
   // right storage (disk on desktop, localStorage on webapp) instead of the
   // hardwired Tauri disk path.
-  writeRef.current = (path, content, tags, signer, runs, citationIds, kedits, localOnly, force) => {
-    return backendRef.current.writeFile(path, content, tags, signer, runs, undefined, citationIds, kedits, localOnly, force);
+  writeRef.current = (path, content, tags, signer, runs, citationIds, kedits, localOnly, force, operationId) => {
+    return backendRef.current.writeFile(path, content, tags, signer, runs, undefined, citationIds, kedits, localOnly, force, operationId);
   };
   // Branch detection: rescan incoming forks / sibling heads for the active file.
   // Fires on folder switch, tab focus, foreign-flag change, and after steps that
@@ -9354,7 +9413,7 @@ function App() {
           contentHash: parsed.contentHash ?? "",
         },
         signer,
-        { localOnly: true },
+        { localOnly: true, operationId: operationIdFromNode(coin) },
       );
       const coinVoice = signer ? getPublicKey(signer) : authorPubkey;
       const runs: Run[] = [{ voice: coinVoice, text: phrase }];
@@ -12276,11 +12335,12 @@ function App() {
         storagePath: SCAN,
       };
       for (const c of created) {
+        const operationId = createTraceOperationId();
         await ensureLocalTreeFolderPath(
           scanTree,
           parentPath(c.path),
           folderSigner,
-          { localOnly: true },
+          { localOnly: true, operationId },
         );
         const coordinate = localTreeFolderCoordinate(scanTree, c.path);
         const directFolderOwner = await fetchFolderOwner(coordinate.folderId);
@@ -12303,6 +12363,7 @@ function App() {
           signer,
           localOnly: true,
           kedits: synthesizeKEditTransition("", c.content, voice),
+          operationId,
         });
         const folderHead = await upsertManifestEntry(
           coordinate.folderId,
@@ -12313,7 +12374,7 @@ function App() {
             contentHash,
           },
           directFolderSigner,
-          { localOnly: true },
+          { localOnly: true, operationId },
         );
         await propagateLocalTreeFolderHead(
           scanTree,
@@ -13363,6 +13424,9 @@ function App() {
         const folderNodes = await fetchFolderNodes(traceId);
         const chain = orderReplayTraceChain(folderNodes, traceId);
         if (chain.length === 0) continue;
+        conformanceVerdicts.push(await verifyFolderTraceChain(chain, {
+          expectedTraceId: traceId,
+        }));
         chains[`folder:${traceId}`] = chain;
         for (const event of chain) {
           steps.push(folderReplayStep(event, mounted.path));
@@ -13376,11 +13440,12 @@ function App() {
     // Step-time order, ascending. stable tie-break keeps same-ms steps in
     // their original activity order rather than shuffling them.
     steps.sort((a, b) => a.meta.steppedAtMs - b.meta.steppedAtMs);
+    const visibleSteps = collapseDerivedFolderCheckpoints(steps);
     // Bootstrap the transport at the newest real Step. This does not open or
     // alter an editor tab; the replay panel is created only by a replay gesture.
-    const last = steps.length - 1;
-    setReplay({ steps, index: last });
-    replayRef.current = { steps, index: last };
+    const last = visibleSteps.length - 1;
+    setReplay({ steps: visibleSteps, index: last });
+    replayRef.current = { steps: visibleSteps, index: last };
     replayChainsRef.current = chains;
     setReplayConformance(
       conformanceVerdicts.length > 0
@@ -13398,7 +13463,7 @@ function App() {
     setReplayTiming(
       buildReplayTiming([
         ...timingFrames.map((frame) => frame.at),
-        ...steps.map((step) => step.meta.steppedAtMs),
+        ...visibleSteps.map((step) => step.meta.steppedAtMs),
       ], timingFrames.map((frame) => frame.at)),
     );
     // Attribution debug: with localStorage `zine.debug.attribution` set,
@@ -14826,6 +14891,33 @@ function App() {
     }
   }
 
+  /** Step one recursive zine. Dirty descendant file buffers land first under
+   * one durable operation id; the selected folder then receives the final
+   * explicit landmark and its ancestors receive derived roll-ups. */
+  function stepFolderPath(path: string): void {
+    if (!folder || replayActiveRef.current) return;
+    const pending = pendingFolderStepOperation(folder.id, path);
+    const operationId = isTraceOperationId(pending)
+      ? pending
+      : createTraceOperationId();
+    stageFolderStepOperation(folder.id, path, operationId);
+    const dirtyDescendants = [...unsteppedPathSetRef.current]
+      .filter((candidate) =>
+        path === ROOT ? true : candidate.startsWith(`${path}/`),
+      )
+      .sort((left, right) => left.localeCompare(right));
+    void (async () => {
+      for (const descendant of dirtyDescendants) {
+        await stepFile(descendant, undefined, true, false, operationId);
+      }
+      await backendRef.current.stepFolder(path, undefined, operationId);
+      clearFolderStepOperation(folder.id, path);
+      refreshMountedReplay();
+    })().catch((error) => {
+      console.warn(`[provenance] folder Step failed for ${path || "Root"}:`, error);
+    });
+  }
+
   // Apply the Delete gesture to one or more files/folders. Root items move into
   // Oblivion while Oblivion items are removed permanently, but both outcomes
   // close every corresponding file/folder tab before mutating the tree.
@@ -15261,6 +15353,7 @@ function App() {
                 onMintCoin={openDirectCoinComposer}
                 onScan={(kind) => void onScan(kind)}
                 onReify={(target) => setReifyPrompt({ includeTrace: false, target })}
+                onStepFolder={stepFolderPath}
                 creating={creating}
                 createError={createError}
                 onCreateStart={createStart}

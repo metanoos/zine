@@ -3,7 +3,12 @@ import test from "node:test";
 import type { Event } from "nostr-tools";
 import { finalizeEvent } from "nostr-tools/pure";
 
-import { gatherContextSnapshot, promptContextFiles } from "./context-gather.js";
+import {
+  directoryTraceCoordinate,
+  folderCheckpointLogObservations,
+  gatherContextSnapshot,
+  promptContextFiles,
+} from "./context-gather.js";
 import type { KEdit } from "../provenance/provenance.js";
 import type { FileState, FolderRef } from "../workspace/workspace-core.js";
 
@@ -65,6 +70,7 @@ async function tracedEvent(path: string): Promise<Event> {
       steppedAt: 1_000,
       snapshot,
       contentHash,
+      operationId: TEST_OPERATION_ID,
       deltas: [],
       kedits: [kedit],
     }),
@@ -73,6 +79,46 @@ async function tracedEvent(path: string): Promise<Event> {
 
 const folder: FolderRef = { id: "folder-1", label: "Root" };
 const rootScope = [{ kind: "folder" as const, path: "" }] as const;
+const TEST_OPERATION_ID = "1".repeat(64);
+
+test("nested workspace paths resolve to their direct folder trace coordinate", () => {
+  const files: Record<string, FileState> = {
+    notes: { kind: "folder", runs: [], nodeId: "folder-head", traceId: "folder-trace", tags: [] },
+    "notes/draft.md": steppedFile("notes/draft.md"),
+  };
+  assert.deepEqual(directoryTraceCoordinate("root-trace", files, "top.md"), {
+    folderId: "root-trace",
+    relativePath: "top.md",
+  });
+  assert.deepEqual(directoryTraceCoordinate("root-trace", files, "notes/draft.md"), {
+    folderId: "folder-trace",
+    relativePath: "draft.md",
+  });
+  assert.equal(directoryTraceCoordinate("root-trace", files, "missing/draft.md"), null);
+});
+
+test("folder checkpoint observations preserve nested structure and explicit Steps", () => {
+  const node = event("folder");
+  node.content = JSON.stringify({
+    steppedAt: 2_000,
+    deltas: [
+      { type: "remove", kind: "file", relativePath: "old.md" },
+      { type: "add", kind: "folder", relativePath: "new" },
+    ],
+    folderCheckpoint: { version: 1, cause: "structure-change" },
+  });
+  assert.deepEqual(folderCheckpointLogObservations(node, "notes"), [
+    { steppedAt: 2_000, action: "remove", relativePath: "notes/old.md" },
+    { steppedAt: 2_000, action: "add", relativePath: "notes/new" },
+  ]);
+  node.content = JSON.stringify({
+    steppedAt: 3_000,
+    folderCheckpoint: { version: 1, cause: "explicit-step" },
+  });
+  assert.deepEqual(folderCheckpointLogObservations(node, "notes"), [
+    { steppedAt: 3_000, action: "step", relativePath: "notes" },
+  ]);
+});
 
 test("prompt context excludes Mint, Scan, and Oblivion from Root", () => {
   const files: Record<string, FileState> = {
@@ -275,6 +321,7 @@ test("invalid signed delta summaries are excluded from AI context evidence", asy
       steppedAt: 2_000,
       snapshot: finalText,
       contentHash,
+      operationId: TEST_OPERATION_ID,
       deltas: [{
         type: "replace",
         position: { start: 0, end: `body:${path}`.length },
@@ -341,6 +388,7 @@ test("descendants of an invalid ancestor cannot contribute AI process evidence",
       steppedAt: 2_000,
       snapshot: finalText,
       contentHash,
+      operationId: TEST_OPERATION_ID,
       deltas: [{
         type: "replace",
         position: { start: 0, end: `body:${path}`.length },

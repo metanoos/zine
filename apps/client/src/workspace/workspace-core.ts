@@ -573,6 +573,9 @@ export interface Workspace {
      *  redundant trailing step stays a no-op; only an explicit author action
      *  forces the checkpoint. */
     force?: boolean,
+    /** Optional causal id supplied by a containing folder/Root Step so the
+     * file checkpoint and every derived roll-up form one inspectable gesture. */
+    operationId?: string,
   ): Promise<string>;
 
   /** Immediately drain a staged local write to the home relay and return its
@@ -587,6 +590,15 @@ export interface Workspace {
   /** Create a directory and its empty folder-trace genesis. Returns that
    *  stable genesis id so replay can begin at the folder's inception. */
   createFolder(relativePath: string): Promise<string>;
+
+  /** Deliberately checkpoint one folder's exact current recursive frontier.
+   *  `""` selects Root. Callers flush dirty descendant files first; the
+   *  backend appends the final explicit folder landmark and ancestor roll-up. */
+  stepFolder(
+    relativePath: string,
+    signer?: Uint8Array,
+    operationId?: string,
+  ): Promise<string>;
 
   /** Delete a file or folder. For folders, every tracked descendant is
    *  tombstoned in the manifest. */

@@ -8,8 +8,9 @@ where it fails; it does not postpone building the system required to test it.
 The execution posture is therefore conviction with gates. Build the complete
 trace-aware loop, keep text-only and bounded-history comparisons inside the
 architecture, and promote claims only when measured outcomes support them.
-Accountable teams remain the initial distribution and paid wedge. Managed
-services and global network work remain downstream of actual retained use.
+Individual writers remain the first audience; accountable teams remain the
+initial paid wedge. Managed services and global network work remain downstream
+of actual retained use.
 
 ## Sequencing rule
 
@@ -41,19 +42,23 @@ Already built:
 
 - desktop and MCP presses;
 - signed file and folder trace chains;
-- Step, Send, Attest, Mint, Cite, fork, merge, and replay;
+- Step, Publish (wire name Send), Attest, Mint, Cite, fork, merge, and replay;
 - mandatory replay-valid KEdit process logs and shared `FULL TRACE` /
   `SNAPSHOT ONLY` / `INVALID` reader verdicts;
 - distinct human, model, and agent voice keys with per-delta attribution;
 - local and hosted relay implementations, with a remaining hosted ACL gap;
 - raw-file Reify with an optional signed-event bundle and report;
 - Stronghold-backed desktop signing and provider secrets;
+- verified recursive folder/Root checkpoint causes, distinct child `advance`,
+  durable operation grouping, explicit folder/Root Step, and derived Replay
+  collapse;
 - prepared direct MODEL operations with approval, stale-result protection,
   current file/folder text, and structured process history;
 - the initial shared `@zine/trace-context` authoring-syntax kernel, compatibility
   fixtures, golden parser/compiler cases, and generated scale corpus;
-- a desktop Extend/Settle adapter with exact current-session manual-origin
-  authority, protected-output validation, and accepted-success cleanup;
+- a desktop adapter for the Extend (continuation) and Settle (revision)
+  operations with exact current-session manual-origin authority,
+  protected-output validation, and accepted-success cleanup;
 - a read-only trace-context Inspector presentation for prepared operations;
 - a preregistered writing-outcome study and operational scoring rubric; and
 - a preregistered narration study showing a narrow process-description effect.
@@ -62,7 +67,9 @@ Not yet built as one system: task-specific evidence selection and rendering,
 cross-press manifest parity, Inspector exclusions/corrections/promotion,
 persisted directive authority and durable consumption receipts, scoped memory,
 durable result-to-context binding, writing-outcome evaluation, or complete
-desktop/MCP operation coverage.
+desktop/MCP operation coverage. Fixed cross-runtime folder vectors and explicit
+crash-boundary real-relay recovery fixtures remain hardening work for the
+recursive checkpoint cut.
 
 ## Phase 0: declare and preregister
 
@@ -78,8 +85,9 @@ exist.
 3. Preregister text-only, bounded-chronological, and selected-trace writing
    conditions under equal byte budgets, including exclusions, missingness,
    privacy, stopping rules, harm gates, and claim-promotion criteria.
-4. Complete the minimal schema/trust review before durable context commitments
-   or private-store formats are frozen.
+4. Preserve the completed recursive-zine schema cut as the foundation for
+   durable context commitments. Readers, writers, recovery, fixtures, and
+   Replay must continue to change together whenever that schema evolves.
 
 Phase 0 succeeds when the documents, implementation plan, and research design
 describe the same claim without presenting conviction as evidence.
@@ -90,6 +98,15 @@ This phase is in progress. The authoring-syntax kernel, compatibility baseline,
 golden cases, and scale corpus exist; the task-specific evidence selector,
 rendered manifest contract, correction/preference stores, cancellation and
 quota boundaries, and desktop/MCP parity do not.
+
+Harden the landed recursive-zine cut while building the shared runtime:
+
+- add fixed cross-runtime folder-chain vectors to the conformance corpus;
+- exercise interrupted and retried recursive checkpoints against a real relay;
+- keep desktop and MCP writers on the same operation-id and `advance` rules;
+  and
+- keep derived roll-ups inspectable even when Replay groups them beneath their
+  originating gesture.
 
 Build a non-normative package used by every press and provider adapter:
 
@@ -109,8 +126,9 @@ The protocol package must not import the context package. Derived evidence,
 preferences, and selector output are product interpretation, never signed
 protocol truth.
 
-Phase 1 succeeds when desktop and MCP readers produce identical selected claims
-and rendered bytes from the same fixtures, including nil, empty, malformed,
+Phase 1 succeeds when recursive checkpoints pass protocol and real-relay
+fixtures, and desktop and MCP readers produce identical selected claims and
+rendered bytes from the same context fixtures, including nil, empty, malformed,
 oversized, Unicode, cancelled, and invalid-trace cases.
 
 ## Phase 2: one complete desktop vertical slice
@@ -148,8 +166,8 @@ After the trust/schema review:
 
 - bind every accepted MODEL Step to the exact approved context manifest,
   prepared request, provider configuration, attempt, and result;
-- keep private payloads local by default behind fresh salted selective-
-  disclosure commitments and profile-keyed local deduplication;
+- keep private payloads local by default behind fresh salted
+  selective-disclosure commitments and profile-keyed local deduplication;
 - add consented, local-first outcome capture with export and redaction;
 - run the preregistered text-only, bounded-history, and selected-trace study
   across multiple model families and real writing tasks; and
@@ -215,7 +233,7 @@ continues to carry evidence and never promotes a model score into proof of
 humanness.
 
 Global rendezvous remains frozen beyond maintenance and security fixes until
-real sent citations produce organic co-citation matches, users ask to meet
+real published citations produce organic co-citation matches, users ask to meet
 unknown co-citers, and the value outweighs privacy and abuse costs.
 
 ## Not on the roadmap

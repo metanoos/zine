@@ -11,6 +11,7 @@ const SECRET = Uint8Array.from([...new Uint8Array(31), 1]);
 const OTHER_SECRET = Uint8Array.from([...new Uint8Array(31), 2]);
 const ROOT = "f".repeat(64);
 const ABSENT_ID = "a".repeat(64);
+const TEST_OPERATION_ID = "1".repeat(64);
 
 interface NodeOptions {
   secret?: Uint8Array;
@@ -73,6 +74,7 @@ async function fileNode(
     content: JSON.stringify({
       snapshot,
       contentHash: options.contentHash ?? await sha256Hex(snapshot),
+      operationId: TEST_OPERATION_ID,
       ...(options.kedits === null ? {} : { kedits: options.kedits ?? defaultKEdits }),
     }),
   };

@@ -11,6 +11,7 @@ import type { TraceLocator } from "./trace-locator.js";
 const SECRET = Uint8Array.from([...new Uint8Array(31), 1]);
 const OWNER = getPublicKey(SECRET);
 const ROOT = "a".repeat(64);
+const TEST_OPERATION_ID = "1".repeat(64);
 
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -31,6 +32,7 @@ async function node(snapshot: string, previous?: string, contentHash?: string) {
     content: JSON.stringify({
       snapshot,
       contentHash: contentHash ?? await sha256Hex(snapshot),
+      operationId: TEST_OPERATION_ID,
       steppedAt: 1_700_000_000_000,
     }),
   }, SECRET);

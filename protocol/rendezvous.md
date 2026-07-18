@@ -325,6 +325,32 @@ framing — the human vet, and the fact that `peers.json` admits individuals,
 not populations. How much the planting delay deters in practice is an
 empirical question.
 
+### 5.5 The vintage asymmetry (non-normative rationale)
+
+Anchoring changes which side time favors. In an ordinary detection arms race
+the forger moves last: they generate against today's detectors, and today's
+detectors lose to tomorrow's generators. A completed anchor removes that last
+move. A pre-planted corpus is frozen at the capability of the models that
+generated it — its anchor date is cryptographically bound — while the
+reviewer's forensics are never frozen. A corpus planted this year must
+therefore survive not today's analysis but every future analysis, using only
+generation-time tools; any synthetic tells committed at planting are
+permanent. A genuine process has nothing to fear from better detectors.
+
+Combined with longitudinal coherence, the planted corpus must also simulate a
+believable *trajectory* — gradual drift in style and process across anchored
+commitments made in real time, before knowing what future scrutiny will look
+for. This raises the patient attack's cost along three multiplying axes:
+calendar delay (§5.4), vintage lock, and trajectory coherence.
+
+The claim boundary is unchanged. This asymmetry is probabilistic, not proof:
+a generator whose output is indistinguishable in principle leaves nothing for
+any future detector, and improving forensics will also flag eccentric-but-real
+human processes, so false-positive behavior must be calibrated and published
+before any threshold is enforced. What the vet establishes at best is
+continuity of one invested process over anchored time — never the species,
+identity, or intent of whoever operates it.
+
 ## 6. Attestation and admission
 
 The pipeline has two attest-like commitments:

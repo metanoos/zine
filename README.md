@@ -7,22 +7,27 @@ know how the text got there: what was attempted, removed, restored, protected,
 accepted, or repeatedly revised. Final text is a lossy summary of writing.
 
 Zine's foundational bet is that an AI can help you write better when it receives
-the current text plus a bounded, inspectable account of its trace—not text
-alone. That is a product thesis under active evaluation, not a proven claim.
+the current scoped content plus a bounded, inspectable account of its trace—not
+content alone. At file scope that means text plus trace; at folder scope it
+means a content tree plus trace. This thesis is under active evaluation, not
+a proven claim.
 
-Zine records the process at the point of writing. Each deliberate checkpoint
-is a signed, self-contained **trace** that can be replayed, cited, forked, and
-verified without trusting one editor or hosted account. Human and model voices
-remain visible. Draft checkpoints stay local until their author sends them.
+Zine records the process at the point of writing. A **zine** is a file or
+folder together with its signed **trace**. File zines replay one Markdown
+history. Folder zines replay the changing descendant tree and the
+interactions across it. Human and model voices remain visible. Draft
+checkpoints stay local until their author sends them.
 
 The same trace serves two jobs. During writing, it can give an AI relevant
 process context that the finished prose no longer contains. Later, it can give
-people inspectable evidence of what the AI saw, changed, and contributed.
+people inspectable evidence of what the AI saw, changed, and contributed —
+enough to evaluate the writer, not just the writing.
 
 Zine is to authorship provenance what Git is to source history: the open
 protocol and local press are the commons; durable remotes, team controls,
-verification, and research can be services around them. Self-hosting remains
-first-class.
+verification, and research can be services around them. Every press signs
+with its own keys and writes to its own relay; self-hosting is the default,
+not a fallback.
 
 The reference press is open source and BYOK. Model calls use provider
 credentials the operator controls; local authoring does not require a Zine
@@ -33,7 +38,7 @@ account or hosted service.
 The daily loop Zine is building is:
 
 ```text
-current text + selected trace evidence
+current scoped content + selected trace evidence
                   |
                   v
         inspect and correct context
@@ -48,38 +53,43 @@ current text + selected trace evidence
           extend the signed trace
 ```
 
-Context must remain bounded, task-specific, and visible before dispatch. A
-writer should be able to see which Step, edit, preference, or correction was
-selected, exclude it for one operation, and correct durable memory. Derived
-preferences are never protocol truth.
+At file scope, content is Markdown text; at folder scope, it is the
+recursive content tree. Context must remain bounded, task-specific, and visible
+before dispatch. A writer should be able to see which Step, edit, preference,
+or correction was selected, exclude it for one operation, and correct durable
+memory. Derived preferences are never protocol truth.
 
 Zine's document grammar makes intent explicit. `[[ protected words ]]` are
 verbatim, inert text that an eligible transformation must preserve.
 `(( author directive ))` is intended as a one-shot instruction to the selected
 AI operation: it is removed only after accepted success and cannot grant tools
-or access outside that operation's approved scope. The initial shared syntax
-kernel and desktop Extend/Settle adapter now enforce exact operation ranges,
-protected bytes, and current-editor-session manual-author authority. This is a
-deliberately partial slice: Stir still uses its earlier grammar, other
-operations are not generalized, and explicit promotion, persisted authority,
-durable consumption receipts, shared evidence selection, scoped memory, and
-result-to-context binding remain roadmap work.
+or access outside that operation's approved scope. A shared syntax kernel and
+the first desktop writing operations already enforce exact operation ranges,
+protected bytes, and current-session author authority. Coverage is
+deliberately partial; the [evidence ledger](docs/EVIDENCE.md) records exactly
+which operations and guarantees exist today.
 
-## Start with accountable agents
+## Writers first, teams close behind
 
-The first product wedge is teams that let AI agents edit durable files such as
-reports, research, policies, and editorial work. When the result matters, a
-reviewer should be able to answer:
+Zine is individual-first. One writer with a sovereign press gets the complete
+product — trace-aware assistance, replay, and portable proof — with no
+account, hosted service, or organization required. If adoption compounds, it
+should compound the way Git's did: writers first, organizations following the
+writers.
+
+Accountable teams are where paid demand is expected first. Organizations
+letting AI agents edit durable files — reports, research, policies, editorial
+work — have an immediate reason to care how a result was produced. When the
+result matters, a reviewer should be able to answer:
 
 - Which agent key made each change?
 - Which exact file states and changes did that key sign?
 - Which version was opened for discussion, and which version was endorsed?
 - Can another party inspect the evidence without access to the original app?
 
-That remains the initial buyer wedge: accountability gives a team a concrete
-reason to adopt the trace while the trace-aware writing loop supplies daily
-value. Customer discovery and writing-outcome evaluation run alongside the
-pivot. Managed services and network layers remain evidence-gated.
+Accountability gives a team a concrete reason to pay for the trace the writer
+already keeps. Customer discovery and writing-outcome evaluation run alongside
+the pivot. Managed services and network layers remain evidence-gated.
 
 Native model operations in the desktop press can also record the prompt,
 model configuration, and cited context. Threading equivalent harness-supplied
@@ -89,10 +99,11 @@ The [headless MCP press](apps/mcp/README.md) lets an MCP-capable agent write
 through Zine under its own key. The [desktop press](apps/client/README.md) is
 the reference authoring and review experience.
 
-Each named headless profile owns one permanent Root; no source folder or live
-relay is required. Offline Steps persist as exact signed events and synchronize
-to the loopback home later. LLMs consume the raw trace directly, while a Send
-can return a locator for the desktop to verify and render for a human.
+Each named headless profile owns one permanent Root, its topmost folder zine;
+no source folder or live relay is required. Offline Steps persist as exact
+signed events and synchronize to the loopback home later. LLMs consume the
+raw trace directly, while a Publish can return a locator for the desktop to
+verify and render for a human.
 
 Read the [documentation hub](docs/README.md), or go directly to the
 [product](docs/PRODUCT.md), [protocol tour](docs/PROTOCOL.md),
@@ -101,17 +112,56 @@ Read the [documentation hub](docs/README.md), or go directly to the
 
 ## Three author gestures
 
-**Step** signs a deliberate checkpoint and keeps it on the home relay. Most
-Steps remain private working history.
+**Step** deliberately checkpoints a file, folder, or Root and keeps it on the
+home relay. A folder Step pins an exact recursive frontier. Automatic ancestor
+roll-ups remain signed derived checkpoints, not extra author Steps. Most Steps
+remain private working history.
 
-**Send** makes one exact stepped version reachable for discussion.
+**Publish** makes one exact stepped version reachable for discussion. On the
+wire and in the current implementation this gesture is still named Send; the
+product term is Publish until the schema cut renames both.
 
-**Attest** is an optional, later endorsement of one sent version. Discussion
-is common; commitment is rare.
+**Attest** is an optional, later endorsement of one published version.
+Discussion is common; commitment is rare.
 
 Copied passages can be minted as immutable **coins** and cited by exact node
 id. Forking starts a proposal under a new owner's key; merging accepts chosen
 work into the receiving owner's chain.
+
+## Sovereign by key, connected by citation
+
+Zine is peer-to-peer in the plainest sense: no platform sits between writers.
+Every press holds its own keys: separate keys own the relay, sign the
+writing, and mark AI edits, so rotating a pen never changes who owns the
+node. The relay's key can derive a stable `.onion` address, so a laptop can
+serve its published work without a server, and a private, never-published ACL
+decides who may connect, read, or write. Reachability degrades before
+identity ever does: lose Tor and you lose metadata privacy, never your name.
+
+A **coin** is how strangers find each other. When a phrase strikes you as
+worth keeping, you mint it: one deliberate gesture — Step, Publish, and
+Attest at once — that strikes the exact text into an immutable,
+single-checkpoint zine under your key. Minting claims salience, not
+authorship or agreement: *these words carry currency for me.* Coins exist
+for rendezvous. A coin type is keyed by the exact content hash, so the
+planned Kademlia DHT can answer one question — *who else minted or cited
+these words?* — and two writers who share no platform, relay, or peer can
+surface each other. The same match works today, more slowly, through a
+mutual peer who can read both chains.
+
+The economics are deliberately spam-resistant. A coin everyone holds carries
+no signal, so there is no payoff in squatting the popular phrase; the signal
+is several independently shared, moderately rare coins, and raw supply never
+becomes reputation. A match is only an introduction, never a connection: you
+and your AI read the stranger's published zines — the writing and the trace
+behind it — and decide whether the resonance is real. If it isn't, swipe
+left; nothing enters your `peers.json` without the process-evidence vet and
+your explicit choice.
+
+The mutual-peer path is implemented and tested; the global DHT is a dormant
+design, gated on real citation density. The
+[transport](protocol/transport.md) and
+[rendezvous](protocol/rendezvous.md) specifications carry the exact rules.
 
 ## What exists today
 
@@ -121,13 +171,14 @@ work into the receiving owner's chain.
 | Headless MCP press with a distinct agent voice | Implemented |
 | Mandatory replay-valid KEdit process log on every file Step | Implemented for editor, AI, import/fork, and MCP write paths |
 | Shared `FULL TRACE` / `SNAPSHOT ONLY` / `INVALID` reader verdict | Implemented in Replay, Analyze, handoff, Reify, and MCP inspection |
-| Step, Send, Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
+| Step, Publish (wire name Send), Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
+| Recursive folder checkpoint propagation | Implemented with verified checkpoint causes, distinct `advance` deltas, explicit folder/Root Step, durable operation ids, and collapsed derived roll-ups in Replay |
 | Top-level foreign-file fork-on-write | Implemented; recursive nested-folder fork-on-write is deferred |
 | Mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
 | Raw-file Reify export with an optional signed-event bundle | Implemented on desktop |
 | Stronghold storage for signing and provider secrets | Implemented on desktop; the browser remains read-only |
 | Shared trace-context authoring-syntax kernel | Initial deterministic `[[…]]` / `((…))` scanner and compiler implemented with golden and generated scale corpora; task-specific evidence selection and cross-press rendering are not yet implemented |
-| Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures; Extend and Settle now use the shared syntax kernel, exact current-session authority spans, protected-output validation, and accepted-success directive cleanup, while the other operations, durable receipts, and context binding remain deferred |
+| Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures; Extend (continuation) and Settle (revision) now use the shared syntax kernel, exact current-session authority spans, protected-output validation, and accepted-success directive cleanup, while the other operations, durable receipts, and context binding remain deferred |
 | Hosted relay | Implemented; an operator ACL equivalent to the local relay policy remains a gap |
 | Global content-hash rendezvous over Kademlia | Specified as a sketch, not implemented |
 | Managed remote, organization control plane, and no-install public verifier | Commercial product hypotheses, not shipping services |
@@ -206,8 +257,8 @@ owning specification, the specification wins.
 
 ## Documentation map
 
-- [Documentation hub](docs/README.md): the five reader-facing documents shared
-  by the repository and the app's About view.
+- [Documentation hub](docs/README.md): the reader-facing documents shared by
+  the repository and the app's About view.
 - [Product](docs/PRODUCT.md): initial buyer, workflow, and product boundary.
 - [Protocol](docs/PROTOCOL.md): readable tour of traces, gestures,
   attribution, transport, and vetting.
@@ -219,6 +270,8 @@ owning specification, the specification wins.
   commercial service without making the press dependent on it.
 - [Protocol specifications](protocol/README.md): normative authority and status
   language for trace provenance, transport, and rendezvous.
+- [Trace-Native Zines](docs/TRACE_NATIVE_ZINES.md): accepted recursive-zine,
+  trace-aware AI, publication, coin, and evidence migration direction.
 - [Client development and releases](apps/client/README.md): frontend, Tauri,
   and per-platform bundle commands.
 - [Headless MCP press](apps/mcp/README.md): tools, installation, and client

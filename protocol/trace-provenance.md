@@ -9,9 +9,18 @@ non-binding rationale and design history. Deferred questions appear last.
 
 ## Vocabulary
 
-A **trace** is the protocol's single primitive: a body on an append-only chain
-of signed checkpoints. Its body is either a **file** (text) or a **folder** (an
-ordered membership list).
+A **trace** is the append-only chain of signed checkpoints belonging to one
+stably identified body. Its body is either a **file** (text) or a **folder**
+(an ordered membership list). A **zine** is that body together with its trace:
+file zines and folder zines are the same protocol primitive at different
+structural shapes. The press's **Root** is the topmost folder zine, not a
+separate project object.
+
+A **checkpoint** is any signed `TraceNode`. A **Step** is the deliberate author
+gesture that creates an explicit checkpoint. Folder checkpoints created only
+to advance a parent to a new direct-child head are **derived checkpoints**, not
+additional deliberate Steps. Readers MUST preserve that distinction instead of
+presenting one file Step as a stack of independent author gestures.
 
 A **coin** is an immutable, single-node file trace. It is either **extracted**
 from an exact span of another trace or minted **directly** as signer-authored
@@ -21,9 +30,10 @@ workspace file, so the reification discriminator remains
 envelope (§3.2) distinguishes Coins from mutable file traces.
 
 A **press** is the authoring interface, not a server. A **relay** is the local
-or remote Nostr server to which a press writes traces. A **zine** is an attested
-published trace, usually a folder. Running your own press means writing in your
-own copy of the interface, backed by your own local relay.
+or remote Nostr server to which a press writes traces. Publication and
+attestation change a zine's reachability and the signer's stance; neither is
+what makes the underlying file or folder a zine. Running your own press means
+writing in your own copy of the interface, backed by your own local relay.
 
 Two identity terms recur throughout:
 
@@ -73,7 +83,12 @@ replaceable Voice Identity (`d` = pubkey), so `TraceAnnotation` cannot use it.
 
 ## 3. TraceNode (kind `4290`)
 
-One stepped checkpoint of one trace. Every node is self-sufficient: it MUST carry its full `snapshot` (§3.2), so resolving any cited node is one bounded fetch, never a chain replay. Every file node also carries the complete node-local `kedits` transition needed to replay how its text moved from the prior snapshot to this one.
+One signed checkpoint of one zine's trace. Every node is self-sufficient: it
+MUST carry its full `snapshot` (§3.2), so resolving any cited node is one
+bounded fetch, never a chain replay. Every file node also carries the complete
+node-local `kedits` transition needed to replay how its text moved from the
+prior snapshot to this one. Not every checkpoint is an explicit Step: folder
+nodes declare why they exist through `folderCheckpoint` (§3.2).
 
 ### 3.1 Tags
 
@@ -99,6 +114,8 @@ One stepped checkpoint of one trace. Every node is self-sufficient: it MUST carr
   "snapshot": "…file text…",
   "deltas": [ … ],
   "contentHash": "…hex…",
+  "operationId": "…hex…",
+  "folderCheckpoint": { "version": 1, "cause": "genesis | explicit-step | structure-change | child-advance | metadata-change", "sourceNodeId": "…" },
   "coin": { "version": 1, "origin": { "kind": "direct" } },
   "voices": [ "<signer pubkey>", "<other voice pubkey>", … ],
   "authors": [ { "v": "<pubkey>", "len": 42, "src": "<nodeId>" } ],
@@ -127,6 +144,30 @@ A direct Coin has no source fields and MUST NOT carry an `extracted-from` edge:
 its claim is only that the event signer minted these exact bytes. Readers MUST
 use the envelope as the sole Coin discriminator; an `extracted-from` tag without
 the envelope does not make an event a Coin.
+
+`operationId` is REQUIRED on every node and is 32 cryptographically random
+bytes encoded as 64 lowercase hex characters. Every checkpoint created by one
+logical gesture or recovery transaction carries the same id, including the
+originating file checkpoint and derived ancestor checkpoints. A standalone
+checkpoint receives a fresh id. Recovery MUST reuse the original id. It joins
+causal records; it is not a trace identity, event id, or ordering mechanism.
+
+`folderCheckpoint` is REQUIRED on every folder node and MUST be absent on file
+nodes. No legacy omission is defined. Folder genesis uses `cause: "genesis"`
+and omits `sourceNodeId`.
+
+- `cause: "genesis"` means this node creates the folder zine's stable identity.
+- `cause: "explicit-step"` means the writer deliberately Stepped this folder
+  or Root. It MAY carry no membership delta when the recursive frontier is
+  already current; the deliberate landmark is itself the signal.
+- `cause: "structure-change"` means a direct member was added, removed, or
+  renamed. Cross-parent movement produces a remove and add under one shared
+  `operationId`.
+- `cause: "child-advance"` means a direct member acquired a new checkpoint.
+  `sourceNodeId` is REQUIRED and MUST equal that member's new `latestNodeId`.
+  This is a derived checkpoint, not another explicit Step.
+- `cause: "metadata-change"` means folder metadata changed without changing
+  membership.
 
 For folder nodes, `snapshot` is instead:
 
@@ -210,9 +251,23 @@ Membership types (folder nodes):
 ```json
 { "type": "add | remove", "kind": "file | folder", "relativePath": "essay.md", "nodeId": "…", "timestamp": 1730000000000 }
 { "type": "rename", "kind": "file | folder", "fromPath": "essay.md", "toPath": "draft.md", "nodeId": "…", "timestamp": 1730000000000 }
+{ "type": "advance", "kind": "file | folder", "relativePath": "essay.md", "previousNodeId": "…", "nodeId": "…", "timestamp": 1730000000000 }
 ```
 
-No `reorder` delta: member ordering is fully recoverable from `snapshot.members` (and from the canonical body of §2, whose projection is the ordered `(relativePath, kind, memberContentHash)` list), so a dedicated ordering delta would be redundant provenance color. `add`/`remove`/`rename` are the three structural facts a folder asserts about its membership. The `kind` field mirrors the member entry (§3.2): `"file"` or `"folder"`.
+No `reorder` delta: member ordering is fully recoverable from `snapshot.members`
+(and from the canonical body of §2, whose projection is the ordered
+`(relativePath, kind, memberContentHash)` list), so a dedicated ordering delta
+would be redundant provenance color. `add`/`remove`/`rename` are the three
+structural facts a folder asserts about its membership. `advance` changes
+neither membership nor structural name; it moves one existing member from
+`previousNodeId` to `nodeId`. The prior id MUST equal the previous folder
+snapshot's `latestNodeId`, and the new id MUST equal the next snapshot's value.
+The `kind` field mirrors the member entry (§3.2): `"file"` or `"folder"`.
+
+Writers MUST NOT encode an existing member's new head as `add`. A direct-child
+checkpoint produces one `advance`; each ancestor then produces its own
+`child-advance` checkpoint naming the newly advanced immediate child. This
+keeps Root's recursive frontier exact without claiming that membership changed.
 
 `rename` is a structural path change — a folder-owned fact about where a member lives, the same class of event as add/remove. It is distinct from `TraceOpinion`'s `name` (§5/§R6): an opinion is an author-scoped display label (replaceable, deliberately history-less), whereas `rename` is a folder-chain event with full history. A member can be structurally renamed zero or many times and independently carry any number of per-author opinion-names; the two axes never interact. Renaming a `kind: "folder"` member changes its name in the **parent** only — it does not rewrite the renamed folder's own chain (its members' `relativePath`s are names within *it*, unaffected).
 
@@ -501,9 +556,13 @@ Typing a tag label is a query, not a direct reference — `#t` plus the reader's
 
 A document that is nothing but a sequence of citations — `[[ q1 | id1 ]] [[ q2 | id2 ]] …` — is already a composite trace: an anthology, ordered by its author, addressable and citable like anything else. Its `snapshot` already inlines what it quotes (rendering needs no fetches — document-level self-sufficiency), and its `cite` deltas already are per-member provenance in order. A composite is an ordinary mutable trace: adding a quote next year is just an edit; the immutable leaves it cites are untouched. No coordination or permission is needed to curate one — citing has never needed the source's cooperation — so parallel, unrelated anthologies under the same informal name are expected, not a conflict.
 
-## 8. Step triggers
+## 8. Checkpoint triggers and the Step gesture
 
-A Step appends one signed trace node to its chain. Steps are triggered by:
+A checkpoint appends one signed trace node to its chain. Only an explicit Step
+is presented as the writer's rhythm-layer gesture; structural and derived
+folder checkpoints remain visible evidence with their actual cause.
+
+Checkpoints are produced by:
 
 - **External write (file).** File changed outside the traced editor; deltas computed by diffing last-known content against disk. Stepped as `action: "external"` (§3.4) under the external actor's voice — a per-machine reconciler key for bare disk drift, or a per-actor key for an MCP tool — not under the authoring key. A brand-new file is still `action: "import"` (genesis is honest provenance vocabulary), but signed by the reconciler voice so the attribution is honest. The authoring key signs only changes the editor's own transactions produced; this trigger is the one place it never does.
 - **Step (file).** A deliberate author action — the Cmd+S "save" gesture. A
@@ -524,7 +583,26 @@ A Step appends one signed trace node to its chain. Steps are triggered by:
   optional and readers MUST treat a missing anchor as "unproven time," not an
   invalid Step. The prototype uses a public OTS calendar; a configurable or
   self-hosted calendar is planned (`transport.md` §2). See `rendezvous.md` §3.
+- **Step (folder or Root).** A deliberate recursive checkpoint. Before signing
+  the selected folder's `explicit-step` checkpoint, the press MUST durably
+  checkpoint every dirty descendant needed to represent the exact visible
+  subtree, propagate each new direct-child head, and recover or fail the whole
+  operation without presenting a partial frontier as complete. All resulting
+  checkpoints share one `operationId`. The selected folder gets exactly one
+  final `explicit-step` checkpoint even when its membership and child heads are
+  already current. Root follows the same rule because it is an ordinary folder
+  zine. A reader SHOULD collapse the derived checkpoints beneath the one
+  deliberate gesture while allowing them to be expanded and verified.
 - **Membership change (folder).** A direct member is added, removed, or renamed.
+  The directly affected folder records `structure-change`; every affected
+  ancestor records `child-advance`. A cross-parent move uses one `operationId`
+  across the source removal, target addition, and both ancestor cascades so a
+  reader can expose incomplete recovery rather than invent atomicity.
+- **Child checkpoint (folder).** A direct child acquired a new head, including
+  a content-stable explicit Step. The parent records an `advance` delta and
+  `cause: "child-advance"`; propagation repeats through every ancestor to Root.
+  This automatic roll-up is required because a folder zine pins both its
+  content tree and the exact descendant trace frontier.
 - **Tag change (file or folder).** `snapshot` unchanged from `prev`; deltas carry the `cite role: "tag"`; `q` tags updated; `contentHash` unaffected.
 - **LLM invocation.** Stepped immediately (`action: llm`) with the prompt, before any write-back becomes its own node.
 - **Minting.** Each resolved bracket steps its own trace (§3.8).
@@ -543,11 +621,23 @@ A Step appends one signed trace node to its chain. Steps are triggered by:
   MUST follow the same completed-proof-only publication rule above. See
   §R11.20 and `rendezvous.md` §3.4.
 
-**Focus buffer drain.** The focus buffer is per-folder and persisted locally. Any structural folder Step drains that folder's pending mount/unmount deltas into its `deltas` array after the membership delta. Focus never creates a Step by itself. Because focus can accumulate, a node's `deltas` array MAY contain several entries (one structural plus N focus); readers iterate the array rather than reading `deltas[0]`.
+**Focus buffer drain.** The focus buffer is per-folder and persisted locally.
+Any folder checkpoint drains that folder's pending mount/unmount deltas into
+its `deltas` array after the membership or advance delta. Focus never creates a
+checkpoint by itself, but an explicit folder/Root Step and publication
+preflight MUST flush applicable buffers even when no structural change occurs.
+Because focus can accumulate, a node's `deltas` array MAY contain several
+entries; readers iterate the array rather than reading `deltas[0]`.
 
 **Local vs. published is destination, not signing.** Local storage is itself a relay, bound to 127.0.0.1; every event needs a valid signature to be accepted at all. What's opt-in is whether a stepped trace ever leaves the machine.
 
-**Every trigger is discrete and bounded-frequency — none fires per keystroke or per click.** Continuous typing and its KEdit journal stay in a raw local buffer until a Step. A file Step MUST fold that journal into its required `kedits` field, but it never creates per-keystroke events; focus observations likewise batch into the triggers above. The protocol only sees checkpoints a human or agent chose to make. This is the load-bearing fact behind unconditional snapshots (§R1).
+**Every trigger is discrete and bounded-frequency — none fires per keystroke or
+per click.** Continuous typing and its KEdit journal stay in a raw local buffer
+until a Step. A file Step MUST fold that journal into its required `kedits`
+field, but it never creates per-keystroke events; focus observations likewise
+batch into the triggers above. Derived folder checkpoints occur only when a
+bounded direct-child checkpoint changes the recursive frontier. This is the
+load-bearing fact behind unconditional snapshots (§R1).
 
 ## 9. Reconstruction and retention
 
@@ -621,7 +711,7 @@ Nothing in this part is normative. Each argument appears once.
 
 ## R1. Unconditional snapshots buy bounded resolution
 
-`snapshot` is required on every node because a cited node must resolve as one fetch against a self-contained object — O(source snapshot), not a replay through the source's chain. Everything the protocol offers as an import/composite/package story rests on that guarantee, not on the delta log. The cost is affordable for exactly one reason: steps are discrete, bounded-frequency events (§8). The high-frequency case — continuous typing — is journaled locally and batched as required `kedits` on the next file Step; it never drives event cadence. If steps ever became per-keystroke, unconditional snapshotting would collapse; that is why both KEdits and `focus` observations batch rather than mint (§R7).
+`snapshot` is required on every node because a cited node must resolve as one fetch against a self-contained object — O(source snapshot), not a replay through the source's chain. Everything the protocol offers as an import/composite/package story rests on that guarantee, not on the delta log. The cost is affordable because explicit checkpoints and direct-child advances are discrete, bounded-frequency events (§8). The high-frequency case — continuous typing — is journaled locally and batched as required `kedits` on the next file Step; it never drives event cadence. If checkpoints ever became per-keystroke, unconditional snapshotting would collapse; that is why both KEdits and `focus` observations batch rather than mint (§R7).
 
 The same trade shows up one level up in injection (§3.7): don't store a manufactured artifact (the assembled prompt), store what's needed to remanufacture it — the same move `deltas` makes by omitting `oldValue`.
 
@@ -673,7 +763,7 @@ The `reaction` field (§5) leans on this argument unchanged. A like is structura
 
 ## R7. The telemetry boundary
 
-An earlier draft let each focus event (panel mount, selection) step its own folder node. That violated the protocol's own frequency argument — focus fires per click, and a 1,000-member folder would re-serialize its full membership per click — and focus wasn't even listed among the step triggers. The fix draws the line cleanly: session-replay observations are telemetry riding on provenance checkpoints, not provenance events of their own. They persist in the local buffer until the next structural folder Step, which drains them alongside the membership delta. Closing the press neither steps nor discards them. A folder with no focus deltas behaves exactly as before; readers ignore delta types they do not understand.
+An earlier draft let each focus event (panel mount, selection) create its own folder node. That violated the protocol's own frequency argument — focus fires per click, and a 1,000-member folder would re-serialize its full membership per click. The fix draws the line cleanly: session-replay observations are telemetry riding on provenance checkpoints, not checkpoint triggers of their own. They persist in the local buffer until the next folder checkpoint, explicit folder/Root Step, or publication preflight drains them. Closing the press neither steps nor discards them. A folder with no focus deltas behaves exactly as before; readers ignore delta types they do not understand.
 
 ## R8. Tag and bracket: one edge, two visibilities
 
@@ -700,7 +790,7 @@ clusters. Those remain reader-side reductions over fetched, verified events.
 
 ## R10. Known costs, accepted
 
-- **Folder snapshots grow with membership.** A 1,000-member folder carries 1,000 entries per node. Acceptable for the same reason file snapshots are — membership changes are bounded-frequency — but noted, and a whole-folder injection rule compounds it by expanding member *content* into a prompt. Sharding or incremental snapshots may be needed at scale. Under nesting, per-node snapshot size stays bounded (immediate members only), but **transitive node count is multiplicative** — a 50-member folder where 10 members are 50-member folders is 550 transitive nodes. Any "walk the whole tree" reader (injection rules, sample queries) pays the full depth. The shallow-local `contentHash` (§2) keeps *hashing* O(immediate members); the cost moves to *traversal*, which is bounded fan-out per level.
+- **Folder snapshots grow with membership.** A 1,000-member folder carries 1,000 entries per node. Membership changes and direct-child checkpoints are bounded-frequency, but a flat high-fan-out Root can still amplify one leaf Step into expensive ancestor snapshots. V1 accepts the simple self-contained encoding; content-addressed structural sharing, sharding, or incremental snapshots may be needed at scale without weakening the logical recursive frontier. Under nesting, per-node snapshot size stays bounded (immediate members only), but **transitive node count is multiplicative** — a 50-member folder where 10 members are 50-member folders is 550 transitive nodes. Any "walk the whole tree" reader (injection rules, sample queries) pays the full depth. The shallow-local `contentHash` (§2) keeps *hashing* O(immediate members); the cost moves to *traversal*, which is bounded fan-out per level.
 - **Cumulative `q` sets grow with citation count.** The `q` list is the full current out-edge set (§3.1), so a heavily-citing trace — a 500-quote anthology — re-carries all 500 `q` tags on every step. Same class of cost as folder snapshots, accepted for the same bounded-frequency reason, and the same sharding caveat applies at scale.
 - **UTF-16 offsets bind the wire to JavaScript string semantics.** Every offset and length (§2) counts UTF-16 code units, so a non-JS implementation (the Go relay, the Rust shell, any future reader) must do UTF-16 offset math over text it likely holds as UTF-8. Accepted deliberately — the Nostr ecosystem and both reference presses are JS, and a mixed-unit wire would be worse — but it is a permanent interop tax on second implementations, recorded here as a decision rather than an accident.
 - **Verification is bounded, not trustless.** A determined liar can cite a real hash for text not really at that position; full verification reads the citing document too. The protocol optimizes the honest path and makes the dishonest one cheap to expose, not impossible.
@@ -890,6 +980,25 @@ A request to "take down my published zine" concerns relay retention, not chain i
 - **Retention remains relay policy.** NIP-09 says relays SHOULD delete or stop publishing; it does not mandate a tombstone or permanent rejection of re-publication. Advertising NIP-09 signals support for the mechanism, not a guaranteed outcome on every relay.
 
 The rejected alternative, a custom replaceable `revoke` marker, would add a second protocol representation for the same removal request without gaining erasure power. It could not compel other relays or remove cached copies. Zine therefore uses NIP-09 for advisory relay removal and makes no stronger cross-relay promise. See §R11.18 for the decision record.
+
+## R14. Folder zines pin recursive trace frontiers
+
+Treating folders as mere organization loses the cross-file process that makes
+Root and subtree replay useful. A folder zine therefore pins the exact head of
+each direct child; recursively, those heads define one complete content tree
+and descendant trace frontier. A child's new checkpoint must advance every
+ancestor to Root even when the child's body hash is unchanged.
+
+That logical rule does not turn the automatic cascade into many author
+gestures. `folderCheckpoint.cause` separates the selected explicit Step or
+structural operation from derived `child-advance` checkpoints, and
+`operationId` lets a reader collapse or expand the signed cascade. The
+`advance` delta exists because overloading `add` for an already-present member
+would falsely claim a membership change and make replay semantically wrong.
+
+Only immediate-member snapshots are duplicated at each level. A press may use
+content-addressed structural sharing and bundle compression physically, but it
+must preserve the same logical recursive frontier and bounded verification.
 
 ---
 

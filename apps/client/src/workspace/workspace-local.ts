@@ -36,6 +36,7 @@ import {
   eventMeta,
   headUserTags,
   headCitationIds,
+  operationIdFromNode,
   publishEdit,
   resolveTraceChain,
   resolveTraceIdentity,
@@ -43,10 +44,12 @@ import {
   reconstructRunsFromChain,
   removeManifestEntry,
   renameManifestEntry,
+  stepFolderManifest,
   upsertManifestEntry,
   type KEdit,
   type ManifestFileEntry,
 } from "../provenance/provenance.js";
+import { createTraceOperationId } from "@zine/protocol";
 import { findAddedInlineCitations, findResolvedBrackets } from "../provenance/brackets.js";
 import { decidePullMerge } from "./three-way-merge.js";
 import { authorVoice, secretKeyForVoice } from "../identity/keys-store.js";
@@ -407,6 +410,7 @@ export async function propagateLocalTreeFolderHead(
   let folderPath = changedFolderPath;
   let folderId = changedFolderId;
   let head = changedHead;
+  const operationId = operationIdFromNode(changedHead);
   rememberLocalTreeFolderHead(tree, folderPath, folderId, head);
 
   while (folderPath !== tree.storagePath) {
@@ -429,7 +433,7 @@ export async function propagateLocalTreeFolderHead(
         contentHash: folderNodeContentHash(head),
       },
       parentSigner,
-      { localOnly },
+      { localOnly, operationId },
     );
     folderPath = parentPath;
     folderId = parentId;
@@ -445,7 +449,7 @@ export async function ensureLocalTreeFolderPath(
   tree: LocalFolderTree,
   folderPath: string,
   signer: Uint8Array,
-  opts?: { localOnly?: boolean },
+  opts?: { localOnly?: boolean; operationId?: string },
 ): Promise<{ folderId: string; folderPath: string }> {
   if (!isPathInsideTree(tree, folderPath)) {
     throw new Error(`folder ${folderPath} escapes ${tree.storagePath || "Root"}`);
@@ -492,9 +496,11 @@ export async function ensureLocalTreeFolderPath(
     if (!currentSigner) {
       throw new Error(`cannot create a folder through foreign folder ${currentId}`);
     }
+    const operationId = opts?.operationId ?? createTraceOperationId();
     const genesisId = await createFolderGenesis({
       signer: currentSigner,
       localOnly: opts?.localOnly,
+      operationId,
     });
     const currentHead = await upsertManifestEntry(
       currentId,
@@ -505,7 +511,7 @@ export async function ensureLocalTreeFolderPath(
         contentHash: await sha256Hex("[]"),
       },
       currentSigner,
-      { localOnly: opts?.localOnly },
+      { localOnly: opts?.localOnly, operationId },
     );
     await propagateLocalTreeFolderHead(
       tree,
@@ -549,7 +555,11 @@ export async function forkFileIntoLocalTree(
     sourceNodeId,
     coordinate.folderId,
     coordinate.relativePath,
-    { signer, localOnly: opts?.localOnly },
+    {
+      signer,
+      localOnly: opts?.localOnly,
+      operationId: createTraceOperationId(),
+    },
   );
   const parsed = JSON.parse(event.content) as { contentHash?: unknown };
   if (typeof parsed.contentHash !== "string") {
@@ -564,7 +574,10 @@ export async function forkFileIntoLocalTree(
       contentHash: parsed.contentHash,
     },
     manifestSigner,
-    { localOnly: opts?.localOnly },
+    {
+      localOnly: opts?.localOnly,
+      operationId: operationIdFromNode(event),
+    },
   );
   await propagateLocalTreeFolderHead(
     tree,
@@ -677,6 +690,27 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     if (file.kind === "folder") return file.nodeId;
     const content = file.content;
     const contentHash = await sha256Hex(content);
+    const operationId = file.pendingOperationId ?? createTraceOperationId();
+    if (!file.pendingOperationId) {
+      // Persist before the first network write so recovery reuses the same
+      // causal id instead of presenting a partial gesture as a new one.
+      saveLocalFile(rootId, storagePath, {
+        content,
+        tags: file.tags,
+        nodeId: file.nodeId,
+        traceId: file.traceId,
+        pendingMove: file.pendingMove,
+        runs: file.runs,
+        voicePubkey: file.voicePubkey,
+        pendingReplyingTo: file.pendingReplyingTo,
+        citationIds: file.citationIds,
+        pendingLocalOnly: file.pendingLocalOnly,
+        pendingForce: file.pendingForce,
+        pendingKedits: file.pendingKedits,
+        pendingEmptyGenesis: file.pendingEmptyGenesis,
+        pendingOperationId: operationId,
+      });
+    }
 
     if (file.pendingMove?.kind === "to-oblivion") {
       const fromPath = file.pendingMove.fromPath;
@@ -740,6 +774,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         snapshot: "",
         contentHash: await sha256Hex(""),
         action: "delete",
+        operationId,
         signer,
         kedits: synthesizeKEditTransition(
           priorParsed.snapshot,
@@ -751,6 +786,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         source.folderId,
         source.relativePath,
         folderSigner,
+        { localOnly: file.pendingLocalOnly, operationId },
       );
       if (sourceHead) {
         await propagateFolderHead(
@@ -759,6 +795,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           source.folderId,
           sourceHead,
           folderSigner,
+          file.pendingLocalOnly,
         );
       }
       saveLocalFile(rootId, storagePath, {
@@ -833,6 +870,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           ...(file.pendingLocalOnly ? { localOnly: true } : {}),
           signer: genesisSigner,
           kedits: [],
+          operationId,
         });
       },
       (genesis) => {
@@ -850,6 +888,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           pendingForce: file.pendingForce,
           pendingKedits: file.pendingKedits,
           pendingEmptyGenesis: true,
+          pendingOperationId: operationId,
         });
       },
     );
@@ -884,21 +923,15 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       // A crash can land the body Step + manifest before the final local save.
       // Adopt that head and clear only the bootstrap marker so attach does not
       // keep retrying an already-complete two-node starter.
-      if (file.pendingEmptyGenesis) {
-        saveLocalFile(rootId, storagePath, {
-          content,
-          tags: file.tags,
-          nodeId: entry.latestNodeId,
-          traceId: traceId ?? entry.latestNodeId,
-          runs: file.runs,
-          voicePubkey: file.voicePubkey,
-          pendingReplyingTo: file.pendingReplyingTo,
-          citationIds: file.citationIds,
-          pendingLocalOnly: file.pendingLocalOnly,
-          pendingForce: file.pendingForce,
-          pendingKedits: file.pendingKedits,
-        });
-      }
+      saveLocalFile(rootId, storagePath, {
+        content,
+        tags: file.tags,
+        nodeId: entry.latestNodeId,
+        traceId: traceId ?? entry.latestNodeId,
+        runs: file.runs,
+        voicePubkey: file.voicePubkey,
+        citationIds: file.citationIds,
+      });
       return entry.latestNodeId;
     }
 
@@ -932,7 +965,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           contentHash,
         },
         folderSigner,
-        { localOnly: file.pendingLocalOnly },
+        { localOnly: file.pendingLocalOnly, operationId },
       );
       await propagateFolderHead(
         rootId,
@@ -970,7 +1003,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           entry.latestNodeId,
           folderId,
           relativePath,
-          { signer, localOnly: file.pendingLocalOnly },
+          { signer, localOnly: file.pendingLocalOnly, operationId },
         );
         await upsertManifestEntry(
           folderId,
@@ -981,7 +1014,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
             contentHash: entry.contentHash,
           },
           folderSigner,
-          { localOnly: file.pendingLocalOnly },
+          { localOnly: file.pendingLocalOnly, operationId },
         );
         prevId = fork.id;
         traceId = fork.id;
@@ -1031,6 +1064,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       kedits: stepKEdits.kedits,
       ...(file.pendingLocalOnly ? { localOnly: true } : {}),
       signer,
+      operationId,
     });
     if (moveSource && fromEntry && moveSource.folderId === folderId) {
       const folderHead = await renameManifestEntry(
@@ -1039,6 +1073,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         relativePath,
         event.id,
         folderSigner,
+        { localOnly: file.pendingLocalOnly, operationId },
       );
       await propagateFolderHead(
         rootId,
@@ -1054,7 +1089,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         relativePath,
         latestNodeId: event.id,
         contentHash,
-      }, folderSigner, { localOnly: file.pendingLocalOnly });
+      }, folderSigner, { localOnly: file.pendingLocalOnly, operationId });
       await propagateFolderHead(
         rootId,
         folderPath,
@@ -1075,6 +1110,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           moveSource.folderId,
           moveSource.relativePath,
           sourceSigner,
+          { localOnly: file.pendingLocalOnly, operationId },
         );
         if (sourceHead) {
           await propagateFolderHead(
@@ -1122,7 +1158,11 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     );
   }
 
-  async function tombstoneStagedFile(rootId: string, storagePath: string): Promise<void> {
+  async function tombstoneStagedFile(
+    rootId: string,
+    storagePath: string,
+    operationId: string,
+  ): Promise<void> {
     const coordinate = localFolderCoordinate(rootId, storagePath);
     const manifest = await fetchManifest(coordinate.folderId);
     const entry = manifest.find(
@@ -1154,6 +1194,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       snapshot: "",
       contentHash: await sha256Hex(""),
       action: "delete",
+      operationId,
       signer,
       kedits: synthesizeKEditTransition(
         priorParsed.snapshot,
@@ -1165,6 +1206,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       coordinate.folderId,
       coordinate.relativePath,
       folderSigner,
+      { operationId },
     );
     if (folderHead) {
       await propagateFolderHead(
@@ -1177,7 +1219,11 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     }
   }
 
-  async function removeStagedFolder(rootId: string, storagePath: string): Promise<void> {
+  async function removeStagedFolder(
+    rootId: string,
+    storagePath: string,
+    operationId: string,
+  ): Promise<void> {
     const coordinate = localFolderCoordinate(rootId, storagePath);
     const signer = resolveFileSigner(authorVoice());
     if (!signer) throw new Error(`cannot resolve a local signer for ${storagePath}`);
@@ -1190,6 +1236,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       coordinate.folderId,
       coordinate.relativePath,
       folderSigner,
+      { operationId },
     );
     if (folderHead) {
       await propagateFolderHead(
@@ -1206,6 +1253,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     rootId: string,
     sourcePath: string,
     targetPath: string,
+    operationId: string,
   ): Promise<void> {
     const source = localFolderCoordinate(rootId, sourcePath);
     const target = localFolderCoordinate(rootId, targetPath);
@@ -1230,6 +1278,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         target.relativePath,
         sourceEntry.latestNodeId,
         targetSigner,
+        { operationId },
       );
       await propagateFolderHead(
         rootId,
@@ -1245,6 +1294,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       target.folderId,
       { ...sourceEntry, relativePath: target.relativePath },
       targetSigner,
+      { operationId },
     );
     await propagateFolderHead(
       rootId,
@@ -1263,6 +1313,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       source.folderId,
       source.relativePath,
       sourceSigner,
+      { operationId },
     );
     if (sourceHead) {
       await propagateFolderHead(
@@ -1279,6 +1330,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     rootId: string,
     targetPath: string,
     folder: LocalFile,
+    operationId: string,
   ): Promise<void> {
     const target = localFolderCoordinate(rootId, targetPath);
     const head = await fetchEventById(folder.nodeId);
@@ -1299,6 +1351,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         contentHash: folderNodeContentHash(head),
       },
       parentSigner,
+      { operationId },
     );
     await propagateFolderHead(
       rootId,
@@ -1374,6 +1427,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       kedits?: KEdit[],
       localOnly?: boolean,
       force?: boolean,
+      requestedOperationId?: string,
     ): Promise<string> {
       relativePath = ensureMdExt(relativePath);
       // Capture the voice (by pubkey) that authored this edit, so the debounced
@@ -1388,6 +1442,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       const local = loadLocalFolder(id);
       const existing = local?.files[relativePath];
       const prevNodeId = existing?.nodeId ?? "";
+      const operationId = requestedOperationId ?? existing?.pendingOperationId ?? createTraceOperationId();
       saveLocalFile(id, relativePath, {
         content,
         tags,
@@ -1402,6 +1457,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         pendingLocalOnly: localOnly || undefined,
         pendingForce: force || undefined,
         pendingEmptyGenesis: existing?.pendingEmptyGenesis,
+        pendingOperationId: operationId,
       });
       // 2. An explicit write is a completed Step. The old implementation
       // returned prevNodeId and queued the publish, which made Step/Send point
@@ -1419,7 +1475,12 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       const id = requireId();
       const local = loadLocalFolder(id);
       if (local?.files[relativePath]) return local.files[relativePath].nodeId;
-      saveLocalFile(id, relativePath, { content: "", tags: [], nodeId: "" });
+      saveLocalFile(id, relativePath, {
+        content: "",
+        tags: [],
+        nodeId: "",
+        pendingOperationId: createTraceOperationId(),
+      });
       return flushStagedFile(relativePath);
     },
 
@@ -1445,7 +1506,12 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       // A directory is a trace from the moment it exists. Mint the empty
       // folder genesis first, then cite that nucleus from the attached parent.
       // The canonical body of an empty folder is the compact JSON array `[]`.
-      const genesisId = await createFolderGenesis({ signer, localOnly: true });
+      const operationId = createTraceOperationId();
+      const genesisId = await createFolderGenesis({
+        signer,
+        localOnly: true,
+        operationId,
+      });
       const parentHead = await upsertManifestEntry(
         parent.folderId,
         {
@@ -1455,7 +1521,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           contentHash: await sha256Hex("[]"),
         },
         parentSigner,
-        { localOnly: true },
+        { localOnly: true, operationId },
       );
       await propagateFolderHead(
         id,
@@ -1475,6 +1541,52 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       return genesisId;
     },
 
+    async stepFolder(
+      relativePath: string,
+      requestedSigner?: Uint8Array,
+      requestedOperationId?: string,
+    ): Promise<string> {
+      const rootId = requireId();
+      const folderId = relativePath === ""
+        ? rootId
+        : (() => {
+            const folder = loadLocalFolder(rootId)?.files[relativePath];
+            const id = folder?.traceId ?? folder?.nodeId;
+            if (folder?.kind !== "folder" || !id) {
+              throw new Error(`cannot resolve folder trace for ${relativePath}`);
+            }
+            return id;
+          })();
+      const signer = requestedSigner ?? resolveFileSigner(authorVoice());
+      if (!signer) throw new Error(`cannot resolve a local signer for ${relativePath || "Root"}`);
+      const folderSigner = folderWriteSigner(await fetchFolderOwner(folderId), signer);
+      if (!folderSigner) {
+        throw new Error(`cannot Step foreign folder ${relativePath || "Root"}`);
+      }
+      const operationId = requestedOperationId ?? createTraceOperationId();
+      const head = await stepFolderManifest(folderId, folderSigner, {
+        localOnly: true,
+        operationId,
+      });
+      if (relativePath !== "") {
+        rememberLocalTreeFolderHead(
+          { storageRootId: rootId, folderId: rootId, storagePath: "" },
+          relativePath,
+          folderId,
+          head,
+        );
+        await propagateFolderHead(
+          rootId,
+          relativePath,
+          folderId,
+          head,
+          folderSigner,
+          true,
+        );
+      }
+      return head.id;
+    },
+
     async deletePath(relativePath: string, isFolder: boolean): Promise<void> {
       const id = requireId();
       const local = loadLocalFolder(id);
@@ -1485,13 +1597,14 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           )
         : [relativePath])
         .sort((a, b) => b.split("/").length - a.split("/").length);
+      const operationId = createTraceOperationId();
       // The gesture is complete only after every signed tombstone and manifest
       // removal lands. Perform remote work first so a failure leaves the local
       // copy retryable instead of silently orphaning provenance.
       for (const path of affected) {
         const entry = loadLocalFolder(id)?.files[path];
-        if (entry?.kind === "folder") await removeStagedFolder(id, path);
-        else await tombstoneStagedFile(id, path);
+        if (entry?.kind === "folder") await removeStagedFolder(id, path, operationId);
+        else await tombstoneStagedFile(id, path, operationId);
       }
       for (const path of affected) deleteLocalFile(id, path);
     },
@@ -1500,6 +1613,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       const id = requireId();
       const local = loadLocalFolder(id);
       if (!local) return;
+      const operationId = createTraceOperationId();
       const name = basename(src);
       const destPath = destFolder === "" ? name : `${destFolder}/${name}`;
       // Move every descendant too.
@@ -1521,13 +1635,16 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
               oldRel,
               newRel,
               pendingMoveForPath(oldRel, newRel, file.pendingMove),
+              file.pendingOperationId ?? operationId,
             );
             await flushStagedFile(newRel);
           }
           const folderMoves = moves
             .filter(({ oldRel }) => loadLocalFolder(id)?.files[oldRel]?.kind === "folder")
             .sort((a, b) => b.oldRel.split("/").length - a.oldRel.split("/").length);
-          for (const { oldRel } of folderMoves) await removeStagedFolder(id, oldRel);
+          for (const { oldRel } of folderMoves) {
+            await removeStagedFolder(id, oldRel, operationId);
+          }
           for (const { oldRel, newRel } of folderMoves) moveLocalFile(id, oldRel, newRel);
           return;
         }
@@ -1539,7 +1656,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
             const folder = loadLocalFolder(id)?.files[oldRel];
             if (!folder) continue;
             moveLocalFile(id, oldRel, newRel);
-            await attachStagedFolder(id, newRel, folder);
+            await attachStagedFolder(id, newRel, folder, operationId);
           }
           const fileMoves = moves.filter(
             ({ oldRel }) => loadLocalFolder(id)?.files[oldRel]?.kind !== "folder",
@@ -1552,12 +1669,13 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
               oldRel,
               newRel,
               pendingMoveForPath(oldRel, newRel, file.pendingMove),
+              file.pendingOperationId ?? operationId,
             );
             await flushStagedFile(newRel);
           }
           return;
         }
-        await moveStagedFolder(id, src, destPath);
+        await moveStagedFolder(id, src, destPath, operationId);
         for (const { oldRel, newRel } of moves) moveLocalFile(id, oldRel, newRel);
         return;
       }
@@ -1565,7 +1683,13 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         const file = loadLocalFolder(id)?.files[oldRel];
         if (!file || file.kind === "folder") continue;
         const pendingMove = pendingMoveForPath(oldRel, newRel, file.pendingMove);
-        moveLocalFile(id, oldRel, newRel, pendingMove);
+        moveLocalFile(
+          id,
+          oldRel,
+          newRel,
+          pendingMove,
+          file.pendingOperationId ?? operationId,
+        );
       }
       // The App updates paths optimistically, but this promise resolves only
       // after each resulting file/folder Step is queryable by replay. If one
@@ -1585,6 +1709,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       const id = requireId();
       const local = loadLocalFolder(id);
       if (!local) return;
+      const operationId = createTraceOperationId();
       const slash = src.lastIndexOf("/");
       const destPath = slash === -1 ? newName : src.slice(0, slash + 1) + newName;
       // Rename every descendant too.
@@ -1594,7 +1719,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         else if (p.startsWith(src + "/")) moves.push({ oldRel: p, newRel: destPath + p.slice(src.length) });
       }
       if (isFolder) {
-        await moveStagedFolder(id, src, destPath);
+        await moveStagedFolder(id, src, destPath, operationId);
         for (const { oldRel, newRel } of moves) moveLocalFile(id, oldRel, newRel);
         return;
       }
@@ -1604,7 +1729,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         moveLocalFile(id, oldRel, newRel, {
           kind: "move",
           fromPath: file.pendingMove?.fromPath ?? oldRel,
-        });
+        }, file.pendingOperationId ?? operationId);
       }
       for (let i = 0; i < moves.length; i++) {
         try {

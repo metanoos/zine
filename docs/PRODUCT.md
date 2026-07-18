@@ -1,18 +1,22 @@
 # Product
 
-Zine records how a document was actually made—by people, by models, or both—as
-signed, replayable history. It then uses that trace to help the next act of
-writing, not only the later audit. This page explains the daily loop, the
-initial buyer, and the evidence still required. For how the machinery works,
-read the [Protocol](PROTOCOL.md) tour.
+Zine records how a file or folder was actually made — by people, by AI, or
+both — as signed, replayable history. A **zine** is that file or folder
+together with its trace.
+Zine uses the trace to help the next act of writing, not only the later audit.
+This page explains the daily loop, the initial buyer, and the evidence still
+required. The accepted migration direction is recorded in
+[Trace-Native Zines](TRACE_NATIVE_ZINES.md); for implemented machinery, read
+the [Protocol](PROTOCOL.md) tour.
 
 ## The problem
 
-Final text is a lossy summary of writing. It preserves what survived, but not
+Current content is a lossy summary of writing. A file preserves the text that
+survived; a folder preserves the current tree. Neither alone preserves
 which direction was abandoned, which phrase was repeatedly repaired, what a
 writer protected, what an AI proposed, or what the writer rejected. Giving an
-AI only that final state asks it to collaborate without evidence of the process
-that shaped the work.
+AI only that final state asks it to collaborate without evidence of the
+process that shaped the work across one file or a whole folder.
 
 Once an AI-assisted document leaves its editor, the process also collapses into
 a final file, coarse version history, and scattered model logs. Those records
@@ -32,12 +36,20 @@ that context. During review, it provides evidence instead of a verdict. It does
 not decide whether an author is human, whether a claim is true, or whether a
 work deserves trust.
 
+The review side compresses to one line: **evaluate the writer, not just the
+writing.** As AI assistance makes finished prose more uniform, the information
+that distinguishes a writer migrates out of the final text and into the
+process — what they asked for, rejected, protected, and rewrote. The trace is
+where that signal survives, and it cannot be captured retroactively: from a
+full trace any bounded view can be derived later, while no finished text
+recovers the process that produced it.
+
 ## Who it serves
 
-Three roles meet in every traced document:
+Three roles meet in every zine:
 
-- **The writer**—a person, an agent, or both interleaved—who wants the AI to
-  respond to the work's actual trajectory rather than its latest text alone.
+- **The writer** — a person, an agent, or both interleaved — who wants the AI
+  to respond to the work's actual trajectory rather than its latest text alone.
 - **The accountable team** — whoever answers for agent-written artifacts in a
   regulated or reputation-sensitive setting: an AI platform owner, a security
   lead, an editorial or compliance owner.
@@ -58,11 +70,13 @@ somewhere else.
 ## The trace-aware writing loop
 
 The foundational product bet is straightforward: for at least some writing
-tasks, models given current text plus relevant process evidence will collaborate
-better than models given current text alone. “Better” must be measured through
-writer preference, editing required before acceptance, time to an acceptable
-result, preservation of intent, recurrence of rejected directions, and later
-reversion—not through a persuasive demo.
+tasks, models given the current scoped content plus relevant process evidence
+will collaborate better than models given current content alone. At file scope
+this is text plus trace; at folder scope — up to the Root, the topmost folder
+— it is a content tree plus trace. “Better” must be measured through writer preference, editing required
+before acceptance, time to an acceptable result, preservation of intent,
+recurrence of rejected directions, and later reversion—not through a
+persuasive demo.
 
 The intended loop is:
 
@@ -79,10 +93,11 @@ The intended loop is:
    of the trace, so later assistance and review can distinguish proposal from
    acceptance.
 
-Context is composed from explicit scopes: user, ancestor folders, nearest
-folder, and file, with more specific choices winning. Operation-only context is
-ephemeral. Nothing promotes itself upward, and incompatible equal-scope
-preferences block preparation instead of being resolved by the model.
+Context is composed from explicit zine scopes: file, nearest folder zine,
+ancestor folder zines, Root, and deliberate user-level context, with more
+specific choices winning. Operation-only context is ephemeral. Nothing
+promotes itself upward, and incompatible equal-scope preferences block
+preparation instead of being resolved by the model.
 
 Two textual forms make local intent legible:
 
@@ -98,6 +113,11 @@ The compiler and memory system are product interpretation, not protocol truth.
 The signed trace remains portable evidence even when a reader uses a different
 selector or no AI at all.
 
+A deliberate Step applies to the selected zine. A file Step checkpoints that
+file. A folder or Root Step first checkpoints dirty descendants and then pins
+one exact recursive frontier. Automatic ancestor checkpoints remain verifiable
+but appear beneath the originating gesture rather than as extra author Steps.
+
 ## Agents write through Zine
 
 `zine-mcp` is a headless press that sits beneath any MCP-capable harness. It
@@ -111,7 +131,7 @@ MCP harness
 agent voice key
     |
     v
-Step local versions ---> Send one version ---> optional Attest
+Step local versions ---> Publish one version ---> optional Attest
     |                         |                      |
     v                         v                      v
 signed history          review/discussion      commitment
@@ -127,12 +147,14 @@ The flow:
 3. The agent Steps file states under its own key. Each exact signed event lands
    in a durable local outbox before relay delivery, so an unavailable home
    relay does not lose or reject the Step.
-4. It Sends one exact stepped file node when the work is ready for someone
-   else to fetch; earlier private Steps need not leave the machine.
+4. It Publishes one exact stepped file node when the work is ready for
+   someone else to fetch; earlier private Steps need not leave the machine.
+   The tool, like the wire gesture, is still named `zine_send` until the
+   schema cut.
 5. The handoff includes a portable locator. An LLM can consume the canonical
    raw signed node directly, while the desktop verifies and renders the
    nucleus plus any reachable history for a human.
-6. The author may later Attest a sent version to stand behind it.
+6. The author may later Attest a published version to stand behind it.
 
 The desktop press is the human interpretation surface; the raw signed trace is
 the portable machine evidence. Native model operations already gather file and
@@ -153,7 +175,7 @@ to pay is not yet proven.
 
 ## Beyond one agent run
 
-The same trace primitive supports people and models, files and folders,
+The same zine primitive supports people and models, files and folders,
 citations and derivation. That breadth matters because useful work does not
 stay inside one agent run:
 
@@ -161,7 +183,7 @@ stay inside one agent run:
 - An agent quotes a source passage.
 - A collaborator forks a file and proposes changes.
 - An owner selectively merges the proposal.
-- A reviewer checks the exact version that was sent or endorsed.
+- A reviewer checks the exact version that was published or endorsed.
 
 Agent provenance delivers value to a single press on day one; team and
 network layers grow out of the same records later. No global network is
@@ -172,13 +194,15 @@ required for the first user to benefit.
 - **Evidence, not verdicts.** Preserve checkable claims and state their limits.
 - **Trace is useful during writing.** Process context is a collaboration input,
   not merely an audit attachment.
+- **Files and folders are zines.** Replay and publication follow the selected
+  recursive scope.
 - **Inspectable AI context.** Writers see, correct, and approve what Zine sends.
 - **Sovereign by default.** Local authoring works without a hosted account.
 - **Protocol before platform lock-in.** Files and signed events remain usable
   outside one service.
 - **One owner per trace.** Cross-author work joins through explicit fork and
   merge seams.
-- **Private work stays private by default.** Step is local; Send changes
+- **Private work stays private by default.** Step is local; Publish changes
   reachability; Attest is a separate commitment.
 - **Progressive disclosure.** Users should understand the action before they
   need to learn Nostr tags, key roles, or relay policy.
@@ -186,12 +210,19 @@ required for the first user to benefit.
 ## Where Zine is today
 
 The desktop press, the MCP press, the local relay, and the full gesture set —
-Step, Send, Attest, Mint, Cite, fork, and merge — plus raw-file Reify export
+Step, Publish, Attest, Mint, Cite, fork, and merge — plus raw-file Reify export
 work today.
 The [evidence ledger](EVIDENCE.md) records exactly what is implemented, what has
 been measured, and what remains unproven. Hosted services, a no-install public
 verifier, and the network layer are sequenced behind evidence, not dates; the
 [roadmap](ROADMAP.md) names the proof that unlocks each phase.
+
+The recursive file/folder ontology now runs through the shared protocol kernel
+and the client. Existing child heads advance separately from membership adds;
+folder and Root Step flush dirty descendants; one durable operation id groups
+the originating event with derived ancestor checkpoints; and Replay collapses
+those roll-ups without hiding their signed nodes. Fixed cross-runtime folder
+vectors and explicit crash-boundary real-relay fixtures remain hardening work.
 
 What matters most now is two linked proofs: trace-aware assistance improves real
 writing outcomes under a preregistered comparison, and accountable teams value

@@ -5,6 +5,7 @@ import type { Event } from "nostr-tools";
 import { createReplayPanels } from "./replay-panel-layout.js";
 import {
   buildReplayTimeline,
+  collapseDerivedFolderCheckpoints,
   folderReplayState,
   replayFrameIndexAtOrBefore,
   selectedReplayPaths,
@@ -393,6 +394,49 @@ test("folder membership snapshots animate as structure, not Markdown", () => {
     { kind: "file", relativePath: "notes.md" },
     { kind: "folder", relativePath: "drafts" },
   ]);
+});
+
+test("replay collapses derived folder roll-ups only when their source is present", () => {
+  const file = step(event("file-step", "notes.md", "A", []), "notes.md", 1_000, "A");
+  file.meta.operationId = "11".repeat(32);
+  const derived = folderStep(folderEvent("folder-rollup", null, [], 2), "", 1_001);
+  derived.meta.operationId = file.meta.operationId;
+  derived.meta.folderCheckpoint = { cause: "child-advance", sourceNodeId: file.event.id };
+  const ancestor = folderStep(folderEvent("ancestor-rollup", null, [], 3), "Root", 1_002);
+  ancestor.meta.operationId = file.meta.operationId;
+  ancestor.meta.folderCheckpoint = {
+    cause: "child-advance",
+    sourceNodeId: derived.event.id,
+  };
+  const explicit = folderStep(folderEvent("folder-explicit", null, [], 3), "", 2_000);
+  explicit.meta.operationId = "22".repeat(32);
+  explicit.meta.folderCheckpoint = { cause: "explicit-step" };
+  const orphanDerived = folderStep(folderEvent("orphan-rollup", null, [], 4), "", 3_000);
+  orphanDerived.meta.operationId = "33".repeat(32);
+  orphanDerived.meta.folderCheckpoint = { cause: "child-advance" };
+
+  const collapsed = collapseDerivedFolderCheckpoints([
+    file,
+    derived,
+    ancestor,
+    explicit,
+    orphanDerived,
+  ]);
+  assert.deepEqual(
+    collapsed.map((item) => item.event.id),
+    ["file-step", "folder-explicit", "orphan-rollup"],
+  );
+  assert.deepEqual(
+    collapsed[0]?.derivedFolderCheckpoints?.map((item) => item.event.id),
+    ["folder-rollup"],
+  );
+  assert.deepEqual(
+    collapsed[0]?.derivedFolderCheckpoints?.[0]?.derivedFolderCheckpoints?.map(
+      (item) => item.event.id,
+    ),
+    ["ancestor-rollup"],
+  );
+  assert.ok(replayDisplayAt(collapsed, 0).folders.Root);
 });
 
 test("folder focus deltas route later file edits to their recorded panel", () => {
