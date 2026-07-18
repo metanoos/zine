@@ -113,9 +113,11 @@ export async function adaptDesktopTraceContextSelectionV1(
 
   // Text-only projection excludes process candidates before their validation,
   // byte accounting, hashing, or rendering. Preserve that exact boundary here.
+  // Selected-trace always carries a non-FULL global verdict to the selector,
+  // even when no facts were requested, so completeness cannot disappear.
   const candidates = policy === "text-only-v1"
     ? []
-    : processFacts.map((request) => processCandidate(target, verdict.steps, request));
+    : processCandidates(target, verdict, processFacts);
   requireDistinctCandidates(candidates);
 
   return deepFreeze({
@@ -213,8 +215,11 @@ function requireVerifiedTarget(
 ): VerifiedTargetProjection {
   const headIndex = chain.length - 1;
   const head = chain[headIndex]!;
-  if (issues.some((issue) => issue.stepIndex === headIndex && issue.code === "invalid-event")) {
-    fail("signed file-chain head has an invalid id or signature");
+  const headIntegrityIssue = issues.find(
+    (issue) => issue.kind === "integrity" && issue.stepIndex === headIndex,
+  );
+  if (headIntegrityIssue) {
+    fail(`signed file-chain head is not a valid signed snapshot: ${headIntegrityIssue.code}`);
   }
   if (head.kind !== 4290) fail("signed file-chain head is not a TraceNode");
   const reifications = head.tags.filter((tag) => tag[0] === "z");
@@ -240,13 +245,6 @@ function requireVerifiedTarget(
   if (typeof payload.contentHash !== "string" || payload.contentHash.length === 0) {
     fail("signed file-chain head has no content hash");
   }
-  if (
-    issues.some((issue) =>
-      issue.stepIndex === headIndex
-      && (issue.code === "snapshot-hash-mismatch" || issue.code === "missing-content-hash"))
-  ) {
-    fail("signed file-chain head snapshot does not match its content hash");
-  }
   return {
     traceId: chain[0]!.id,
     headId: head.id,
@@ -256,9 +254,27 @@ function requireVerifiedTarget(
   };
 }
 
+function processCandidates(
+  target: VerifiedTargetProjection,
+  verdict: TraceConformanceVerdict,
+  requests: readonly DesktopProcessFactRequestV1[],
+): Extract<EvidenceCandidateV1, { kind: "process-fact" }>[] {
+  if (verdict.status !== "full") {
+    return [processCandidate(
+      target,
+      verdict.steps,
+      verdict.status,
+      { version: 1, kind: "step-summary", chainDistance: 0 },
+    )];
+  }
+  return requests.map((request) =>
+    processCandidate(target, verdict.steps, verdict.status, request));
+}
+
 function processCandidate(
   target: VerifiedTargetProjection,
   steps: readonly TraceConformanceStep[],
+  verdictStatus: TraceConformanceStatus,
   request: DesktopProcessFactRequestV1,
 ): Extract<EvidenceCandidateV1, { kind: "process-fact" }> {
   requireVersion(request.version, "process fact request");
@@ -287,7 +303,7 @@ function processCandidate(
       traceId: target.traceId,
       headId: target.headId,
       nodeId: step.nodeId,
-      processStatus: selectorProcessStatus(step.status),
+      processStatus: selectorProcessStatus(verdictStatus),
       chainDistance: request.chainDistance,
       transactionIndex,
       ...(fact.kind === "change" ? { range: copyRange(fact.range) } : {}),
