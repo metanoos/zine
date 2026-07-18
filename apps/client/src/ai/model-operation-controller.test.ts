@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { renderContextBlock } from "./context-block.js";
 import { contentFingerprint, createContextSnapshot } from "./context-snapshot.js";
 import { ModelOperationController } from "./model-operation-controller.js";
 import type { CurrentModelTarget } from "./model-operation-executor.js";
@@ -92,7 +93,12 @@ function harness() {
             deltaLog: [],
             unstepped: false,
           }],
-          renderedBlock: `=== CONTEXT ===\n${body}\n=== END CONTEXT ===`,
+          renderedBlock: renderContextBlock({
+            folderLabel: "folder-1",
+            entries: [{ relativePath: "draft.md", content: body }],
+            activePath: "draft.md",
+            deltaLog: [],
+          }),
           createdAt: 1,
         });
       },

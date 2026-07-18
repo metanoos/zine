@@ -138,6 +138,7 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
     operation: input.operation,
     operationInputs: input.operationInputs,
     targetText: target.body,
+    renderedContextBlock: input.contextSnapshot.renderedBlock,
     actingAuthorId: input.actingAuthorId ?? "",
     authoritySpans: input.authoritySpans ?? [],
     sourceRevision: {
@@ -165,9 +166,10 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
       ),
     );
   }
+  const renderedContextBlock = compiledAuthoring.renderedContextBlock;
   const assembled = assembleOpMessages(input.operation, operationInputs, {
     voicePrompt: input.voicePrompt ?? "",
-    contextBlock: input.contextSnapshot.renderedBlock,
+    contextBlock: renderedContextBlock,
     lensId: input.lensId,
     authorDirectiveInstructions: compiledAuthoring.authoring?.instructionSection,
     authorDirectiveExcerpts: compiledAuthoring.authoring?.quotedExcerptSection,
@@ -175,10 +177,11 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
   const messages = prepareChatMessages(input.provider, assembled)
     .map((message) => ({ ...message }));
   const totalBytes = messages.reduce((total, message) => total + bytes(message.content), 0);
+  const contextBytes = bytes(renderedContextBlock);
   const maxBytes = input.maxBytes ?? PREPARED_REQUEST_MAX_BYTES;
   if (totalBytes > maxBytes) {
     throw new PreparedOperationError([
-      `Prepared request exceeds ${maxBytes} bytes (${totalBytes}); context contributes ${input.contextSnapshot.budget.totalBytes}`,
+      `Prepared request exceeds ${maxBytes} bytes (${totalBytes}); context contributes ${contextBytes}`,
     ]);
   }
 
@@ -237,8 +240,8 @@ export function prepareOperation(input: PrepareOperationInput): PreparedOperatio
       maxBytes,
       totalBytes,
       estimatedTokens: Math.ceil(totalBytes / 4),
-      contextBytes: input.contextSnapshot.budget.totalBytes,
-      promptLayerBytes: Math.max(0, totalBytes - input.contextSnapshot.budget.totalBytes),
+      contextBytes,
+      promptLayerBytes: Math.max(0, totalBytes - contextBytes),
     },
     preparedRequestHash,
     createdAt,

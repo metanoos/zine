@@ -40,6 +40,7 @@ export interface CompileTraceAuthoringInput {
   operation: OpKind;
   operationInputs: OpInputs;
   targetText: string;
+  renderedContextBlock: string;
   actingAuthorId: string;
   authoritySpans: readonly AuthoritySpanV1[];
   sourceRevision: DirectiveSourceRevisionV1;
@@ -47,6 +48,7 @@ export interface CompileTraceAuthoringInput {
 
 export interface CompiledTraceAuthoringOperation {
   operationInputs: OpInputs;
+  renderedContextBlock: string;
   authoring: PreparedTraceAuthoringV1 | null;
 }
 
@@ -72,7 +74,11 @@ export function compileTraceAuthoringOperation(
   input: CompileTraceAuthoringInput,
 ): CompiledTraceAuthoringOperation {
   if (input.operation !== "extend" && input.operation !== "settle") {
-    return { operationInputs: cloneInputs(input.operationInputs), authoring: null };
+    return {
+      operationInputs: cloneInputs(input.operationInputs),
+      renderedContextBlock: input.renderedContextBlock,
+      authoring: null,
+    };
   }
 
   const operationRange = sourceRangeForOperation(
@@ -119,6 +125,14 @@ export function compileTraceAuthoringOperation(
     protectedTokens,
   );
   const hasAuthorizedDirectives = compiled.directives.length > 0;
+  const renderedContextBlock = hasAuthorizedDirectives
+    ? renderMarkerizedActiveContext(
+        input.renderedContextBlock,
+        input.sourceRevision.path ?? "",
+        input.targetText,
+        compiled.renderedText,
+      )
+    : input.renderedContextBlock;
   const operationInputs = cloneInputs(input.operationInputs);
   if (hasAuthorizedDirectives) {
     if (input.operation === "extend") operationInputs.seed = promptTargetText;
@@ -143,7 +157,7 @@ export function compileTraceAuthoringOperation(
     })),
   } satisfies PreparedTraceAuthoringV1);
 
-  return { operationInputs, authoring };
+  return { operationInputs, renderedContextBlock, authoring };
 }
 
 /** Validate output before App is allowed to dispatch an editor transaction. */
@@ -306,6 +320,56 @@ function renderInstructionSection(directives: readonly CompiledDirectiveV1[]): s
       `${index + 1}. ${directive.marker}\n${directive.instruction}`,
     ),
   ].join("\n\n");
+}
+
+/**
+ * Context Block V1 always emits the active body first in the file-contents
+ * section. Locate that structured boundary, verify the immutable source bytes
+ * exactly, and replace only that occurrence. A renderer drift or ambiguous
+ * snapshot therefore blocks preparation instead of falling back to a global
+ * byte replacement that could rewrite sibling/history evidence.
+ */
+function renderMarkerizedActiveContext(
+  contextBlock: string,
+  activePath: string,
+  sourceText: string,
+  markerizedText: string,
+): string {
+  if (!activePath) {
+    throw new TraceAuthoringPreparationError([
+      "ACTIVE_CONTEXT_PATH_MISSING: cannot locate the prepared target in Context Block V1",
+    ]);
+  }
+  const boundary = `\n--- file contents ---\n## ${activePath}  (ACTIVE)\n`;
+  const boundaryAt = contextBlock.indexOf(boundary);
+  if (boundaryAt < 0) {
+    throw new TraceAuthoringPreparationError([
+      `ACTIVE_CONTEXT_BOUNDARY_MISSING: Context Block V1 has no active body boundary for ${activePath}`,
+    ]);
+  }
+  if (contextBlock.indexOf(boundary, boundaryAt + boundary.length) >= 0) {
+    throw new TraceAuthoringPreparationError([
+      `ACTIVE_CONTEXT_BOUNDARY_AMBIGUOUS: Context Block V1 has multiple active body boundaries for ${activePath}`,
+    ]);
+  }
+  const bodyFrom = boundaryAt + boundary.length;
+  const bodyTo = bodyFrom + sourceText.length;
+  if (contextBlock.slice(bodyFrom, bodyTo) !== sourceText) {
+    throw new TraceAuthoringPreparationError([
+      `ACTIVE_CONTEXT_BODY_MISMATCH: Context Block V1 body for ${activePath} does not match the captured target revision`,
+    ]);
+  }
+  const suffix = contextBlock.slice(bodyTo);
+  if (
+    !suffix.startsWith("\n\n## ") &&
+    !suffix.startsWith("\n\n--- directory log:") &&
+    !suffix.startsWith("\n\n=== END CONTEXT ===")
+  ) {
+    throw new TraceAuthoringPreparationError([
+      `ACTIVE_CONTEXT_BODY_BOUNDARY_INVALID: Context Block V1 body for ${activePath} has an unexpected suffix`,
+    ]);
+  }
+  return `${contextBlock.slice(0, bodyFrom)}${markerizedText}${contextBlock.slice(bodyTo)}`;
 }
 
 function renderQuotedExcerptSection(compiled: CompiledAuthoringSyntaxV1): string {

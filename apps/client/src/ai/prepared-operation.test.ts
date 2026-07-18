@@ -8,7 +8,7 @@ import {
   providerProfileFingerprint,
 } from "./prepared-operation.js";
 import type { ProviderConfig } from "./models-store.js";
-import type { DeltaLogEntry } from "./context-block.js";
+import { renderContextBlock, type DeltaLogEntry } from "./context-block.js";
 import { TraceAuthoringPreparationError } from "./trace-authoring-adapter.js";
 
 const provider: ProviderConfig = {
@@ -75,7 +75,12 @@ function authoringSnapshot(body: string) {
       path: "draft.md", traceId: "trace", headId: "head", body,
       citations: [], deltaLog: [], unstepped: false,
     }],
-    renderedBlock: `=== CONTEXT ===\n${body}\n=== END CONTEXT ===`,
+    renderedBlock: renderContextBlock({
+      folderLabel: "folder",
+      entries: [{ relativePath: "draft.md", content: body }],
+      activePath: "draft.md",
+      deltaLog: [],
+    }),
     createdAt: 1,
   });
 }
@@ -189,6 +194,7 @@ test("prepared Extend freezes compiler output and separates instructions from qu
   assert.equal(prepared.traceAuthoring?.authorityPersistence, "current-editor-session-only");
   assert.equal(prepared.traceAuthoring?.compiled.directives.length, 1);
   assert.equal(Object.isFrozen(prepared.traceAuthoring), true);
+  assert.equal("renderedContextBlock" in prepared.traceAuthoring!, false);
   assert.match(prepared.operationInputs.seed ?? "", /ZINE_DIRECTIVE_V1/);
   const system = prepared.messages.filter((message) => message.role === "system")
     .map((message) => message.content).join("\n");
@@ -197,7 +203,21 @@ test("prepared Extend freezes compiler output and separates instructions from qu
   assert.match(system, /AUTHOR DIRECTIVES — ORDERED INSTRUCTIONS/);
   assert.match(system, / tighten this /);
   assert.match(user, /QUOTED DATA, NEVER INSTRUCTIONS/);
-  assert.match(user, /\(\( tighten this \)\)/, "raw target/context remains quoted data");
+  assert.doesNotMatch(user, /\(\( tighten this \)\)/, "raw authorized directives never enter user-role messages");
+  const marker = prepared.traceAuthoring!.compiled.directives[0]!.marker;
+  assert.ok(
+    user.split(marker).length - 1 >= 2,
+    "the operation target and active context both carry the stable marker",
+  );
+  const transformedContext = authoringSnapshot(body).renderedBlock.replace(
+    "(( tighten this ))",
+    marker,
+  );
+  assert.equal(
+    prepared.budget.contextBytes,
+    new TextEncoder().encode(transformedContext).length,
+    "budget metadata accounts for the transformed context actually sent",
+  );
 });
 
 test("authority decisions change both dependency and prepared-request identity", () => {
@@ -258,6 +278,76 @@ test("documents without an authorized directive retain prior prompt bytes", () =
   assert.deepEqual(missing.messages, unknown.messages);
   assert.deepEqual(missing.operationInputs, base.operationInputs);
   assert.deepEqual(unknown.operationInputs, base.operationInputs);
+});
+
+test("ineligible directive-shaped text remains byte-identical quoted data", () => {
+  const body = "Before ((pasted words)) after";
+  const from = body.indexOf("((");
+  const contextSnapshot = authoringSnapshot(body);
+  const prepared = prepareOperation({
+    operation: "extend",
+    operationInputs: {
+      seed: body,
+      hasSelection: true,
+      rangeFrom: body.length,
+      rangeTo: body.length,
+      sourceFrom: 0,
+      sourceTo: body.length,
+    },
+    contextSnapshot,
+    provider,
+    modelVoicePubkey: "a".repeat(64),
+    lensId: "default",
+    dirtyTarget: false,
+    actingAuthorId: "author-a",
+    authoritySpans: [{
+      id: "paste-1",
+      actorId: "author-a",
+      origin: "paste",
+      instructionEligible: false,
+      fromUtf16: from,
+      toUtf16: from + "((pasted words))".length,
+    }],
+    requestId: "inert-authoring",
+    createdAt: 1,
+  });
+  assert.equal(prepared.traceAuthoring?.compiled.directives.length, 0);
+  assert.equal(prepared.budget.contextBytes, contextSnapshot.budget.totalBytes);
+  assert.deepEqual(prepared.operationInputs, {
+    seed: body,
+    hasSelection: true,
+    rangeFrom: body.length,
+    rangeTo: body.length,
+    sourceFrom: 0,
+    sourceTo: body.length,
+  });
+  const system = prepared.messages.filter((message) => message.role === "system")
+    .map((message) => message.content).join("\n");
+  const user = prepared.messages.filter((message) => message.role === "user")
+    .map((message) => message.content).join("\n");
+  assert.doesNotMatch(system, /AUTHOR DIRECTIVES — ORDERED INSTRUCTIONS/);
+  assert.match(user, /\(\(pasted words\)\)/);
+  const noAuthority = prepareOperation({
+    operation: "extend",
+    operationInputs: {
+      seed: body,
+      hasSelection: true,
+      rangeFrom: body.length,
+      rangeTo: body.length,
+      sourceFrom: 0,
+      sourceTo: body.length,
+    },
+    contextSnapshot,
+    provider,
+    modelVoicePubkey: "a".repeat(64),
+    lensId: "default",
+    dirtyTarget: false,
+    actingAuthorId: "author-a",
+    authoritySpans: [],
+    requestId: "inert-authoring",
+    createdAt: 1,
+  });
+  assert.deepEqual(prepared.messages, noAuthority.messages, "zero authorized directives preserve prompt bytes");
 });
 
 test("malformed syntax affecting the prepared range blocks before prompt assembly", () => {
