@@ -120,6 +120,7 @@ function makeFullPresentation(): TraceContextInspectorPresentationV1 {
         selectionReasons: ["prepared target head", "recent process fact"],
         sensitivity: "trace-private",
         byteCost: 173,
+        byteCostLabel: "rendered context bytes",
         canExclude: true,
       },
       {
@@ -133,6 +134,7 @@ function makeFullPresentation(): TraceContextInspectorPresentationV1 {
         selectionReasons: ["mandatory operation instruction"],
         sensitivity: "public",
         byteCost: 42,
+        byteCostLabel: "rendered context bytes",
         canExclude: false,
       },
     ],
@@ -249,10 +251,10 @@ test("SSR renders honest empty states without implying missing trace data was se
     presentation: makeEmptyPresentation(),
   }));
 
-  assert.match(html, /No authorized directives are selected for this operation/);
-  assert.match(html, /No protected ranges intersect this operation/);
-  assert.match(html, /No directive-looking quoted data was found/);
-  assert.match(html, /No authoring-syntax compilation errors affect this operation/);
+  assert.match(html, /No authorized directives are available for this operation/);
+  assert.match(html, /No compiled protected ranges are available for this operation/);
+  assert.match(html, /No compiled inert directive candidates are available/);
+  assert.match(html, /No authoring-syntax compilation errors are available for this operation/);
   assert.match(html, /No trace evidence was selected for this operation/);
   assert.doesNotMatch(html, /this preparation is text-only/);
   assert.match(html, /No context candidates were excluded/);

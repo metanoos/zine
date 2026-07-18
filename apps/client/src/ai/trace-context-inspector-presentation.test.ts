@@ -85,6 +85,7 @@ function makePresentation(): TraceContextInspectorPresentationV1 {
         selectionReasons: ["recent"],
         sensitivity: "trace-private",
         byteCost: 12,
+        byteCostLabel: "rendered context bytes",
         canExclude: true,
       },
       {
@@ -97,6 +98,7 @@ function makePresentation(): TraceContextInspectorPresentationV1 {
         selectionReasons: ["explicit"],
         sensitivity: "profile-private",
         byteCost: 10,
+        byteCostLabel: "rendered context bytes",
         canExclude: true,
       },
     ],

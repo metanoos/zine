@@ -37,6 +37,8 @@ import {
 import { OP_LENSES, lensForOp, type OpLensId, type OpLensSelections } from "./op-lenses.js";
 import type { ProviderConfig } from "./models-store.js";
 import type { PreparedOperation } from "./prepared-operation.js";
+import { TraceContextInspectorView } from "./TraceContextInspectorView.js";
+import { adaptPreparedOperationForTraceContextInspector } from "./trace-context-inspector-adapter.js";
 
 export interface PromptInspectorProps {
   /** The op to show first. Defaults to "extend". */
@@ -119,6 +121,12 @@ export function PromptInspectorModal({
   const selectedLens = lensForOp(op, lensSelections[op]);
   const preparedOperation = preparedOperations[op] ?? null;
   const effectiveContextBlock = preparedOperation?.contextSnapshot.renderedBlock ?? contextBlock;
+  const traceContextPresentation = useMemo(
+    () => preparedOperation
+      ? adaptPreparedOperationForTraceContextInspector(preparedOperation)
+      : null,
+    [preparedOperation],
+  );
 
   // Inspector never rebuilds. These are the exact frozen messages which
   // completePrepared receives after approval.
@@ -262,7 +270,23 @@ export function PromptInspectorModal({
           </p>
         ) : null}
 
+        {traceContextPresentation ? (
+          <section
+            className="prompt-inspector-trace-context"
+            aria-label="Prepared trace context"
+            tabIndex={0}
+          >
+            <TraceContextInspectorView
+              presentation={traceContextPresentation}
+              headingId={`prompt-inspector-trace-context-${op}`}
+            />
+          </section>
+        ) : null}
+
         <div className="prompt-inspector-body">
+          {rows.length > 0 ? (
+            <h3 className="prompt-inspector-stack-title">Exact prepared message stack</h3>
+          ) : null}
           {rows.length === 0 ? (
             <p className="muted">No messages for this op.</p>
           ) : (

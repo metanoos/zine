@@ -192,7 +192,7 @@ export function TraceContextInspectorView({
       <section className="trace-context-inspector-section trace-context-inspector-directives" aria-labelledby={`${headingId}-directives`}>
         <h3 id={`${headingId}-directives`}>Authorized directives</h3>
         {groups.directives.length === 0 ? (
-          <EmptyState>No authorized directives are selected for this operation.</EmptyState>
+          <EmptyState>No authorized directives are available for this operation.</EmptyState>
         ) : (
           <ol className="trace-context-inspector-list trace-context-inspector-directive-list">
             {groups.directives.map((directive) => (
@@ -289,7 +289,7 @@ export function TraceContextInspectorView({
       <section className="trace-context-inspector-section trace-context-inspector-protected" aria-labelledby={`${headingId}-protected`}>
         <h3 id={`${headingId}-protected`}>Protected ranges</h3>
         {groups.protectedRanges.length === 0 ? (
-          <EmptyState>No protected ranges intersect this operation.</EmptyState>
+          <EmptyState>No compiled protected ranges are available for this operation.</EmptyState>
         ) : (
           <ul className="trace-context-inspector-list trace-context-inspector-protected-list">
             {groups.protectedRanges.map((protectedRange) => (
@@ -314,7 +314,7 @@ export function TraceContextInspectorView({
       <section className="trace-context-inspector-section trace-context-inspector-inert" aria-labelledby={`${headingId}-inert`}>
         <h3 id={`${headingId}-inert`}>Inert directive candidates</h3>
         {groups.inertDirectives.length === 0 ? (
-          <EmptyState>No directive-looking quoted data was found.</EmptyState>
+          <EmptyState>No compiled inert directive candidates are available.</EmptyState>
         ) : (
           <ol className="trace-context-inspector-list trace-context-inspector-inert-list">
             {groups.inertDirectives.map((candidate) => (
@@ -351,7 +351,7 @@ export function TraceContextInspectorView({
       <section className="trace-context-inspector-section trace-context-inspector-errors" aria-labelledby={`${headingId}-errors`}>
         <h3 id={`${headingId}-errors`}>Compilation errors</h3>
         {groups.compilationErrors.length === 0 ? (
-          <EmptyState>No authoring-syntax compilation errors affect this operation.</EmptyState>
+          <EmptyState>No authoring-syntax compilation errors are available for this operation.</EmptyState>
         ) : (
           <ul className="trace-context-inspector-list trace-context-inspector-error-list">
             {groups.compilationErrors.map((error) => (
@@ -394,7 +394,9 @@ export function TraceContextInspectorView({
                     {TRACE_CONTEXT_INSPECTOR_EVIDENCE_KIND_LABELS[evidence.kind]}
                   </span>
                   <ClassificationBadge classification={evidence.classification} />
-                  <span className="trace-context-inspector-byte-cost">{evidence.byteCost.toLocaleString()} bytes</span>
+                  <span className="trace-context-inspector-byte-cost">
+                    {evidence.byteCost.toLocaleString()} {evidence.byteCostLabel}
+                  </span>
                 </header>
                 <p className="trace-context-inspector-claim">{evidence.displayClaim}</p>
                 <EvidenceSource source={evidence.source} />

@@ -8629,6 +8629,221 @@ html[data-theme="light"] .editor-host {
   line-height: 1.45;
   font-style: italic;
 }
+.prompt-inspector-trace-context {
+  min-width: 0;
+  max-height: 42vh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0.65rem;
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  background: var(--surface);
+}
+.prompt-inspector-trace-context:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+.trace-context-inspector-view {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.65rem;
+  color: var(--ink);
+}
+.trace-context-inspector-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(14rem, 1.5fr);
+  gap: 0.8rem;
+  align-items: start;
+}
+.trace-context-inspector-eyebrow,
+.trace-context-inspector-summary,
+.trace-context-inspector-empty,
+.trace-context-inspector-card p,
+.trace-context-inspector-excerpt-meta,
+.trace-context-inspector-excerpt-classification {
+  margin: 0;
+}
+.trace-context-inspector-eyebrow,
+.trace-context-inspector-view h2,
+.trace-context-inspector-view h3,
+.trace-context-inspector-view h4,
+.trace-context-inspector-view dt,
+.trace-context-inspector-state,
+.trace-context-inspector-classification,
+.trace-context-inspector-evidence-kind,
+.trace-context-inspector-byte-cost,
+.prompt-inspector-stack-title {
+  font-family: var(--font-mono);
+}
+.trace-context-inspector-eyebrow,
+.trace-context-inspector-view dt {
+  color: var(--ink-dim);
+  font-size: 0.61rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.trace-context-inspector-view h2,
+.trace-context-inspector-view h3,
+.trace-context-inspector-view h4 {
+  margin: 0;
+}
+.trace-context-inspector-view h2 { font-size: 0.88rem; }
+.trace-context-inspector-view h3 { font-size: 0.73rem; text-transform: uppercase; }
+.trace-context-inspector-view h4 { font-size: 0.66rem; color: var(--ink-dim); }
+.trace-context-inspector-summary,
+.trace-context-inspector-empty {
+  color: var(--ink-dim);
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+.trace-context-inspector-section {
+  min-width: 0;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--rule);
+}
+.trace-context-inspector-metadata,
+.trace-context-inspector-card-metadata,
+.trace-context-inspector-source,
+.trace-context-inspector-receipt {
+  display: grid;
+  gap: 0.28rem;
+  margin: 0.45rem 0 0;
+}
+.trace-context-inspector-metadata > div,
+.trace-context-inspector-card-metadata > div,
+.trace-context-inspector-source > div,
+.trace-context-inspector-receipt > div {
+  display: grid;
+  grid-template-columns: minmax(6.5rem, 0.32fr) minmax(0, 1fr);
+  gap: 0.45rem;
+}
+.trace-context-inspector-view dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.7rem;
+}
+.trace-context-inspector-view code,
+.trace-context-inspector-view pre {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+}
+.trace-context-inspector-legend {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
+}
+.trace-context-inspector-legend p {
+  display: flex;
+  gap: 0.4rem;
+  align-items: baseline;
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 0.7rem;
+}
+.trace-context-inspector-classification,
+.trace-context-inspector-state,
+.trace-context-inspector-byte-cost {
+  flex: 0 0 auto;
+  padding: 0.08rem 0.32rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  font-size: 0.58rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.trace-context-inspector-classification-instruction {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.trace-context-inspector-list {
+  display: grid;
+  gap: 0.42rem;
+  margin: 0.45rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.trace-context-inspector-card {
+  min-width: 0;
+  padding: 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--surface-sunken);
+}
+.trace-context-inspector-card-header {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.trace-context-inspector-marker,
+.trace-context-inspector-evidence-kind { margin-right: auto; }
+.trace-context-inspector-instruction,
+.trace-context-inspector-excerpt { margin-top: 0.48rem; }
+.trace-context-inspector-view pre,
+.trace-context-inspector-view blockquote {
+  max-width: 100%;
+  margin: 0.28rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.trace-context-inspector-view pre {
+  padding: 0.38rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--surface);
+}
+.trace-context-inspector-view blockquote {
+  padding-left: 0.5rem;
+  border-left: 2px solid var(--rule-strong);
+  color: var(--ink-dim);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+.trace-context-inspector-excerpt-meta,
+.trace-context-inspector-excerpt-classification,
+.trace-context-inspector-reason,
+.trace-context-inspector-claim,
+.trace-context-inspector-first-rejected,
+.trace-context-inspector-budget {
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+.trace-context-inspector-exclusion {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.25rem 0.6rem;
+  font-size: 0.7rem;
+}
+.trace-context-inspector-first-rejected { grid-column: 1 / -1; color: var(--ink-dim); }
+.trace-context-inspector-budget {
+  display: grid;
+  grid-template-columns: auto minmax(5rem, 1fr);
+  gap: 0.3rem 0.55rem;
+  align-items: center;
+  margin-top: 0.45rem;
+}
+.trace-context-inspector-budget span { grid-column: 1 / -1; color: var(--ink-dim); }
+.trace-context-inspector-budget progress { width: 100%; }
+.trace-context-inspector-completeness { margin: 0.4rem 0 0; font-size: 0.7rem; }
+.trace-context-inspector-completeness.complete { color: var(--accent); }
+.trace-context-inspector-completeness.incomplete,
+.trace-context-inspector-error { color: var(--danger, #c0392b); }
+.prompt-inspector-stack-title {
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 0.66rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+@media (max-width: 640px) {
+  .trace-context-inspector-header { grid-template-columns: 1fr; }
+  .trace-context-inspector-metadata > div,
+  .trace-context-inspector-card-metadata > div,
+  .trace-context-inspector-source > div,
+  .trace-context-inspector-receipt > div { grid-template-columns: 1fr; }
+}
 .prompt-inspector-body {
   display: flex;
   flex-direction: column;

@@ -148,6 +148,10 @@ export type TraceContextInspectorEvidenceKindV1 =
   | "process-fact"
   | "citation";
 
+export type TraceContextInspectorByteCostLabelV1 =
+  | "rendered context bytes"
+  | "source record bytes";
+
 export interface TraceContextInspectorSelectedEvidenceV1 {
   readonly id: string;
   readonly selectionOrder: number;
@@ -159,6 +163,7 @@ export interface TraceContextInspectorSelectedEvidenceV1 {
   readonly selectionReasons: readonly string[];
   readonly sensitivity: TraceContextInspectorSensitivityV1;
   readonly byteCost: number;
+  readonly byteCostLabel: TraceContextInspectorByteCostLabelV1;
   readonly canExclude: boolean;
 }
 

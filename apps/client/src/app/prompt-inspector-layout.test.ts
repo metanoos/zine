@@ -27,3 +27,15 @@ test("prompt inspector wraps within the tab without horizontal scrolling", () =>
   assert.match(prompt, /overflow-y:\s*auto\s*;/);
   assert.doesNotMatch(prompt, /overflow:\s*auto\s*;/);
 });
+
+test("trace context stays constrained and keyboard-scrollable inside the prompt modal", () => {
+  const traceContext = rule(".prompt-inspector-trace-context");
+  assert.match(traceContext, /min-width:\s*0\s*;/);
+  assert.match(traceContext, /max-height:\s*42vh\s*;/);
+  assert.match(traceContext, /overflow-x:\s*hidden\s*;/);
+  assert.match(traceContext, /overflow-y:\s*auto\s*;/);
+
+  const traceView = rule(".trace-context-inspector-view");
+  assert.match(traceView, /min-width:\s*0\s*;/);
+  assert.match(traceView, /flex-direction:\s*column\s*;/);
+});
