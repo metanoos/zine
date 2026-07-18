@@ -1,3 +1,4 @@
+export * from "./adapter-validation.js";
 export * from "./compiler.js";
 export * from "./errors.js";
 export * from "./protected-output.js";

@@ -111,8 +111,12 @@ export type TextOnlyEvidenceSourceV1 =
 
 export type SelectedEvidenceSourceV1 = EvidenceSourceV1 | TextOnlyEvidenceSourceV1;
 
-/** Runtime-validated Nostr signer pubkey: exactly 64 lowercase hexadecimal characters. */
-export type TraceVoicePubkeyV1 = string;
+/**
+ * Runtime-validated process voice identity. Normal writers use an exact Nostr
+ * signer pubkey; legacy protocol-valid KEdits outside that normative shape are
+ * carried by the projector as an explicit UTF-16 code-unit identity instead.
+ */
+export type TraceVoiceIdV1 = string;
 
 export type TraceProcessFactV1 =
   | {
@@ -125,6 +129,8 @@ export type TraceProcessFactV1 =
       lastCapturedAtMs?: number;
       spanMs: number;
       longestGapMs: number;
+      /** Present only when finite KEdit timestamps overflow derived JS differences. */
+      timingStatus?: "outside-summary-domain";
       undoCount: number;
       redoCount: number;
     }
@@ -134,7 +140,7 @@ export type TraceProcessFactV1 =
       capturedAtMs: number;
       intent?: "undo" | "redo";
       changeCount: number;
-      voiceIds: readonly TraceVoicePubkeyV1[];
+      voiceIds: readonly TraceVoiceIdV1[];
     }
   | {
       kind: "change";
@@ -143,7 +149,7 @@ export type TraceProcessFactV1 =
       range: Utf16Range;
       insertedCodePointCount: number;
       deletedCodePointCount: number;
-      voiceId: TraceVoicePubkeyV1;
+      voiceId: TraceVoiceIdV1;
     };
 
 interface EvidenceCandidateBaseV1 {

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   projectTraceProcessCandidatesV1,
+  projectTraceProcessCandidatesV1Async,
   type TraceContextProcessProjectionInputV1,
 } from "./index.js";
 
@@ -178,6 +179,100 @@ test("projector rejects ambiguous chain and ordinal projections", () => {
       }],
     }),
     /source transaction ids must be strictly increasing/,
+  );
+});
+
+test("projector closes the complete protocol KEdit domain without inventing signer authority", () => {
+  const legacyVoice = "legacy writer";
+  const surrogateVoice = "\ud800";
+  const candidates = projectTraceProcessCandidatesV1({
+    version: 1,
+    traceId: TRACE_ID,
+    headId: HEAD_ID,
+    steps: [{
+      version: 1,
+      nodeId: HEAD_ID,
+      chainDistance: 0,
+      transactions: [
+        {
+          version: 1,
+          sourceTransactionId: 0,
+          capturedAtMs: -Number.MAX_VALUE,
+          changes: [{
+            version: 1,
+            operation: "insert",
+            range: { fromUtf16: 0, toUtf16: 0 },
+            insertedText: "A",
+            deletedText: "",
+            voiceId: legacyVoice,
+          }],
+        },
+        {
+          version: 1,
+          sourceTransactionId: Number.MAX_SAFE_INTEGER + 1,
+          capturedAtMs: Number.MAX_VALUE,
+          changes: [{
+            version: 1,
+            operation: "insert",
+            range: { fromUtf16: 1, toUtf16: 1 },
+            insertedText: "B",
+            deletedText: "",
+            voiceId: surrogateVoice,
+          }],
+        },
+      ],
+    }],
+  });
+
+  assert.deepEqual(candidates[0]?.fact, {
+    kind: "step-summary",
+    transactionCount: 2,
+    rangeCount: 2,
+    insertedCodePointCount: 2,
+    deletedCodePointCount: 0,
+    spanMs: 0,
+    longestGapMs: 0,
+    timingStatus: "outside-summary-domain",
+    undoCount: 0,
+    redoCount: 0,
+  });
+  assert.deepEqual(
+    candidates.flatMap((candidate) =>
+      candidate.fact.kind === "change" ? [candidate.fact.voiceId] : []),
+    [
+      "kedit-voice-utf16-v1:006c006500670061006300790020007700720069007400650072",
+      "kedit-voice-utf16-v1:d800",
+    ],
+  );
+});
+
+test("async projector enforces selector bounds and cancellation before returning candidates", async () => {
+  const input: TraceContextProcessProjectionInputV1 = {
+    version: 1,
+    traceId: TRACE_ID,
+    headId: HEAD_ID,
+    steps: [{
+      version: 1,
+      nodeId: HEAD_ID,
+      chainDistance: 0,
+      transactions: [{
+        version: 1,
+        sourceTransactionId: 0,
+        capturedAtMs: 1,
+        changes: [noOp()],
+      }],
+    }],
+  };
+  await assert.rejects(
+    projectTraceProcessCandidatesV1Async(input, { maxCandidates: 1 }),
+    /candidate count exceeds the selector ceiling/,
+  );
+
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    projectTraceProcessCandidatesV1Async(input, { signal: controller.signal }),
+    /projection was cancelled/,
   );
 });
 
