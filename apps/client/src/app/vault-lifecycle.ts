@@ -17,6 +17,7 @@ export interface VaultOpenOperations {
   listVaults(): Promise<VaultSummary[]>;
   closeSecrets(): Promise<void>;
   deactivateStorage(): void;
+  fenceStorageSession?(): void;
   lockRuntime(): Promise<void>;
 }
 
@@ -72,6 +73,7 @@ export async function openVaultSession(
   async function rollback(): Promise<void> {
     const cleanupErrors: string[] = [];
     if (runtimeActive) {
+      operations.fenceStorageSession?.();
       await operations.lockRuntime().then(
         () => { runtimeActive = false; },
         (error) => { cleanupErrors.push(String(error)); },
@@ -142,6 +144,7 @@ export async function openVaultSession(
 }
 
 export interface VaultCloseOperations {
+  fenceStorageSession?(): void;
   lockRuntime(): Promise<void>;
   closeSecrets(): Promise<void>;
   deactivateStorage(): void;
@@ -150,6 +153,7 @@ export interface VaultCloseOperations {
 /** Fail closed: storage is not deactivated and the selector must not render
  * until native reachability and Stronghold have both confirmed shutdown. */
 export async function closeVaultSession(operations: VaultCloseOperations): Promise<void> {
+  operations.fenceStorageSession?.();
   await operations.lockRuntime();
   await operations.closeSecrets();
   operations.deactivateStorage();

@@ -26,8 +26,12 @@ const GLOBAL_KEYS = new Set([
 
 let activeVaultId: string | null = null;
 let activeVaultKey: Uint8Array | null = null;
+let activeVaultMigratesLegacy = false;
 let activeValues = new Map<string, string>();
 let vaultBoundaryInstalled = false;
+let storageSessionAcceptsWork = true;
+let storageGeneration = 0;
+const storageListeners = new Set<() => void>();
 
 interface EncryptedVaultEnvelope {
   version: 2;
@@ -310,64 +314,119 @@ export function activateVaultStorage(
   if (!validVaultId(id)) throw new Error("The selected vault id is invalid");
   if (key.length !== 32) throw new Error("The vault workspace key is invalid");
   vaultBoundaryInstalled = true;
-  deactivateVaultStorage();
+  clearActiveVaultStorage();
 
-  const storage = rawStorage();
-  const indexKey = vaultIndexKey(id);
-  const encrypted = storage.getItem(indexKey);
-  const values = encrypted ? loadEncryptedState(id, key, encrypted) : new Map<string, string>();
-  const oldPlaintextPrefix = `${indexKey}.`;
-  const migratedSources: string[] = [];
-  for (let index = 0; index < storage.length; index++) {
-    const sourceKey = storage.key(index);
-    if (!sourceKey) continue;
-    if (sourceKey.startsWith(oldPlaintextPrefix)) {
-      const logicalKey = sourceKey.slice(oldPlaintextPrefix.length);
-      if (!values.has(logicalKey)) {
-        const value = storage.getItem(sourceKey);
-        if (value !== null) values.set(logicalKey, value);
-      }
-      migratedSources.push(sourceKey);
-      continue;
-    }
-    if (
-      migrateLegacy &&
-      sourceKey.startsWith("zine.") &&
-      !GLOBAL_KEYS.has(sourceKey) &&
-      !isPhysicalVaultKey(sourceKey)
-    ) {
-      if (!values.has(sourceKey)) {
-        const value = storage.getItem(sourceKey);
-        if (value !== null) values.set(sourceKey, value);
-      }
-      migratedSources.push(sourceKey);
-    }
-  }
-
-  const installedKey = new Uint8Array(key);
+  let installedKey: Uint8Array | null = null;
   try {
+    const storage = rawStorage();
+    const indexKey = vaultIndexKey(id);
+    const encrypted = storage.getItem(indexKey);
+    const values = encrypted ? loadEncryptedState(id, key, encrypted) : new Map<string, string>();
+    const oldPlaintextPrefix = `${indexKey}.`;
+    const migratedSources: string[] = [];
+    for (let index = 0; index < storage.length; index++) {
+      const sourceKey = storage.key(index);
+      if (!sourceKey) continue;
+      if (sourceKey.startsWith(oldPlaintextPrefix)) {
+        const logicalKey = sourceKey.slice(oldPlaintextPrefix.length);
+        if (!values.has(logicalKey)) {
+          const value = storage.getItem(sourceKey);
+          if (value !== null) values.set(logicalKey, value);
+        }
+        migratedSources.push(sourceKey);
+        continue;
+      }
+      if (
+        migrateLegacy &&
+        sourceKey.startsWith("zine.") &&
+        !GLOBAL_KEYS.has(sourceKey) &&
+        !isPhysicalVaultKey(sourceKey)
+      ) {
+        if (!values.has(sourceKey)) {
+          const value = storage.getItem(sourceKey);
+          if (value !== null) values.set(sourceKey, value);
+        }
+        migratedSources.push(sourceKey);
+      }
+    }
+
+    installedKey = new Uint8Array(key);
     persistCompleteState(id, installedKey, values);
     for (const sourceKey of migratedSources) storage.removeItem(sourceKey);
     activeVaultId = id;
     activeVaultKey = installedKey;
+    activeVaultMigratesLegacy = migrateLegacy;
     activeValues = values;
+    storageSessionAcceptsWork = true;
+    installedKey = null;
+    publishStorageGeneration();
   } catch (error) {
-    installedKey.fill(0);
+    installedKey?.fill(0);
+    publishStorageGeneration();
     throw error;
+  }
+}
+
+function clearActiveVaultStorage(): void {
+  activeVaultKey?.fill(0);
+  activeVaultId = null;
+  activeVaultKey = null;
+  activeVaultMigratesLegacy = false;
+  storageSessionAcceptsWork = false;
+  activeValues.clear();
+  activeValues = new Map();
+}
+
+function publishStorageGeneration(): void {
+  storageGeneration += 1;
+  for (const listener of storageListeners) {
+    try {
+      listener();
+    } catch (error) {
+      console.error("vault storage subscriber failed", error);
+    }
   }
 }
 
 /** Zero the in-memory content key and release decrypted state before selection. */
 export function deactivateVaultStorage(): void {
-  activeVaultKey?.fill(0);
-  activeVaultId = null;
-  activeVaultKey = null;
-  activeValues.clear();
-  activeValues = new Map();
+  clearActiveVaultStorage();
+  publishStorageGeneration();
 }
 
 export function activeVaultStorageId(): string | null {
   return activeVaultId;
+}
+
+/** True only for the active vault explicitly authorized to adopt legacy
+ * install-global state during this activation transaction. */
+export function activeVaultStorageMigratesLegacy(): boolean {
+  return activeVaultMigratesLegacy;
+}
+
+/** Monotonic lease for session-global async clients. Every activation,
+ * deactivation, and failed replacement invalidates work captured earlier. */
+export function vaultStorageGeneration(): number {
+  return storageGeneration;
+}
+
+/** The browser profile starts open. Desktop activation reopens this authority
+ * only after decryption succeeds; fencing and deactivation close it. */
+export function vaultStorageSessionAcceptsWork(): boolean {
+  return storageSessionAcceptsWork;
+}
+
+/** Invalidate captured async work before native reachability is locked while
+ * keeping the active vault readable for orderly shutdown. */
+export function fenceVaultStorageSession(): void {
+  storageSessionAcceptsWork = false;
+  publishStorageGeneration();
+}
+
+/** Notify external stores when the active vault boundary changes. */
+export function subscribeVaultStorage(listener: () => void): () => void {
+  storageListeners.add(listener);
+  return () => storageListeners.delete(listener);
 }
 
 function visibleKeys(): string[] {

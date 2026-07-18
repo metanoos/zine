@@ -23,7 +23,7 @@ export interface PaletteSecondaryActions {
 
 export type PaletteStatusRow = "author" | "model" | "substrate";
 
-const AUTHOR_STATUS_OPS = new Set(["step", "send", "attest", "fork"]);
+const AUTHOR_STATUS_OPS = new Set(["step", "mint", "send", "attest", "fork"]);
 const MODEL_STATUS_OPS = new Set(["analyze", "reply", "extend", "stir", "settle", "run"]);
 const SUBSTRATE_STATUS_OPS = new Set(["scan", "reify"]);
 
@@ -41,6 +41,7 @@ export function paletteStatusMessage(op?: string, message?: string): string | nu
   if (message) return message;
   switch (op) {
     case "step": return "stepped";
+    case "mint": return "minted, published, and attested";
     case "send": return "sent";
     case "attest": return "attested";
     case "analyze": return "analyzed";
@@ -106,7 +107,7 @@ export function palettePrimaryAction(state: PaletteSelectionState): PalettePrima
   if (state === "loose" || state === "pending") {
     return {
       label: "Mint",
-      title: "Mint the selected passage as an enduring Coin",
+      title: "Review public Mint details before publishing and attesting the selected passage",
       tone: "mint",
       actionable: true,
     };

@@ -379,6 +379,10 @@ export interface FileState {
   /** The latest kind-4290 event id for this file (the chain head). Empty
    * string while a file exists but hasn't been stepped this session. */
   nodeId: string;
+  /** Durable local proof that a Mint transaction reached its public Coin +
+   * same-minter attestation + membership boundary. Absent Mint entries are
+   * quarantined as incomplete artifacts and must not be treated as Coins. */
+  coinComplete?: boolean;
   /** Stable trace identity: the genesis kind-4290 event id. Unlike `nodeId`,
    * this never changes when the trace takes a Step or moves to another path.
    * Optional before genesis is stepped; readers derive and persist it when the

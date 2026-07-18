@@ -62,3 +62,16 @@ test("minted file-shaped nodes activate the coin handler", () => {
 
   assert.deepEqual(activations, ["coin:mint/2026-07-16_120000-quote.md"]);
 });
+
+test("incomplete Mint artifacts activate the inert file surface, not Coin handling", () => {
+  const calls: string[] = [];
+  activateTreeItem(
+    { path: "mint/legacy.md", type: "file", systemKind: "mint-pending" },
+    {
+      file: (path) => calls.push(`file:${path}`),
+      folder: (path) => calls.push(`folder:${path}`),
+      coin: (path) => calls.push(`coin:${path}`),
+    },
+  );
+  assert.deepEqual(calls, ["file:mint/legacy.md"]);
+});

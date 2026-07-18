@@ -12,7 +12,7 @@ export interface ActivatableTreeItem {
   path: string;
   type: "file" | "folder";
   /** Mint entries remain file-shaped in storage but activate as Coins in UI. */
-  systemKind?: "root" | "mint" | "minted" | "scan" | "oblivion";
+  systemKind?: "root" | "mint" | "minted" | "mint-pending" | "scan" | "oblivion";
 }
 
 export interface TreeActivationHandlers {

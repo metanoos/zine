@@ -117,16 +117,19 @@ home relay. A folder Step pins an exact recursive frontier. Automatic ancestor
 roll-ups remain signed derived checkpoints, not extra author Steps. Most Steps
 remain private working history.
 
-**Publish** makes one exact stepped version reachable for discussion. On the
-wire and in the current implementation this gesture is still named Send; the
-product term is Publish until the schema cut renames both.
+**Publish** makes one exact stepped version reachable for discussion. (The
+wire and today's implementation still spell this gesture `Send` until the
+coordinated schema cut.)
 
 **Attest** is an optional, later endorsement of one published version.
 Discussion is common; commitment is rare.
 
-Copied passages can be minted as immutable **coins** and cited by exact node
-id. Forking starts a proposal under a new owner's key; merging accepts chosen
-work into the receiving owner's chain.
+Copied passages can cite any exact stepped source without minting or endorsing
+it. A separate explicit Mint creates an immutable **coin** through one genesis
+Step, Publish, and same-minter Attest. Forking starts a proposal under a new
+owner's key; merging accepts chosen work into the receiving owner's chain.
+Coins are one user-facing discovery opt-in covering Mint, Coin indexing, and
+rendezvous; ordinary citation remains available without it.
 
 ## Sovereign by key, connected by citation
 
@@ -139,14 +142,17 @@ decides who may connect, read, or write. Reachability degrades before
 identity ever does: lose Tor and you lose metadata privacy, never your name.
 
 A **coin** is how strangers find each other. When a phrase strikes you as
-worth keeping, you mint it: one deliberate gesture — Step, Publish, and
-Attest at once — that strikes the exact text into an immutable,
-single-checkpoint zine under your key. Minting claims salience, not
-authorship or agreement: *these words carry currency for me.* Coins exist
-for rendezvous. A coin type is keyed by the exact content hash, so the
-planned Kademlia DHT can answer one question — *who else minted or cited
-these words?* — and two writers who share no platform, relay, or peer can
-surface each other. The same match works today, more slowly, through a
+worth keeping, you mint it: one deliberate gesture that Steps an immutable,
+single-checkpoint zine under your key, Publishes it, and Attests it. Minting
+claims salience, not authorship or agreement: *these words carry currency for
+me.* There is no unpublished Coin; an interrupted gesture is only a pending
+Mint attempt until its public minter attestation exists. Each coin's `x` key
+hashes its exact bytes. When Coins are enabled, Zine also derives the
+canonicalized `H` rendezvous coordinate and indexes published citations to
+valid Coins to answer one question — *which published traces cite these
+words?* — so two writers who share no platform, relay, or peer can surface
+each other even when their coin bytes differ only in Unicode normalization or
+whitespace. The same valid-Coin match also works, more slowly, through a
 mutual peer who can read both chains.
 
 The economics are deliberately spam-resistant. A coin everyone holds carries
@@ -158,9 +164,16 @@ behind it — and decide whether the resonance is real. If it isn't, swipe
 left; nothing enters your `peers.json` without the process-evidence vet and
 your explicit choice.
 
-The mutual-peer path is implemented and tested; the global DHT is a dormant
-design, gated on real citation density. The
-[transport](protocol/transport.md) and
+Mint, ordinary Cite, valid-Coin mutual-peer matching, and process vetting are
+implemented and tested. Publish-side indexing and the Kademlia routing
+component are integrated and exercised as part of the same Coins discovery
+package; Kademlia is not a separate opt-in. The code filters bounded records,
+reserves owned capacity, merges replicas before publication and republish,
+verifies hostile relays under deadlines and cancellation, inspects every
+ordinary `q` citation while indexing only valid Coins, and persists incomplete
+indexing in a durable outbox. It still needs operator-provided super-peers and
+real deployment evidence; this repository does not claim an operated public
+network or meaningful citation density. The [transport](protocol/transport.md) and
 [rendezvous](protocol/rendezvous.md) specifications carry the exact rules.
 
 ## What exists today
@@ -171,16 +184,16 @@ design, gated on real citation density. The
 | Headless MCP press with a distinct agent voice | Implemented |
 | Mandatory replay-valid KEdit process log on every file Step | Implemented for editor, AI, import/fork, and MCP write paths |
 | Shared `FULL TRACE` / `SNAPSHOT ONLY` / `INVALID` reader verdict | Implemented in Replay, Analyze, handoff, Reify, and MCP inspection |
-| Step, Publish (wire name Send), Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
+| Step, Publish, Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
 | Recursive folder checkpoint propagation | Implemented with verified checkpoint causes, distinct `advance` deltas, explicit folder/Root Step, durable operation ids, and collapsed derived roll-ups in Replay |
 | Top-level foreign-file fork-on-write | Implemented; recursive nested-folder fork-on-write is deferred |
-| Mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
+| Valid-Coin mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
 | Raw-file Reify export with an optional signed-event bundle | Implemented on desktop |
 | Multiple desktop vaults with independent passphrases, Roots, encrypted webview state, Stronghold secrets, relay databases, ACLs, and KDF salts | Implemented on desktop; the browser remains read-only |
-| Shared trace-context authoring-syntax kernel | Initial deterministic `[[…]]` / `((…))` scanner and compiler implemented with golden and generated scale corpora; task-specific evidence selection and cross-press rendering are not yet implemented |
-| Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures; Extend (continuation) and Settle (revision) now use the shared syntax kernel, exact current-session authority spans, protected-output validation, and accepted-success directive cleanup, while the other operations, durable receipts, and context binding remain deferred |
+| Shared trace-context runtime | Deterministic task-specific selection, byte budgets, process projection, and desktop/MCP parity are implemented with fixed corpora; `[[…]]` / `((…))` authoring-syntax enforcement remains an initial desktop Extend/Settle slice |
+| Prepared desktop MODEL operations with explicit approval | All five direct single-shot gestures use canonical selected trace context and stale-safe approval. Extend and Settle also enforce current-session authority spans, protected-output validation, and accepted-success directive cleanup; durable receipts and the separate agent loop remain deferred |
 | Hosted relay | Implemented; an operator ACL equivalent to the local relay policy remains a gap |
-| Global content-hash rendezvous over Kademlia | Specified as a sketch, not implemented |
+| Coins package: Mint, Coin indexing, and rendezvous | Integrated and exercised as one user-facing discovery opt-in. Ordinary Cite remains core composition outside it. No bootstrap network is operated, and deployment/density evidence remains absent |
 | Managed remote, organization control plane, and no-install public verifier | Commercial product hypotheses, not shipping services |
 
 The complete evidence and limitation record lives in
@@ -293,7 +306,7 @@ enough for provenance, storage, or networking changes.
 npm run doctor         # prerequisites and local artifact diagnostics
 npm run check          # dev scripts, client types/tests, MCP, relay, and Rust
 npm run verify         # check + client build + isolated real-relay smoke
-npm run verify:relay   # Step/Send/Attest/Mint/Cite against temporary relays
+npm run verify:relay   # Step/Publish/Attest/Mint/Cite against temporary relays
 ```
 
 `verify:relay` uses temporary ACL-protected relay databases and random ports.

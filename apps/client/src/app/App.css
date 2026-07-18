@@ -2442,6 +2442,35 @@ html[data-theme="light"] .rail-brand-wordmark {
   margin: 0;
 }
 
+.kademlia-enabled {
+  align-self: flex-start;
+  margin: 0.25rem 0;
+}
+
+.kademlia-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--ink-dim);
+}
+
+.kademlia-bootstrap {
+  width: 100%;
+  min-height: 6rem;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.kademlia-status {
+  margin-top: 0.5rem;
+}
+
+.kademlia-status code {
+  overflow-wrap: anywhere;
+}
+
 .networking-subsection-title {
   margin: 0.65rem 0 0;
   font-family: var(--font-mono);
@@ -5360,7 +5389,7 @@ body.panel-resizing {
    voice marks (now applied to CM's spans via Decoration.mark). */
 
 /* .panel-body positions the single CodeMirror surface that now serves Preview,
-   Markdown, and Diff modes — App's LLM ops, palette citations, and Cmd+S step
+   Markdown, and Diff modes — App's LLM ops, Mint-backed citations, and Cmd+S step
    hold its view ref and dispatch into it imperatively regardless of which mode
    is showing. Preview/Markdown switch decorations + the CSS below; Diff keeps
    the editor mounted (so the ref and unstepped-buffer tracking stay live) but
@@ -5998,6 +6027,39 @@ html[data-theme="light"] .editor-host {
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.25);
 }
 
+.mint-consent-dialog {
+  width: min(30rem, calc(100vw - 2rem));
+  max-width: 30rem;
+  box-sizing: border-box;
+}
+
+.mint-consent-overlay {
+  z-index: 2300;
+}
+
+.mint-consent-title {
+  margin: 0 0 0.7rem;
+}
+
+.mint-consent-phrase {
+  max-height: 10rem;
+  margin: 0 0 0.8rem;
+  padding: 0.65rem 0.75rem;
+  overflow: auto;
+  border-left: 2px solid var(--coin-fg);
+  background: var(--surface-sunken);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mint-consent-message {
+  color: var(--ink-dim);
+}
+
 .confirm-message {
   margin: 0 0 1rem;
   font-family: var(--font-mono);
@@ -6457,12 +6519,79 @@ html[data-theme="light"] .editor-host {
   overflow-wrap: anywhere;
 }
 
+.coin-rendezvous-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+
+.coin-rendezvous-list li {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  color: var(--ink-dim);
+}
+
+.coin-rendezvous-list code:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .coin-modal-hint {
   margin: 0;
   color: var(--ink-dim);
   font-family: var(--font-mono);
   font-size: 0.68rem;
   line-height: 1.45;
+}
+
+.mint-recovery-alert {
+  position: fixed;
+  z-index: 2200;
+  right: 1rem;
+  bottom: 1rem;
+  display: flex;
+  max-width: min(42rem, calc(100vw - 2rem));
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--danger, #a33);
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 20%);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.mint-recovery-alert-content {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.45;
+}
+
+.mint-recovery-alert-content ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.mint-recovery-error,
+.mint-recovery-alert-content li {
+  overflow-wrap: anywhere;
+}
+
+.mint-recovery-alert button {
+  flex: none;
 }
 
 .coin-composer-form {

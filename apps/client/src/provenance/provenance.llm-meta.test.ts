@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { generateSecretKey } from "nostr-tools/pure";
 
 import {
   applyPendingLlmMeta,
   clearPendingLlmMeta,
+  publishEdit,
   setPendingLlmMeta,
   takePendingLlmMeta,
   type LlmStepMeta,
@@ -64,4 +66,51 @@ test("pending metadata marks only its matching write as an LLM Step", () => {
   assert.equal(input.prompt, "prompt for model-a");
   assert.equal(input.llm?.maxTokens, 1024);
   assert.deepEqual(input.scopeCitations, ["scope-model-a"]);
+});
+
+test("LLM writer preserves q edges and marks only structural-only targets", async () => {
+  const social = "1".repeat(64);
+  const bothRoles = "2".repeat(64);
+  const privateScope = "3".repeat(64);
+  const rule = "4".repeat(64);
+  const event = await publishEdit({
+    prevEventId: null,
+    previousSnapshot: "",
+    relativePath: "answer.md",
+    folderId: "folder",
+    deltas: [],
+    snapshot: "answer",
+    contentHash: "hash",
+    kedits: [{
+      op: "ins",
+      from: 0,
+      to: 0,
+      text: "answer",
+      voice: "voice",
+      t: 1,
+      tx: 0,
+    }],
+    citations: [social, bothRoles],
+    scopeCitations: [privateScope, bothRoles],
+    injectRule: rule,
+    action: "llm",
+    prompt: "answer the question",
+    llm: { model: "test", temperature: null, maxTokens: 1024, provider: "test" },
+    signer: generateSecretKey(),
+    prepareOnly: true,
+  });
+
+  assert.deepEqual(
+    event.tags.filter((tag) => tag[0] === "q").map((tag) => tag[1]),
+    [social, bothRoles, privateScope, rule],
+  );
+  assert.deepEqual(
+    event.tags.filter((tag) => tag[0] === "scope" && tag[1] === "llm"),
+    [
+      ["scope", "llm"],
+      ["scope", "llm", "targets-v1"],
+      ["scope", "llm", privateScope],
+      ["scope", "llm", rule],
+    ],
+  );
 });

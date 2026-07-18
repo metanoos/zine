@@ -13,6 +13,7 @@ import { listPeers, setOwner } from "../networking/peers-store.js";
 import {
   activateVaultStorage,
   deactivateVaultStorage,
+  fenceVaultStorageSession,
 } from "../storage/vault-storage.js";
 import { VaultSessionContext, type VaultSession } from "./vault-session.js";
 import {
@@ -158,6 +159,7 @@ export function SecurityBootstrap({ children }: { children: ReactNode }) {
       listVaults,
       closeSecrets: closeSecretSession,
       deactivateStorage: deactivateVaultStorage,
+      fenceStorageSession: fenceVaultStorageSession,
       lockRuntime: lockVaultRuntime,
     }, { migrateLegacyWorkspace });
   }
@@ -283,6 +285,7 @@ export function SecurityBootstrap({ children }: { children: ReactNode }) {
           lockRuntime: lockVaultRuntime,
           closeSecrets: closeSecretSession,
           deactivateStorage: deactivateVaultStorage,
+          fenceStorageSession: fenceVaultStorageSession,
         });
       }
     } catch (error) {

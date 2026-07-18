@@ -32,6 +32,7 @@ import { verifyEvent } from "nostr-tools/pure";
 
 import {
   attestNode,
+  completeCoinMint,
   eventMeta,
   fetchChain,
   fetchEventById,
@@ -59,11 +60,25 @@ import {
   putSecret,
   unlockSecretSession,
 } from "../../client/src/identity/secret-store.js";
-import type { Workspace } from "../../client/src/workspace/workspace-core.js";
+import {
+  flattenRuns,
+  reconcileRunsText,
+  type Workspace,
+} from "../../client/src/workspace/workspace-core.js";
 import { getOrCreateMintFolder } from "../../client/src/workspace/root.js";
 import { MINT, mintedPath } from "../../client/src/workspace/generated-paths.js";
-import { saveLocalFile } from "../../client/src/workspace/local-store.js";
+import { loadLocalFolder, saveLocalFile } from "../../client/src/workspace/local-store.js";
 import { pendingLocalEventCount } from "../../client/src/provenance/event-outbox.js";
+import {
+  coinMintOperationKey,
+  completePendingCoinMint as completePendingCoinMintTransaction,
+  finalizedCoinMintSourceText,
+  pendingCoinMints,
+  preparePendingCoinMint,
+  resumePendingCoinMints,
+  storedCoinMintAttestation,
+  type CoinMintCompletion,
+} from "../../client/src/provenance/coin-mint-journal.js";
 
 /** The headless press's signing key. Seeded on first call, persisted via the
  *  localStorage shim into the selected profile. Distinct from the desktop app's
@@ -167,6 +182,119 @@ function requireFolder(ws: Workspace) {
     );
   }
   return ref;
+}
+
+/** Complete a durable MCP Mint using the currently attached Root. Kept
+ * outside tool registration so server startup can resume the exact same
+ * transaction without waiting for another zine_mint_span call. */
+export function mcpCoinMintCompletion(
+  workspace: Workspace,
+  voice: Voice,
+): CoinMintCompletion<Event> {
+  const ref = requireFolder(workspace);
+  return {
+    publishPair: (coin) => completeCoinMint(coin, voice.secretKey),
+    serializeAttestation: (attestation) => attestation,
+    restoreAttestation: storedCoinMintAttestation,
+    persistMembership: async (record) => {
+      const parsed = JSON.parse(record.coin.content) as { contentHash?: string };
+      await upsertManifestEntry(
+        record.mintFolderId,
+        {
+          kind: "file",
+          relativePath: record.memberName,
+          latestNodeId: record.coin.id,
+          contentHash: parsed.contentHash ?? "",
+        },
+        voice.secretKey,
+        { localOnly: true, operationId: operationIdFromNode(record.coin) },
+      );
+    },
+    persistLocal: (record) => {
+      const persisted = saveLocalFile(record.sourceFolderId, record.localPath, {
+        content: record.phrase,
+        tags: [],
+        nodeId: record.coin.id,
+        runs: [{ voice: record.coin.pubkey, text: record.phrase }],
+        coinComplete: true,
+      });
+      if (!persisted) {
+        throw new Error("Mint is public but its local inventory could not be persisted");
+      }
+    },
+    finalizeSource: async (record) => {
+      const source = record.sourceFinalization;
+      if (!source || record.sourceFolderId !== ref.id) {
+        throw new Error("the pending Mint source does not match this press");
+      }
+      const localFile = loadLocalFolder(ref.id)?.files[source.relativePath];
+      if (!localFile || localFile.kind !== "file") {
+        throw new Error(`cannot finalize missing Mint source ${source.relativePath}`);
+      }
+      const nextText = finalizedCoinMintSourceText(record, localFile.content);
+      if (nextText === localFile.content && localFile.nodeId) {
+        const currentNode = await fetchEventById(localFile.nodeId);
+        if (currentNode && eventMeta(currentNode).citationTargets.includes(record.coin.id)) {
+          return currentNode.id;
+        }
+      }
+      const currentRuns = localFile.runs && flattenRuns(localFile.runs) === localFile.content
+        ? localFile.runs
+        : [{ voice: voice.publicKey, text: localFile.content }];
+      const nextRuns = reconcileRunsText(currentRuns, nextText, voice.publicKey);
+      const citationNodeId = await workspace.writeFile(
+        source.relativePath,
+        nextText,
+        localFile.tags,
+        voice.secretKey,
+        nextRuns,
+        undefined,
+        localFile.citationIds,
+        undefined,
+        true,
+        nextText === localFile.content,
+        operationIdFromNode(record.coin),
+      );
+      if (!citationNodeId) {
+        throw new Error(`Mint source ${source.relativePath} did not produce a citation Step`);
+      }
+      return citationNodeId;
+    },
+  };
+}
+
+export function pendingMcpCoinMintCount(workspace: Workspace): number {
+  const ref = requireFolder(workspace);
+  return pendingCoinMints(localStorage).filter((record) => record.sourceFolderId === ref.id).length;
+}
+
+let mcpMintLifecycleQueue: Promise<unknown> = Promise.resolve();
+
+/** Serialize the whole headless Mint gesture with background recovery. The
+ * journal's phase queues protect individual records, but this wider boundary
+ * also covers the final journal removal → next preparation transition. */
+export function runMcpMintLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+  const task = mcpMintLifecycleQueue.catch(() => undefined).then(operation);
+  mcpMintLifecycleQueue = task.then(() => undefined, () => undefined);
+  return task;
+}
+
+/** Resume every Mint owned by the attached MCP Root. Startup and the Mint tool
+ * share this path so crash recovery cannot depend on a later author gesture. */
+export async function resumeMcpPendingCoinMints(
+  workspace: Workspace,
+  voice: Voice,
+  exceptOperationKey?: string,
+) {
+  const ref = requireFolder(workspace);
+  const completion = mcpCoinMintCompletion(workspace, voice);
+  return resumePendingCoinMints(
+    () => completion,
+    localStorage,
+    (record) =>
+      record.sourceFolderId === ref.id &&
+      (!exceptOperationKey || record.operationKey !== exceptOperationKey),
+  );
 }
 
 function parsedPayload(event: Awaited<ReturnType<typeof fetchEventById>>): unknown {
@@ -514,11 +642,13 @@ export function registerTools(
 
   server.tool(
     "zine_mint_span",
-    "Mint (spec §3.8): strike an immutable, addressable kind-4290 node from a " +
-      "span of text, frozen at exactly this version. Minted spans are the " +
+    "Mint (spec §3.8): Step, Publish, and Attest an immutable, addressable " +
+      "kind-4290 Coin from a span of text, frozen at exactly this version. " +
+      "Minted spans are the " +
       "protocol's addressable unit for citations — 'quote this passage' first " +
-      "mints it, then cites the minted id. Returns the minted node id and its " +
-      "synthetic path.",
+      "mints it, then cites the minted id. The tool succeeds only after the " +
+      "Coin and its minter attestation are public and originPath has Stepped " +
+      "the resolved citation. Returns all three event ids and the Coin's synthetic path.",
     {
       originPath: z.string().describe("relative path of the document the span came from"),
       phrase: z.string().describe("the exact span text to freeze as an immutable trace"),
@@ -532,7 +662,7 @@ export function registerTools(
         .optional()
         .describe("UTF-16 start offset when the phrase occurs more than once in the source snapshot"),
     },
-    async ({ originPath, phrase, originNodeId, sourceStart }) => {
+    async ({ originPath, phrase, originNodeId, sourceStart }) => runMcpMintLifecycle(async () => {
       const ref = requireFolder(workspace);
       const voice = agentVoice();
       const sourceEvent = await fetchEventById(originNodeId);
@@ -556,41 +686,88 @@ export function registerTools(
         throw new Error("the phrase occurs more than once; provide sourceStart to identify the exact span");
       }
       const sourceContentHash = await sha256HexLocal(sourceSnapshot);
-      const mintFolderId = await getOrCreateMintFolder(ref.id, voice.secretKey);
-      const manifest = await fetchManifest(mintFolderId);
-      const occupied = new Set(manifest.map((entry) => `${MINT}/${entry.relativePath}`));
-      const localPath = mintedPath(phrase, new Date(), occupied);
-      const memberName = localPath.slice(`${MINT}/`.length);
-      const minted = await publishHardenedSpan({
-        folderId: mintFolderId,
-        relativePath: memberName,
-        phrase,
-        originNodeId,
+      const origin = {
+        kind: "extracted" as const,
+        sourceNodeId: originNodeId,
         sourceContentHash,
-        sourceRange: { start: resolvedStart, end: resolvedStart + phrase.length },
-        signer: voice.secretKey,
-        localOnly: true,
+        range: { start: resolvedStart, end: resolvedStart + phrase.length },
+      };
+      const operationKey = coinMintOperationKey({
+        sourceFolderId: ref.id,
+        signerPubkey: voice.publicKey,
+        phrase,
+        origin,
       });
-      const parsed = JSON.parse(minted.content) as { contentHash?: string };
-      await upsertManifestEntry(
-        mintFolderId,
-        {
-          kind: "file",
-          relativePath: memberName,
-          latestNodeId: minted.id,
-          contentHash: parsed.contentHash ?? "",
-        },
-        voice.secretKey,
-        { localOnly: true, operationId: operationIdFromNode(minted) },
+      const completion = mcpCoinMintCompletion(workspace, voice);
+      await resumeMcpPendingCoinMints(workspace, voice, operationKey);
+      const existing = pendingCoinMints(localStorage).find(
+        (record) => record.operationKey === operationKey,
       );
-      saveLocalFile(ref.id, localPath, {
-        content: phrase,
-        tags: [],
-        nodeId: minted.id,
-        runs: [{ voice: voice.publicKey, text: phrase }],
+      if (!existing) {
+        const currentLocalFile = loadLocalFolder(ref.id)?.files[originPath];
+        if (!currentLocalFile || currentLocalFile.kind !== "file") {
+          throw new Error(`originPath does not identify a current local file: ${originPath}`);
+        }
+        if (currentLocalFile.nodeId !== originNodeId) {
+          throw new Error("originPath's current local node does not match originNodeId");
+        }
+        const currentSource = await workspace.readFile(originPath);
+        if (currentSource !== sourceSnapshot) {
+          throw new Error("originPath no longer matches originNodeId; Step the current source and retry");
+        }
+      }
+      const pending = await preparePendingCoinMint(operationKey, async () => {
+        const mintFolderId = await getOrCreateMintFolder(ref.id, voice.secretKey);
+        const manifest = await fetchManifest(mintFolderId);
+        const occupied = new Set([
+          ...Object.keys(loadLocalFolder(ref.id)?.files ?? {}),
+          ...manifest.map((entry) => `${MINT}/${entry.relativePath}`),
+          ...pendingCoinMints(localStorage)
+            .filter((record) => record.sourceFolderId === ref.id)
+            .map((record) => record.localPath),
+        ]);
+        const localPath = mintedPath(phrase, new Date(), occupied);
+        const memberName = localPath.slice(`${MINT}/`.length);
+        const coin = await publishHardenedSpan({
+          folderId: mintFolderId,
+          relativePath: memberName,
+          phrase,
+          originNodeId,
+          sourceContentHash,
+          sourceRange: origin.range,
+          signer: voice.secretKey,
+          prepareOnly: true,
+        });
+        return {
+          sourceFolderId: ref.id,
+          mintFolderId,
+          localPath,
+          memberName,
+          phrase,
+          coin,
+          sourceFinalization: {
+            kind: "span" as const,
+            relativePath: originPath,
+            sourceNodeId: originNodeId,
+            sourceContentHash,
+            range: origin.range,
+          },
+        };
       });
-      return jsonResult({ mintedNodeId: minted.id, path: localPath, originPath });
-    },
+      const receipt = await completePendingCoinMintTransaction(pending, completion);
+      const completedSourceNodeId = receipt.sourceNodeId ?? null;
+      if (!completedSourceNodeId) {
+        throw new Error("Mint source finalization completed without a citation node id");
+      }
+      return jsonResult({
+        mintedNodeId: pending.coin.id,
+        attestationId: receipt.attestation.id,
+        published: true,
+        path: pending.localPath,
+        originPath,
+        sourceNodeId: completedSourceNodeId,
+      });
+    }),
   );
 
   server.tool(

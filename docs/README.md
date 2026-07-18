@@ -5,10 +5,10 @@ company perspectives. They are the shared reader-facing source for this
 repository and the app's About view.
 
 The organizing product thesis is that current content discards information
-useful to both collaborators and reviewers. A zine is a file or folder together
-with its trace. Zine preserves that trace so an
-AI can work with selected, inspectable process context while people retain
-portable evidence of what happened. The [Evidence](EVIDENCE.md) page
+useful to both collaborators and reviewers. A zine is a file or folder
+together with its trace. Zine preserves that trace so an AI can work with
+selected, inspectable process context while people retain portable evidence
+of what happened. The [Evidence](EVIDENCE.md) page
 distinguishes that foundational bet from what the repository has actually
 demonstrated.
 

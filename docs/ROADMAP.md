@@ -9,8 +9,20 @@ The execution posture is therefore conviction with gates. Build the complete
 trace-aware loop, keep text-only and bounded-history comparisons inside the
 architecture, and promote claims only when measured outcomes support them.
 Individual writers remain the first audience; accountable teams remain the
-initial paid wedge. Managed services and global network work remain downstream
-of actual retained use.
+initial paid wedge. Managed services and operation or expansion of a global
+network remain downstream of actual retained use.
+
+AI-assisted writing remains the product center. The defensible slice is the
+portable boundary crossing that proprietary single-editor logs cannot provide:
+cross-model handoff, cross-team review, and cross-time postmortem. The roadmap
+therefore proves one desktop writing loop first, adds one narrow
+provider-neutral handoff next, and generalizes a broader multi-AI surface only
+after those foundations hold.
+
+Mobile is outside this active sequence. It remains a later, separately
+reviewed program after the desktop writing, provenance, durability, and
+recovery gates hold; no active phase pulls its ownership, key, sync, or recovery
+design forward.
 
 ## Sequencing rule
 
@@ -24,7 +36,7 @@ shared deterministic trace-context runtime
 one complete desktop writing loop <----> text-only comparison
                  |
                  v
-durable binding + writing outcomes + accountable-team use
+durable binding + one boundary-crossing handoff + writing outcomes
           |                              |
           v                              v
 supported operation breadth        optional paid team layer
@@ -33,7 +45,7 @@ supported operation breadth        optional paid team layer
 scoped longitudinal memory, only if independently beneficial
           |
           v
-calibration or network layers, only when real density requires them
+calibration or operated network layers, only when real density requires them
 ```
 
 ## Current foundation
@@ -42,7 +54,7 @@ Already built:
 
 - desktop and MCP presses;
 - signed file and folder trace chains;
-- Step, Publish (wire name Send), Attest, Mint, Cite, fork, merge, and replay;
+- Step, Publish, Attest, Mint, Cite, fork, merge, and replay;
 - mandatory replay-valid KEdit process logs and shared `FULL TRACE` /
   `SNAPSHOT ONLY` / `INVALID` reader verdicts;
 - distinct human, model, and agent voice keys with per-delta attribution;
@@ -60,17 +72,22 @@ Already built:
 - a desktop adapter for the Extend (continuation) and Settle (revision)
   operations with exact current-session manual-origin authority,
   protected-output validation, and accepted-success cleanup;
+- deterministic task-specific trace selection, byte budgeting, process
+  projection, cancellation, and fixed desktop/MCP parity corpora;
+- canonical selected context bound into prepared desktop requests;
+- fixed cross-runtime folder-chain vectors and interrupted/retried recursive
+  checkpoint recovery exercised against a real relay;
+- the single Coins discovery opt-in with valid-Coin co-citation, durable
+  Publish-side indexing, hostile-relay verification, and native Kademlia
+  routing; no bootstrap network is operated;
 - a read-only trace-context Inspector presentation for prepared operations;
 - a preregistered writing-outcome study and operational scoring rubric; and
 - a preregistered narration study showing a narrow process-description effect.
 
-Not yet built as one system: task-specific evidence selection and rendering,
-cross-press manifest parity, Inspector exclusions/corrections/promotion,
+Not yet built as one system: Inspector exclusions/corrections/promotion,
 persisted directive authority and durable consumption receipts, scoped memory,
-durable result-to-context binding, writing-outcome evaluation, or complete
-desktop/MCP operation coverage. Fixed cross-runtime folder vectors and explicit
-crash-boundary real-relay recovery fixtures remain hardening work for the
-recursive checkpoint cut.
+durable result-to-context binding in signed Step metadata, writing-outcome
+evaluation, or complete desktop/MCP operation coverage.
 
 ## Phase 0: declare and preregister
 
@@ -95,21 +112,22 @@ describe the same claim without presenting conviction as evidence.
 
 ## Phase 1: shared deterministic context runtime
 
-This phase is in progress. The authoring-syntax kernel, compatibility baseline,
-golden cases, and scale corpus exist; the task-specific evidence selector,
-rendered manifest contract, correction/preference stores, cancellation and
-quota boundaries, and desktop/MCP parity do not.
+This phase is in progress. The authoring-syntax kernel, deterministic evidence
+selector and renderer, compatibility baseline, cancellation and quota bounds,
+golden cases, scale corpus, and desktop/MCP process-projection parity exist.
+Correction/preference stores, complete Inspector contracts, and a reviewed
+private-store capability do not.
 
-Harden the landed recursive-zine cut while building the shared runtime:
+The landed recursive-zine and shared-runtime floor now includes:
 
-- add fixed cross-runtime folder-chain vectors to the conformance corpus;
-- exercise interrupted and retried recursive checkpoints against a real relay;
+- fixed cross-runtime folder-chain vectors in the conformance corpus;
+- interrupted and retried recursive checkpoints against a real relay;
 - keep desktop and MCP writers on the same operation-id and `advance` rules;
   and
 - keep derived roll-ups inspectable even when Replay groups them beneath their
   originating gesture.
 
-Build a non-normative package used by every press and provider adapter:
+Continue the non-normative package used by every press and provider adapter:
 
 - closed operation, evidence, correction, preference, directive, error, and
   Inspector contracts;
@@ -127,10 +145,11 @@ The protocol package must not import the context package. Derived evidence,
 preferences, and selector output are product interpretation, never signed
 protocol truth.
 
-Phase 1 succeeds when recursive checkpoints pass protocol and real-relay
-fixtures, and desktop and MCP readers produce identical selected claims and
-rendered bytes from the same context fixtures, including nil, empty, malformed,
-oversized, Unicode, cancelled, and invalid-trace cases.
+The recursive checkpoint and deterministic cross-press projection criteria now
+pass protocol, parity, and real-relay fixtures, including nil, empty, malformed,
+oversized, Unicode, cancelled, and invalid-trace cases. Phase 1 remains open
+until the correction/preference, Inspector, and private-store contracts above
+are closed without weakening those boundaries.
 
 ## Phase 2: one complete desktop vertical slice
 
@@ -167,6 +186,11 @@ After the trust/schema review:
 
 - bind every accepted MODEL Step to the exact approved context manifest,
   prepared request, provider configuration, attempt, and result;
+- ship one explicit cross-provider Continue or Reply journey whose receiving
+  provider gets a stepped context packet rather than implied transfer of hidden
+  vendor state;
+- make that handoff portable for a later reviewer or postmortem, with provider
+  boundaries, source Steps, omissions, and acceptance visible;
 - keep private payloads local by default behind fresh salted
   selective-disclosure commitments and profile-keyed local deduplication;
 - add consented, local-first outcome capture with export and redaction;
@@ -194,8 +218,10 @@ fixtures:
 - MCP consumes the shared package, with retention and encrypted profile stores
   blocked on their own key-management review.
 
-Multi-AI task and correspondence work belongs here as a family of trace-aware
-operations and handoffs, not as a product center separate from writing.
+Generalize the proven handoff into broader multi-AI correspondence here:
+additional providers, model rows, cumulative and reply-chain forms, and richer
+review workflows. It remains a family of authored writing operations, not a
+product center separate from writing and not a permanent generic chat pane.
 
 ## Phase 5: longitudinal scoped learning
 
@@ -233,9 +259,14 @@ sampling, retention, false-positive, and false-negative behavior. The protocol
 continues to carry evidence and never promotes a model score into proof of
 humanness.
 
-Global rendezvous remains frozen beyond maintenance and security fixes until
-real published citations produce organic co-citation matches, users ask to meet
-unknown co-citers, and the value outweighs privacy and abuse costs.
+Coins remain one user-facing discovery opt-in covering Mint, valid-Coin
+indexing, and rendezvous; ordinary citation remains part of core composition.
+The core package, including its under-the-hood Kademlia component, is integrated
+and exercised. Continue its security hardening without creating a second
+Kademlia product surface.
+Operating or expanding global rendezvous remains gated until real published
+citations produce organic co-citation matches, users ask to meet unknown
+co-citers, and the value outweighs privacy and abuse costs.
 
 ## Not on the roadmap
 
@@ -243,7 +274,9 @@ unknown co-citers, and the value outweighs privacy and abuse costs.
 - Hidden personalization or automatic promotion from file to folder/user scope.
 - More protocol fields merely to encode product inference.
 - New tool authority granted by document text.
-- More DHT design before real co-citation density.
+- A separate Kademlia feature or setting; Coins own the opt-in.
+- More routing design beyond completion and security hardening before real
+  co-citation density.
 - A proprietary relay requirement or mandatory account for local writing.
 - Claims that timing or revision shape proves a human author.
 

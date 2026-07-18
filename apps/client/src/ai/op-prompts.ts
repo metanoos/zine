@@ -134,7 +134,7 @@ function composeReplySystem(): string {
     `${SYSTEM_PREAMBLE}\n\n` +
     "YOUR ROLE — Reply: the replier. You write a new response document " +
     "engaging with the source text. This op is the only one authorized to " +
-    "EMIT new brackets: where you reference a minted passage from the " +
+    "EMIT new brackets: where you reference an exact stepped passage from the " +
     "available traces, cite it inline as `[[ short quote | nodeId ]]` using " +
     "that trace's EXACT nodeId (copied from the list, never invented). " +
     "Citations should be accurate and sparing — one per load-bearing " +
@@ -145,7 +145,7 @@ function composeReplySystem(): string {
     "Then the response body only — no other preamble, no meta-commentary, " +
     "no fences. The TITLE line names the new document; it is stripped before " +
     "the body is saved.\n\n" +
-    "After the context block you will see `--- available minted traces ---` " +
+    "After the context block you will see `--- available stepped traces ---` " +
     "(the citable passages, with their nodeIds) and `--- source document ---` " +
     "(the text to reply to). Reply to the source; use the traces as " +
     "citable backing."
@@ -222,7 +222,7 @@ function composeEditSystem(): string {
     "ONLY the file's complete new content after applying the instruction — no " +
     "commentary, no markdown code fences, no explanation. If the instruction " +
     "does not require changes, return the content unchanged. Spans wrapped in " +
-    "[[ ]] brackets are minted sediment — preserve them verbatim."
+    "[[ ]] brackets are protected citations or draft spans — preserve them verbatim."
   );
 }
 
@@ -282,15 +282,15 @@ export function stirMessages(loose: string, anchorCount: number, commands: strin
   ];
 }
 
-/** Reply: write a response doc that may cite minted traces by nodeId. `traces`
- *  is the pre-formatted citable-passages block (empty string when none). */
+/** Reply: write a response doc that may cite stepped traces by nodeId. `traces`
+ *  is the pre-formatted exact-excerpt block (empty string when none). */
 export function replyMessages(source: string, traces: string): ChatMessage[] {
   return [
     { role: "system", content: composeReplySystem() },
     {
       role: "user",
       content:
-        (traces ? `--- available minted traces ---\n${traces}\n\n` : "") +
+        (traces ? `--- available stepped traces ---\n${traces}\n\n` : "") +
         `--- source document ---\n${source || "(empty)"}`,
     },
   ];

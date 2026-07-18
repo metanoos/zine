@@ -525,9 +525,9 @@ function isAbort(error: unknown): boolean {
 /**
  * Keep the prompt-context view aligned with the Press tree's four independent
  * regions. Mint, Scan, and Oblivion share the client-side file map with Root
- * for UI rendering, but none is a descendant of Root: coins are supplied only
- * by operations that explicitly request the palette, intake must be adopted
- * deliberately, and deleted drafts must not re-enter a model prompt.
+ * for UI rendering, but none is a descendant of Root: Coins are supplied only
+ * by operations that explicitly request a local stepped-trace inventory, intake must
+ * be adopted deliberately, and deleted drafts must not re-enter a model prompt.
  */
 export function promptContextFiles(
   files: Record<string, FileState>,

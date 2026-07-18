@@ -62,19 +62,31 @@ export function mintedPath(
   phrase: string,
   date: Date,
   taken: ReadonlySet<string>,
+  operationId?: string,
 ): string {
   const title = slugifyFilename(phrase, "mint");
-  return uniquePath(`${MINT}/${formatLocalSecondStamp(date)}-${title}.md`, taken);
+  const identity = operationId && /^[0-9a-f]{16,64}$/.test(operationId)
+    ? `~${operationId.slice(0, 16)}`
+    : "";
+  return uniquePath(
+    `${MINT}/${formatLocalSecondStamp(date)}-${title}${identity}.md`,
+    taken,
+  );
 }
 
 const MINT_STAMP_PREFIX = /^\d{4}-\d{2}-\d{2}_\d{6}-/;
+const MINT_OPERATION_SUFFIX = /~[0-9a-f]{16}(?=\.md$)/;
+
+function visibleMintName(name: string): string {
+  return name.replace(MINT_STAMP_PREFIX, "").replace(MINT_OPERATION_SUFFIX, "");
+}
 
 /** Human-facing basename for generated system paths. Structural paths keep
  * their timestamp so identity, collision handling, and chronology are intact. */
 export function systemPathDisplayName(path: string): string {
   const slash = path.lastIndexOf("/");
   const name = slash === -1 ? path : path.slice(slash + 1);
-  return isMintPath(path) ? name.replace(MINT_STAMP_PREFIX, "") : name;
+  return isMintPath(path) ? visibleMintName(name) : name;
 }
 
 /** A Mint -> ordinary-folder drop creates an editable fork with an ordinary
@@ -85,7 +97,7 @@ export function forkPathForMint(
   taken: ReadonlySet<string>,
 ): string {
   const sourceName = sourcePath.slice(sourcePath.lastIndexOf("/") + 1);
-  const ordinaryName = sourceName.replace(MINT_STAMP_PREFIX, "") || "minted-trace.md";
+  const ordinaryName = visibleMintName(sourceName) || "minted-trace.md";
   const candidate = destinationFolder
     ? `${destinationFolder}/${ordinaryName}`
     : ordinaryName;

@@ -121,7 +121,7 @@ test("palette statuses render in the row that owns the operation", () => {
   assert.equal((appSource.match(/<PaletteStatus row="model"/g) ?? []).length, 1);
   assert.equal((appSource.match(/<PaletteStatus row="substrate"/g) ?? []).length, 1);
 
-  for (const op of ["step", "send", "attest", "fork"]) {
+  for (const op of ["step", "mint", "send", "attest", "fork"]) {
     assert.equal(paletteStatusRow(op), "author", op);
   }
   for (const op of ["analyze", "reply", "extend", "stir", "settle", "run"]) {
@@ -133,6 +133,7 @@ test("palette statuses render in the row that owns the operation", () => {
   assert.equal(paletteStatusRow(), null);
 
   assert.equal(paletteStatusMessage("settle"), "settled");
+  assert.equal(paletteStatusMessage("mint"), "minted, published, and attested");
   assert.equal(paletteStatusMessage("scan", "3 scanned"), "3 scanned");
 });
 
@@ -347,12 +348,23 @@ test("palette primary action mutates from outlined Step to Mint or immutable Coi
     actionable: true,
   });
   assert.equal(palettePrimaryAction("loose").label, "Mint");
+  assert.match(palettePrimaryAction("loose").title, /Review public Mint details/);
+  assert.match(palettePrimaryAction("loose").title, /publishing and attesting/);
   assert.equal(palettePrimaryAction("loose").tone, "mint");
   assert.equal(palettePrimaryAction("pending").label, "Mint");
   assert.equal(palettePrimaryAction("coin").label, "Coin");
   assert.equal(palettePrimaryAction("coin").actionable, false);
   assert.equal(palettePrimaryAction("invalid").tone, "invalid");
   assert.equal(palettePrimaryAction("invalid").actionable, false);
+});
+
+test("selection Mint has a distinct in-flight operation and visible consent gate", () => {
+  assert.match(appSource, /type PaletteRunningOp = OpKind \| "mint"/);
+  assert.match(appSource, /runningOp === "mint"/);
+  assert.match(appSource, /"Minting…"/);
+  assert.match(appSource, /setOpStatus\(idx, "running", undefined, "mint"\)/);
+  assert.match(appSource, /setOpStatus\(idx, "done", undefined, "mint"\)/);
+  assert.match(appSource, /await requestMintConsent\(mintTarget\.phrase\)/);
 });
 
 test("palette secondary actions follow passage semantics", () => {
@@ -413,10 +425,10 @@ test("switching files collapses the previous editor range", () => {
   assert.match(switchedBranch, /selection:\s*EditorSelection\.cursor\(0\)/);
 });
 
-test("an opened Mint trace presents as an immutable Coin", () => {
+test("only a completed Mint entry presents as an immutable Coin", () => {
   assert.match(
     appSource,
-    /const targetPath = panels\[targetPanel\]\?\.active;\s*if \(targetPath && isMint\(targetPath\)\) return "coin";/,
+    /if \(targetPath && isCoinTab\(targetPath\)\) \{[\s\S]*?isCompletedCoinFile\(files\[targetPath\]\) \? "coin" : "none"/,
   );
 });
 

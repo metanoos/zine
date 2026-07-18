@@ -354,7 +354,7 @@ test("Extend preserves the exact provider, operation, and context-plus-seed laye
     fixture.prepared.messages.map((message) => contentFingerprint(message.content)),
     [
       "a7ac870883c7252d1a11ee02253f7b4943d084532fa1b5a81a6fcf6cd83dc80c",
-      "5ef6c53742e7c9ef6a65b2d2f63be97cf0e8a57a758cdd845128c094502bf508",
+      "ec8a00a32ce4f6bc184e582c3d5fd7da12e382c4f02d2c9fff8126c18f90273d",
       "55e7dd0279978cb020b8f0feaad10b9e45ad123547c65aeea979adf4e28825d1",
     ],
   );
@@ -388,7 +388,7 @@ test("Settle preserves the exact provider, operation, and context-plus-passage l
     fixture.prepared.messages.map((message) => contentFingerprint(message.content)),
     [
       "a7ac870883c7252d1a11ee02253f7b4943d084532fa1b5a81a6fcf6cd83dc80c",
-      "dbad6b723259574ab03c8324c7112590e2fe1af29c94a2c141aa93dceea6fb57",
+      "81175ba90b40d7cde95ddd1d201cda836e227e0d68da5d0bee72bd712a9edd75",
       "b7f3462039e2bc963a42173070da5a29b42214681094d961aef3d8048eec10a5",
     ],
   );

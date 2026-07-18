@@ -219,3 +219,21 @@ test("close transaction keeps the selector blocked after Stronghold unload failu
   );
   assert.deepEqual(log, ["lock-runtime", "close-secrets"]);
 });
+
+test("close fences session-global work before native runtime shutdown", async () => {
+  const log: string[] = [];
+
+  await closeVaultSession({
+    fenceStorageSession() { log.push("fence-storage"); },
+    async lockRuntime() { log.push("lock-runtime"); },
+    async closeSecrets() { log.push("close-secrets"); },
+    deactivateStorage() { log.push("deactivate-storage"); },
+  });
+
+  assert.deepEqual(log, [
+    "fence-storage",
+    "lock-runtime",
+    "close-secrets",
+    "deactivate-storage",
+  ]);
+});

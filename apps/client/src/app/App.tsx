@@ -1,8 +1,12 @@
-import { Component, Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Component, Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, MutableRefObject, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { createTraceOperationId, isTraceOperationId } from "@zine/protocol";
-import { vaultStorage as localStorage } from "../storage/vault-storage.js";
+import {
+  vaultStorage,
+  vaultStorage as localStorage,
+  vaultStorageGeneration,
+} from "../storage/vault-storage.js";
 import {
   Compartment,
   EditorState,
@@ -28,8 +32,6 @@ import { RefCountedStepGate } from "../editor/ref-counted-step-gate.js";
 import {
   sampleRelays,
   hitToDocument,
-  appendToPalette,
-  fetchPalette,
   rankSampleHits,
   upsertManifestEntry,
   resolveTagCandidates,
@@ -40,6 +42,7 @@ import {
   fetchFolderOwner,
   fetchEventById,
   diffToDeltas,
+  completeCoinMint,
   publishEdit,
   publishDirectCoin,
   publishHardenedSpan,
@@ -47,6 +50,7 @@ import {
   sha256HexLocal,
   sendHistoricalStep,
   sendStep,
+  flushRendezvousPublicationOutbox,
   reconstructUpTo,
   reconstructRunsUpTo,
   auditAttribution,
@@ -64,7 +68,6 @@ import {
   incorporateMergeCandidate,
   loadMergeSides,
   mergeFile,
-  type PaletteItem,
   type TagCandidate,
   type EventMeta,
   type FocusSelection,
@@ -88,7 +91,18 @@ import { MergePanel } from "../workspace/MergePanel.js";
 import { MergePreviewModal } from "../workspace/MergePreviewModal.js";
 import { threeWayMerge, autoMergedText } from "../workspace/three-way-merge.js";
 import { AttestModal } from "../provenance/AttestModal.js";
-import { CoinView, DirectCoinComposerView } from "../provenance/CoinModal.js";
+import { CoinView, DirectCoinComposerView, IncompleteMintView } from "../provenance/CoinModal.js";
+import {
+  coinMintOperationKey,
+  completePendingCoinMint as completePendingCoinMintTransaction,
+  finalizedCoinMintSourceText,
+  pendingCoinMints,
+  preparePendingCoinMint,
+  resumePendingCoinMints,
+  storedCoinMintAttestation,
+  type CoinMintSourceFinalization,
+  type PendingCoinMint,
+} from "../provenance/coin-mint-journal.js";
 import { OblivionModal } from "../workspace/OblivionModal.js";
 import { RunModal } from "../ai/RunModal.js";
 import { PromptInspectorModal } from "../ai/PromptInspectorModal.js";
@@ -138,8 +152,6 @@ import {
   modeCompartment,
   modeFacet,
   onSelectSpanFacet,
-  onCopySpanFacet,
-  resolveBracket,
   resolvedBracketMarkup,
   selectedNodeIdFacet,
   wrapSelectionCommand,
@@ -157,11 +169,9 @@ import {
 } from "../editor/palette.js";
 import {
   COIN_CLIPBOARD_MIME,
-  canCoinText,
   parseCoinClipboardEnvelope,
   serializeCoinClipboardEnvelope,
 } from "../provenance/coin-clipboard.js";
-
 import { DownloadView } from "../networking/Download.js";
 import { AboutView } from "./About.js";
 import { VaultsView } from "./VaultsView.js";
@@ -179,6 +189,10 @@ import {
 } from "./onboarding-state.js";
 import { aboutHashTarget } from "./about-documents.js";
 import { NetworkingView } from "../networking/Networking.js";
+import {
+  kademliaEnabledSnapshot,
+  subscribeKademliaConfig,
+} from "../networking/kademlia.js";
 import { ModelsView } from "../ai/ModelsView.js";
 import { KeysView } from "../identity/KeysView.js";
 import { GlobeView } from "../networking/Globe.js";
@@ -514,6 +528,17 @@ interface DirectCoinDraft {
   nextTx: number;
 }
 
+interface MintConsentRequest {
+  phrase: string;
+  resolve: (confirmed: boolean) => void;
+}
+
+interface MintRecoveryNotice {
+  pending: number;
+  failures: string[];
+  startError?: string;
+}
+
 const emptyDirectCoinDraft = (): DirectCoinDraft => ({
   phrase: "",
   kedits: [],
@@ -544,7 +569,7 @@ interface CoinClipboardCitation {
 
 interface CoinClipboardTicket {
   phrase: string;
-  citation: Promise<CoinClipboardCitation>;
+  citation: CoinClipboardCitation;
 }
 
 // One step in a folder-wide replay timeline. `contentUpToHere` is the file's
@@ -614,7 +639,7 @@ function readTheme(): Theme {
   return stored === "light" || stored === "dark" ? stored : "auto";
 }
 
-// Horizontal resize of the press: how wide the collection/palette sidebar is.
+// Horizontal resize of the press: how wide the directory sidebar is.
 // Persisted per-browser (zine.press.sidebarWidth); clamped to MIN..MAX on read.
 const SIDEBAR_WIDTH_KEY = "zine.press.sidebarWidth";
 const SIDEBAR_WIDTH_DEFAULT = 220;
@@ -953,6 +978,12 @@ const DIRECT_COIN_COMPOSER_TAB = "coin-compose://direct";
 const isCoinComposerTab = (p: string): boolean => p === DIRECT_COIN_COMPOSER_TAB;
 /** Mint members are immutable Coin tabs, never editable file tabs. */
 const isCoinTab = (p: string): boolean => !isFolderTab(p) && p !== MINT && isMint(p);
+const isCompletedCoinFile = (file: FileState | undefined): boolean =>
+  !!file && file.kind !== "folder" && file.coinComplete === true;
+const isCompletedCoinPath = (
+  path: string,
+  files: Record<string, FileState>,
+): boolean => isCoinTab(path) && isCompletedCoinFile(files[path]);
 /** Tab label: the basename of a file, or the basename of a folder's relpath. */
 const tabLabel = (p: string): string => {
   if (isCoinComposerTab(p)) return "New Coin";
@@ -1269,6 +1300,7 @@ function TreeItem({
   onRowActivate,
   onCreateStart,
   onMintCoin,
+  coinsEnabled,
   onScan,
   creating,
   createDraft,
@@ -1317,6 +1349,7 @@ function TreeItem({
   onCreateStart: (kind: "file" | "folder") => void;
   /** Open the direct-Coin composer from the Mint region header. */
   onMintCoin: () => void;
+  coinsEnabled: boolean;
   /** Acquire a filesystem snapshot from the Scan region header. */
   onScan: (kind: "file" | "folder") => void;
   /** Active inline creation (null unless a New button/context-menu entry was
@@ -1567,8 +1600,9 @@ function TreeItem({
               <button
                 className="icon-btn"
                 type="button"
-                title="Mint a direct Coin"
+                title={coinsEnabled ? "Mint a direct Coin" : "Enable Coins in Networking to Mint"}
                 aria-label="Mint a direct Coin"
+                disabled={!coinsEnabled}
                 onClick={onMintCoin}
               >
                 <CircleDollarSign size={14} aria-hidden="true" />
@@ -1642,6 +1676,7 @@ function TreeItem({
                 onRowActivate={onRowActivate}
                 onCreateStart={onCreateStart}
                 onMintCoin={onMintCoin}
+                coinsEnabled={coinsEnabled}
                 onScan={onScan}
                 creating={creating}
                 createDraft={createDraft}
@@ -1701,7 +1736,7 @@ function TreeItem({
       }
       style={indent}
       aria-current={isTabFocused ? "true" : undefined}
-      draggable={!isRenaming}
+      draggable={!isRenaming && node.systemKind !== "mint-pending"}
       onDragStart={(e) => {
         // copyMove: tree reparent uses "move"; tag-strip drop uses "copy".
         e.dataTransfer.effectAllowed = "copyMove";
@@ -1717,14 +1752,22 @@ function TreeItem({
       }}
     >
       <span className="tree-expand-spacer" aria-hidden="true" />
-      {node.systemKind === "minted" || isScan(node.path) ? (
+      {node.systemKind === "minted" || node.systemKind === "mint-pending" || isScan(node.path) ? (
         <span
           className="tree-icon-slot tree-system-icon"
-          title={node.systemKind === "minted" ? "Coin" : "Scanned file"}
+          title={
+            node.systemKind === "minted"
+              ? "Coin"
+              : node.systemKind === "mint-pending"
+                ? "Incomplete Mint artifact"
+                : "Scanned file"
+          }
           aria-hidden="true"
         >
           {node.systemKind === "minted" ? (
             <CircleDollarSign size={13} className="tree-icon tree-icon-coin" aria-hidden="true" />
+          ) : node.systemKind === "mint-pending" ? (
+            <FileX size={13} className="tree-icon tree-icon-mint-pending" aria-hidden="true" />
           ) : (
             <FileInput size={13} className="tree-icon tree-icon-scan" aria-hidden="true" />
           )}
@@ -1804,6 +1847,7 @@ function Sidebar({
   onActivateFolder,
   onOpenFolder,
   onMintCoin,
+  coinsEnabled,
   onScan,
   onReify,
   onStepFolder,
@@ -1860,6 +1904,7 @@ function Sidebar({
   onOpenFolder: (path: string) => void;
   /** Open the direct-Coin composer from the Mint region header. */
   onMintCoin: () => void;
+  coinsEnabled: boolean;
   /** Acquire a file or folder from the Scan region header. */
   onScan: (kind: "file" | "folder") => void;
   /** Reify one explicitly chosen tree file or folder to the filesystem. */
@@ -1957,7 +2002,12 @@ function Sidebar({
 
   // context menu + delete-confirm state. ctxMenu is positioned at the cursor;
   // confirmDelete holds the paths pending a Delete click.
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    path: string;
+    systemKind?: ActivatableTreeItem["systemKind"];
+  } | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const sortMenuRef = useRef<HTMLDivElement>(null);
   const [confirmDelete, setConfirmDelete] = useState<{
@@ -2114,7 +2164,12 @@ function Sidebar({
       onSelectionChange(actionSelection);
       setAnchorPath(item.path);
     }
-    setCtxMenu({ x: e.clientX, y: e.clientY, path: item.path });
+    setCtxMenu({
+      x: e.clientX,
+      y: e.clientY,
+      path: item.path,
+      ...(item.systemKind ? { systemKind: item.systemKind } : {}),
+    });
   }
 
   // The paths a Delete should act on: the current selection, pruned of any
@@ -2315,6 +2370,7 @@ function Sidebar({
               onRowActivate={onRowActivate}
               onCreateStart={(kind) => onCreateStart(kind, createParent())}
               onMintCoin={onMintCoin}
+              coinsEnabled={coinsEnabled}
               onScan={onScan}
               creating={creating}
               createDraft={createDraft}
@@ -2403,7 +2459,7 @@ function Sidebar({
               isSystemRootPath(path) ||
               folderPaths.has(path) ||
               hasChild(filePaths, folderPaths, path);
-            const isCoin = !isFolder && isMint(path);
+            const isCoin = !isFolder && ctxMenu.systemKind === "minted";
             const menu = directoryContextMenuCapabilities(
               path,
               isFolder,
@@ -2484,6 +2540,8 @@ function Sidebar({
                     <button
                       type="button"
                       className="ctx-menu-item"
+                      disabled={!coinsEnabled}
+                      title={coinsEnabled ? "Mint a direct Coin" : "Enable Coins in Networking to Mint"}
                       onClick={() => {
                         setCtxMenu(null);
                         onMintCoin();
@@ -2938,7 +2996,7 @@ function replayActionLabel(
 //
 // Replaces the editor surface in the panel when the active tab's mode is
 // "diff" (the third surface alongside Preview/Markdown). The editor
-// (FileEditor) stays mounted underneath — LLM ops, palette citations, and
+// (FileEditor) stays mounted underneath — LLM ops, citation chips, and
 // Cmd+S step all hold its view ref regardless of which surface is showing —
 // this pane is just an absolute overlay that covers it visually. Reuses the
 // same jsdiff + steps-diff-add/-remove/-same spans MergePreviewModal uses.
@@ -3961,7 +4019,6 @@ const focusedVoiceCompartment = new Compartment();
  *  the editor. Reconfigured live from FileEditor when `selection` moves. */
 const selectedNodeIdCompartment = new Compartment();
 const onSelectSpanCompartment = new Compartment();
-const onCopySpanCompartment = new Compartment();
 /** Holds the replay read-only gate so it can be reconfigured live (entering/
  *  leaving a frozen replay step) without rebuilding the editor. While armed it
  *  drops user keystrokes (a frozen historical view can't be edited) but flashes
@@ -4402,7 +4459,6 @@ function buildExtensions(
   onSelection: (sel: { from: number; to: number } | null) => void,
   selectedNodeId: string,
   onSelectSpan: (nodeId: string, phrase: string) => void,
-  onCopySpan: (nodeId: string, phrase: string) => void,
   onCopySelection: (view: EditorView, event: ClipboardEvent) => boolean,
   onPasteSelection: (view: EditorView, event: ClipboardEvent) => boolean,
   readOnly: boolean,
@@ -4479,12 +4535,11 @@ function buildExtensions(
     // compartment is needed — the resolver closure is stateless and the field
     // it reads updates synchronously with each transaction.
     bracketVoiceResolverFacet.of(voiceAtOffset),
-    // Selected-span ring + chip-click/chip-copy handlers, each reconfigurable
+    // Selected-span ring + chip-click handler, each reconfigurable
     // live so a selection move re-rings the right `[[ span ]]` (and a chip
     // click/copy reports to App) without rebuilding the editor.
     selectedNodeIdCompartment.of(selectedNodeIdFacet.of(selectedNodeId)),
     onSelectSpanCompartment.of(onSelectSpanFacet.of(onSelectSpan)),
-    onCopySpanCompartment.of(onCopySpanFacet.of(onCopySpan)),
     // Replay read-only gate, reconfigured live via readOnlyCompartment (see
     // FileEditor). While frozen on a historical replay step (or mid-playback)
     // user keystrokes are dropped and pulse the reject flash; programmatic
@@ -4544,7 +4599,6 @@ function FileEditor({
   scrollTarget,
   readOnly,
   onSelectSpan,
-  onCopySpan,
   onCopySelection,
   onPasteSelection,
   onReplayEditAttempt,
@@ -4588,13 +4642,8 @@ function FileEditor({
   readOnly: boolean;
   /** Clicking a citation chip selects that coin as the active trace. */
   onSelectSpan: (nodeId: string, phrase: string) => void;
-  /** Clicking a citation chip's copy button curates the span (clipboard +
-   *  palette append). Mirrors onSelectSpan's ref-indirection so the chip's
-   *  copy widget stays current without rebuilding the editor. */
-  onCopySpan: (nodeId: string, phrase: string) => void;
-  /** Copy/paste hooks that upgrade an intra-press text transfer into a
-   * coin-backed resolved citation. Returning false preserves native clipboard
-   * behavior for external/plain text. */
+  /** Copy/paste hooks that preserve an existing resolved Coin citation.
+   * Returning false preserves native clipboard behavior for ordinary text. */
   onCopySelection: (view: EditorView, event: ClipboardEvent) => boolean;
   onPasteSelection: (view: EditorView, event: ClipboardEvent) => boolean;
   /** Fired when the user tries to edit while replay-frozen (a keystroke the
@@ -4641,9 +4690,6 @@ function FileEditor({
   // right widget, but indirection keeps it cheap (no rebuild on selection move).
   const onSelectSpanRef = useRef(onSelectSpan);
   onSelectSpanRef.current = onSelectSpan;
-  // Same indirection for the chip's copy-curates side effect.
-  const onCopySpanRef = useRef(onCopySpan);
-  onCopySpanRef.current = onCopySpan;
   const onCopySelectionRef = useRef(onCopySelection);
   onCopySelectionRef.current = onCopySelection;
   const onPasteSelectionRef = useRef(onPasteSelection);
@@ -4690,7 +4736,6 @@ function FileEditor({
       (has) => onSelectionRef.current?.(has),
       selectedNodeId,
       (nodeId, phrase) => onSelectSpanRef.current(nodeId, phrase),
-      (nodeId, phrase) => onCopySpanRef.current(nodeId, phrase),
       (view, event) => onCopySelectionRef.current(view, event),
       (view, event) => onPasteSelectionRef.current(view, event),
       readOnly,
@@ -5294,12 +5339,14 @@ function CitationPicker({
   candidates,
   alreadyCited,
   disabled,
+  disabledTitle,
   onActivate,
   onPick,
 }: {
   candidates: TraceCandidate[];
   alreadyCited: string[];
   disabled: boolean;
+  disabledTitle?: string;
   onActivate: () => void;
   onPick: (nodeId: string) => void;
 }) {
@@ -5329,7 +5376,7 @@ function CitationPicker({
       <button
         type="button"
         className="panel-cite-add"
-        title={disabled ? "Step this file before inserting citations" : "Insert citation"}
+        title={disabled ? disabledTitle ?? "Step this file before inserting citations" : "Insert citation"}
         aria-expanded={!disabled && open}
         disabled={disabled}
         onClick={() => {
@@ -5419,14 +5466,15 @@ function EventMetaBar({ meta }: { meta: SampleEventMeta }) {
 // their operations. The selected AUTHOR key is the "pen" new typed text is
 // attributed to; MODEL operations run as the selected model voice.
 
-type PaletteStatusOp = OpKind | "scan" | "reify" | "fork";
+type PaletteRunningOp = OpKind | "mint";
+type PaletteStatusOp = PaletteRunningOp | "scan" | "reify" | "fork";
 type SummonStatus = {
   state: "idle" | "running" | "done" | "error";
   msg?: string;
   op?: PaletteStatusOp;
 };
 
-function isOpKind(op?: PaletteStatusOp): op is OpKind {
+function isRunningPaletteOp(op?: PaletteStatusOp): op is PaletteRunningOp {
   return op !== undefined && op !== "scan" && op !== "reify" && op !== "fork";
 }
 
@@ -5903,6 +5951,7 @@ function ActionPalette({
   onInspect,
   attestPlan,
   targetInScope,
+  coinsEnabled,
   /** Semantic state of the focused editor passage. Mutates the AUTHOR primary
    *  slot between Step, Mint, disabled Coin, and disabled invalid Mint. */
   authorSelectionState,
@@ -5943,7 +5992,7 @@ function ActionPalette({
   /** Which op kind is in flight on the target panel, or null when idle. The
    *  button for this op re-renders as the live stop control — click it again
    *  to abort — instead of spawning a separate Stop button. */
-  runningOp: OpKind | null;
+  runningOp: PaletteRunningOp | null;
   /** Run an op against the op-target panel. */
   onOp: (op: OpKind) => void;
   /** Stop the in-flight op on the target panel. */
@@ -5965,6 +6014,8 @@ function ActionPalette({
    *  endorsing or ensuring reachability of an existing exact node does not
    *  write into the target content. */
   targetInScope: boolean;
+  /** The Coins discovery opt-in gates Mint; ordinary citation remains core. */
+  coinsEnabled: boolean;
   /** Semantic state of the focused editor passage presented by the palette. */
   authorSelectionState: PaletteSelectionState;
   /** Whether Send's delivery plan is append-and-send rather than send-latest. */
@@ -6057,12 +6108,13 @@ function ActionPalette({
         />
         <div className="action-palette-actions">
           {(() => {
-            const isRunning = runningOp === "step";
+            const isRunning = runningOp === "step" || runningOp === "mint";
             const enabled =
               !runningOp &&
                 primaryAction.actionable &&
                 (hasMintablePassage || stepAvailable) &&
                 (hasMintablePassage ? targetInScope : scopedDeliver) &&
+                (!hasMintablePassage || coinsEnabled) &&
                 !immutableMint &&
                 !replayFrozen;
             return (
@@ -6073,12 +6125,16 @@ function ActionPalette({
                 disabled={isRunning || !enabled}
                 title={
                   isRunning
-                    ? `${primaryAction.label} in progress`
+                    ? runningOp === "mint"
+                      ? "Mint public transaction in progress"
+                      : "Step in progress"
+                    : hasMintablePassage && !coinsEnabled
+                      ? "Enable Coins in Networking to Mint this passage"
                     : primaryAction.title
                 }
                 onClick={() => onOp("step")}
               >
-                {isRunning ? "Stepping…" : primaryAction.label}
+                {isRunning ? (runningOp === "mint" ? "Minting…" : "Stepping…") : primaryAction.label}
               </button>
             );
           })()}
@@ -6359,7 +6415,6 @@ function Panel({
   replayFrozen,
   replayMounted,
   onSelectSpan,
-  onCopySpan,
   onCopySelection,
   onPasteSelection,
   onReplayEditAttempt,
@@ -6383,6 +6438,7 @@ function Panel({
   unsteppedPathSet,
   unsteppedEditCounts,
   tabIsInScope,
+  completedCoinPaths,
 }: {
   panelIdx: number;
   tabs: string[];
@@ -6390,6 +6446,7 @@ function Panel({
   file?: FileState;
   directCoinComposer: {
     phrase: string;
+    enabled: boolean;
     busy: boolean;
     error: string | null;
     onPhraseChange: (phrase: string) => void;
@@ -6470,9 +6527,6 @@ function Panel({
   replayMounted: boolean;
   /** Clicking a citation chip in this editor selects that coin. */
   onSelectSpan: (nodeId: string, phrase: string) => void;
-  /** Clicking a citation chip's copy button curates the span (clipboard +
-   *  palette append). */
-  onCopySpan: (nodeId: string, phrase: string) => void;
   onCopySelection: (view: EditorView, event: ClipboardEvent) => boolean;
   onPasteSelection: (view: EditorView, event: ClipboardEvent) => boolean;
   /** Fired when the user tries to edit while replay-frozen. The App surfaces
@@ -6534,9 +6588,14 @@ function Panel({
   /** Whether a tab's trace belongs to the current effective scope. Tab focus
    *  does not move scope, so the focused tab may legitimately return false. */
   tabIsInScope: (tabPath: string) => boolean;
+  /** Mint paths whose full public transaction completed. Unmarked legacy
+   * artifacts remain visible but never receive Coin semantics. */
+  completedCoinPaths: ReadonlySet<string>;
 }) {
   const coinComposerActive = isCoinComposerTab(activePath);
-  const coinActive = isCoinTab(activePath) && !!file && file.kind !== "folder";
+  const coinFile = isCoinTab(activePath) && isCompletedCoinFile(file) ? file : undefined;
+  const coinActive = !!coinFile;
+  const incompleteMintActive = isCoinTab(activePath) && !!file && !coinActive;
   // One outgoing list, regardless of the protocol path that created the `q`.
   // Current body brackets are the source of truth for the visible "quoted"
   // marker; this updates immediately while the head's resolved q-list catches
@@ -6638,7 +6697,7 @@ function Panel({
   }
 
   const modeToggle =
-    !draggingTab && !coinActive && !coinComposerActive && !isFolderTab(activePath) ? (
+    !draggingTab && !isCoinTab(activePath) && !coinComposerActive && !isFolderTab(activePath) ? (
     <div className="tab-bar-mode" role="group" aria-label="View mode">
       <button
         type="button"
@@ -6814,8 +6873,11 @@ function Panel({
             const hasUnsteppedChanges = unsteppedPathSet.has(p);
             const pendingLabel = unsteppedEdits > 999 ? "999+" : String(unsteppedEdits);
             const scanTab = isScan(isFolderTab(p) ? folderTabPath(p) : p);
+            const completedCoinTab = completedCoinPaths.has(p);
             const readOnlyTabDetail = isCoinTab(p)
-              ? "Immutable Coin"
+              ? completedCoinTab
+                ? "Immutable Coin"
+                : "Incomplete Mint artifact"
               : scanTab
                 ? "Scanned snapshot · Adopt to edit"
               : replayFrozen && isActive
@@ -6930,8 +6992,10 @@ function Panel({
                     ) : (
                       <FolderOpen size={12} className="tab-status tab-status-folder" aria-hidden="true" />
                     )
-                  ) : isCoinTab(p) || isCoinComposerTab(p) ? (
+                  ) : completedCoinTab || isCoinComposerTab(p) ? (
                     <CircleDollarSign size={12} className="tab-status tab-status-coin" aria-hidden="true" />
+                  ) : isCoinTab(p) ? (
+                    <FileX size={12} className="tab-status tab-status-mint-pending" aria-hidden="true" />
                   ) : scanTab ? (
                     <FileInput size={12} className="tab-status tab-status-scan" aria-hidden="true" />
                   ) : (
@@ -7072,7 +7136,7 @@ function Panel({
           candidate list is scoped to the focused panel's active path, so this
           renders only on the focused panel; hidden while the MergePanel overlay
           is already open (and on read-only foreign folders). */}
-      {file && !coinActive && active && mergeCandidates.length > 0 && !mergeSessionOpen && (
+      {file && !isCoinTab(activePath) && active && mergeCandidates.length > 0 && !mergeSessionOpen && (
         <div className="merge-banner">
           {(() => {
             const candidateLabel = (c: MergeCandidate) => {
@@ -7137,10 +7201,11 @@ function Panel({
           })()}
         </div>
       )}
-      {!coinActive && file?.eventMeta && <EventMetaBar meta={file.eventMeta} />}
+      {!isCoinTab(activePath) && file?.eventMeta && <EventMetaBar meta={file.eventMeta} />}
       {coinComposerActive ? (
         <DirectCoinComposerView
           phrase={directCoinComposer.phrase}
+          enabled={directCoinComposer.enabled}
           busy={directCoinComposer.busy}
           error={directCoinComposer.error}
           onPhraseChange={directCoinComposer.onPhraseChange}
@@ -7151,12 +7216,18 @@ function Panel({
         <CoinView
           key={activePath}
           name={systemPathDisplayName(activePath)}
+          phrase={flatten(coinFile.runs)}
+          nodeId={coinFile.nodeId}
+        />
+      ) : incompleteMintActive ? (
+        <IncompleteMintView
+          key={activePath}
+          name={systemPathDisplayName(activePath)}
           phrase={flatten(file.runs)}
-          nodeId={file.nodeId}
         />
       ) : file ? (
         // .panel-body positions the one CodeMirror surface that now serves
-        // all three modes — LLM ops, palette citations, and Cmd+S step all hold
+        // all three modes — LLM ops, citation chips, and Cmd+S step all hold
         // its view ref regardless of which mode is active. Preview vs Markdown
         // is purely a decoration/CSS switch (see FileEditor/modeFacet), not a
         // second mounted component. Diff keeps the editor mounted (so the view
@@ -7178,7 +7249,6 @@ function Panel({
             scrollTarget={scrollTarget}
             readOnly={readOnly}
             onSelectSpan={onSelectSpan}
-            onCopySpan={onCopySpan}
             onCopySelection={onCopySelection}
             onPasteSelection={onPasteSelection}
             onReplayEditAttempt={onReplayEditAttempt}
@@ -7525,6 +7595,32 @@ function useProvenance(
   // that attach already loaded as current. Cleared by the boot effect in App().
   const ready = useRef(false);
 
+  // App mounts only after SecurityBootstrap has activated the selected vault
+  // and started its relay. Start the optional Coins rendezvous runtime at that
+  // point, then retry the install-local publication outbox on boot/online.
+  // Relay startup itself stays exclusively owned by the vault transaction.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    const flushRendezvous = () => {
+      void flushRendezvousPublicationOutbox().catch((e: unknown) => {
+        if (!cancelled) console.warn("[rendezvous] indexing outbox retry failed:", e);
+      });
+    };
+    import("../networking/kademlia.js")
+      .then(({ ensureKademliaStarted }) => ensureKademliaStarted())
+      .then(() => {
+        if (!cancelled) flushRendezvous();
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) console.warn("[rendezvous] Kademlia startup failed:", e);
+      });
+    window.addEventListener("online", flushRendezvous);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("online", flushRendezvous);
+    };
+  }, []);
   // Debounced crash-pad refresh for metadata and belt-and-suspenders recovery.
   // Content plus KEdits are journaled synchronously in editFile at transaction
   // time; this pass catches non-editor state changes such as tags.
@@ -7850,6 +7946,7 @@ function useProvenance(
     suppressStep,
     seedSteppedRef,
     authorSignerRef,
+    lastSteppedRef,
     unsteppedPathSet,
     unsteppedEditCounts,
   };
@@ -7861,7 +7958,60 @@ export type GlobalCtxItem =
   | { kind: "action"; label: string; run: () => void; disabled?: boolean }
   | { kind: "sep" };
 
+function MintConsentModal({
+  phrase,
+  onCancel,
+  onConfirm,
+}: {
+  phrase: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onCancel();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onCancel]);
+
+  return (
+    <div className="confirm-overlay mint-consent-overlay" onClick={onCancel}>
+      <div
+        className="confirm-dialog mint-consent-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="mint-consent-title"
+        aria-describedby="mint-consent-description"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <h2 id="mint-consent-title" className="create-modal-title mint-consent-title">
+          Publish this selection as a Coin?
+        </h2>
+        <blockquote className="mint-consent-phrase">{phrase}</blockquote>
+        <p id="mint-consent-description" className="confirm-message mint-consent-message">
+          This exact selected text will be public through configured publication relays.
+          Mint also publishes a same-minter attestation, making the result an immutable Coin.
+          If you later Send a trace that cites it, the signer&apos;s interest can become globally
+          discoverable through rendezvous.
+        </p>
+        <div className="confirm-actions">
+          <button type="button" className="confirm-cancel" onClick={onCancel}>Cancel</button>
+          <button type="button" className="coin-mint-submit" onClick={onConfirm}>
+            Mint publicly
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
+  const coinsEnabled = useSyncExternalStore(
+    subscribeKademliaConfig,
+    kademliaEnabledSnapshot,
+    () => false,
+  );
   // The workspace is folder-driven: `files` starts empty and is populated by
   // the boot scan once a folder is attached. `folder` holds the attached
   // folder's stable id + absolute path (persisted in localStorage by
@@ -8158,12 +8308,21 @@ function App() {
   const traceCandidates = useMemo<TraceCandidate[]>(() => {
     const out: TraceCandidate[] = [];
     for (const [path, f] of Object.entries(files)) {
+      if (isCoinTab(path) && !isCompletedCoinFile(f)) continue;
       if (f.kind !== "folder" && f.nodeId) {
         out.push({ path, nodeId: f.nodeId, ...(f.traceId ? { traceId: f.traceId } : {}) });
       }
     }
     return out;
   }, [files]);
+  const completedCoinPaths = useMemo(
+    () => new Set(
+      Object.entries(files)
+        .filter(([path, file]) => isCoinTab(path) && isCompletedCoinFile(file))
+        .map(([path]) => path),
+    ),
+    [files],
+  );
   // Citation targets are immutable Steps, but the traces containing those
   // Steps keep advancing. A local head move refreshes progress immediately;
   // the epoch also checks relay-side advances made by another press while the
@@ -8500,6 +8659,7 @@ function App() {
     suppressStep,
     seedSteppedRef,
     authorSignerRef,
+    lastSteppedRef,
     unsteppedPathSet,
     unsteppedEditCounts,
   } = useProvenance(folder, files, replayActiveRef);
@@ -8962,7 +9122,7 @@ function App() {
   // Read at fire time (see scheduleStep), so an AUTHOR switch mid-debounce wins.
   authorSignerRef.current = () => secretKeyForVoice(authorPubkey) ?? undefined;
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  // Width of the collection/palette sidebar, driven by the .sidebar-resizer
+  // Width of the directory sidebar, driven by the .sidebar-resizer
   // handle. Resting default 220px; persisted in localStorage on change.
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => readSidebarWidth());
   const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -9113,6 +9273,37 @@ function App() {
     setActiveView(view);
   }
   const [sendFailure, setSendFailure] = useState<ReturnType<typeof describeSendFailure> | null>(null);
+  const [mintConsentRequest, setMintConsentRequest] = useState<MintConsentRequest | null>(null);
+  const mintConsentRequestRef = useRef<MintConsentRequest | null>(null);
+  const [mintRecoveryNotice, setMintRecoveryNotice] = useState<MintRecoveryNotice | null>(null);
+  const [mintRecoveryBusy, setMintRecoveryBusy] = useState(false);
+  const recoveredMintSessionsRef = useRef(new Set<string>());
+
+  function finishMintConsent(confirmed: boolean): void {
+    const request = mintConsentRequestRef.current;
+    if (!request) return;
+    mintConsentRequestRef.current = null;
+    setMintConsentRequest(null);
+    request.resolve(confirmed);
+  }
+
+  function requestMintConsent(phrase: string): Promise<boolean> {
+    if (mintConsentRequestRef.current) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      const request = { phrase, resolve };
+      mintConsentRequestRef.current = request;
+      setMintConsentRequest(request);
+    });
+  }
+
+  useEffect(() => {
+    const request = mintConsentRequestRef.current;
+    if (!request) return;
+    mintConsentRequestRef.current = null;
+    setMintConsentRequest(null);
+    request.resolve(false);
+  }, [coinsEnabled, folder?.id]);
+
   const [socialQuery, setSocialQuery] = useState<SocialQuery>(() => loadSocialQuery());
   useEffect(() => {
     saveSocialQuery(socialQuery);
@@ -9255,7 +9446,12 @@ function App() {
    *  remain debounced, but minting needs a signed source id before it can emit
    *  `extracted-from`, and a signed container id after resolving the bracket so
    *  its `q` citation is not left pending behind a temporary empty node id. */
-  async function flushEditorLocally(path: string, view: EditorView, signer?: Uint8Array): Promise<string> {
+  async function flushEditorLocally(
+    path: string,
+    view: EditorView,
+    signer?: Uint8Array,
+    operationId?: string,
+  ): Promise<string> {
     const file = filesRef.current[path] ?? files[path];
     if (!file) throw new Error(`Cannot step missing source trace ${path}.`);
     const content = view.state.doc.toString();
@@ -9290,6 +9486,8 @@ function App() {
       citationIds.length > 0 ? citationIds : undefined,
       kedits.length > 0 ? kedits : undefined,
       true,
+      undefined,
+      operationId,
     );
     if (!nodeId) throw new Error(`The local source trace ${path} did not produce a node id.`);
     const traceId = await resolvePostWriteTraceId({
@@ -9332,7 +9530,7 @@ function App() {
     setFiles((prev) => {
       const current = prev[path];
       if (!current) return prev;
-      // Copy/mint may wait on a relay while the author keeps typing. Advance
+      // Mint/Step may wait on a relay while the author keeps typing. Advance
       // only the stepped nucleus and drain exactly the KEdit prefix captured
       // above; never overwrite newer runs with the source snapshot.
       const remaining = dropKEditLogPrefix(current.kedits ?? EMPTY_KEDIT_LOG, steppedKedits);
@@ -9350,78 +9548,318 @@ function App() {
     return nodeId;
   }
 
-  /** Strike one immutable, single-Step coin without changing the source body.
-   * The caller decides whether to resolve a bracket in the source (the Mint
-   * gesture does; provenance-aware Copy deliberately does not). */
+  async function finalizeStoredMintSource(
+    record: PendingCoinMint,
+    signer: Uint8Array,
+  ): Promise<string> {
+    const source = record.sourceFinalization;
+    if (!source) throw new Error("cannot finalize a direct Mint source");
+    if (folderIdRef.current !== record.sourceFolderId) {
+      throw new Error(`cannot finalize Mint source outside its attached press: ${source.relativePath}`);
+    }
+    const localFile = loadLocalFolder(record.sourceFolderId)?.files[source.relativePath];
+    const liveFile = filesRef.current[source.relativePath];
+    const currentText = liveFile ? flatten(liveFile.runs) : localFile?.content;
+    if (currentText === undefined) {
+      throw new Error(`cannot finalize missing Mint source ${source.relativePath}`);
+    }
+    const nextText = finalizedCoinMintSourceText(record, currentText);
+    const currentNodeId = liveFile?.nodeId ?? localFile?.nodeId ?? "";
+    if (nextText === currentText && currentNodeId) {
+      const currentNode = await fetchEventById(currentNodeId);
+      if (currentNode && eventMeta(currentNode).citationTargets.includes(record.coin.id)) {
+        return currentNode.id;
+      }
+    }
+    const sourceRuns = liveFile?.runs && flatten(liveFile.runs) === currentText
+      ? liveFile.runs
+      : localFile?.runs && flatten(localFile.runs) === currentText
+        ? localFile.runs
+        : [{ voice: record.coin.pubkey, text: currentText }];
+    const nextRuns = reconcileRunsText(sourceRuns, nextText, getPublicKey(signer));
+    const sourceTags = liveFile?.tags ?? localFile?.tags ?? [];
+    const citationIds = liveFile?.citationIds ?? localFile?.citationIds;
+    const nodeId = await backendRef.current.writeFile(
+      source.relativePath,
+      nextText,
+      sourceTags,
+      signer,
+      nextRuns,
+      undefined,
+      citationIds,
+      undefined,
+      true,
+      nextText === currentText,
+      operationIdFromNode(record.coin),
+    );
+    if (!nodeId) throw new Error(`Mint source ${source.relativePath} did not produce a citation Step`);
+    const nextFile = {
+      ...(liveFile ?? { tags: sourceTags }),
+      runs: nextRuns,
+      nodeId,
+      tags: sourceTags,
+      ...(citationIds ? { citationIds } : {}),
+    };
+    filesRef.current = { ...filesRef.current, [source.relativePath]: nextFile };
+    setFiles((prev) => ({ ...prev, [source.relativePath]: nextFile }));
+    return nodeId;
+  }
+
+  /** Strike one immutable Coin. Extracted Mints include a fourth durable phase
+   * that resolves and Steps the source citation before the journal can clear. */
+  function coinMintCompletionFor(
+    signer: Uint8Array,
+    finalizeSource: (record: PendingCoinMint) => Promise<string> =
+      (record) => finalizeStoredMintSource(record, signer),
+  ) {
+    return {
+      publishPair: (coin: Event) => completeCoinMint(coin, signer),
+      serializeAttestation: (attestation: Event) => attestation,
+      restoreAttestation: storedCoinMintAttestation,
+      persistMembership: async (record: PendingCoinMint) => {
+        const parsed = JSON.parse(record.coin.content) as { contentHash?: string };
+        await upsertManifestEntry(
+          record.mintFolderId,
+          {
+            kind: "file",
+            relativePath: record.memberName,
+            latestNodeId: record.coin.id,
+            contentHash: parsed.contentHash ?? "",
+          },
+          signer,
+          { localOnly: true, operationId: operationIdFromNode(record.coin) },
+        );
+      },
+      persistLocal: (record: PendingCoinMint) => {
+        const runs: Run[] = [{ voice: record.coin.pubkey, text: record.phrase }];
+        const persisted = saveLocalFile(record.sourceFolderId, record.localPath, {
+          content: record.phrase,
+          tags: [],
+          nodeId: record.coin.id,
+          runs,
+          voicePubkey: record.coin.pubkey,
+          coinComplete: true,
+        });
+        if (!persisted) {
+          throw new Error("Mint is public but its local inventory could not be persisted");
+        }
+        seedSteppedRef.current({
+          [record.localPath]: { runs, nodeId: record.coin.id, tags: [], coinComplete: true },
+        });
+        if (folderIdRef.current === record.sourceFolderId) {
+          const nextFile = { runs, nodeId: record.coin.id, tags: [], coinComplete: true };
+          // Keep the allocator's imperative snapshot authoritative immediately;
+          // React commits on a later turn and cannot be the reservation barrier.
+          filesRef.current = { ...filesRef.current, [record.localPath]: nextFile };
+          setFiles((prev) => ({ ...prev, [record.localPath]: nextFile }));
+        }
+      },
+      finalizeSource,
+    };
+  }
+
+  function refreshMintRecoveryNotice(
+    failures: readonly string[] = [],
+    startError?: string,
+  ): void {
+    const sourceFolderId = folderIdRef.current;
+    const pending = sourceFolderId
+      ? pendingCoinMints().filter((record) => record.sourceFolderId === sourceFolderId).length
+      : 0;
+    const uniqueFailures = [...new Set(failures.filter(Boolean))];
+    setMintRecoveryNotice(
+      pending > 0 || uniqueFailures.length > 0 || startError
+        ? { pending, failures: uniqueFailures, ...(startError ? { startError } : {}) }
+        : null,
+    );
+  }
+
+  /** Retry every durable Mint whose signing key remains in this press. Stored
+   * path/source metadata makes recovery independent of the editor selection
+   * that originally created the Coin. */
+  async function recoverPendingCoinMints(exceptOperationKey?: string): Promise<void> {
+    const result = await resumePendingCoinMints((pending) => {
+      const signer = secretKeyForVoice(pending.coin.pubkey);
+      if (!signer) {
+        throw new Error(`the Coin signer ${formatPubkey(pending.coin.pubkey)} is unavailable`);
+      }
+      return coinMintCompletionFor(signer);
+    }, vaultStorage, (pending) =>
+      pending.sourceFolderId === folderIdRef.current &&
+      (!exceptOperationKey || pending.operationKey !== exceptOperationKey),
+    );
+    if (result.failures.length > 0) {
+      console.warn("[mint] pending Mint recovery remains incomplete:", result.failures);
+    }
+    refreshMintRecoveryNotice(result.failures.map((failure) => failure.error));
+  }
+
+  // Recovery is a workspace-start phase, not a side effect of the next Mint.
+  // Include the available signer set so importing a missing key creates one
+  // fresh recovery opportunity without replaying on ordinary React renders.
+  useEffect(() => {
+    if (bootState !== "ready" || !folder) {
+      setMintRecoveryNotice(null);
+      setMintRecoveryBusy(false);
+      return;
+    }
+    refreshMintRecoveryNotice();
+    if (!coinsEnabled) {
+      setMintRecoveryBusy(false);
+      return;
+    }
+    const generation = vaultStorageGeneration();
+    const keyFingerprint = keys.map((key) => key.pubkey).sort().join(",");
+    const session = `${generation}:${folder.id}:${keyFingerprint}`;
+    if (recoveredMintSessionsRef.current.has(session)) return;
+    recoveredMintSessionsRef.current.add(session);
+    setMintRecoveryBusy(true);
+    void recoverPendingCoinMints()
+      .catch((error) => {
+        if (vaultStorageGeneration() !== generation || folderIdRef.current !== folder.id) return;
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn("[mint] startup recovery failed:", error);
+        refreshMintRecoveryNotice([], message);
+      })
+      .finally(() => {
+        if (vaultStorageGeneration() === generation && folderIdRef.current === folder.id) {
+          setMintRecoveryBusy(false);
+        }
+      });
+  }, [bootState, coinsEnabled, folder?.id, keys]);
+
   async function mintCoinTrace(
     phrase: string,
     origin: CoinOrigin,
     signer?: Uint8Array,
     kedits?: KEdit[],
-  ): Promise<{ path: string; nodeId: string; runs: Run[] }> {
+    sourceCompletion?: {
+      metadata: CoinMintSourceFinalization;
+      finalize: (record: PendingCoinMint) => Promise<string>;
+    },
+  ): Promise<{ path: string; nodeId: string; attestationId: string; runs: Run[] }> {
+    if (!kademliaEnabledSnapshot()) {
+      throw new Error("Enable Coins in Networking before minting a Coin.");
+    }
     if (!folder) throw new Error("Cannot mint a coin without an attached press.");
     const sourceFolderId = folder.id;
-    const taken = new Set([
-      ...Object.keys(filesRef.current),
-      ...pendingPaths.current,
-    ]);
-    const newPath = mintedPath(phrase, new Date(), taken);
-    pendingPaths.current.add(newPath);
-    try {
-      const mintFolderId = await getOrCreateMintFolder(sourceFolderId, signer);
-      const mintMemberName = newPath.slice(`${MINT}/`.length);
+    const coinVoice = signer ? getPublicKey(signer) : authorPubkey;
+    const mintSigner = signer ?? secretKeyForVoice(coinVoice);
+    if (!mintSigner) throw new Error(`no key for voice ${formatPubkey(coinVoice)}`);
+    const operationKey = coinMintOperationKey({
+      sourceFolderId,
+      signerPubkey: coinVoice,
+      phrase,
+      origin,
+    });
+    // Complete abandoned gestures directly from their stored records before a
+    // new one consumes journal capacity. Exclude this gesture so its retry
+    // returns the original exact Coin to the caller instead of completing it
+    // invisibly and then creating a sibling.
+    await recoverPendingCoinMints(operationKey);
+    if (sourceCompletion) {
+      // Recovery may itself Step this source and shift every later UTF-16
+      // range. Revalidate the exact node, bytes, and target after recovery and
+      // before signing or publishing a new Coin pair.
+      const source = sourceCompletion.metadata;
+      const localFile = loadLocalFolder(sourceFolderId)?.files[source.relativePath];
+      const liveFile = filesRef.current[source.relativePath];
+      const currentText = liveFile ? flatten(liveFile.runs) : localFile?.content;
+      const currentNodeId = liveFile?.nodeId ?? localFile?.nodeId ?? "";
+      if (currentText === undefined || currentNodeId !== source.sourceNodeId) {
+        throw new Error(
+          `Mint source ${source.relativePath} changed while pending Mints were recovered; select it again`,
+        );
+      }
+      if (await sha256HexLocal(currentText) !== source.sourceContentHash) {
+        throw new Error(
+          `Mint source ${source.relativePath} no longer matches its captured snapshot; select it again`,
+        );
+      }
+      const targetStillMatches = source.kind === "pending-bracket"
+        ? findPendingBrackets(currentText).some((bracket) =>
+            bracket.matchStart === source.bracketRange.start &&
+            bracket.matchEnd === source.bracketRange.end &&
+            bracket.phraseStart === source.range.start &&
+            bracket.phraseEnd === source.range.end &&
+            bracket.phrase === phrase
+          )
+        : currentText.slice(source.range.start, source.range.end) === phrase;
+      if (!targetStillMatches) {
+        throw new Error(
+          `Mint source ${source.relativePath} selection moved while pending Mints were recovered; select it again`,
+        );
+      }
+    }
+    const pending = await preparePendingCoinMint(operationKey, async () => {
+      const operationId = createTraceOperationId();
+      const taken = new Set([
+        ...Object.keys(filesRef.current),
+        ...Object.keys(loadLocalFolder(sourceFolderId)?.files ?? {}),
+        ...pendingPaths.current,
+        ...pendingCoinMints()
+          .filter((record) => record.sourceFolderId === sourceFolderId)
+          .map((record) => record.localPath),
+      ]);
+      const localPath = mintedPath(phrase, new Date(), taken, operationId);
+      const mintFolderId = await getOrCreateMintFolder(sourceFolderId, mintSigner);
+      const memberName = localPath.slice(`${MINT}/`.length);
       const coin = origin.kind === "direct"
         ? await publishDirectCoin({
             folderId: mintFolderId,
-            relativePath: mintMemberName,
+            relativePath: memberName,
             phrase,
-            signer,
+            signer: mintSigner,
             kedits,
-            localOnly: true,
+            prepareOnly: true,
+            operationId,
           })
         : await publishHardenedSpan({
             folderId: mintFolderId,
-            relativePath: mintMemberName,
+            relativePath: memberName,
             phrase,
             originNodeId: origin.sourceNodeId,
             sourceContentHash: origin.sourceContentHash,
             sourceRange: origin.range,
-            signer,
-            localOnly: true,
+            signer: mintSigner,
+            prepareOnly: true,
+            operationId,
           });
-      const parsed = JSON.parse(coin.content) as { contentHash?: string };
-      await upsertManifestEntry(
+      return {
+        sourceFolderId,
         mintFolderId,
-        {
-          kind: "file",
-          relativePath: mintMemberName,
-          latestNodeId: coin.id,
-          contentHash: parsed.contentHash ?? "",
-        },
-        signer,
-        { localOnly: true, operationId: operationIdFromNode(coin) },
+        localPath,
+        memberName,
+        phrase,
+        coin,
+        ...(sourceCompletion ? { sourceFinalization: sourceCompletion.metadata } : {}),
+      };
+    });
+    pendingPaths.current.add(pending.localPath);
+    try {
+      // The transaction journal retains this exact signed Coin through every
+      // public and local phase. A retry resumes it instead of minting a sibling.
+      const receipt = await completePendingCoinMintTransaction(
+        pending,
+        coinMintCompletionFor(mintSigner, sourceCompletion?.finalize),
       );
-      const coinVoice = signer ? getPublicKey(signer) : authorPubkey;
-      const runs: Run[] = [{ voice: coinVoice, text: phrase }];
-      saveLocalFile(sourceFolderId, newPath, {
-        content: phrase,
-        tags: [],
-        nodeId: coin.id,
+      const runs: Run[] = [{ voice: pending.coin.pubkey, text: pending.phrase }];
+      return {
+        path: pending.localPath,
+        nodeId: pending.coin.id,
+        attestationId: receipt.attestation.id,
         runs,
-        voicePubkey: coinVoice,
-      });
-      seedSteppedRef.current({
-        [newPath]: { runs, nodeId: coin.id, tags: [] },
-      });
-      if (folderIdRef.current === sourceFolderId) {
-        setFiles((prev) => ({
-          ...prev,
-          [newPath]: { runs, nodeId: coin.id, tags: [] },
-        }));
-      }
-      return { path: newPath, nodeId: coin.id, runs };
+      };
+    } catch (error) {
+      refreshMintRecoveryNotice([
+        error instanceof Error ? error.message : String(error),
+      ]);
+      throw error;
     } finally {
-      pendingPaths.current.delete(newPath);
+      pendingPaths.current.delete(pending.localPath);
+      if (!pendingCoinMints().some((record) => record.operationKey === operationKey)) {
+        refreshMintRecoveryNotice();
+      }
     }
   }
 
@@ -9453,10 +9891,9 @@ function App() {
     }
   }
 
-  /** Mint a selection as a named, immutable trace in the dedicated Mint folder, then
-   *  resolve the source bracket to cite it. Both source checkpoints and the
-   *  new Mint member are stepped only to the home relay. Send remains a later,
-   *  separate reachability gesture.
+  /** Mint a selection as a named, immutable trace in the dedicated Mint folder,
+   *  publishing and attesting it as part of the same gesture, then resolve the
+   *  source bracket to cite it.
    *
    *  `from`/`to` are the current selection in `view`. If the selection is
    *  already inside a pending `[[ phrase ]]`, that phrase is used as-is;
@@ -9469,6 +9906,7 @@ function App() {
     to: number,
     stepSigner?: Uint8Array,
   ): Promise<boolean> {
+    if (!kademliaEnabledSnapshot()) return false;
     if (!folder || isMint(path) || isScan(path) || isOblivion(path)) return false;
     // Step mints either a loose-text highlight or the entire unresolved bracket
     // containing the selection. Resolved/cross-boundary selections are not new
@@ -9508,22 +9946,30 @@ function App() {
           range: { start: sourceBracket.phraseStart, end: sourceBracket.phraseEnd },
         },
         signer,
+        undefined,
+        {
+          metadata: {
+            kind: "pending-bracket",
+            relativePath: path,
+            sourceNodeId: originNodeId,
+            sourceContentHash,
+            range: { start: sourceBracket.phraseStart, end: sourceBracket.phraseEnd },
+            bracketRange: { start: sourceBracket.matchStart, end: sourceBracket.matchEnd },
+          },
+          finalize: async (record) => {
+            const afterWrite = view.state.doc.toString();
+            const resolved = finalizedCoinMintSourceText(record, afterWrite);
+            const change = minimalTextChange(afterWrite, resolved);
+            if (change) view.dispatch({ changes: change });
+            return flushEditorLocally(
+              path,
+              view,
+              signer,
+              operationIdFromNode(record.coin),
+            );
+          },
+        },
       );
-
-      // Resolve the bracket in the origin doc to cite the new file's node.
-      // Dispatch only the changed id, so the bracket phrase and surrounding
-      // model prose retain their existing voices.
-      const afterWrite = view.state.doc.toString();
-      // Bracket positions may have shifted if the user typed during the await;
-      // re-find by phrase to be safe.
-      const target = findPendingBrackets(afterWrite).find((b) => b.phrase === phrase);
-      if (target) {
-        const resolved = resolveBracket(afterWrite, target.matchStart, target.matchEnd, coin.nodeId);
-        const change = minimalTextChange(afterWrite, resolved);
-        if (change) view.dispatch({ changes: change });
-      }
-      // The source's next local checkpoint now carries the paired q edge.
-      await flushEditorLocally(path, view, signer);
       // Coins use the normal tab lifecycle but render a dedicated read-only
       // surface instead of mounting CodeMirror.
       setEditorSelection(null);
@@ -9538,29 +9984,21 @@ function App() {
     } catch (e) {
       console.warn(`[mint] failed for phrase in ${path}:`, e);
       const originPanel = panels.findIndex((p) => p.tabs.includes(path));
-      setOpStatus(originPanel === -1 ? activePanel : originPanel, "error", e instanceof Error ? e.message : String(e), "step");
+      setOpStatus(originPanel === -1 ? activePanel : originPanel, "error", e instanceof Error ? e.message : String(e), "mint");
       // Leave the bracket pending — the user can retry.
       return false;
     }
   }
 
-  /** Materialize a copied selection as a coin-backed citation. A clean source
-   * reuses its current Step; a dirty source is locally stepped first. Copying
-   * a whole existing coin reuses that coin instead of minting a duplicate. */
-  async function prepareCopiedCoin(
+  /** Copy can carry any exact stepped-source citation, but it never mints. */
+  function copiedTraceCitation(
     path: string,
     view: EditorView,
     from: number,
     to: number,
     phrase: string,
-  ): Promise<CoinClipboardCitation> {
-    const file = filesRef.current[path];
-    if (!file) throw new Error(`Cannot copy from missing trace ${path}.`);
+  ): CoinClipboardCitation | null {
     const docText = view.state.doc.toString();
-
-    // A phrase selected inside an existing resolved bracket already has the
-    // strongest possible provenance. Reuse its coin rather than striking an
-    // identical child coin.
     const existing = findResolvedBrackets(docText).find(
       (bracket) =>
         bracket.phrase === phrase &&
@@ -9568,43 +10006,14 @@ function App() {
         bracket.matchEnd >= to,
     );
     if (existing) return { phrase, nodeId: existing.nodeId };
-
-    const signer = secretKeyForVoice(authorPubkey) ?? undefined;
-    let originNodeId: string;
-    if (isMint(path)) {
-      if (!file.nodeId) throw new Error("The source coin has no stepped nucleus.");
-      if (from === 0 && to === docText.length) {
-        return { phrase, nodeId: file.nodeId };
-      }
-      originNodeId = file.nodeId;
-    } else if (isScan(path)) {
-      if (!file.nodeId) throw new Error("The scanned source has no stepped nucleus.");
-      originNodeId = file.nodeId;
-    } else {
-      originNodeId = await flushEditorLocally(path, view, signer);
-    }
-
-    const sourceContentHash = await sha256HexLocal(docText);
-    const coin = await mintCoinTrace(
-      phrase,
-      {
-        kind: "extracted",
-        sourceNodeId: originNodeId,
-        sourceContentHash,
-        range: { start: from, end: to },
-      },
-      signer,
-    );
-    void appendToPalette({
-      nodeId: coin.nodeId,
-      text: phrase,
-      originPath: path,
-      mintedAt: Date.now(),
-    }).catch((error) => console.warn("[coin-copy] palette append failed:", error));
-    return { phrase, nodeId: coin.nodeId };
+    const source = filesRef.current[path];
+    const stepped = lastSteppedRef.current.get(path);
+    return source?.nodeId && stepped?.content === docText
+      ? { phrase, nodeId: source.nodeId }
+      : null;
   }
 
-  /** Upgrade a normal editor Copy into an intra-press coin transfer while
+  /** Carry an exact stepped citation across an intra-press Copy while
    * keeping `text/plain` on the system clipboard for every other app. */
   function copySelectionWithCoin(
     path: string,
@@ -9615,7 +10024,9 @@ function App() {
     const { from, to } = view.state.selection.main;
     if (from === to) return false;
     const phrase = view.state.sliceDoc(from, to);
-    if (!canCoinText(phrase) || !event.clipboardData) return false;
+    if (!event.clipboardData) return false;
+    const citation = copiedTraceCitation(path, view, from, to, phrase);
+    if (!citation) return false;
 
     const ticket = typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
@@ -9631,10 +10042,6 @@ function App() {
     }
     event.preventDefault();
 
-    const citation = prepareCopiedCoin(path, view, from, to, phrase);
-    // Attach a rejection observer even if the user never pastes; paste itself
-    // still receives the original promise and degrades to plain text on error.
-    void citation.catch((error) => console.warn("[coin-copy] mint failed:", error));
     coinClipboardTicketsRef.current.set(ticket, { phrase, citation });
     // Bound session memory without time-based clipboard invalidation: the
     // newest 32 provenance copies remain pasteable, older envelopes safely
@@ -9647,7 +10054,7 @@ function App() {
     return true;
   }
 
-  /** Resolve a clipboard ticket into `[[ phrase | coinId ]]`. Unknown tickets,
+  /** Resolve a clipboard ticket into `[[ phrase | sourceStepId ]]`. Unknown tickets,
    * text modified by another app, and unsupported custom MIME all fall through
    * to CodeMirror's native plain-text paste. */
   function pasteSelectionWithCoin(
@@ -9682,13 +10089,7 @@ function App() {
       view.focus();
     };
 
-    void ticket.citation.then(
-      (citation) => insert(resolvedBracketMarkup(citation.phrase, citation.nodeId)),
-      (error) => {
-        console.warn("[coin-paste] citation unavailable; pasted plain text:", error);
-        insert(plainText);
-      },
-    );
+    insert(resolvedBracketMarkup(ticket.citation.phrase, ticket.citation.nodeId));
     return true;
   }
 
@@ -10137,8 +10538,8 @@ function App() {
   /** Derive the per-op `OpInputs` from the op-target panel's live editor state,
    *  the same way the ops themselves do. Extend seeds from the selection or doc
    *  tail; Settle/Stir use partitionDoc + findCommands + iterBrackets. Reply's
-   *  coins and Analyze's limelight log are filled by openInspector's relay
-   *  fetches so the captured preview matches a call made at the same moment. */
+   *  stepped references and Analyze's limelight log are filled when Inspector
+   *  opens so the captured preview matches a call made at the same moment. */
   function deriveInspectInputs(): Partial<Record<PromptOpKind, OpInputs>> {
     const idx = opTargetPanel();
     const path = panels[idx]?.active;
@@ -10230,10 +10631,27 @@ function App() {
     }
   }
 
-  /** Fetch only the selected operation's ancillary relay input. Extend,
-   * Settle, and Stir can prepare immediately from the local editor; Reply's
-   * palette and Analyze's limelight history are lazy so they never delay those
-   * local operations. */
+  /** Render bounded, exact excerpts from local stepped heads for Reply. Live
+   * unstepped buffers are never paired with an older node id. */
+  function renderSteppedTraceReferences(excludePath?: string): string {
+    return traceCandidates
+      .filter((candidate) => candidate.path !== excludePath)
+      .slice(0, 20)
+      .flatMap((candidate) => {
+        const stepped = lastSteppedRef.current.get(candidate.path)?.content;
+        if (stepped === undefined) return [];
+        return [
+          `- ${JSON.stringify(stepped.slice(0, 512))} ` +
+          `(nodeId ${candidate.nodeId}; path ${JSON.stringify(candidate.path)})`,
+        ];
+      })
+      .join("\n");
+  }
+
+  /** Hydrate only the selected operation's ancillary input. Extend, Settle,
+   * and Stir can prepare immediately from the local editor; Reply's stepped
+   * trace inventory and Analyze's limelight history never delay those local
+   * operations. */
   async function hydrateInspectorInputs(
     operation: PromptOpKind,
     openSequence: number,
@@ -10241,24 +10659,11 @@ function App() {
     if (inspectInputsReadyRef.current[operation]) return;
     const inputs = inspectInputsRef.current;
     if (operation === "reply") {
-      try {
-        const palette = await fetchPalette();
-        if (openSequence !== inspectOpenSequenceRef.current) return;
-        inputs.reply = {
-          ...inputs.reply,
-          traces: palette
-            .slice(0, 20)
-            .map((item) => `- "${item.text}" (nodeId ${item.nodeId})`)
-            .join("\n"),
-        };
-      } catch {
-        if (openSequence !== inspectOpenSequenceRef.current) return;
-        inputs.reply = { ...inputs.reply, traces: "" };
-        setInspectNotes((current) => ({
-          ...current,
-          reply: "The relay palette fetch failed; Reply will continue without citable traces.",
-        }));
-      }
+      if (openSequence !== inspectOpenSequenceRef.current) return;
+      inputs.reply = {
+        ...inputs.reply,
+        traces: renderSteppedTraceReferences(panels[opTargetPanel()]?.active),
+      };
     } else if (operation === "analyze") {
       try {
         const focus = folder ? await focusTimeline(folder.id) : [];
@@ -10719,8 +11124,8 @@ function App() {
     }
   }
 
-  /** RESPOND — buffer an AI response into a NEW unstepped sibling doc, citing existing
-   *  coins via [[ phrase | nodeId ]], and citing the source itself
+  /** RESPOND — buffer an AI response into a NEW unstepped sibling doc, citing available
+   *  stepped traces via [[ phrase | nodeId ]], and citing the source itself
    *  via `replyingTo` (spec §reply-to delta type) so the reply chain
    *  stays legible from the trace alone. Placement: the sibling opens in a fresh
    *  column immediately to the right of the source panel (`idx`) — auto-spawning
@@ -10749,13 +11154,7 @@ function App() {
           : (srcRel && filesRef.current[srcRel] ? flatten(filesRef.current[srcRel].runs) : "");
         const sourceFrom = hasSel ? sel!.from : 0;
         const sourceTo = hasSel ? sel!.to : sourceText.length;
-        let palette: PaletteItem[] = [];
-        try {
-          palette = await fetchPalette();
-        } catch {
-          /* no palette is fine — the response just won't carry citations */
-        }
-        const traces = palette.slice(0, 20).map((p) => `- "${p.text}" (nodeId ${p.nodeId})`).join("\n");
+        const traces = renderSteppedTraceReferences(srcRel);
         inputs = { source: sourceText, traces, sourceFrom, sourceTo };
       }
       const sourceText = inputs.source ?? "";
@@ -10960,12 +11359,16 @@ function App() {
       setOpStatus(idx, "error", "authoring is available in the unlocked desktop press", op);
       return;
     }
+    const target = panels[idx]?.active;
+    if (target && isCoinTab(target) && !isCompletedCoinFile(files[target])) {
+      setOpStatus(idx, "error", "This incomplete Mint artifact has no Coin actions", op);
+      return;
+    }
     // Mint, Scan, and Oblivion are read-only: no LLM/content op may write into
     // any of them
     // system region. Send is allowed for an immutable Mint coin because it
     // changes reachability, not content; Attest is also non-mutating.
     if (op !== "attest") {
-      const target = panels[idx]?.active;
       if (
         target &&
         !isFolderTab(target) &&
@@ -11306,13 +11709,15 @@ function App() {
     return live.panels.length > 0 ? live.activePanel : 0;
   }
 
-  /** Derive the AUTHOR primary slot from the focused editor selection. An
-   *  opened Mint trace is always an immutable Coin; otherwise a live range
-   *  wins over an older Coin focus. */
+  /** Derive the AUTHOR primary slot from the focused editor selection. Only a
+   *  Mint entry carrying the durable completion marker is a Coin; incomplete
+   *  artifacts remain inert. Otherwise a live range wins over older focus. */
   function paletteSelectionForAuthor(): PaletteSelectionState {
     const targetPanel = opTargetPanel();
     const targetPath = panels[targetPanel]?.active;
-    if (targetPath && isMint(targetPath)) return "coin";
+    if (targetPath && isCoinTab(targetPath)) {
+      return isCompletedCoinFile(files[targetPath]) ? "coin" : "none";
+    }
     if (editorSelection?.panelIdx === targetPanel) {
       const view = panelViews.current[targetPanel];
       if (view) {
@@ -11372,8 +11777,10 @@ function App() {
     const path = panels[opTargetPanel()]?.active;
     const file = path ? files[path] : undefined;
     if (!path || !file || file.kind === "folder") return null;
-    if (isMint(path)) {
-      return file.nodeId ? { path, kind: "coin", nodeId: file.nodeId } : null;
+    if (isCoinTab(path)) {
+      return isCompletedCoinFile(file) && file.nodeId
+        ? { path, kind: "coin", nodeId: file.nodeId }
+        : null;
     }
     return { path, kind: "file", ...(file.nodeId ? { nodeId: file.nodeId } : {}) };
   }
@@ -11483,6 +11890,10 @@ function App() {
     const pubkey = authorPubkey;
     const path = panels[idx]?.active;
     if (!path || !files[path]) return;
+    if (isCoinTab(path) && !isCompletedCoinFile(files[path])) {
+      setOpStatus(idx, "error", "This incomplete Mint artifact has no Coin actions", op);
+      return;
+    }
     if (op === "send") setSendFailure(null);
     const signer = secretKeyForVoice(pubkey);
     if (!signer) {
@@ -11502,10 +11913,24 @@ function App() {
         );
         const mintTarget = findMintSelectionTarget(view.state.doc.toString(), from, to);
         if (mintTarget) {
-          setOpStatus(idx, "running", undefined, op);
+          if (!kademliaEnabledSnapshot()) {
+            setOpStatus(idx, "error", "Enable Coins in Networking before minting a Coin", op);
+            return;
+          }
+          if (!(await requestMintConsent(mintTarget.phrase))) return;
+          const confirmedTarget = findMintSelectionTarget(
+            view.state.doc.toString(),
+            from,
+            to,
+          );
+          if (!confirmedTarget || confirmedTarget.phrase !== mintTarget.phrase) {
+            setOpStatus(idx, "error", "The selected text changed before Mint was confirmed", "mint");
+            return;
+          }
+          setOpStatus(idx, "running", undefined, "mint");
           const minted = await zinePhrase(path, view, from, to, signer);
           if (minted) {
-            setOpStatus(idx, "done", undefined, op);
+            setOpStatus(idx, "done", undefined, "mint");
             flashPanelFn(idx);
           }
           return;
@@ -11626,6 +12051,9 @@ function App() {
     }
     setOpStatus(statusIdx, "running", undefined, "attest");
     try {
+      if (opts?.kind === "coin" && isCoinTab(path) && !isCompletedCoinFile(files[path])) {
+        throw new Error("This incomplete Mint artifact has no Coin actions");
+      }
       let citedId = opts?.nodeId;
       let createsStep = false;
       if ((opts?.kind ?? "file") === "file") {
@@ -12591,6 +13019,7 @@ function App() {
     }
     if (isCoinTab(path)) {
       const coin = files[path];
+      if (!isCompletedCoinFile(coin)) return null;
       return {
         kind: "coin",
         path,
@@ -12616,6 +13045,7 @@ function App() {
   /** Open the one session-owned direct-Coin draft. Repeated activation focuses
    * the existing tab so switching away and back never discards typed bytes. */
   function openDirectCoinComposer() {
+    if (!kademliaEnabledSnapshot()) return;
     const current = panelsRef.current;
     const existingPanel = current.findIndex((panel) =>
       panel.tabs.includes(DIRECT_COIN_COMPOSER_TAB),
@@ -12704,11 +13134,11 @@ function App() {
   function selectFile(path: string) {
     const nodeId = files[path]?.nodeId;
     chooseDirectorySelection([]);
-    activateLiveTab(path, { kind: "file", path, nodeId });
+    activateLiveTab(path, isCoinTab(path) ? null : { kind: "file", path, nodeId });
   }
   function selectCoin(path: string) {
     const coin = files[path];
-    if (!coin || coin.kind === "folder" || !isCoinTab(path)) return;
+    if (!isCoinTab(path) || !isCompletedCoinFile(coin)) return;
     const phrase = flatten(coin.runs);
     setEditorSelection(null);
     chooseDirectorySelection([]);
@@ -12767,21 +13197,6 @@ function App() {
     setShielded(next.shielded);
     saveLocalShielded(folder.id, next.shielded);
   }
-  /** Curate a coin into the palette. Triggered by the copy button on
-   *  a citation chip (Preview mode) — the chip still owns its own clipboard
-   *  write (so copy stays a pasteable citation), and this is the "also save for
-   *  reuse" side effect. `appendToPalette` is idempotent (deduped by nodeId), so
-   *  re-copying an already-curated span is a no-op. Fire-and-forget; errors only
-   *  log — the chip's own copy still succeeds either way. */
-  function copySpan(nodeId: string, phrase: string, originPath: string) {
-    appendToPalette({
-      nodeId,
-      text: phrase,
-      originPath,
-      mintedAt: Date.now(),
-    }).catch((e) => console.warn("[zine] palette append failed:", e));
-  }
-
   // Keep the focused path-backed trace's head fresh without changing its exact
   // live panel/tab locus.
   useEffect(() => {
@@ -13257,7 +13672,7 @@ function App() {
         (!!traceId && (file.traceId ?? file.nodeId) === traceId),
     )?.[0];
     if (localPath) {
-      if (isCoinTab(localPath)) selectCoin(localPath);
+      if (isCompletedCoinPath(localPath, files)) selectCoin(localPath);
       else selectFile(localPath);
       return;
     }
@@ -13268,7 +13683,7 @@ function App() {
         const head = resolution.chain[resolution.chain.length - 1];
         const currentPath = head ? eventMeta(head).relativePath : undefined;
         if (currentPath) {
-          if (isCoinTab(currentPath)) selectCoin(currentPath);
+          if (isCompletedCoinPath(currentPath, files)) selectCoin(currentPath);
           else selectFile(currentPath);
         }
       }
@@ -14572,7 +14987,9 @@ function App() {
     try {
       for (const src of srcs) {
         const source = files[src];
-        if (!source?.nodeId || !isMint(src) || src === MINT) continue;
+        if (!source?.nodeId || !isMint(src) || src === MINT || !isCompletedCoinFile(source)) {
+          continue;
+        }
         const forkPath = forkPathForMint(src, destFolder, taken);
         const content = flatten(source.runs);
         const event = await forkFileIntoLocalTree(
@@ -15271,6 +15688,7 @@ function App() {
         path: p,
         type: "file" as const,
         updatedAt: f.updatedAt,
+        coinComplete: f.coinComplete,
       }));
     const folderMemberEntries = Object.entries(files)
       .filter(([, f]) => f.kind === "folder")
@@ -15348,6 +15766,7 @@ function App() {
                 onActivateFolder={selectFolder}
                 onOpenFolder={openFolder}
                 onMintCoin={openDirectCoinComposer}
+                coinsEnabled={coinsEnabled}
                 onScan={(kind) => void onScan(kind)}
                 onReify={(target) => setReifyPrompt({ includeTrace: false, target })}
                 onStepFolder={stepFolderPath}
@@ -15412,12 +15831,12 @@ function App() {
                 }}
               />
               {/* Horizontal resize handle for the press: drag to change the
-                  collection/palette sidebar width; double-click resets. */}
+                  directory sidebar width; double-click resets. */}
               <div
                 className="sidebar-resizer"
                 role="separator"
                 aria-orientation="vertical"
-                aria-label="Resize collection sidebar"
+                aria-label="Resize directory sidebar"
                 aria-valuenow={sidebarWidth}
                 aria-valuemin={SIDEBAR_WIDTH_MIN}
                 aria-valuemax={SIDEBAR_WIDTH_MAX}
@@ -15687,6 +16106,7 @@ function App() {
                             file={panelFile}
                             directCoinComposer={{
                               phrase: directCoinDraft.phrase,
+                              enabled: coinsEnabled,
                               busy: directCoinBusy,
                               error: directCoinError,
                               onPhraseChange: editDirectCoinDraft,
@@ -15764,7 +16184,7 @@ function App() {
                                   idx,
                                   p,
                                 ));
-                              } else if (isCoinTab(p)) {
+                              } else if (isCoinTab(p) && completedCoinPaths.has(p)) {
                                 const coin = files[p];
                                 setEditorSelection(null);
                                 commitUiFocus(locateFocus({
@@ -15773,6 +16193,9 @@ function App() {
                                   nodeId: coin?.nodeId,
                                   phrase: coin ? flatten(coin.runs) : "",
                                 }, idx, p));
+                              } else if (isCoinTab(p)) {
+                                setEditorSelection(null);
+                                commitUiFocus(null);
                               } else {
                                 commitUiFocus(locateFocus(
                                   { kind: "file", path: p, nodeId: files[p]?.nodeId },
@@ -15845,9 +16268,6 @@ function App() {
                             onSelectSpan={(nodeId, phrase) => {
                               selectSpan(nodeId, phrase);
                             }}
-                            onCopySpan={(nodeId, phrase) =>
-                              copySpan(nodeId, phrase, path)
-                            }
                             onCopySelection={(view, event) =>
                               copySelectionWithCoin(path, view, event)
                             }
@@ -15915,6 +16335,7 @@ function App() {
                               const src = files[srcPath];
                               if (!src || src.kind === "folder" || !src.nodeId)
                                 return false; // only stepped files and Mint coins
+                              if (isCoinTab(srcPath) && !isCompletedCoinFile(src)) return false;
                               const cur = files[path]?.citationIds ?? [];
                               if (cur.includes(src.nodeId)) return false; // already cited
                               return true;
@@ -15923,14 +16344,15 @@ function App() {
                               if (!path || citationReadOnly) return;
                               const src = files[srcPath];
                               if (!src || src.kind === "folder" || !src.nodeId) return;
+                              if (isCoinTab(srcPath) && !isCompletedCoinFile(src)) return;
                               const cur = files[path]?.citationIds ?? [];
                               if (cur.includes(src.nodeId)) return; // dedupe
                               editCitations(path, [...cur, src.nodeId]);
                             }}
                             citationBodyDropMarkup={(srcPath) => {
-                              if (!isMint(srcPath)) return null;
+                              if (!isCoinTab(srcPath)) return null;
                               const src = files[srcPath];
-                              if (!src || src.kind === "folder" || !src.nodeId) return null;
+                              if (!isCompletedCoinFile(src) || !src.nodeId) return null;
                               return resolvedBracketMarkup(flatten(src.runs), src.nodeId) || null;
                             }}
                             mergeCandidates={mergeCandidates}
@@ -15952,6 +16374,7 @@ function App() {
                                 pathInEffectiveScope(scope, shielded, tracePath)
                               );
                             }}
+                            completedCoinPaths={completedCoinPaths}
                             draggingTab={draggingTab}
                             dropTargetTab={dropTargetTab}
                             onTabDragStart={(p) => setDraggingTab({ fromPanel: idx, path: p })}
@@ -16272,7 +16695,7 @@ function App() {
                 selection={uiFocus}
                 runningOp={(() => {
                   const s = summonStatus[opTargetPanel()] ?? { state: "idle" };
-                  return s.state === "running" && isOpKind(s.op) ? s.op : null;
+                  return s.state === "running" && isRunningPaletteOp(s.op) ? s.op : null;
                 })()}
                 onOp={(op) => runOp(opTargetPanel(), op)}
                 onStop={() => stopOp(opTargetPanel())}
@@ -16280,6 +16703,7 @@ function App() {
                 tokenEstimate={tokenEstimate}
                 onInspect={(operation) => void openInspector(operation)}
                 attestPlan={paletteAttestationPlan()}
+                coinsEnabled={coinsEnabled}
                 targetInScope={(() => {
                   const p = panels[opTargetPanel()]?.active;
                   return !!p && isInScope(scope, shielded, p);
@@ -16550,6 +16974,60 @@ function App() {
         </div>
       </div>
       <PinPanel />
+      {mintConsentRequest && (
+        <MintConsentModal
+          phrase={mintConsentRequest.phrase}
+          onCancel={() => finishMintConsent(false)}
+          onConfirm={() => finishMintConsent(true)}
+        />
+      )}
+      {mintRecoveryNotice && (
+        <div className="mint-recovery-alert" role="alert">
+          <div className="mint-recovery-alert-content">
+            <strong>
+              {mintRecoveryNotice.pending > 0
+                ? `${mintRecoveryNotice.pending} pending Mint ${mintRecoveryNotice.pending === 1 ? "transaction remains" : "transactions remain"} incomplete and may already be public.`
+                : "Pending Mint recovery could not start."}
+            </strong>
+            {!coinsEnabled && mintRecoveryNotice.pending > 0 && (
+              <span> Coins are disabled, so recovery is paused.</span>
+            )}
+            {mintRecoveryNotice.startError && (
+              <span className="mint-recovery-error"> {mintRecoveryNotice.startError}</span>
+            )}
+            {mintRecoveryNotice.failures.length > 0 && (
+              <ul>
+                {mintRecoveryNotice.failures.map((failure) => (
+                  <li key={failure}>{failure}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+          {coinsEnabled ? (
+            <button
+              type="button"
+              disabled={mintRecoveryBusy}
+              onClick={() => {
+                setMintRecoveryBusy(true);
+                void recoverPendingCoinMints()
+                  .catch((error) => {
+                    refreshMintRecoveryNotice(
+                      [],
+                      error instanceof Error ? error.message : String(error),
+                    );
+                  })
+                  .finally(() => setMintRecoveryBusy(false));
+              }}
+            >
+              {mintRecoveryBusy ? "Retrying…" : "Retry"}
+            </button>
+          ) : (
+            <button type="button" onClick={() => setActiveView("networking")}>
+              Open Networking
+            </button>
+          )}
+        </div>
+      )}
       {oblivionModalPath && files[oblivionModalPath] && (
         <OblivionModal
           name={systemPathDisplayName(oblivionModalPath)}
