@@ -3,13 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Pure trace-context authoring syntax and instruction-authority kernel for Zine.",
+  "description": "Pure authoring-syntax and deterministic evidence-selection kernel for Zine.",
   "engines": {
     "node": ">=24 <25"
   },
   "exports": {
     ".": "./src/index.ts",
-    "./corpus": "./corpus/authoring-syntax-v1.json"
+    "./corpus": "./corpus/authoring-syntax-v1.json",
+    "./selection-corpus": "./corpus/evidence-selection-v1.json"
   },
   "scripts": {
     "benchmark": "tsx benchmark/run.ts",

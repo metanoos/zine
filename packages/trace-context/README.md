@@ -1,9 +1,9 @@
 # `@zine/trace-context`
 
-Pure, runtime-dependency-free authoring-syntax kernel for Zine's trace-aware
-prompt compiler. This Wave 0 package deliberately does not read files, derive
-edit provenance, call models, store secrets, sign events, or define protocol
-wire fields.
+Pure, runtime-dependency-free authoring-syntax and evidence-selection
+foundation for Zine's trace-aware prompt compiler. This package deliberately
+does not read files, derive edit provenance, call models, store secrets, sign
+events, or define protocol wire fields.
 
 ## Contract
 
@@ -42,6 +42,57 @@ replace protected spans with identity-bearing placeholders should also verify
 that stronger placeholder map; this helper cannot distinguish two naturally
 identical fragments beyond count and order.
 
+## Evidence selection V1
+
+`selectTraceContextV1(input, { signal })` consumes closed, versioned candidates
+that an adapter has already materialized from validated sources. V1 candidates
+are explicit or mechanical only; there is no confidence, inferred preference,
+psychology, or latent-intent field. The supported kinds have fixed priority:
+operation instruction, protected range, correction, explicit preference,
+prepared-head process fact, prior process fact, then direct citation.
+
+The selector validates every input field, rejects unpaired UTF-16 surrogates,
+sorts strings by raw UTF-8 bytes, collapses identical duplicate references
+while retaining every reason, and budgets exact UTF-8 bytes of its canonical
+rendered segment array. Operation instructions and protected ranges are
+mandatory. Optional overflow produces deterministic exclusion counts and a
+first rejected reference; mandatory overflow, cancellation, candidate limits,
+manifest limits, and conflicting duplicates return typed failures rather than
+an apparently complete result.
+
+Source ranges remain exact half-open UTF-16 coordinates and are never remapped
+or normalized. The validating adapter must reject a boundary that splits a
+surrogate pair in its named source revision; the selector intentionally does
+not receive or duplicate every historical source body just to re-derive that
+validation.
+
+Only `process-fact` candidates backed by `full-trace` sources are eligible.
+`snapshot-only` and `invalid` process records remain visible in exclusion
+decisions and cannot become persuasive process evidence. A snapshot may still
+be supplied as an explicitly approved citation because quoted content and a
+claim about its process are different things.
+
+`text-only-v1`, `bounded-trace-v1`, and `selected-trace-v1` use the same result
+contract. In this package slice, bounded trace means deterministic filtering of
+adapter-materialized chronological candidates; it does not yet build or prove
+the newest complete-Step suffix required by the accepted destination design.
+
+Successful results contain an exact rendered byte string, per-candidate
+Inspector decisions, a compact frozen `SelectedTraceContextManifestV1`, and
+domain-separated SHA-256 identities for normalized frozen inputs, rendered
+context, and the package manifest. The manifest labels itself
+`package-local-non-normative-v1`. It is not the final
+`TraceContextManifestV1`, a protocol commitment, or a durable private record.
+
+Still deferred behind their own schema, trust, storage, or integration review:
+
+- RFC 8785/JCS durable envelopes and fresh-salted commitments;
+- encrypted payload references and `TraceContextPrivateStoreV1`;
+- complete-Step bounded-history suffix commitments;
+- persisted corrections, scoped memory, and preference conflict resolution;
+- durable MODEL Step binding and provider-specific prompt rendering; and
+- desktop/MCP adapters and cross-press integration.
+
 The fixed corpus at `corpus/authoring-syntax-v1.json` pins UTF-16 offsets,
 Unicode behavior, authority failures, operation clipping, protected precedence,
 markers, excerpts, deduplication, and malformed-syntax errors. The generated
@@ -51,12 +102,17 @@ and observable work-set/output size for deterministic 0, 100, 1,000, and
 directives, eligible and inert authority, exact operation clipping, oversized
 anchors, and malformed syntax both inside and outside the prepared range.
 
-These scale fixtures are authoring-syntax workloads, not trace-manifest
-transactions. The current compiler is synchronous and has no candidate store,
-cache, quota, context envelope, or cancellation boundary. Cancellation,
-cache-cold/cache-warm behavior, incomplete candidate ceilings, and rendered
-manifest limits belong to the future manifest compiler and are not simulated by
-this package.
+These scale fixtures are authoring-syntax workloads, not evidence-selection
+transactions. The authoring compiler remains synchronous and has no candidate
+store or cache. The evidence selector has cancellation and hard package-local
+candidate, rendered-context, and manifest ceilings; cache-cold/cache-warm
+selection benchmarks and the future durable envelope remain deferred.
+
+The fixed selector corpus at `corpus/evidence-selection-v1.json` pins nil,
+empty, malformed, Unicode, oversize, exact-boundary, duplicate, invalid-trace,
+snapshot-only, and cancellation behavior plus deterministic hashes. Existing
+syntax callers and the `./corpus` export remain unchanged; the new corpus is
+available at `./selection-corpus`.
 
 ## Development
 
