@@ -1196,8 +1196,13 @@ fn validate_native_time(now_ms: u64) -> Result<(), String> {
 
 fn require_live_deadline(metadata: &EnvelopeMetadata, now_ms: u64) -> Result<(), String> {
     validate_native_time(now_ms)?;
-    if metadata.delete_by_ms <= now_ms {
+    let remaining_ms = metadata.delete_by_ms.checked_sub(now_ms).ok_or_else(|| {
+        "The private operation envelope has reached its deletion deadline".to_string()
+    })?;
+    if remaining_ms == 0 {
         Err("The private operation envelope has reached its deletion deadline".into())
+    } else if remaining_ms > DESKTOP_OPERATION_MAX_RETENTION_MS {
+        Err("The private operation envelope exceeds the native retention maximum".into())
     } else {
         Ok(())
     }
@@ -1315,9 +1320,12 @@ fn conflict() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    const TEST_STARTED_AT_MS: u64 = MAX_SAFE_INTEGER - DESKTOP_OPERATION_MAX_RETENTION_MS - 100_000;
+    static TEST_STARTED_AT_MS: LazyLock<u64> = LazyLock::new(|| {
+        native_unix_time_ms().expect("sample test retention start from the native clock")
+    });
 
     fn temp_directory(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -1345,8 +1353,8 @@ mod tests {
         envelope_with_retention(
             operation_id,
             attempt_id,
-            TEST_STARTED_AT_MS,
-            TEST_STARTED_AT_MS + delete_by_ms,
+            *TEST_STARTED_AT_MS,
+            *TEST_STARTED_AT_MS + delete_by_ms,
             prompt,
             response,
         )
@@ -1815,6 +1823,19 @@ mod tests {
             .create_at(&over, started_at_ms)
             .unwrap_err()
             .contains("positively bounded"));
+
+        let forged_future_start = envelope_with_retention(
+            "operation-retention-future",
+            "attempt-retention-future",
+            started_at_ms + 1_000_000,
+            started_at_ms + 1_000_000 + DESKTOP_OPERATION_MAX_RETENTION_MS,
+            "prompt",
+            "response",
+        );
+        assert!(store
+            .create_at(&forged_future_start, started_at_ms)
+            .unwrap_err()
+            .contains("native retention maximum"));
         fs::remove_dir_all(directory).expect("remove fixture");
     }
 
