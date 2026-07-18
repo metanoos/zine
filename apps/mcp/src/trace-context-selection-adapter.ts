@@ -107,7 +107,12 @@ export async function adaptVerifiedMcpFileForTraceContextSelectionV1(
 
   const verification = await verifyCapturedChain(captured.chain, captured.verifyEvent);
   const read = deriveRead(captured.chain, verification);
-  const candidates = verification.verdict.status === "full"
+  if (captured.operation.range) {
+    requireOperationRange(captured.operation.range, read.currentText);
+  }
+  const candidates = captured.policy === "text-only-v1"
+    ? []
+    : verification.verdict.status === "full"
     ? captured.processFactRequests.map((request) =>
         processCandidate(read, captured.chain, verification.verdict, "full-trace", request))
     : [statusCandidate(
@@ -118,7 +123,7 @@ export async function adaptVerifiedMcpFileForTraceContextSelectionV1(
       )];
   requireDistinctCandidates(candidates);
 
-  return {
+  const output: TraceContextSelectionInputV1 = {
     version: 1,
     policy: captured.policy,
     operation: {
@@ -139,11 +144,14 @@ export async function adaptVerifiedMcpFileForTraceContextSelectionV1(
     candidates,
     ...(captured.limits ? { limits: { ...captured.limits } } : {}),
   };
+  return deepFreeze(output);
 }
 
 function captureInput(input: McpTraceContextSelectionAdapterInputV1): CapturedAdapterInput {
   const chain = input.chain.map((event) => cloneEvent(event));
-  const processFactRequests = input.processFactRequests.map((request) => cloneRequest(request));
+  const processFactRequests = input.policy === "text-only-v1"
+    ? []
+    : input.processFactRequests.map((request) => cloneRequest(request));
   const captured: CapturedAdapterInput = {
     version: input.version,
     policy: input.policy,
@@ -491,6 +499,27 @@ function deepFreeze<T>(value: T): T {
 
 function requireVersion(version: number, subject: string): void {
   if (version !== 1) fail(`${subject} version must be 1`);
+}
+
+function requireOperationRange(range: Utf16Range, currentText: string): void {
+  if (!Number.isSafeInteger(range.fromUtf16)
+    || !Number.isSafeInteger(range.toUtf16)
+    || range.fromUtf16 < 0
+    || range.toUtf16 < range.fromUtf16
+    || range.toUtf16 > currentText.length) {
+    fail(`operation range must be within the verified head snapshot [0, ${currentText.length}]`);
+  }
+  if (!isUtf16Boundary(currentText, range.fromUtf16)
+    || !isUtf16Boundary(currentText, range.toUtf16)) {
+    fail("operation range must not split a UTF-16 surrogate pair in the verified head snapshot");
+  }
+}
+
+function isUtf16Boundary(text: string, offset: number): boolean {
+  if (offset === 0 || offset === text.length) return true;
+  const before = text.charCodeAt(offset - 1);
+  const after = text.charCodeAt(offset);
+  return !(before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff);
 }
 
 function copyRange(range: Utf16Range): Utf16Range {
