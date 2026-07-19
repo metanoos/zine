@@ -90,7 +90,18 @@ impl PinnedVaultDirectory {
         {
             use std::os::fd::AsRawFd;
 
-            let root = PathBuf::from(format!("/proc/self/fd/{}", self.handle.as_raw_fd()));
+            // Resolve the pinned directory descriptor to its real filesystem
+            // path via /proc/self/fd/{fd}. The raw procfs entry is a magic
+            // symlink, and SQLite's SQLITE_OPEN_NOFOLLOW (set in open_checked)
+            // refuses to open through it — as does verify_sqlite_path's
+            // symlink guard. readlink gives the directory the pinned descriptor
+            // currently names so SQLite opens the real file, which is also what
+            // the descriptor-relative dev+ino checks validate against. The
+            // dev+ino pre/post checks in open_checked still catch a rename or
+            // symlink substitution between this resolution and the SQLite open,
+            // matching the macOS F_GETPATH branch's posture.
+            let proc_entry = PathBuf::from(format!("/proc/self/fd/{}", self.handle.as_raw_fd()));
+            let root = fs::read_link(&proc_entry).map_err(|_| storage_unavailable())?;
             Ok(root.join(JOURNAL_FILENAME))
         }
         #[cfg(target_os = "macos")]
