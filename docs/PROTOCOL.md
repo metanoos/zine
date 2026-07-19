@@ -98,7 +98,7 @@ relays: SHA-256 ids, Schnorr signatures, and the seven NIP-01 fields. Tor can
 expose a private relay. Coins are the user-facing opt-in for minting, citation,
 indexing, and rendezvous together. Kademlia is the internal routing component,
 not a separate opt-in, and remains under implementation; global discovery also
-needs operator-provided super-peers and real citation density.
+needs operator-provided super-peers and real co-Mint density.
 
 ---
 

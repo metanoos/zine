@@ -271,8 +271,8 @@ Three proofs govern what comes next:
 2. **Buyer proof:** accountable teams use the evidence to answer consequential
    questions, return to the workflow, and show willingness to pay for the
    operational layer.
-3. **Network proof:** real published citations create enough useful
-   co-citation density to justify operating and expanding discovery.
+3. **Network proof:** real completed Mints create enough useful
+   co-Mint density to justify operating and expanding discovery.
 
 The first two are the immediate product gates; the third stays downstream of
 real use.
@@ -385,7 +385,7 @@ relays: SHA-256 ids, Schnorr signatures, and the seven NIP-01 fields. Tor can
 expose a private relay. Coins are the user-facing opt-in for minting, citation,
 indexing, and rendezvous together. Kademlia is the internal routing component,
 not a separate opt-in, and remains under implementation; global discovery also
-needs operator-provided super-peers and real citation density.
+needs operator-provided super-peers and real co-Mint density.
 
 ---
 
