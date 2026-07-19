@@ -261,7 +261,7 @@ test("Inspector prepares local operations without waiting on ancillary relay rea
   const hydrate = functionBody("hydrateInspectorInputs", "async function prepareInspectorSelection");
   assert.match(source, /setInspectOp\(defaultOperation\)[\s\S]*prepareInspectorSelection\(/);
   assert.doesNotMatch(source, /renderSteppedTraceReferences\(|focusTimeline\(|Promise\.allSettled/);
-  assert.match(hydrate, /operation === "reply"[\s\S]*renderSteppedTraceReferences\(/);
+  assert.match(hydrate, /operation === "reply"[\s\S]*renderReplyCitableTraces\(/);
   assert.match(hydrate, /operation === "analyze"[\s\S]*focusTimeline\(/);
   assert.match(source, /inspectOpenSequenceRef\.current/);
 });
@@ -281,7 +281,7 @@ test("Reply freezes the selected source range into Inspector and execution input
   assert.match(reply, /inputs = \{ source: sourceText, traces, sourceFrom, sourceTo \}/);
 });
 
-test("Reply exposes exact stepped traces independently of the Coins discovery opt-in", () => {
+test("Reply cites stepped traces and the local Mint inventory independently of the Coins discovery opt-in", () => {
   const inventory = functionBody("renderSteppedTraceReferences", "async function hydrateInspectorInputs");
   const reply = functionBody("replyLLM", "function analyzeLLM");
 
@@ -289,7 +289,11 @@ test("Reply exposes exact stepped traces independently of the Coins discovery op
   assert.match(inventory, /lastSteppedRef\.current\.get/);
   assert.match(inventory, /stepped\.slice\(0, 512\)/);
   assert.doesNotMatch(inventory, /kademliaEnabledSnapshot|coinsEnabled/);
-  assert.match(reply, /const traces = renderSteppedTraceReferences\(srcRel\)/);
+  // Reply's citable set combines stepped traces with the local Mint coin
+  // inventory via renderReplyCitableTraces; both are pure local FileState reads
+  // and stay independent of the network Coins discovery opt-in.
+  assert.match(reply, /const traces = renderReplyCitableTraces\(srcRel\)/);
+  assert.match(app, /listMintCoins\(filesRef\.current\)/);
   assert.doesNotMatch(reply, /Coins were disabled|!kademliaEnabledSnapshot/);
   assert.doesNotMatch(app, /opLenses, coinsEnabled\]\);/);
   assert.doesNotMatch(app, /authorPubkey, modelPubkey, coinsEnabled\]\);/);

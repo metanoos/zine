@@ -295,6 +295,7 @@ import {
   type SampleEventMeta,
   type AttachedFolder,
 } from "../workspace/workspace.js";
+import { listMintCoins, renderMintCoinReferences } from "../workspace/mint-inventory.js";
 import {
   prepareReifyExport,
   traceSidecarEntries,
@@ -11231,6 +11232,18 @@ function App() {
       .join("\n");
   }
 
+  /** Reply's citable trace set combines the recent stepped-trace inventory with
+   *  the local Mint coin inventory. Both are pure local FileState reads — this
+   *  is independent of the Coins rendezvous discovery opt-in (Kademlia), which
+   *  governs network publication, not what the local Press can cite. Mint paths
+   *  are deliberately excluded from promptContextFiles, so Coins reach the model
+   *  only through this explicit request (context-gather §Mint exclusion). */
+  function renderReplyCitableTraces(excludePath?: string): string {
+    const stepped = renderSteppedTraceReferences(excludePath);
+    const coins = renderMintCoinReferences(listMintCoins(filesRef.current));
+    return [stepped, coins].filter(Boolean).join("\n");
+  }
+
   /** Hydrate only the selected operation's ancillary input. Extend, Settle,
    * and Stir can prepare immediately from the local editor; Reply's stepped
    * trace inventory and Analyze's limelight history never delay those local
@@ -11245,7 +11258,7 @@ function App() {
       if (openSequence !== inspectOpenSequenceRef.current) return;
       inputs.reply = {
         ...inputs.reply,
-        traces: renderSteppedTraceReferences(panels[opTargetPanel()]?.active),
+        traces: renderReplyCitableTraces(panels[opTargetPanel()]?.active),
       };
     } else if (operation === "analyze") {
       try {
@@ -11743,7 +11756,7 @@ function App() {
           : (srcRel && filesRef.current[srcRel] ? flatten(filesRef.current[srcRel].runs) : "");
         const sourceFrom = hasSel ? sel!.from : 0;
         const sourceTo = hasSel ? sel!.to : sourceText.length;
-        const traces = renderSteppedTraceReferences(srcRel);
+        const traces = renderReplyCitableTraces(srcRel);
         inputs = { source: sourceText, traces, sourceFrom, sourceTo };
       }
       const sourceText = inputs.source ?? "";
