@@ -13410,7 +13410,35 @@ function App() {
             });
             if (file) seedSteppedRef.current({ [path]: file });
           });
-        void attached.reconciled.catch((error) => {
+        void attached.reconciled
+          .then(() => {
+            if (cancelled || folderIdRef.current !== folder.id) return;
+            // Background relay pull can remove paths via remote-driven absence
+            // reconciliation (pullFromRelayUnlocked → deleteLocalFileDurably).
+            // The user may have mounted a sub-tree scope in the window between
+            // attach returning and this promise resolving; if pull then removed
+            // that sub-tree, the scope mount is left pointing at a path that no
+            // longer exists — the same defect class the renameNode/hardDelete
+            // scope rebase closes for user-initiated gestures. Writes already
+            // follow focus (which is rebased separately), so this is a state-
+            // machine fix: without it the scope UI lies and the next MODEL op
+            // silently loses the scope subtree (activePath is still included,
+            // but nothing else under scope is). Pull does not touch shields, so
+            // there is no disclosure risk — only scope staleness.
+            const mount = scopeRef.current[0];
+            if (!mount || mount.path === ROOT) return;
+            const loaded = loadLocalFolder(folder.id);
+            const paths = loaded?.files ?? {};
+            const stillPresent = mount.kind === "file"
+              ? mount.path in paths
+              : Object.keys(paths).some(
+                  (p) => p === mount.path || p.startsWith(`${mount.path}/`),
+                );
+            if (!stillPresent) {
+              setScope([{ kind: "folder", path: ROOT }]);
+            }
+          })
+          .catch((error) => {
           if (cancelled || folderIdRef.current !== folder.id) return;
           const storedConflicts = Object.values(
             loadLocalFolder(folder.id)?.structuralConflicts ?? {},

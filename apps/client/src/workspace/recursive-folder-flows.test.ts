@@ -306,11 +306,35 @@ test("pull distinguishes a missing local trace from a divergent empty trace", ()
 });
 
 test("ready structural conflicts are restored and rendered outside the boot placeholder", () => {
-  assert.match(appSource, /attached\.reconciled\.catch/);
+  // The reconciled promise runs resumeLocalWork → pullFromRelay in the
+  // background after attach returns. A .then reconciles scope against the
+  // post-pull folder state (pull can remove paths via remote-driven absence
+  // reconciliation, leaving a sub-tree scope mount dangling — the same defect
+  // class renameNode/hardDelete close). A .catch surfaces structural conflicts.
+  assert.match(appSource, /attached\.reconciled[\s\S]*?\.then\([\s\S]*?\.catch/);
   assert.match(appSource, /loadLocalFolder\(folder\.id\)\?\.structuralConflicts/);
   assert.match(appSource, /className="reconcile-banner structural-error-banner"/);
   assert.match(appSource, /role="alert"/);
 });
+
+test("the attach reconciled promise drops a sub-tree scope mount that pull removed", () => {
+  // Pins the scope-reconcile half of the reconciled.then contract: after
+  // background pull resolves, a non-ROOT scope mount whose path is no longer
+  // present in the loaded folder falls back to the whole-folder mount. Without
+  // this the scope UI keeps pointing at a path that no longer exists and the
+  // next MODEL op silently loses the scope subtree. Mirrors the setScope
+  // rebase in moveNodes/renameNode/hardDelete for the pull entry point.
+  const reconciledThen = appSource.slice(
+    appSource.indexOf("void attached.reconciled"),
+    appSource.indexOf("const scanned = attached.files"),
+  );
+  assert.match(reconciledThen, /\.then\(\(\) => \{/);
+  assert.match(reconciledThen, /scopeRef\.current\[0\]/);
+  assert.match(reconciledThen, /mount\.path === ROOT/);
+  assert.match(reconciledThen, /stillPresent/);
+  assert.match(reconciledThen, /setScope\(\[\{ kind: "folder", path: ROOT \}\]\)/);
+});
+
 
 test("context, Replay, and attach enforce individual trace-history ceilings", () => {
   const contextSource = readFileSync(new URL("../ai/context-gather.ts", import.meta.url), "utf8");
