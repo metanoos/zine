@@ -285,3 +285,114 @@ test("accepts projector-emitted timingStatus and canonical KEdit legacy voices",
     /mutually exclusive/,
   );
 });
+
+// Cover the step-summary capture-times paths that the timingStatus fixture
+// above does not reach: the happy path with paired, consistent capture times,
+// plus the three consistency failures the validator enforces only when
+// capture times are present (span mismatch, span without capture times, and
+// undo/redo overflow).
+async function processSelectionWithCaptureTimes() {
+  const result = await selectTraceContextV1({
+    version: 1,
+    policy: "selected-trace-v1",
+    operation: {
+      version: 1,
+      operation: "extend",
+      target: {
+        traceId: "trace-capture",
+        headId: "head-capture",
+        contentHash: "content-capture",
+        currentText: "Capture target",
+      },
+      range: { fromUtf16: 0, toUtf16: 7 },
+      maxContextBytes: 16_384,
+      preparedRequestMaxBytes: 32_768,
+      reservedPromptBytes: 512,
+    },
+    candidates: [
+      {
+        version: 1,
+        id: "process-step-summary-capture",
+        dedupeKey: "process-step-summary-capture",
+        kind: "process-fact",
+        claimClass: "mechanical",
+        source: {
+          kind: "trace", ref: "step-summary-capture", traceId: "trace-capture",
+          headId: "head-capture", nodeId: "head-capture", processStatus: "full-trace",
+          chainDistance: 0, transactionIndex: 0,
+        },
+        reasons: ["prepared-head-process"],
+        fact: {
+          kind: "step-summary",
+          transactionCount: 2, rangeCount: 2,
+          insertedCodePointCount: 3, deletedCodePointCount: 1,
+          firstCapturedAtMs: 100,
+          lastCapturedAtMs: 250,
+          spanMs: 150,
+          longestGapMs: 150,
+          undoCount: 0, redoCount: 1,
+        },
+      },
+    ],
+  });
+  if (!result.ok) assert.fail(result.error.message);
+  return result;
+}
+
+test("accepts step-summary with consistent paired capture times", async () => {
+  const selected = await processSelectionWithCaptureTimes();
+  assert.doesNotThrow(
+    () => validateSelectedTraceContextManifestV1(selected.manifest, selected.renderedContext),
+    "a step-summary whose span equals last - first capture time should round-trip",
+  );
+});
+
+test("rejects step-summary capture/span inconsistencies", async () => {
+  const base = await processSelectionWithCaptureTimes();
+
+  // spanMs != lastCapturedAtMs - firstCapturedAtMs
+  const spanMismatch = structuredClone(base.manifest) as unknown as SelectedTraceContextManifestV1;
+  const spanEntry = spanMismatch.selected.find((entry) => entry.fact?.kind === "step-summary") as
+    unknown as { fact: { spanMs?: number } } | undefined;
+  assert.ok(spanEntry, "fixture must include a step-summary fact");
+  spanEntry.fact.spanMs = 999;
+  assert.throws(
+    () => validateSelectedTraceContextManifestV1(spanMismatch, base.renderedContext),
+    /capture times and span are inconsistent/,
+  );
+
+  // span without capture times: drop the capture pair but leave spanMs nonzero.
+  const orphanSpan = structuredClone(base.manifest) as unknown as SelectedTraceContextManifestV1;
+  const orphanEntry = orphanSpan.selected.find((entry) => entry.fact?.kind === "step-summary") as
+    unknown as { fact: { firstCapturedAtMs?: number; lastCapturedAtMs?: number; spanMs?: number; longestGapMs?: number } } | undefined;
+  assert.ok(orphanEntry, "fixture must include a step-summary fact");
+  delete orphanEntry.fact.firstCapturedAtMs;
+  delete orphanEntry.fact.lastCapturedAtMs;
+  assert.throws(
+    () => validateSelectedTraceContextManifestV1(orphanSpan, base.renderedContext),
+    /must be zero without capture times/,
+  );
+
+  // undo + redo overflow vs transactionCount
+  const overflow = structuredClone(base.manifest) as unknown as SelectedTraceContextManifestV1;
+  const overflowEntry = overflow.selected.find((entry) => entry.fact?.kind === "step-summary") as
+    unknown as { fact: { undoCount?: number; redoCount?: number; transactionCount?: number } } | undefined;
+  assert.ok(overflowEntry, "fixture must include a step-summary fact");
+  overflowEntry.fact.undoCount = 5;
+  overflowEntry.fact.redoCount = 5;
+  assert.throws(
+    () => validateSelectedTraceContextManifestV1(overflow, base.renderedContext),
+    /summary counts are inconsistent/,
+  );
+
+  // only one capture time present (unpaired)
+  const unpaired = structuredClone(base.manifest) as unknown as SelectedTraceContextManifestV1;
+  const unpairedEntry = unpaired.selected.find((entry) => entry.fact?.kind === "step-summary") as
+    unknown as { fact: { lastCapturedAtMs?: number } } | undefined;
+  assert.ok(unpairedEntry, "fixture must include a step-summary fact");
+  delete unpairedEntry.fact.lastCapturedAtMs;
+  assert.throws(
+    () => validateSelectedTraceContextManifestV1(unpaired, base.renderedContext),
+    /capture times must be paired/,
+  );
+});
