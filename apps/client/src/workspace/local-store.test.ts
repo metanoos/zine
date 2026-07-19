@@ -10,12 +10,14 @@ import {
   createDesktopOperationCrashPadReceiptV1,
   deleteLocalFile,
   deleteLocalFiles,
+  deletePadPath,
   failStructuralOperation,
   hasPendingStructuralPathMutation,
   loadLocalFolder,
   loadPad,
   mirrorPad,
   moveLocalFile,
+  movePadPath,
   pendingFolderStepOperation,
   pendingFolderStepOperations,
   pendingStructuralOperations,
@@ -298,6 +300,64 @@ test("deleteLocalFile and deleteLocalFiles clear the crash pad so a deleted file
   // The pad is empty once every entry is cleared — and an empty pad is
   // dropped from storage entirely (matches clearPadPath's empty-pad rule).
   assert.equal(pad, null, "pad dropped once the last entry is cleared");
+});
+
+test("movePadPath and deletePadPath catch pad-ONLY entries (no LocalFolder.files backing) — the crash-resume contract", () => {
+  // The per-file moveLocalFile/deleteLocalFile integration rebases a pad
+  // entry only when its file moves/deletes. A pad-ONLY entry (a MODEL-write
+  // receipt at a brand-new path that has no LocalFolder.files entry yet) has
+  // no file to move, so the per-file loop skips it. The structural completion
+  // path (completePendingStructuralOperationWithinRoot) therefore calls the
+  // subtree-aware movePadPath/deletePadPath once for the whole op prefix,
+  // catching pad-only entries. This runs on BOTH the fresh-gesture path AND
+  // the crash-resume path (every boot), so a mid-op crash cannot leave a
+  // pad-only entry that resurrects as a ghost file. This test pins the
+  // pad-only contract directly against the load-bearing helpers.
+  values.clear();
+  saveLocalFile("root", "notes/a.md", { content: "a", tags: [], nodeId: "head-a" });
+  // A pad-ONLY entry: a brand-new MODEL-created file at notes/sub/new.md that
+  // has NEVER been Stepped (no LocalFolder.files entry, only a pad entry).
+  mirrorPad("root", "notes/sub/new.md", { content: "new-MODEL", tags: [], nodeId: "" });
+  // The folder notes/sub moves to notes/sub-moved. There is NO file entry at
+  // notes/sub/new.md for moveLocalFile to rebase, so only the subtree-aware
+  // movePadPath can carry the pad-only entry to its new key.
+  movePadPath("root", "notes/sub", "notes/sub-moved");
+  let pad = loadPad("root");
+  assert.equal(
+    pad?.["notes/sub/new.md"],
+    undefined,
+    "pad-only entry at the old subtree prefix cleared",
+  );
+  assert.equal(
+    pad?.["notes/sub-moved/new.md"]?.content,
+    "new-MODEL",
+    "pad-only entry rebased under the new subtree prefix",
+  );
+
+  // The delete case: a folder delete must subtree-clear pad-only entries
+  // under it, or they resurrect on the next boot.
+  mirrorPad("root", "notes/sub-moved/orphan.md", { content: "orphan", tags: [], nodeId: "" });
+  deletePadPath("root", "notes/sub-moved", true);
+  // Both pad-only descendants under the deleted prefix are cleared, and the
+  // pad becomes empty — so it is dropped from storage entirely (matches
+  // clearPadPath's empty-pad rule). The boot loop therefore has nothing to
+  // resurrect.
+  assert.equal(
+    loadPad("root"),
+    null,
+    "pad-only descendants cleared by folder-prefix delete; empty pad dropped",
+  );
+
+  // Prefix-collision guard: deleting "notes/a" (a file-shaped prefix) MUST
+  // NOT clear "notes/a.md" — only an exact match or a true descendant.
+  mirrorPad("root", "notes/a.md", { content: "a", tags: [], nodeId: "head-a" });
+  deletePadPath("root", "notes/a", true);
+  pad = loadPad("root");
+  assert.equal(
+    pad?.["notes/a.md"]?.content,
+    "a",
+    "prefix-collision guard: notes/a.md survives a delete of the notes/a prefix",
+  );
 });
 
 
