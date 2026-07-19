@@ -189,9 +189,9 @@ network or meaningful citation density. The [transport](protocol/transport.md) a
 | Top-level foreign-file fork-on-write | Implemented; recursive nested-folder fork-on-write is deferred |
 | Valid-Coin mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
 | Raw-file Reify export with an optional signed-event bundle | Implemented on desktop |
-| Multiple desktop vaults with independent passphrases, Roots, encrypted webview state, Stronghold secrets, relay databases, ACLs, and KDF salts | Implemented on desktop; the browser remains read-only |
-| Shared trace-context runtime | Deterministic task-specific selection, byte budgets, process projection, and desktop/MCP parity are implemented with fixed corpora; `[[…]]` / `((…))` authoring-syntax enforcement remains an initial desktop Extend/Settle slice |
-| Prepared desktop MODEL operations with explicit approval | All five direct single-shot gestures use canonical selected trace context and stale-safe approval. Desktop Extend now persists its exact approved request before provider I/O, presents provisional results for explicit local review, and recovers idempotent crash-pad application through the encrypted native journal. Active directive consumption is fail-closed until the private envelope carries its deletion plan; signed Step linkage and the separate agent loop remain deferred |
+| Stronghold storage for signing and provider secrets | Implemented on desktop; the browser remains read-only |
+| Shared trace-context authoring-syntax kernel | Initial deterministic `[[…]]` / `((…))` scanner and compiler implemented with golden and generated scale corpora; task-specific evidence selection and cross-press rendering are not yet implemented |
+| Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures. Extend additionally persists the exact approved request, selected context, provider profile, attempt, result, and local application intent in a bounded encrypted vault journal before side effects; recovery never redispatches an ambiguous provider call, accepted application uses an exact crash-pad receipt and compare-and-set target check, and vault teardown cancels and drains native HTTP work. Settle uses the shared syntax kernel but not yet this durable execution path. Portable signed binding and the other operation adapters remain deferred |
 | Hosted relay | Implemented; an operator ACL equivalent to the local relay policy remains a gap |
 | Coins package: Mint, Coin indexing, and rendezvous | Integrated and exercised as one user-facing discovery opt-in. Ordinary Cite remains core composition outside it. No bootstrap network is operated, and deployment/density evidence remains absent |
 | Managed remote, organization control plane, and no-install public verifier | Commercial product hypotheses, not shipping services |
@@ -304,17 +304,10 @@ enough for provenance, storage, or networking changes.
 
 ```sh
 npm run doctor         # prerequisites and local artifact diagnostics
-npm run check          # dev scripts, types, tests, and Node/Go coverage floors
+npm run check          # dev scripts, client types/tests, MCP, relay, and Rust
 npm run verify         # check + client build + isolated real-relay smoke
 npm run verify:relay   # Step/Publish/Attest/Mint/Cite against temporary relays
 ```
-
-`check` enforces conservative coverage floors for the TypeScript modules loaded
-by each suite and for both Go relay packages. These floors prevent silent
-regression from the current baseline; they are not a claim that every source
-file is loaded or that browser interactions have end-to-end coverage. Package
-directories retain plain `npm test` commands for a quieter local loop and expose
-the enforced run as `npm run test:coverage`.
 
 `verify:relay` uses temporary ACL-protected relay databases and random ports.
 It does not touch `~/.tracer`, checked-in `data/`, or a running desktop

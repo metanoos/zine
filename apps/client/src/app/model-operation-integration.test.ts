@@ -5,6 +5,7 @@ import test from "node:test";
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const contextGather = readFileSync(new URL("../ai/context-gather.ts", import.meta.url), "utf8");
 const inspector = readFileSync(new URL("../ai/PromptInspectorModal.tsx", import.meta.url), "utf8");
+const desktopRuntime = readFileSync(new URL("../ai/desktop-operation-runtime.ts", import.meta.url), "utf8");
 
 function functionBody(name: string, next: string): string {
   const start = app.indexOf(`function ${name}`);
@@ -94,7 +95,7 @@ test("Settle retains current-session authoring while durable Extend accepts thro
 });
 
 test("Inspector binds Extend to the fetched signed-chain selector boundary", () => {
-  const prepare = functionBody("prepareInspectorOperation", "/** Render bounded, exact excerpts");
+  const prepare = functionBody("prepareInspectorOperation", "function renderSteppedTraceReferences");
   assert.match(prepare, /operation === "extend"[\s\S]*fetchChain\(liveFolder\.id, activePath\)/);
   assert.match(prepare, /policy: "selected-trace-v1"/);
   assert.match(prepare, /verifyEvent/);
@@ -104,11 +105,148 @@ test("Inspector binds Extend to the fetched signed-chain selector boundary", () 
 test("desktop Accept writes one exact crash-pad receipt before dispatching CodeMirror", () => {
   const apply = functionBody("applyDesktopArtifact", "function editFile");
   assert.match(apply, /prepareDesktopExtendApplyV1/);
+  assert.match(apply, /prepared\.traceAuthoring/);
+  assert.match(apply, /planned\.changes/);
   assert.match(apply, /transaction\.state\.field\(voiceField\)/);
   assert.match(apply, /transaction\.state\.field\(keditField\)/);
   assert.ok(apply.indexOf("mirrorPad(") < apply.indexOf("view.dispatch(transaction)"));
-  assert.match(apply, /desktopOperationReceipt/);
+  assert.ok(
+    apply.indexOf("receipt?.intentId === input.intent.intentId")
+      < apply.indexOf("isDesktopOperationAuthorizedThisSessionV1"),
+    "restart receipt reconciliation must precede ephemeral directive authority",
+  );
+  assert.match(apply, /createDesktopOperationCrashPadReceiptV1/);
+  assert.match(apply, /prepared\.modelVoicePubkey/);
+  assert.doesNotMatch(apply, /modelPubkeyRef\.current/);
   assert.doesNotMatch(apply, /stepFile\(|sendStep\(|publish|mint/i);
+});
+
+test("directive authority gates provider dispatch and apply across App activations", () => {
+  const apply = functionBody("applyDesktopArtifact", "function editFile");
+  const dispatch = functionBody("dispatchDesktopOperationAttempt", "async function retryDesktopOperation");
+  assert.match(app, /desktopAuthorizedAttemptKeysRef = useRef\(new Set<string>\(\)\)/);
+  assert.match(app, /isAttemptAuthorizedForCurrentEditorSession: \(envelope\) =>[\s\S]*isDesktopOperationAuthorizedThisSessionV1/);
+  assert.match(dispatch, /runtime\.approve\(key\)/);
+  assert.match(dispatch, /runtime\.dispatch\(key, \{ signal: controller\.signal \}\)/);
+  assert.match(apply, /isDesktopOperationAuthorizedThisSessionV1/);
+  assert.match(apply, /return \{ status: "stale" \}/);
+  assert.match(app, /desktopOperationReviewQueueV1\([\s\S]*isDesktopOperationAuthorizedThisSessionV1/);
+});
+
+test("desktop recovery defers inactive workspaces and keeps review scoped to the live folder", () => {
+  const apply = functionBody("applyDesktopArtifact", "function editFile");
+  assert.match(apply, /liveFolder\.id !== target\.folderId/);
+  assert.match(apply, /status: "deferred"/);
+  assert.match(app, /targetRevision\.folderId === folder\?\.id/);
+});
+
+test("recovery errors stay generic and saved operations navigate exact bounded cursor pages", () => {
+  const refresh = functionBody(
+    "refreshDesktopOperationEnvelopes",
+    "function loadMoreDesktopOperationEnvelopes",
+  );
+  const next = functionBody(
+    "loadMoreDesktopOperationEnvelopes",
+    "async function loadPreviousDesktopOperationEnvelopes",
+  );
+  const previous = functionBody(
+    "loadPreviousDesktopOperationEnvelopes",
+    "async function dispatchDesktopOperationAttempt",
+  );
+  assert.match(app, /result\.failureCount > 0/);
+  assert.match(app, /saved AI operation\(s\) need recovery attention/);
+  assert.doesNotMatch(app, /failureSamples\[/);
+  assert.match(app, /result\.failureCount > 0[\s\S]*setDesktopOperationEnvelopes\(\[\]\)[\s\S]*setDesktopOperationPageLineageHeads\(\[\]\)[\s\S]*setDesktopOperationPageCursor\(null\)[\s\S]*setDesktopOperationNextCursor\(null\)[\s\S]*setDesktopOperationPreviousCursors\(\[\]\)[\s\S]*return;/);
+  assert.match(app, /Saved AI history recovered\. Review the current page and use Previous \/ More \/ Next when available\./);
+  assert.match(refresh, /repository\.listPage\(cursor, 16\)/);
+  assert.match(refresh, /resolveDesktopOperationPageLineageV1\(/);
+  assert.match(refresh, /page\.records,[\s\S]*pageSize: 16, isCancelled: cancelled/);
+  assert.match(refresh, /setDesktopOperationEnvelopes\(\[\.\.\.page\.records\]\)/);
+  assert.match(refresh, /setDesktopOperationPageLineageHeads\(\[\.\.\.lineageHeads\]\)/);
+  assert.match(refresh, /setDesktopOperationPageCursor\(cursor\)/);
+  assert.match(refresh, /setDesktopOperationNextCursor\(page\.nextCursor\)/);
+  assert.match(next, /desktopOperationNextCursor/);
+  assert.match(next, /\[\.\.\.desktopOperationPreviousCursors, desktopOperationPageCursor\]/);
+  assert.match(previous, /desktopOperationPreviousCursors\[desktopOperationPreviousCursors\.length - 1\]/);
+  assert.match(previous, /desktopOperationPreviousCursors\.slice\(0, -1\)/);
+  assert.doesNotMatch(refresh, /\.\.\.current|slice\(-64\)/);
+  assert.match(refresh, /setDesktopOperationEnvelopes\(\[\]\)[\s\S]*setDesktopOperationPageLineageHeads\(\[\]\)/);
+  assert.match(refresh, /desktopOperationStoreRef\.current !== repository/);
+  assert.match(app, /createDesktopOperationPinnedLineageFenceV1\(\)/);
+  assert.match(app, /provenParent = desktopOperationPageLineageHeads\.find/);
+  assert.match(app, /mergeDesktopOperationPinnedDescendantV1\([\s\S]*current,[\s\S]*provenParent,[\s\S]*envelope,[\s\S]*16,[\s\S]*desktopOperationPinnedLineageFenceRef\.current/);
+  assert.match(app, /mergeDesktopOperationPinnedHeadsV1\([\s\S]*current,[\s\S]*\[envelope\],[\s\S]*16,[\s\S]*desktopOperationPinnedLineageFenceRef\.current/);
+  assert.match(app, />Previous<\/button>/);
+  assert.match(app, /"More \/ Next"/);
+});
+
+test("recovery never publishes partial pins and cancellation or vault replacement fences archive state", () => {
+  const recoverStart = desktopRuntime.indexOf("private async recoverEnvelope");
+  const recoverEnd = desktopRuntime.indexOf("private async requireEnvelope", recoverStart);
+  assert.ok(recoverStart >= 0 && recoverEnd > recoverStart);
+  assert.doesNotMatch(desktopRuntime.slice(recoverStart, recoverEnd), /this\.present\(/);
+  assert.match(app, /if \(cancelled\) return;/);
+  assert.match(app, /desktopOperationRefreshSequenceRef\.current \+= 1;[\s\S]*setDesktopOperationEnvelopes\(\[\]\)[\s\S]*setDesktopOperationPageLineageHeads\(\[\]\)[\s\S]*desktopOperationRuntimeRef\.current!\.recover\(\)/);
+  assert.match(app, /sequence !== desktopOperationRefreshSequenceRef\.current/);
+  assert.match(app, /desktopOperationStoreRef\.current !== repository/);
+  assert.match(app, /return \(\) => \{[\s\S]*desktopOperationRefreshSequenceRef\.current \+= 1;[\s\S]*desktopAuthorizedAttemptKeysRef\.current\.clear\(\);[\s\S]*controller\.abort\(\);[\s\S]*desktopOperationRuntimeRef\.current = null;[\s\S]*desktopOperationStoreRef\.current = null;/);
+});
+
+test("vault cleanup owns and aborts every desktop Extend barrier before releasing runtime refs", () => {
+  const extend = functionBody("extendLLM", "function settleDeDupeLLM");
+  const dispatch = functionBody(
+    "dispatchDesktopOperationAttempt",
+    "async function retryDesktopOperation",
+  );
+  const retry = functionBody("retryDesktopOperation", "async function handleDesktopOperationAction");
+  const freshRetry = functionBody("dispatchFreshDesktopRetry", "const [opLenses");
+
+  assert.match(app, /desktopOperationAbortControllersRef = useRef\(new Set<AbortController>\(\)\)/);
+  assert.match(app, /desktopAuthorizedAttemptKeysRef\.current\.clear\(\);[\s\S]*for \(const controller of desktopOperationAbortControllersRef\.current\)[\s\S]*controller\.abort\(\);[\s\S]*desktopOperationRuntimeRef\.current = null;/);
+  assert.ok(
+    extend.indexOf("desktopOperationAbortControllersRef.current.add(controller)")
+      < extend.indexOf("runtime.persistApprovedExtend"),
+    "the controller must be owned before private request persistence begins",
+  );
+  assert.ok(
+    extend.indexOf("if (!controller.signal.aborted)")
+      < extend.indexOf("desktopAuthorizedAttemptKeysRef.current.add"),
+    "an unmounted continuation cannot recreate ephemeral directive authority",
+  );
+  assert.match(extend, /controller\.signal\.aborted[\s\S]*runtime\.cancel\(/);
+  assert.match(dispatch, /desktopOperationAbortControllersRef\.current\.add\(controller\)[\s\S]*runtime\.approve\(key\)[\s\S]*controller\.signal\.aborted[\s\S]*runtime\.cancel\(key\)[\s\S]*runtime\.dispatch\(key, \{ signal: controller\.signal \}\)/);
+  assert.ok(
+    retry.indexOf("desktopOperationAbortControllersRef.current.add(controller)")
+      < retry.indexOf("runtime.retry"),
+  );
+  assert.ok(
+    freshRetry.indexOf("desktopOperationAbortControllersRef.current.add(controller)")
+      < freshRetry.indexOf("runtime.retry"),
+  );
+});
+
+test("stale re-prepare opens only the original workspace path and trace", () => {
+  const action = functionBody("handleDesktopOperationAction", "function dispatchFreshDesktopRetry");
+  assert.match(action, /liveFolder\.id !== target\.folderId/);
+  assert.match(action, /liveFile\.traceId !== target\.traceId/);
+  assert.match(action, /activateLiveTab\(target\.path\)/);
+  assert.match(action, /Restore the original workspace and trace/);
+});
+
+test("expired terminal directive re-prepare distinguishes safe fresh operations from confirmed ambiguous linkage", () => {
+  const dispatch = functionBody("dispatchFreshDesktopRetry", "const [opLenses");
+  assert.match(dispatch, /ambiguous = prior\.lifecycle\.retryPolicy === "operator-confirmation-required"/);
+  assert.match(dispatch, /ambiguous[\s\S]*window\.confirm\(/);
+  assert.ok(dispatch.indexOf("window.confirm(") < dispatch.indexOf("await runtime.retry(staleKey"));
+  assert.ok(
+    dispatch.indexOf("await runtime.retry(staleKey")
+      < dispatch.indexOf("dispatchDesktopOperationAttempt(retry, controller)"),
+  );
+  assert.match(dispatch, /possibleDuplicateAcknowledged: true as const/);
+  assert.match(dispatch, /prior\.lifecycle\.status === "stale" \|\| ambiguous[\s\S]*runtime\.retry\(staleKey/);
+  assert.match(dispatch, /: await runtime\.persistApprovedExtend\(/);
+  assert.match(dispatch, /desktopOperationAttemptKeyV1\(retry\.operationId, retry\.attempt\.attemptId\)/);
+  assert.match(app, /case "reprepare-possible-duplicate": return "Re-prepare \(may duplicate\)"/);
 });
 
 test("desktop recovery constructs the native frozen-session store only after App mounts", () => {
@@ -116,14 +254,6 @@ test("desktop recovery constructs the native frozen-session store only after App
   assert.match(app, /desktopOperationRuntimeRef\.current = runtime/);
   assert.match(app, /bootState !== "ready"[\s\S]*desktopOperationRuntimeRef\.current!\.recover\(\)/);
   assert.doesNotMatch(app, /DesktopOperationStoreV1\([^)]*localStorage/);
-});
-
-test("desktop review refresh traverses the complete opaque journal", () => {
-  const refresh = functionBody("refreshDesktopOperationEnvelopes", "async function dispatchDesktopOperationAttempt");
-  assert.match(refresh, /while \(true\)/);
-  assert.match(refresh, /repository\.listPage\(cursor, 16\)/);
-  assert.match(refresh, /nextCursor === cursor \|\| seenCursors\.has\(nextCursor\)/);
-  assert.doesNotMatch(refresh, /pageIndex|< 4/);
 });
 
 test("Inspector prepares local operations without waiting on ancillary relay reads", () => {

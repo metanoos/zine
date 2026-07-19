@@ -412,7 +412,19 @@ Attribution is carried at two layers, in priority order: per-delta (primary) and
 
 An `action: llm` node's `prompt` is the instruction only — what a human typed or an agent decided to ask. Everything else the model saw (folder content, a roster, pinned traces) is NOT duplicated into the node: the node's `q` tags cite whatever was in scope, each cited node already self-sufficient, and `injectRule` names the deterministic procedure that expands those citations into the literal submitted prompt. The `llm` field records the model configuration (`model`, `temperature`, `maxTokens`, `provider`) so a reader knows which call answered.
 
-LLM nodes preserve ordinary social citations and structural prompt dependencies as `q` tags, so older readers retain the graph. To distinguish their roles, a writer that can enumerate the complete structural set MUST retain the legacy `["scope", "llm"]` marker, emit `["scope", "llm", "targets-v1"]`, and emit one `["scope", "llm", "<node-id>"]` tag for every structural-only target. If one target has both an ordinary social role and a structural scope role, the social role wins: the writer emits its `q` tag but MUST NOT list it in the structural-only set. A reader that recognizes `targets-v1` excludes only those enumerated ids from social citation processing. A reader that sees any `scope:llm` marker without a recognized, complete, well-formed target-set version MUST exclude every `q` edge on that node from social processing. This fail-closed legacy rule prevents an old or unknown encoding from publishing private prompt scope.
+LLM nodes preserve ordinary social citations and structural prompt dependencies
+as `q` tags, so older readers retain the graph. To distinguish their roles, a
+writer that can enumerate the complete structural set MUST retain the legacy
+`["scope", "llm"]` marker, emit `["scope", "llm", "targets-v1"]`, and emit one
+`["scope", "llm", "<node-id>"]` tag for every structural-only target. If one
+target has both an ordinary social role and a structural scope role, the social
+role wins: the writer emits its `q` tag but MUST NOT list it in the
+structural-only set. A reader that recognizes `targets-v1` excludes only those
+enumerated ids from social citation processing. A reader that sees any
+`scope:llm` marker without a recognized, complete, well-formed target-set
+version MUST exclude every `q` edge on that node from social processing. This
+fail-closed legacy rule prevents an old or unknown encoding from publishing
+private prompt scope.
 
 **A rule is an immutable single-node trace carrying a named-algorithm manifest.** `injectRule` carries the event id of a rule trace whose body is a JSON manifest `{ "algorithm": "<name>-v<n>", "params": { … } }` — NOT executable code. The algorithm is a named, versioned, deterministic procedure shipped in the reader's binary (e.g. `ctx-block-v1`); the manifest names which one and its parameters (which context-block variant, whether sibling text is included, the role preamble). Rule immutability is guaranteed by the protocol itself, not by registry discipline: evolving a rule means stepping a new rule trace carrying a new manifest and citing the new id. Two readers implementing the same algorithm version produce byte-identical reconstruction; a reader that doesn't know the algorithm degrades — the scope `q`-tags still show *what* was in scope, but the assembled prompt can't be rebuilt. There is no executable code on the relay: execution-from-relay is rejected on the same trust posture as §3.9/§R5 (verifiable, not trustless).
 
@@ -653,10 +665,10 @@ Checkpoints are produced by:
   idempotent retry makes the event fetchable. The press retries incomplete
   indexing with backoff, after startup, and on network recovery. It inspects
   every ordinary social `q` target in bounded batches but indexes only targets
-  that verify as Coins; one failed
-  coordinate or relay does not starve later targets or events. DHT failure
-  never revokes or rolls back the already-Sent node. `rendezvous.md` §2.2 owns
-  the queue bound, public-relay proof, and pointer publication semantics.
+  that verify as Coins; one failed coordinate or relay does not starve later
+  targets or events. DHT failure never revokes or rolls back the already-Sent
+  node. `rendezvous.md` §2.2 owns the queue bound, public-relay proof, and
+  pointer publication semantics.
 
 - **ATTEST (the commitment stance).** Attest means "I stand behind this" — a deliberate commitment, distinct from Send's "let's discuss." It is a separate speech act, not a downstream stage of Send: an author Sends freely (discussion is common) and Attests rarely (commitment is deliberate). Most Sent content is never Attested, and that is healthy — most discussions shouldn't become positions. Attest emits one append-only `TraceAttestation` (kind 4294) targeting the exact sent node; it does not step or mutate either author's trace chain (§5A).
 

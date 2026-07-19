@@ -9,6 +9,7 @@ import {
 import { contentFingerprint } from "./context-snapshot.js";
 import {
   hashDesktopOperationEnvelopeV1,
+  hashCanonicalV1,
   type DesktopOperationEnvelopeV1,
 } from "./desktop-operation-envelope.js";
 import {
@@ -20,6 +21,7 @@ import {
   DesktopOperationTransportFailureV1,
   createApprovedDesktopExtendEnvelopeV1,
   desktopCredentialFreeTransportConfigSha256V1,
+  desktopOperationRetryAttemptIdV1,
   type DesktopArtifactApplierV1,
   type DesktopOperationKeyV1,
   type DesktopOperationRepositoryV1,
@@ -34,6 +36,7 @@ import {
   type PreparedOperation,
 } from "./prepared-operation.js";
 import { providerProfileFingerprint } from "./provider-fingerprint.js";
+import { compileTraceAuthoringOperation } from "./trace-authoring-adapter.js";
 
 const BASE_TIME = 10_000;
 const HASH = (value: string) => contentFingerprint(value);
@@ -77,6 +80,12 @@ function target(suffix = "one"): TargetFixture {
     headId: HASH(`head-${suffix}`),
     contentHash: HASH(text),
   };
+}
+
+function directiveTarget(suffix = "directive"): TargetFixture {
+  const fixture = target(suffix);
+  const text = `draft ((tighten the ${suffix} ending))`;
+  return { ...fixture, text, contentHash: HASH(text) };
 }
 
 async function selectionFor(targetFixture: TargetFixture): Promise<TraceContextSelectionSuccessV1> {
@@ -137,6 +146,20 @@ async function preparedFor(
     contentHash: targetFixture.contentHash,
   };
   const dependencyFingerprint = HASH(`dependency-${targetFixture.path}`);
+  const traceAuthoring = compileTraceAuthoringOperation({
+    operation: "extend",
+    operationInputs,
+    targetText: targetFixture.text,
+    renderedContextBlock: selection.renderedContext,
+    actingAuthorId: "",
+    authoritySpans: [],
+    sourceRevision: {
+      traceId: targetFixture.traceId,
+      headId: targetFixture.headId,
+      path: targetFixture.path,
+      contentHash: targetFixture.contentHash,
+    },
+  }).authoring!;
   return Object.freeze({
     version: 1,
     requestId,
@@ -144,7 +167,7 @@ async function preparedFor(
     operationInputs,
     contextSnapshot: {} as PreparedOperation["contextSnapshot"],
     contextFingerprint: HASH(`context-${targetFixture.path}`),
-    traceAuthoring: null,
+    traceAuthoring,
     traceContextSelection: selection,
     messages,
     providerId: providerFixture.id,
@@ -168,13 +191,72 @@ async function preparedFor(
       operation: "extend",
       operationInputs,
       messages,
-      traceAuthoring: null,
+      traceAuthoring,
       providerFingerprint,
       targetRevision,
       dependencyFingerprint,
       createdAt,
     }),
     createdAt,
+  });
+}
+
+async function directivePreparedFor(
+  targetFixture = directiveTarget(),
+  providerFixture = provider(),
+  identity: { requestId?: string; createdAt?: number } = {},
+): Promise<PreparedOperation> {
+  const base = await preparedFor(targetFixture, providerFixture, undefined, identity);
+  const fromUtf16 = targetFixture.text.indexOf("((");
+  assert.ok(fromUtf16 >= 0, "directive fixture must contain authoring syntax");
+  const compiled = compileTraceAuthoringOperation({
+    operation: "extend",
+    operationInputs: base.operationInputs,
+    targetText: targetFixture.text,
+    renderedContextBlock: [
+      "=== CONTEXT ===",
+      "",
+      "--- folder structure ---",
+      `${targetFixture.path}  <- ACTIVE`,
+      "",
+      "--- file contents ---",
+      `## ${targetFixture.path}  (ACTIVE)`,
+      targetFixture.text,
+      "",
+      "=== END CONTEXT ===",
+    ].join("\n"),
+    actingAuthorId: "author-current-session",
+    authoritySpans: [{
+      id: "manual-directive-authority",
+      actorId: "author-current-session",
+      origin: "manual",
+      instructionEligible: true,
+      fromUtf16,
+      toUtf16: targetFixture.text.length,
+    }],
+    sourceRevision: {
+      traceId: targetFixture.traceId,
+      headId: targetFixture.headId,
+      path: targetFixture.path,
+      contentHash: targetFixture.contentHash,
+    },
+  });
+  const preparedRequestHash = computePreparedOperationRequestHashV1({
+    requestId: base.requestId,
+    operation: base.operation,
+    operationInputs: compiled.operationInputs,
+    messages: base.messages,
+    traceAuthoring: compiled.authoring,
+    providerFingerprint: base.providerFingerprint,
+    targetRevision: base.targetRevision,
+    dependencyFingerprint: base.provenance.dependencyFingerprint,
+    createdAt: base.createdAt,
+  });
+  return Object.freeze({
+    ...base,
+    operationInputs: Object.freeze(compiled.operationInputs),
+    traceAuthoring: compiled.authoring,
+    preparedRequestHash,
   });
 }
 
@@ -285,6 +367,17 @@ class MutableClock {
   }
 }
 
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve(value?: T): void;
+} {
+  let resolve!: (value?: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = (value) => { done(value as T); };
+  });
+  return { promise, resolve };
+}
+
 function runtimeDependencies(input: {
   repository?: MemoryRepository;
   clock?: MutableClock;
@@ -293,6 +386,7 @@ function runtimeDependencies(input: {
   completePrepared?: DesktopOperationRuntimeDependenciesV1["completePrepared"];
   applyArtifact?: DesktopArtifactApplierV1;
   presentResult?: DesktopOperationRuntimeDependenciesV1["presentResult"];
+  isAttemptAuthorizedForCurrentEditorSession?: DesktopOperationRuntimeDependenciesV1["isAttemptAuthorizedForCurrentEditorSession"];
   ids?: DesktopOperationRuntimeIdsV1;
 } = {}): DesktopOperationRuntimeDependenciesV1 & {
   repository: MemoryRepository;
@@ -313,6 +407,9 @@ function runtimeDependencies(input: {
       status: "applied",
       resultingContentHash: HASH(responseText),
     })),
+    ...(input.isAttemptAuthorizedForCurrentEditorSession
+      ? { isAttemptAuthorizedForCurrentEditorSession: input.isAttemptAuthorizedForCurrentEditorSession }
+      : {}),
     ...(input.presentResult ? { presentResult: input.presentResult } : {}),
   };
 }
@@ -325,6 +422,20 @@ async function persist(
 ): Promise<DesktopOperationEnvelopeV1> {
   return runtime.persistApprovedExtend({
     prepared: await preparedFor(targetFixture, providerFixture),
+    provider: providerFixture,
+    maxOutputTokens: 1_024,
+    ...overrides,
+  });
+}
+
+async function persistDirective(
+  runtime: DesktopOperationRuntimeV1,
+  targetFixture: TargetFixture,
+  overrides: Partial<Parameters<DesktopOperationRuntimeV1["persistApprovedExtend"]>[0]> = {},
+): Promise<DesktopOperationEnvelopeV1> {
+  const providerFixture = provider();
+  return runtime.persistApprovedExtend({
+    prepared: await directivePreparedFor(targetFixture, providerFixture),
     provider: providerFixture,
     maxOutputTokens: 1_024,
     ...overrides,
@@ -376,6 +487,32 @@ function transition<T extends DesktopOperationTransitionV1["type"]>(
 test("the real approved-request transport satisfies the reconstructible runtime boundary", () => {
   const transport: DesktopOperationTransportV1 = completePrepared;
   assert.equal(transport, completePrepared);
+});
+
+test("retry child identity has a fixed domain-separated canonical vector", () => {
+  const parent = {
+    operationId: "operation-vector-0001",
+    attemptId: "attempt-parent-0001",
+  };
+  assert.equal(
+    desktopOperationRetryAttemptIdV1(parent),
+    "retry:4ad4be1f7e5dbfed64999fe83248c81ebd592d4ea2eb9665d30c8c9662642c11",
+  );
+  assert.notEqual(
+    desktopOperationRetryAttemptIdV1(parent),
+    desktopOperationRetryAttemptIdV1({ ...parent, operationId: "operation-vector-0002" }),
+  );
+  assert.notEqual(
+    desktopOperationRetryAttemptIdV1(parent),
+    desktopOperationRetryAttemptIdV1({ ...parent, attemptId: "attempt-parent-0002" }),
+  );
+  assert.notEqual(
+    desktopOperationRetryAttemptIdV1(parent),
+    `retry:${hashCanonicalV1("zine.desktop-operation.retry-child.v0", {
+      operationId: parent.operationId,
+      parentAttemptId: parent.attemptId,
+    })}`,
+  );
 });
 
 test("factory binds the approved selector, unique user-message placement, and credential-free provider config", async () => {
@@ -465,7 +602,7 @@ test("factory binds the approved selector, unique user-message placement, and cr
       attemptId: "attempt-factory-directive",
       createdAtMs: BASE_TIME,
     }),
-    /cannot yet recover active directive consumption/,
+    /preparedRequestHash does not match its exact bytes/,
   );
 });
 
@@ -623,7 +760,200 @@ test("reconstruction handles every durable crash window without replaying provid
   assert.equal((await recoveredRuntime.load(keyFor(acceptedBase)))!.artifactReceipt !== null, true);
   assert.equal(transportCalls, 0, "recovery may never resume a persisted dispatch handshake");
   assert.equal(applyCalls, 1);
-  assert.ok(presentations.includes(responseCopy.attempt.attemptId));
+  assert.deepEqual(presentations, [], "recovery must not incrementally publish review pins");
+});
+
+test("expired directive authority is durably stopped before every provider boundary", async () => {
+  const repository = new MemoryRepository();
+  const authorized = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => true,
+  }));
+  const prepared = await persistDirective(authorized, directiveTarget("recovered-prepared"), {
+    operationId: "operation-directive-recovered-prepared",
+    attemptId: "attempt-directive-recovered-prepared",
+  });
+  const approved = await authorized.approve(keyFor(await persistDirective(
+    authorized,
+    directiveTarget("recovered-approved"),
+    {
+      operationId: "operation-directive-recovered-approved",
+      attemptId: "attempt-directive-recovered-approved",
+    },
+  )));
+  let transportCalls = 0;
+  const unauthorized = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => false,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not dispatch";
+    },
+  }));
+
+  const recovery = await unauthorized.recover();
+  assert.equal(recovery.failureCount, 0);
+  for (const recovered of [prepared, approved]) {
+    const stale = (await unauthorized.load(keyFor(recovered)))!;
+    assert.equal(stale.lifecycle.status, "stale");
+    assert.equal(stale.lifecycle.executionCertainty, "known-not-dispatched");
+    assert.equal(stale.lifecycle.retryPolicy, "safe-new-attempt");
+    assert.equal(stale.response, null);
+    assert.equal(stale.fault?.code, "TARGET_STALE");
+    assert.equal(stale.fault?.stage, "approve");
+  }
+
+  const resumePrepared = await persistDirective(authorized, directiveTarget("resume-prepared"), {
+    operationId: "operation-directive-resume-prepared",
+    attemptId: "attempt-directive-resume-prepared",
+  });
+  assert.equal(
+    (await unauthorized.approve(keyFor(resumePrepared))).lifecycle.status,
+    "stale",
+  );
+  const resumeApproved = await authorized.approve(keyFor(await persistDirective(
+    authorized,
+    directiveTarget("resume-approved"),
+    {
+      operationId: "operation-directive-resume-approved",
+      attemptId: "attempt-directive-resume-approved",
+    },
+  )));
+  assert.equal(
+    (await unauthorized.dispatch(keyFor(resumeApproved))).lifecycle.status,
+    "stale",
+  );
+  assert.equal(transportCalls, 0);
+});
+
+test("ambiguous expired directives require confirmation and persist one linked fresh retry before I/O", async () => {
+  const repository = new MemoryRepository();
+  const authorized = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => true,
+  }));
+  let failed = await authorized.approve(keyFor(await persistDirective(
+    authorized,
+    directiveTarget("terminal-failed"),
+    { operationId: "operation-directive-failed", attemptId: "attempt-directive-failed" },
+  )));
+  failed = await replaceWithTransition(repository, failed, transition("record-failure", failed, {
+    certainty: "known-not-dispatched",
+    fault: {
+      version: 1,
+      code: "PROVIDER_UNAVAILABLE",
+      stage: "dispatch",
+      observedAtMs: failed.updatedAtMs + 1,
+      diagnosticRef: `diag:${HASH("test-provider-unavailable")}`,
+    },
+  }));
+  const unknownTarget = directiveTarget("terminal-unknown");
+  let unknown = await authorized.approve(keyFor(await persistDirective(
+    authorized,
+    unknownTarget,
+    { operationId: "operation-directive-unknown", attemptId: "attempt-directive-unknown" },
+  )));
+  unknown = await replaceWithTransition(
+    repository,
+    unknown,
+    transition("record-dispatch-intent", unknown),
+  );
+  unknown = await replaceWithTransition(
+    repository,
+    unknown,
+    transition("mark-dispatch-unknown", unknown, {
+      diagnosticRef: `diag:${HASH("test-ambiguous")}`,
+    }),
+  );
+  let transportCalls = 0;
+  const unauthorized = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => false,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not dispatch";
+    },
+  }));
+  const freshText = "revised draft ((tighten the terminal unknown ending))";
+  const freshTarget: TargetFixture = {
+    ...unknownTarget,
+    text: freshText,
+    headId: HASH("head-terminal-unknown-fresh"),
+    contentHash: HASH(freshText),
+  };
+  const freshPreparation = {
+    prepared: await directivePreparedFor(freshTarget, provider(), {
+      requestId: "request-terminal-unknown-fresh",
+      createdAt: unknown.updatedAtMs + 1,
+    }),
+    provider: provider(),
+    maxOutputTokens: 1_024,
+  };
+
+  await assert.rejects(
+    () => unauthorized.retry(keyFor(failed), { freshPreparation }),
+    /expired directive authority requires a fresh operation/,
+  );
+  await assert.rejects(
+    () => unauthorized.retry(keyFor(unknown), { freshPreparation }),
+    /explicit operator confirmation/,
+  );
+  assert.equal(transportCalls, 0);
+  assert.equal(repository.records.size, 2, "no linked retry attempt may be persisted");
+
+  const retry = await unauthorized.retry(keyFor(unknown), {
+    createdAtMs: freshPreparation.prepared.createdAt,
+    possibleDuplicateAcknowledged: true,
+    freshPreparation,
+  });
+  assert.equal(retry.operationId, unknown.operationId);
+  assert.equal(retry.attempt.retryOfAttemptId, unknown.attempt.attemptId);
+  assert.equal(retry.attempt.possibleDuplicateAcknowledgedAtMs, retry.attempt.createdAtMs);
+  assert.equal(retry.prepared.requestId, freshPreparation.prepared.requestId);
+  assert.equal(repository.records.size, 3);
+  assert.equal(transportCalls, 0, "confirmation records a retry but does not itself call the provider");
+
+  const afterRestart = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => false,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not resume after restart";
+    },
+  }));
+  const recovery = await afterRestart.recover();
+  assert.equal(recovery.failureCount, 0);
+  assert.equal((await afterRestart.load(keyFor(retry)))?.lifecycle.status, "stale");
+  assert.equal(transportCalls, 0);
+});
+
+test("failed authorization reconciliation never exposes resume or retry after a CAS conflict", async () => {
+  const repository = new MemoryRepository();
+  const authorized = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => true,
+  }));
+  const prepared = await persistDirective(authorized, directiveTarget("recovery-cas"), {
+    operationId: "operation-directive-recovery-cas",
+    attemptId: "attempt-directive-recovery-cas",
+  });
+  repository.replace = async () => "conflict";
+  let transportCalls = 0;
+  const unauthorized = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    isAttemptAuthorizedForCurrentEditorSession: () => false,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not dispatch";
+    },
+  }));
+
+  const recovery = await unauthorized.recover();
+  assert.equal(recovery.failureCount, 1);
+  assert.equal((await unauthorized.load(keyFor(prepared)))?.lifecycle.status, "prepared");
+  await assert.rejects(() => unauthorized.approve(keyFor(prepared)), /optimistic-CAS/);
+  assert.equal(transportCalls, 0);
+  assert.equal(repository.records.size, 1);
 });
 
 test("typed completed failures remain typed while abort and generic transport ambiguity become unknown", async () => {
@@ -683,6 +1013,111 @@ test("typed completed failures remain typed while abort and generic transport am
   }, "abort-before-io", alreadyAborted.signal);
   assert.equal(cancelled.lifecycle.status, "cancelled");
   assert.equal(preAbortTransportCalls, 0);
+});
+
+test("vault cancellation while provider resolution is pending is durably known-not-dispatched", async () => {
+  const providerResolutionEntered = deferred();
+  const releaseProviderResolution = deferred<ProviderConfig>();
+  let transportCalls = 0;
+  const dependencies = runtimeDependencies({
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not dispatch";
+    },
+  });
+  dependencies.resolveProvider = async () => {
+    providerResolutionEntered.resolve();
+    return releaseProviderResolution.promise;
+  };
+  const runtime = new DesktopOperationRuntimeV1(dependencies);
+  const approved = await runtime.approve(keyFor(await persist(runtime, target("cancel-provider-resolve"))));
+  const controller = new AbortController();
+
+  const pending = runtime.dispatch(keyFor(approved), { signal: controller.signal });
+  await providerResolutionEntered.promise;
+  controller.abort();
+  releaseProviderResolution.resolve(provider());
+  const cancelled = await pending;
+
+  assert.equal(cancelled.lifecycle.status, "cancelled");
+  assert.equal(cancelled.lifecycle.executionCertainty, "known-not-dispatched");
+  assert.equal(transportCalls, 0);
+  assert.equal(
+    cancelled.appliedTransitions.some(({ transitionType }) => (
+      transitionType === "record-provider-io-may-have-started"
+    )),
+    false,
+  );
+});
+
+test("vault cancellation that crosses the provider-I/O CAS stays unknown without transport", async () => {
+  const repository = new MemoryRepository();
+  const providerIoCasEntered = deferred();
+  const releaseProviderIoCas = deferred();
+  const originalReplace = repository.replace.bind(repository);
+  repository.replace = async (...parameters) => {
+    if (parameters[2].lifecycle.status === "provider-io") {
+      providerIoCasEntered.resolve();
+      await releaseProviderIoCas.promise;
+    }
+    return originalReplace(...parameters);
+  };
+  let transportCalls = 0;
+  const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not dispatch";
+    },
+  }));
+  const approved = await runtime.approve(keyFor(await persist(runtime, target("cancel-provider-cas"))));
+  const controller = new AbortController();
+
+  const pending = runtime.dispatch(keyFor(approved), { signal: controller.signal });
+  await providerIoCasEntered.promise;
+  controller.abort();
+  releaseProviderIoCas.resolve();
+  const unknown = await pending;
+
+  assert.equal(unknown.lifecycle.status, "unknown");
+  assert.equal(unknown.lifecycle.executionCertainty, "may-have-dispatched");
+  assert.equal(unknown.lifecycle.retryPolicy, "operator-confirmation-required");
+  assert.equal(transportCalls, 0);
+});
+
+test("vault cancellation during approval cannot begin provider transport afterward", async () => {
+  const repository = new MemoryRepository();
+  const approvalCasEntered = deferred();
+  const releaseApprovalCas = deferred();
+  const originalReplace = repository.replace.bind(repository);
+  repository.replace = async (...parameters) => {
+    if (parameters[2].lifecycle.status === "approved") {
+      approvalCasEntered.resolve();
+      await releaseApprovalCas.promise;
+    }
+    return originalReplace(...parameters);
+  };
+  let transportCalls = 0;
+  const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not dispatch";
+    },
+  }));
+  const prepared = await persist(runtime, target("cancel-approval-cas"));
+  const controller = new AbortController();
+
+  const approving = runtime.approve(keyFor(prepared));
+  await approvalCasEntered.promise;
+  controller.abort();
+  releaseApprovalCas.resolve();
+  const approved = await approving;
+  const cancelled = await runtime.dispatch(keyFor(approved), { signal: controller.signal });
+
+  assert.equal(cancelled.lifecycle.status, "cancelled");
+  assert.equal(cancelled.lifecycle.executionCertainty, "known-not-dispatched");
+  assert.equal(transportCalls, 0);
 });
 
 test("changed provider configuration fails before the durable provider-I/O boundary", async () => {
@@ -769,7 +1204,7 @@ test("dispatch-intent, provider-io, and repeated unknown recovery never silently
   assert.equal(calls, 0);
 });
 
-test("apply-before-receipt crash is recovered through an idempotent artifact applier", async () => {
+test("restart records an exact already-applied directive receipt before expired authority can stale it", async () => {
   const repository = new MemoryRepository();
   let applied = false;
   let calls = 0;
@@ -781,8 +1216,17 @@ test("apply-before-receipt crash is recovered through an idempotent artifact app
     }
     return { status: "already-applied", resultingContentHash: HASH(responseText) };
   };
-  const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({ repository, applyArtifact }));
-  const ready = await responseReady(runtime, target("apply-crash"));
+  const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    applyArtifact,
+    isAttemptAuthorizedForCurrentEditorSession: () => true,
+  }));
+  let ready = await persistDirective(runtime, directiveTarget("apply-crash"), {
+    operationId: "operation-directive-apply-crash",
+    attemptId: "attempt-directive-apply-crash",
+  });
+  ready = await runtime.approve(keyFor(ready));
+  ready = await runtime.dispatch(keyFor(ready));
   await assert.rejects(() => runtime.accept(keyFor(ready)), /simulated process death/);
   const afterCrash = await runtime.load(keyFor(ready));
   assert.equal(afterCrash!.lifecycle.status, "accepted");
@@ -791,12 +1235,52 @@ test("apply-before-receipt crash is recovered through an idempotent artifact app
   const reconstructed = new DesktopOperationRuntimeV1(runtimeDependencies({
     repository,
     applyArtifact,
+    isAttemptAuthorizedForCurrentEditorSession: () => false,
   }));
   const recovery = await reconstructed.recover();
   assert.equal(recovery.failureCount, 0);
   const recovered = await reconstructed.load(keyFor(ready));
   assert.ok(recovered!.artifactReceipt);
+  assert.equal(recovered!.lifecycle.status, "accepted");
+  assert.equal(recovered!.fault, null);
   assert.equal(calls, 2);
+});
+
+test("vault-wide recovery defers accepted intents until their exact workspace is restored", async () => {
+  const repository = new MemoryRepository();
+  const setup = new DesktopOperationRuntimeV1(runtimeDependencies({ repository }));
+  const workspaceA = target("workspace-a");
+  const workspaceB = target("workspace-b");
+  const ready = await responseReady(setup, workspaceA);
+  const accepted = await replaceWithTransition(
+    repository,
+    ready,
+    transition("accept-result", ready, { artifactIntentId: "intent-workspace-deferred" }),
+  );
+  let restoredFolderId = workspaceB.folderId;
+  let mutations = 0;
+  const recovering = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    applyArtifact: async ({ intent, responseText }) => {
+      if (intent.targetRevision.folderId !== restoredFolderId) return { status: "deferred" };
+      mutations += 1;
+      return { status: "applied", resultingContentHash: HASH(responseText) };
+    },
+  }));
+
+  const whileB = await recovering.recover();
+  const stillAccepted = await recovering.load(keyFor(accepted));
+  assert.equal(whileB.failureCount, 0);
+  assert.equal(stillAccepted?.lifecycle.status, "accepted");
+  assert.equal(stillAccepted?.artifactReceipt, null);
+  assert.equal(mutations, 0);
+
+  restoredFolderId = workspaceA.folderId;
+  const whileA = await recovering.recover();
+  const applied = await recovering.load(keyFor(accepted));
+  assert.equal(whileA.failureCount, 0);
+  assert.ok(applied?.artifactReceipt);
+  assert.equal(mutations, 1);
 });
 
 test("two runtimes converge on one idempotent application and one durable receipt", async () => {
@@ -953,7 +1437,6 @@ test("focus-only stale retry requires fresh preparation while preserving byte-id
   };
   await assert.rejects(
     () => runtime.retry(keyFor(stale.envelope), {
-      attemptId: "attempt-focus-only-cosmetic-relabel",
       createdAtMs: freshCreatedAt,
       freshPreparation: {
         prepared: cosmeticallyRelabeled,
@@ -968,7 +1451,6 @@ test("focus-only stale retry requires fresh preparation while preserving byte-id
     createdAt: freshCreatedAt,
   });
   const retry = await runtime.retry(keyFor(stale.envelope), {
-    attemptId: "attempt-focus-only-stale-retry-new",
     createdAtMs: freshCreatedAt,
     freshPreparation: {
       prepared: freshPrepared,
@@ -1021,11 +1503,12 @@ test("a stale compare-and-set becomes a durable reviewable state and never reapp
   const recovery = await reconstructed.recover();
   assert.equal(recovery.failureCount, 0);
   assert.equal(applyCalls, 1, "stale recovery must not retry the artifact mutation");
-  assert.deepEqual(presentations.at(-1), { status: "stale", reason: "recovery" });
+  assert.deepEqual(presentations, [
+    { status: "response-completed", reason: "response-recorded" },
+    { status: "stale", reason: "stale-target" },
+  ]);
   await assert.rejects(
-    () => reconstructed.retry(keyFor(ready), {
-      attemptId: "attempt-stale-missing-preparation",
-    }),
+    () => reconstructed.retry(keyFor(ready)),
     /stale retry requires a fresh prepared operation/,
   );
   const freshCreatedAt = accepted.envelope.updatedAtMs + 1;
@@ -1034,7 +1517,6 @@ test("a stale compare-and-set becomes a durable reviewable state and never reapp
     createdAt: freshCreatedAt,
   });
   const retry = await reconstructed.retry(keyFor(ready), {
-    attemptId: "attempt-stale-safe-retry",
     createdAtMs: freshCreatedAt,
     freshPreparation: {
       prepared: freshPrepared,
@@ -1057,11 +1539,10 @@ test("linked retry requires acknowledgement only when the prior dispatch is ambi
   const unknown = await responseOrFailure(runtime, "ambiguous-retry");
   assert.equal(unknown.lifecycle.status, "unknown");
   await assert.rejects(
-    () => runtime.retry(keyFor(unknown), { attemptId: "attempt-retry-no-ack" }),
+    () => runtime.retry(keyFor(unknown)),
     /explicit operator confirmation/,
   );
   const retry = await runtime.retry(keyFor(unknown), {
-    attemptId: "attempt-retry-with-ack",
     possibleDuplicateAcknowledged: true,
   });
   assert.equal(retry.operationId, unknown.operationId);
@@ -1072,7 +1553,7 @@ test("linked retry requires acknowledgement only when the prior dispatch is ambi
   assert.equal(abandoned.lifecycle.executionCertainty, "may-have-dispatched");
   assert.equal(abandoned.fault!.code, "DISPATCH_OUTCOME_UNKNOWN");
   await assert.rejects(
-    () => runtime.retry(keyFor(abandoned), { attemptId: "attempt-after-abandon" }),
+    () => runtime.retry(keyFor(abandoned)),
     /abandoned is not retryable/,
   );
 
@@ -1086,14 +1567,11 @@ test("linked retry requires acknowledgement only when the prior dispatch is ambi
   const cancelled = await safeRuntime.cancel(keyFor(prepared));
   await assert.rejects(
     () => safeRuntime.retry(keyFor(cancelled), {
-      attemptId: "attempt-safe-retry-ack",
       possibleDuplicateAcknowledged: true,
     }),
     /allowed only for an ambiguous attempt/,
   );
-  const safeRetry = await safeRuntime.retry(keyFor(cancelled), {
-    attemptId: "attempt-safe-retry-new",
-  });
+  const safeRetry = await safeRuntime.retry(keyFor(cancelled));
   assert.equal(safeRetry.attempt.possibleDuplicateAcknowledgedAtMs, null);
 
   const rejectedReady = await responseReady(
@@ -1104,11 +1582,174 @@ test("linked retry requires acknowledgement only when the prior dispatch is ambi
   );
   const rejected = await safeRuntime.reject(keyFor(rejectedReady));
   assert.equal(rejected.lifecycle.retryPolicy, "safe-new-attempt");
-  const rejectedRetry = await safeRuntime.retry(keyFor(rejected), {
-    attemptId: "attempt-rejected-retry-new",
-  });
+  const rejectedRetry = await safeRuntime.retry(keyFor(rejected));
   assert.equal(rejectedRetry.attempt.retryOfAttemptId, rejected.attempt.attemptId);
   assert.equal(rejectedRetry.attempt.possibleDuplicateAcknowledgedAtMs, null);
+});
+
+test("a deterministic retry child converges across runtimes, restarts, and one provider claim", async () => {
+  const repository = new MemoryRepository();
+  let transportCalls = 0;
+  let releaseTransport!: () => void;
+  let transportEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { transportEntered = resolve; });
+  const heldResponse = new Promise<string>((resolve) => {
+    releaseTransport = () => resolve("one deterministic response");
+  });
+  const completePreparedOnce = async () => {
+    transportCalls += 1;
+    transportEntered();
+    return heldResponse;
+  };
+  const firstRuntime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    completePrepared: completePreparedOnce,
+  }));
+  const secondRuntime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    completePrepared: completePreparedOnce,
+  }));
+  const parent = await firstRuntime.cancel(keyFor(await persist(
+    firstRuntime,
+    target("deterministic-retry"),
+    provider(),
+    {
+      operationId: "operation-deterministic-retry",
+      attemptId: "attempt-deterministic-parent",
+    },
+  )));
+  const expectedAttemptId = desktopOperationRetryAttemptIdV1(keyFor(parent));
+
+  await assert.rejects(
+    () => firstRuntime.retry(keyFor(parent), { attemptId: "caller-selected-retry-id" }),
+    /deterministic parent claim/,
+  );
+  const [firstChild, secondChild] = await Promise.all([
+    firstRuntime.retry(keyFor(parent)),
+    secondRuntime.retry(keyFor(parent)),
+  ]);
+  assert.equal(firstChild.attempt.attemptId, expectedAttemptId);
+  assert.equal(secondChild.attempt.attemptId, expectedAttemptId);
+  assert.equal(repository.records.size, 2, "one parent has exactly one durable child");
+
+  const approvedChild = await firstRuntime.approve(keyFor(firstChild));
+  const dispatchIntent = await replaceWithTransition(
+    repository,
+    approvedChild,
+    transition("record-dispatch-intent", approvedChild),
+  );
+  const dispatches = [
+    firstRuntime.dispatch(keyFor(dispatchIntent)),
+    secondRuntime.dispatch(keyFor(dispatchIntent)),
+  ];
+  await entered;
+  await Promise.resolve();
+  assert.equal(transportCalls, 1, "provider I/O begins only after one durable CAS claim");
+  releaseTransport();
+  await Promise.allSettled(dispatches);
+  assert.equal(transportCalls, 1);
+  assert.equal((await firstRuntime.load(keyFor(firstChild)))?.lifecycle.status, "response-completed");
+
+  const afterRestart = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not redispatch";
+    },
+  }));
+  const recoveredChild = await afterRestart.retry(keyFor(parent));
+  assert.equal(recoveredChild.attempt.attemptId, expectedAttemptId);
+  assert.equal(recoveredChild.lifecycle.status, "response-completed");
+  assert.equal(repository.records.size, 2);
+  assert.equal(transportCalls, 1);
+});
+
+test("concurrent retries with different fresh preparations cannot fork one parent", async () => {
+  const repository = new MemoryRepository();
+  const parentRuntime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    completePrepared: async () => { throw new Error("ambiguous provider boundary"); },
+  }));
+  const parentTarget = target("different-retry-preparation");
+  const parent = await responseOrFailure(parentRuntime, "different-retry-preparation");
+  assert.equal(parent.lifecycle.status, "unknown");
+  const createdAt = parent.updatedAtMs + 1;
+  const freshA = await preparedFor(parentTarget, provider(), undefined, {
+    requestId: "request-different-retry-a",
+    createdAt,
+  });
+  const freshB = await preparedFor(parentTarget, provider(), undefined, {
+    requestId: "request-different-retry-b",
+    createdAt,
+  });
+  const runtimeA = new DesktopOperationRuntimeV1(runtimeDependencies({ repository }));
+  const runtimeB = new DesktopOperationRuntimeV1(runtimeDependencies({ repository }));
+  const results = await Promise.allSettled([
+    runtimeA.retry(keyFor(parent), {
+      createdAtMs: createdAt,
+      possibleDuplicateAcknowledged: true,
+      freshPreparation: { prepared: freshA, provider: provider(), maxOutputTokens: 1_024 },
+    }),
+    runtimeB.retry(keyFor(parent), {
+      createdAtMs: createdAt,
+      possibleDuplicateAcknowledged: true,
+      freshPreparation: { prepared: freshB, provider: provider(), maxOutputTokens: 1_024 },
+    }),
+  ]);
+  assert.deepEqual(results.map(({ status }) => status).sort(), ["fulfilled", "rejected"]);
+  const rejection = results.find((result) => result.status === "rejected");
+  assert.equal(rejection?.status, "rejected");
+  if (rejection?.status === "rejected") {
+    assert.match(String(rejection.reason), /different durable child/);
+  }
+  assert.equal(repository.records.size, 2);
+  const child = [...repository.records.values()].find(
+    ({ attempt }) => attempt.retryOfAttemptId === parent.attempt.attemptId,
+  );
+  assert.ok(child);
+  assert.equal(child.attempt.attemptId, desktopOperationRetryAttemptIdV1(keyFor(parent)));
+});
+
+test("retry retention cannot expire a deterministic child while its parent remains retryable", async () => {
+  const repository = new MemoryRepository();
+  const clock = new MutableClock();
+  repository.expiryNowMs = () => clock.value;
+  const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({ repository, clock }));
+  const parent = await runtime.cancel(keyFor(await persist(
+    runtime,
+    target("retry-retention-parent"),
+    provider(),
+    {
+      operationId: "operation-retry-retention-parent",
+      attemptId: "attempt-retry-retention-parent",
+      retainForMs: 100,
+    },
+  )));
+  const createdAtMs = parent.updatedAtMs + 1;
+  const exactRetainForMs = parent.retention.deleteByMs - createdAtMs;
+  await assert.rejects(
+    () => runtime.retry(keyFor(parent), {
+      createdAtMs,
+      retainForMs: exactRetainForMs - 1,
+    }),
+    /cover the parent attempt privacy deadline/,
+  );
+  assert.equal(repository.records.size, 1, "a short-lived claim is never persisted");
+
+  clock.value = createdAtMs + exactRetainForMs - 1;
+  assert.ok(clock.value < parent.retention.deleteByMs);
+  const afterRestart = new DesktopOperationRuntimeV1(runtimeDependencies({ repository, clock }));
+  const exact = await afterRestart.retry(keyFor(parent), { retainForMs: 1 });
+  assert.equal(exact.retention.deleteByMs, parent.retention.deleteByMs);
+  assert.equal(repository.records.size, 2);
+
+  const secondRestart = new DesktopOperationRuntimeV1(runtimeDependencies({ repository, clock }));
+  const converged = await secondRestart.retry(keyFor(parent), { retainForMs: 1 });
+  assert.equal(
+    hashDesktopOperationEnvelopeV1(converged),
+    hashDesktopOperationEnvelopeV1(exact),
+  );
+  assert.equal(repository.records.size, 2, "restart converges instead of recreating child bytes");
 });
 
 test("recovery deletes every expired envelope before any surviving side effect", async () => {
@@ -1152,7 +1793,7 @@ test("recovery deletes every expired envelope before any surviving side effect",
   assert.equal(transportCalls, 0);
   assert.equal(result.deletedCount, 1);
   assert.equal(events[0], `delete:${expired.attempt.attemptId}`);
-  assert.ok(events.indexOf("present") > events.indexOf(`delete:${expired.attempt.attemptId}`));
+  assert.equal(events.includes("present"), false);
 });
 
 test("recovery processes more than one repository page without accumulating envelope snapshots", async () => {
@@ -1176,6 +1817,32 @@ test("recovery processes more than one repository page without accumulating enve
   assert.equal(recovery.failureCount, 0);
   assert.equal(repository.listPageCalls, 3);
   assert.equal(repository.maxPageRecordsReturned, 8);
+});
+
+test("a corrupt later recovery page cannot incrementally publish an earlier page", async () => {
+  const repository = new MemoryRepository();
+  const setup = new DesktopOperationRuntimeV1(runtimeDependencies({ repository }));
+  for (let index = 0; index < 9; index += 1) {
+    await responseReady(setup, target(`partial-recovery-${index}`), provider(), {
+      operationId: `operation-partial-recovery-${index}`,
+      attemptId: `attempt-partial-recovery-${index}`,
+    });
+  }
+  const originalListPage = repository.listPage.bind(repository);
+  let calls = 0;
+  repository.listPage = async (cursor, limit) => {
+    calls += 1;
+    if (calls === 2) throw new Error("corrupt later recovery page");
+    return originalListPage(cursor, limit);
+  };
+  const presentations: string[] = [];
+  const recovering = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    presentResult: (envelope) => { presentations.push(envelope.attempt.attemptId); },
+  }));
+
+  await assert.rejects(() => recovering.recover(), /corrupt later recovery page/);
+  assert.deepEqual(presentations, []);
 });
 
 test("privacy deadlines delete and block direct dispatch and acceptance", async () => {

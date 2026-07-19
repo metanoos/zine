@@ -91,10 +91,9 @@ preserve. `(( author directive ))` is a one-shot instruction to the selected
 operation: it is removed only after accepted success and cannot grant tools
 or access outside that operation's approved scope. A shared syntax kernel and
 the first desktop operations already enforce exact operation ranges,
-protected bytes, and current-session author authority. Deterministic
-task-specific selection and cross-press projection now share one verified
-runtime; the exclusion and correction surface, scoped memory, and durable
-context binding remain sequenced in the [Roadmap](ROADMAP.md).
+protected bytes, and current-session author authority; the complete selector,
+exclusion and correction surface, scoped memory, and durable context binding
+are sequenced in the [Roadmap](ROADMAP.md).
 
 ## Three deliberate gestures
 
@@ -251,12 +250,10 @@ to sell.
 
 The desktop press, headless MCP press, local relay, recursive file and folder
 traces, and the complete gesture set — Step, Publish, Attest, Mint, Cite,
-fork, merge, replay, and Reify export — work today. The shared deterministic
-selector and process projector now bind canonical selected context across the
-desktop and MCP adapters. The first authoring-syntax kernel and prepared
-desktop model operations also exist, but the correction and memory model,
-durable context binding, and complete operation coverage do not yet operate as
-one system.
+fork, merge, replay, and Reify export — work today. The first shared
+authoring-syntax kernel and prepared desktop model operations also exist, but
+the task-specific selector, correction and memory model, durable context
+binding, and cross-press rendering contract do not yet operate as one system.
 
 Three proofs govern what comes next:
 
@@ -378,8 +375,8 @@ relays: SHA-256 ids, Schnorr signatures, and the seven NIP-01 fields. Tor can
 expose a private relay. Coins are the user-facing discovery opt-in for Mint,
 valid-Coin indexing, and rendezvous; ordinary citation is part of core
 composition. Kademlia is the internal routing component, not a separate opt-in,
-and remains under implementation; global discovery also needs
-operator-provided super-peers and real citation density.
+and is integrated and exercised; global discovery still needs operator-provided
+super-peers and real citation density.
 
 ---
 
@@ -701,17 +698,17 @@ and same-minter attestation verify. `H` clusters independent mints; it is an
 index coordinate, not another citation type.
 
 **The DHT carries event pointers, not content or private addresses.** The
-integrated Kademlia component answers one question: *which
+Kademlia component is being implemented to answer one question: *which
 published events cite content `H`?* Each value is `{eventId, relayUrl}` for a
 signed carrying node on a stranger-readable relay. A querier fetches and
 verifies the carrying event, its `q`, the Coin target, and the same-minter
 attestation before evaluating the candidate. Private admission details are
-exchanged only after vetting. The routing layer still needs
+exchanged only after vetting. The in-progress implementation still needs
 operator-provided super-peer bootstrap addresses.
 Its current configuration path is transactional: an unusable replacement is
 never left persisted with the prior node stopped.
 
-**The index is bounded and merge-safe.** The native component caps
+**The index is bounded and merge-safe.** The in-progress native component caps
 records at 12 KiB and 64 pointers. It validates remote keys, schemas,
 coordinates, and URLs before storage, keeps a disposable 1,024-record remote
 cache separate from capacity reserved for locally owned coordinates, and never
@@ -722,7 +719,7 @@ first Get and merge valid replicas; stale libp2p auto-publication is disabled.
 
 Two paths can produce a match. In the trust-bounded v1, a mutual peer who can
 read both chains sees the shared valid-Coin citation and brokers an
-introduction. With Coins enabled, the Kademlia path accelerates
+introduction. With Coins enabled, the in-progress Kademlia path accelerates
 non-mutual discovery: publishing a carrying node to a stranger-readable relay
 places its pointer under each verified Coin target's `H`. Every ordinary
 social `q` is inspected in bounded batches rather than a fixed first-N slice;
@@ -733,7 +730,7 @@ relation; Publish controls its reachability, and an indexing failure never
 rolls Publish back.
 
 Relay verification is also bounded because a DHT pointer chooses an untrusted
-host. The native reader requests exact ids, rejects unsolicited and
+host. The in-progress reader requests exact ids, rejects unsolicited and
 oversized events, caps parallelism and total bytes, closes subscriptions and
 late WebSocket handshakes, and obeys caller cancellation plus a hard discovery
 deadline. Only events that still pass signature, citation, and Coin-hash
@@ -803,15 +800,15 @@ hypotheses. Last updated 2026-07-18.
 | Capability | State | How to check |
 |---|---|---|
 | Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke; folder heads carry direct manifests and propagate recursively toward Root |
-| Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, membership transition, hash, lineage, and operation id; client and MCP tests share fixed cross-runtime folder vectors, and the real-relay smoke exercises interrupted and retried recursive checkpoints. Client tests also cover add versus advance, explicit folder/Root Step plumbing, durable retry ids, nested AI context, and Replay roll-up collapse |
+| Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, membership transition, hash, lineage, and operation id; client tests exercise add versus advance, explicit folder/Root Step plumbing, durable retry ids, nested AI context, and Replay roll-up collapse. Fixed cross-runtime folder vectors and explicit crash-boundary real-relay fixtures remain hardening work |
 | Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
 | Step, Publish (wire name Send), Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
-| Passphrase-gated desktop vault sessions with independent Roots, encrypted webview workspaces, relay databases, ACLs, signing keys, and provider secrets | Implemented on desktop; browser remains read-only | Vault lifecycle and encrypted-storage tests, registry recovery tests, key/model store tests, and the Tauri Stronghold shell |
+| Desktop Stronghold storage for signing and provider secrets | Implemented on desktop; browser remains read-only | `secret-store.test.ts`, `secret-migration.test.ts`, key/model store tests, and the Tauri Stronghold shell |
 | Headless MCP press with its own voice key and permanent profile Root | Implemented | Offline stdio smoke proves zero-folder cold start, exact signed-event outbox, raw node reads, and Root/key reuse; isolated real-relay integration flushes a queued event unchanged, preserves optional source forks, and exercises external Publish |
-| Prepared desktop MODEL operations and approval gating | Implemented for direct single-shot gestures; durable for desktop Extend | Canonical selected context, exact prepared identity, explicit approval, cancellation, and stale-result recovery are exercised across the five direct operations. Desktop Extend additionally persists before provider I/O, requires explicit provisional-result review, and recovers idempotent local application through the encrypted native journal. Active directive consumption is fail-closed; the separate agent loop still uses its own transport, and `preparedRequestHash` is not yet stored in Step metadata |
-| Current text plus structured trace context in desktop prompts | Shared deterministic selection and cross-press projection implemented | Desktop and MCP adapters share selection corpora, bounds, cancellation, and projection invariants. Durable context binding in signed Step metadata and scoped memory remain deferred |
-| Shared authoring-syntax kernel and desktop adapters for Extend (continuation) and Settle (revision) | Initial deterministic slice implemented; authority is current-editor-session-only | `packages/trace-context` pins UTF-16 parsing, protected precedence, exact operation clipping, authority failures, directive markers, local excerpts, malformed syntax, and generated 0/100/1,000/10,000-candidate scale fixtures. Settle retains atomic accepted-success cleanup. Plain desktop Extend has durable request/result/application recovery, while active Extend directives fail closed until their deletion plan is part of the private envelope. Persisted authority, promotion, recoverable directive consumption, other operations, and MCP authoring-syntax enforcement remain deferred |
+| Prepared desktop MODEL operations and approval gating | Direct gestures are prepared; Extend also has a durable private execution path | `prepared-operation.test.ts`, `context-snapshot.test.ts`, `model-operation-executor.test.ts`, and `llm-prepared.test.ts` cover preparation. `desktop-operation-runtime.test.ts`, `desktop-operation-review.test.ts`, and the native journal/proxy tests cover persist-before-provider ordering, bounded recovery, ambiguous no-redispatch, explicit duplicate-risk retry, provisional review, compare-and-set application, exact receipts, and vault-bound cancellation. The separate agent loop shares the cancellable native transport but remains outside the durable operation journal; `preparedRequestHash` is not yet signed into Step metadata |
+| Current text plus structured trace context in desktop prompts | Implemented as a client-local compatibility baseline; privately exact-bound for durable Extend | Direct operations gather current file/folder text and a chronological process log through `context-block.ts`, `context-snapshot.ts`, and `prepared-operation.ts`. The Extend journal self-consistency-checks the exact selected context and approved request, but there is no shared task-specific selector, scoped memory, cross-press fixture contract, or portable signed context/result binding yet |
+| Shared authoring-syntax kernel and desktop adapters for Extend (continuation) and Settle (revision) | Initial deterministic slice implemented; authority is current-editor-session-only | `packages/trace-context` pins UTF-16 parsing, protected precedence, exact operation clipping, authority failures, directive markers, local excerpts, malformed syntax, and generated 0/100/1,000/10,000-candidate scale fixtures. Desktop tests cover manual versus paste/drop/MODEL/undo/reload authority, exact prepared identity, protected-output rejection, and inert legacy behavior. Extend additionally records the exact directive deletion plan and durable accepted-application receipt so crash recovery can converge without restoring authority or redispatching provider work. Persisted authority, explicit promotion, Inspector correction/exclusion, durable Settle, other operations, and MCP parity remain deferred |
 | Per-delta human/model attribution | Implemented | Attribution regression suite; trust status remains asserted unless corroborated through a signed seam |
 | Fork and merge | Implemented for owned recursive destinations and current top-level foreign flows | Nested Scan/adoption/fork tests plus merge and ownership tests; recursive fork-on-write through an already-foreign folder remains deferred |
 | Valid-Coin mutual-peer co-citation and process vet | Implemented and tested | Signed TraceHeads are author-bound and resolved through verified chains; only cryptographically completed Coins survive intersection. `vet.ts`, `vet-walker.ts`, and their tests cover the process vet |
@@ -825,12 +822,7 @@ Desktop vault caveat: Stronghold's password and snapshot KDFs are
 intentionally expensive. A fully unoptimized development build can appear to
 stall for minutes; the current development profile optimizes only the
 cryptographic hot paths. Release KDF parameters and the application security
-contract are unchanged. New vaults use independent KDF salts, authenticated
-encrypted webview state, relay databases, and ACLs. Relay databases are
-physically partitioned and bound only after unlock, but canonical signed
-protocol events are not additionally encrypted by the vault passphrase at
-rest. The adopted legacy vault keeps its existing Stronghold and `~/.tracer`
-paths so its passphrase and relay history continue to work.
+contract are unchanged.
 
 Reify writes each chosen Step's authoritative `snapshot` to its ordinary file
 path. It never substitutes the live unstepped editor buffer and never embeds
@@ -943,8 +935,7 @@ The normative trust posture is in
   corpus affinity after controlling for topic and popularity.
 - Longitudinal coherence or conditional-compression features adding calibrated
   vetting value without being mistaken for proof of humanity or identity.
-- Organic co-citation density sufficient to justify operating or expanding
-  global rendezvous.
+- Organic co-citation density sufficient to justify global rendezvous work.
 - Clean-machine release installation on every supported desktop platform.
 
 These gaps are roadmap gates, not details to hide. A claim moves off this
@@ -962,8 +953,8 @@ The execution posture is therefore conviction with gates. Build the complete
 trace-aware loop, keep text-only and bounded-history comparisons inside the
 architecture, and promote claims only when measured outcomes support them.
 Individual writers remain the first audience; accountable teams remain the
-initial paid wedge. Managed services and operation or expansion of a global
-network remain downstream of actual retained use.
+initial paid wedge. Managed services and global network work remain downstream
+of actual retained use.
 
 AI-assisted writing remains the product center. The defensible slice is the
 portable boundary crossing that proprietary single-editor logs cannot provide:
@@ -998,7 +989,7 @@ supported operation breadth        optional paid team layer
 scoped longitudinal memory, only if independently beneficial
           |
           v
-calibration or operated network layers, only when real density requires them
+calibration or network layers, only when real density requires them
 ```
 
 ## Current foundation
@@ -1013,8 +1004,7 @@ Already built:
 - distinct human, model, and agent voice keys with per-delta attribution;
 - local and hosted relay implementations, with a remaining hosted ACL gap;
 - raw-file Reify with an optional signed-event bundle and report;
-- passphrase-gated desktop vault sessions with independent Roots, encrypted
-  webview state, relay databases, ACLs, signing keys, and provider secrets;
+- Stronghold-backed desktop signing and provider secrets;
 - verified recursive folder/Root checkpoint causes, distinct child `advance`,
   durable operation grouping, explicit folder/Root Step, and derived Replay
   collapse;
@@ -1025,11 +1015,10 @@ Already built:
 - a desktop adapter for the Extend (continuation) and Settle (revision)
   operations with exact current-session manual-origin authority,
   protected-output validation, and accepted-success cleanup;
-- deterministic task-specific trace selection, byte budgeting, process
-  projection, cancellation, and fixed desktop/MCP parity corpora;
-- canonical selected context bound into prepared desktop requests;
-- fixed cross-runtime folder-chain vectors and interrupted/retried recursive
-  checkpoint recovery exercised against a real relay;
+- a vault-scoped encrypted desktop Extend journal that binds the exact approved
+  request, selected context, provider profile, attempt, provisional result,
+  application intent, and crash-pad receipt; recovers without ambiguous
+  redispatch; and cancels/drains native HTTP work at the vault boundary;
 - the single Coins discovery opt-in with valid-Coin co-citation, durable
   Publish-side indexing, hostile-relay verification, and native Kademlia
   routing; no bootstrap network is operated;
@@ -1037,10 +1026,13 @@ Already built:
 - a preregistered writing-outcome study and operational scoring rubric; and
 - a preregistered narration study showing a narrow process-description effect.
 
-Not yet built as one system: Inspector exclusions/corrections/promotion,
-persisted directive authority and durable consumption receipts, scoped memory,
-durable result-to-context binding in signed Step metadata, writing-outcome
-evaluation, or complete desktop/MCP operation coverage.
+Not yet built as one system: task-specific evidence selection and rendering,
+cross-press manifest parity, Inspector exclusions/corrections/promotion,
+persisted directive authority, scoped memory, durable Settle and other
+operation adapters, portable signed result-to-context binding,
+writing-outcome evaluation, or complete desktop/MCP operation coverage. Fixed
+cross-runtime folder vectors and explicit crash-boundary real-relay recovery
+fixtures remain hardening work for the recursive checkpoint cut.
 
 ## Phase 0: declare and preregister
 
@@ -1065,22 +1057,21 @@ describe the same claim without presenting conviction as evidence.
 
 ## Phase 1: shared deterministic context runtime
 
-This phase is in progress. The authoring-syntax kernel, deterministic evidence
-selector and renderer, compatibility baseline, cancellation and quota bounds,
-golden cases, scale corpus, and desktop/MCP process-projection parity exist.
-Correction/preference stores, complete Inspector contracts, and a reviewed
-private-store capability do not.
+This phase is in progress. The authoring-syntax kernel, compatibility baseline,
+golden cases, and scale corpus exist; the task-specific evidence selector,
+rendered manifest contract, correction/preference stores, cancellation and
+quota boundaries, and desktop/MCP parity do not.
 
-The landed recursive-zine and shared-runtime floor now includes:
+Harden the landed recursive-zine cut while building the shared runtime:
 
-- fixed cross-runtime folder-chain vectors in the conformance corpus;
-- interrupted and retried recursive checkpoints against a real relay;
+- add fixed cross-runtime folder-chain vectors to the conformance corpus;
+- exercise interrupted and retried recursive checkpoints against a real relay;
 - keep desktop and MCP writers on the same operation-id and `advance` rules;
   and
 - keep derived roll-ups inspectable even when Replay groups them beneath their
   originating gesture.
 
-Continue the non-normative package used by every press and provider adapter:
+Build a non-normative package used by every press and provider adapter:
 
 - closed operation, evidence, correction, preference, directive, error, and
   Inspector contracts;
@@ -1098,22 +1089,25 @@ The protocol package must not import the context package. Derived evidence,
 preferences, and selector output are product interpretation, never signed
 protocol truth.
 
-The recursive checkpoint and deterministic cross-press projection criteria now
-pass protocol, parity, and real-relay fixtures, including nil, empty, malformed,
-oversized, Unicode, cancelled, and invalid-trace cases. Phase 1 remains open
-until the correction/preference, Inspector, and private-store contracts above
-are closed without weakening those boundaries.
+Phase 1 succeeds when recursive checkpoints pass protocol and real-relay
+fixtures, and desktop and MCP readers produce identical selected claims and
+rendered bytes from the same context fixtures, including nil, empty, malformed,
+oversized, Unicode, cancelled, and invalid-trace cases.
 
 ## Phase 2: one complete desktop vertical slice
 
-This phase now has one durable desktop Extend path: Prompt Inspector freezes the
-selected signed-chain boundary, the encrypted native journal persists before
-provider I/O, a private strip presents provisional results, and acceptance
-writes an idempotent local crash-pad receipt before one editor transaction.
-Active directive consumption remains fail-closed until the private envelope
-carries its exact deletion plan. Exclusion, correction, explicit promotion,
-persisted authority, signed Step linkage, and Settle lifecycle reuse are still
-required before the broader vertical slice is complete.
+This phase now has one private execution-and-recovery cut for desktop Extend.
+Extend prepares through the shared syntax kernel and Prompt Inspector, then
+persists the exact approved boundary before provider I/O. Its encrypted
+vault-scoped journal supports bounded review history, explicit ambiguous retry,
+provisional result review, compare-and-set application, exact accepted receipts,
+and crash recovery without automatic provider redispatch. Native vault lock,
+reload recovery, and factory reset cancel and drain active provider requests.
+
+The broader phase is not complete. Settle still uses the syntax kernel without
+the durable execution journal, and exclusion, correction, explicit promotion,
+persisted directive authority, task-specific selection, and scoped memory
+remain open.
 
 Integrate Extend and Settle first because continuation and revision expose
 different ways trace may help. Preserve today's Stir behavior through the new
@@ -1133,10 +1127,11 @@ grammar, but gate its generalized adapter separately.
 - Preparation, approval, provider dispatch, result review, compare-and-set
   application, consumption receipts, and cleanup are idempotent and recoverable.
 
-Disposable local envelopes are allowed for dogfood. They must not be described
-as final protocol binding or generally released private storage.
+The current dogfood envelope is encrypted, vault-scoped, retention-bounded
+private recovery state. It must not be described as portable signed provenance,
+final protocol binding, or a generally released private-storage contract.
 
-## Phase 3: durable binding and outcome evidence
+## Phase 3: portable signed binding and outcome evidence
 
 After the trust/schema review:
 

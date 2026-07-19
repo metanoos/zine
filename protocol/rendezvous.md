@@ -24,9 +24,10 @@ sketches. Part II records the rationale.
 opt-in. Ordinary citation works without it. Enabling Coins covers Mint,
 valid-Coin Send-side indexing, and mutual-peer plus global Coin rendezvous.
 Kademlia is the routing component inside that package, not a separate feature
-or setting, and remains under implementation. The normative rules below define
-the intended interoperable behavior even where the reference package is
-incomplete.
+or setting. Its core routing path is integrated and exercised in the reference
+package. An operated bootstrap network, deployment evidence, and production
+security hardening remain future work. The normative rules below define the
+intended interoperable behavior.
 
 ---
 
@@ -175,8 +176,8 @@ ahead of disposable remote values when truncating, and ranks the merged remote
 set by `SHA-256(H || 0x00 || eventId || 0x00 || relayUrl)` before both count and
 byte truncation. Sequential replicas therefore converge on the same bounded
 set instead of granting lexicographically low event ids eviction priority. It
-  reserves storage for up to 2,048 owned coordinates independently of its
-  1,024-record remote cache.
+reserves storage for up to 2,048 owned coordinates independently of its
+1,024-record remote cache.
 Remote-cache saturation therefore cannot evict or prevent an owned record.
 These are index-availability limits, not supply claims: Kademlia results MUST
 NOT be presented as global Coin supply, popularity, trust, or reputation.
@@ -329,18 +330,12 @@ works the moment two peers share a mutual, before any DHT density exists.
 For each pair of peers (A, B) that you — the introducer C — mutually trust:
 
 ```
-T_A = ⋃ verified completed-Coin q targets across A's readable Sent file traces
-T_B = ⋃ verified completed-Coin q targets across B's readable Sent file traces
+T_A = ⋃ valid Coin q targets across A's readable Sent file traces
+T_B = ⋃ valid Coin q targets across B's readable Sent file traces
 shared = T_A ∩ T_B
 if shared ≠ ∅:
     surface intro(A, B, shared, sample traces, A↔B reachability hints)
 ```
-
-Before entering either set, a target MUST be fetched as a cryptographically
-valid Coin genesis and paired with a valid same-minter `TraceAttestation` that
-completes Mint. Ordinary file/folder targets, malformed Coins, bare pending Coin
-geneses, and third-party-only attestations do not participate in mutual-peer
-rendezvous even when both peers carry identical `q` ids.
 
 C sees the coincidence because C is the one node already authorized to read
 both chains. **C brokers the introduction** — surfaces it to a human, who
@@ -660,8 +655,10 @@ may treat that as missing evidence, never as an invalid trace.
 # Open questions (deferred)
 
 **Implementation status.** The trust-bounded mutual-peer path and vet are built
-and tested. The Kademlia component remains under implementation inside the
-Coins package; its existing exercised slices include:
+and tested. The core Kademlia component is integrated and exercised inside the
+Coins package; the remaining work is operating bootstrap peers, gathering
+deployment evidence, and completing production security hardening. Its
+implemented slices include:
 - `provenance.ts` — `canonicalQuoteText`, `quoteHash` (the exact coordinate H)
 - `quote-fuzzy.ts` — MinHash signature + LSH banding (the fuzzy recall layer, §R2)
 - `co-citation.ts` — author-bound current-head resolution, completed-Coin

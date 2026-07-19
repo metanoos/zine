@@ -97,8 +97,8 @@ relays: SHA-256 ids, Schnorr signatures, and the seven NIP-01 fields. Tor can
 expose a private relay. Coins are the user-facing discovery opt-in for Mint,
 valid-Coin indexing, and rendezvous; ordinary citation is part of core
 composition. Kademlia is the internal routing component, not a separate opt-in,
-and remains under implementation; global discovery also needs
-operator-provided super-peers and real citation density.
+and is integrated and exercised; global discovery still needs operator-provided
+super-peers and real citation density.
 
 ---
 
@@ -420,17 +420,17 @@ and same-minter attestation verify. `H` clusters independent mints; it is an
 index coordinate, not another citation type.
 
 **The DHT carries event pointers, not content or private addresses.** The
-integrated Kademlia component answers one question: *which
+Kademlia component is being implemented to answer one question: *which
 published events cite content `H`?* Each value is `{eventId, relayUrl}` for a
 signed carrying node on a stranger-readable relay. A querier fetches and
 verifies the carrying event, its `q`, the Coin target, and the same-minter
 attestation before evaluating the candidate. Private admission details are
-exchanged only after vetting. The routing layer still needs
+exchanged only after vetting. The in-progress implementation still needs
 operator-provided super-peer bootstrap addresses.
 Its current configuration path is transactional: an unusable replacement is
 never left persisted with the prior node stopped.
 
-**The index is bounded and merge-safe.** The native component caps
+**The index is bounded and merge-safe.** The in-progress native component caps
 records at 12 KiB and 64 pointers. It validates remote keys, schemas,
 coordinates, and URLs before storage, keeps a disposable 1,024-record remote
 cache separate from capacity reserved for locally owned coordinates, and never
@@ -441,7 +441,7 @@ first Get and merge valid replicas; stale libp2p auto-publication is disabled.
 
 Two paths can produce a match. In the trust-bounded v1, a mutual peer who can
 read both chains sees the shared valid-Coin citation and brokers an
-introduction. With Coins enabled, the Kademlia path accelerates
+introduction. With Coins enabled, the in-progress Kademlia path accelerates
 non-mutual discovery: publishing a carrying node to a stranger-readable relay
 places its pointer under each verified Coin target's `H`. Every ordinary
 social `q` is inspected in bounded batches rather than a fixed first-N slice;
@@ -452,7 +452,7 @@ relation; Publish controls its reachability, and an indexing failure never
 rolls Publish back.
 
 Relay verification is also bounded because a DHT pointer chooses an untrusted
-host. The native reader requests exact ids, rejects unsolicited and
+host. The in-progress reader requests exact ids, rejects unsolicited and
 oversized events, caps parallelism and total bytes, closes subscriptions and
 late WebSocket handshakes, and obeys caller cancellation plus a hard discovery
 deadline. Only events that still pass signature, citation, and Coin-hash

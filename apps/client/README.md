@@ -41,34 +41,6 @@ The hosted browser surface is deliberately read-only and model-free: it cannot
 sign, Send, Attest, or execute MODEL actions until the deferred encrypted
 browser vault exists.
 
-## Desktop vaults
-
-Desktop startup lists the local vaults and unlocks exactly one for the session.
-Each vault has its own passphrase, Stronghold snapshot and KDF salt, permanent
-Root, encrypted workspace records, relay database, access-control list, public
-key/model profiles, crash pads, layouts, recipes, and other local workspace
-state. Logical webview keys and values are both hidden before unlock, while
-per-record ciphertext keeps ordinary editor saves proportional to the record
-that changed. Appearance preferences such as theme and navigation width remain
-shared across the install. The **Vaults** view, immediately before **Keys**,
-can lock the active vault, switch to another vault, or create a new one.
-Locking is fail-closed: another vault is never selectable until Stronghold,
-relay, and Tor reachability have all confirmed shutdown. Normal application
-exit performs the same native shutdown; an unexpected stale listener blocks
-the next unlock instead of being reused across vaults.
-
-Installs created before multi-vault support are adopted in place as a vault
-named **Personal**. Its Stronghold snapshot and KDF salt are neither moved nor
-re-encrypted, so the existing passphrase continues to work. Its existing relay
-database and ACL remain at `~/.tracer`; every newly-created vault keeps those
-files in its own native directory. After the first successful legacy unlock,
-plaintext webview workspace records are migrated into encrypted vault storage.
-Factory reset remains the only operation that deletes every local vault.
-
-Relay databases are physically partitioned and bound only after their vault
-unlocks, but their canonical signed protocol events are not additionally
-encrypted with the vault passphrase at rest.
-
 Nested paths are stored as recursive folder traces, not slash-joined file
 names. Scanning a source tree preserves its directory hierarchy inside the
 private Scan folder, and adopting or forking a file into Root creates any
@@ -88,18 +60,27 @@ A complete `((…))` candidate becomes an instruction only when every byte was
 typed directly by the acting local author during the current mounted editor
 session and lies wholly inside the prepared operation range. Paste, drop,
 MODEL, undo/redo restoration, reload, mixed origin, wrong-author, malformed,
-and unknown bytes remain inert quoted data. Accepted Settle results validate
-protected content and remove consumed directives as part of the same editor
-transaction. Desktop Extend now uses the encrypted native operation journal,
-explicit provisional-result review, and an idempotent local apply receipt.
-Until that private envelope carries the exact directive-deletion plan, an
-Extend request with active `((…))` directives fails closed before provider I/O.
+and unknown bytes remain inert quoted data. Accepted Extend/Settle results
+validate protected content and remove consumed directives as part of the same
+editor transaction.
 
-This is a dogfood slice, not the finished context system. Plain Extend request,
-response-review, and local-apply recovery are durable; directive authority is
-not yet persisted across reloads or moves. Explicit promotion, recoverable
-directive consumption, signed result-to-context binding, scoped memory,
-Stir/Reply/Analyze/Run authoring adapters, and MCP parity are still deferred.
+Desktop Extend adds a vault-scoped encrypted operation journal around that
+prepared boundary. It durably records the exact approved request, selected
+context, provider profile, attempt, provisional result, local application
+intent, and exact crash-pad receipt. Recovery never redispatches a provider
+request whose outcome may be unknown; retrying that state requires an explicit
+possible-duplicate acknowledgement. Results remain provisional until the
+writer accepts a compare-and-set application. Lock, reload recovery, and
+factory reset close native registration, cancel and drain active HTTP work,
+and verify the registry is empty before releasing the vault binding.
+
+This is still a dogfood slice, not the finished context system. Directive
+authority deliberately does not persist across reloads or moves; an expired
+directive-bearing attempt must be re-prepared under current-session authority.
+Explicit promotion, Inspector exclusions and corrections, task-specific
+evidence selection, scoped memory, durable Settle and other operation adapters,
+MCP parity, and portable signed result-to-context binding remain deferred. The
+private journal is recovery state, not protocol provenance.
 
 ## Agent run recipes
 

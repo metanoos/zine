@@ -20,10 +20,11 @@ demonstrated.
 | [Roadmap](ROADMAP.md) | How the trace-context runtime, evaluation, and later team layers are sequenced |
 | [Company](COMPANY.md) | How an open sovereign protocol can support an optional paid layer |
 
-Implementation architecture: [Desktop operation lifecycle](DESKTOP_OPERATION_LIFECYCLE.md)
-defines the private/local Phase 2 envelope, crash semantics, and integration
-boundary for the first recoverable Extend operation. It is not a protocol
-specification or an implemented-storage claim.
+Implementation references sit below those reader-facing documents. The
+[desktop operation lifecycle](DESKTOP_OPERATION_LIFECYCLE.md) defines the
+private Phase-2 Extend journal, recovery states, retry rules, application
+receipt, and vault-bound cancellation behavior. It is not a wire specification
+or portable provenance format.
 
 ## Accepted migration direction
 

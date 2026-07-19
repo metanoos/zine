@@ -32,6 +32,11 @@ import {
   modelSystemInstruction,
   openAIModelOptions,
 } from "./model-config.js";
+import {
+  createCancellableTauriEventGateV1,
+  invokeCancellableTauriLlmFetchV1,
+} from "./llm.js";
+import { requireDesktopOperationJournalSessionV1 } from "./desktop-operation-journal-session.js";
 
 /** A tool call the model wants executed. `args` is the parsed JSON object. */
 export interface ToolCall {
@@ -284,17 +289,27 @@ async function rawRequest(
     const { invoke, Channel } = await import("@tauri-apps/api/core");
     const chan = new Channel<string>();
     const chunks: string[] = [];
-    chan.onmessage = (frame) => chunks.push(frame);
-    const out = (await invoke("llm_fetch", {
-      url,
-      method: "POST",
-      headers,
-      body,
-      stream: false,
-      onEvent: chan,
-    })) as string;
-    // Tauri returns the assembled body directly for non-streaming calls.
-    return out ?? chunks.join("");
+    const eventGate = createCancellableTauriEventGateV1(
+      signal,
+      (frame: string) => { chunks.push(frame); },
+      () => { chunks.length = 0; },
+    );
+    chan.onmessage = eventGate.onEvent;
+    try {
+      await invokeCancellableTauriLlmFetchV1(invoke, {
+        requestId: crypto.randomUUID(),
+        journalGeneration: requireDesktopOperationJournalSessionV1().journalGeneration,
+        url,
+        method: "POST",
+        headers,
+        body,
+        stream: false,
+        onEvent: chan,
+      }, signal);
+      return chunks.join("");
+    } finally {
+      eventGate.dispose();
+    }
   }
   const res = await fetch(devProxyUrl(url), { method: "POST", headers, body, signal });
   if (!res.ok) throw new Error(`${protocolLabel} HTTP ${res.status}: ${await res.text()}`);

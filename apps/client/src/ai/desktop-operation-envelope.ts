@@ -12,7 +12,10 @@ import {
   type PreparedOperation,
   type PreparedTargetRevision,
 } from "./prepared-operation.js";
-import { traceSourceRangeForOperationV1 } from "./trace-authoring-adapter.js";
+import {
+  traceSourceRangeForOperationV1,
+  type PreparedTraceAuthoringV1,
+} from "./trace-authoring-adapter.js";
 
 const encoder = new TextEncoder();
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -101,7 +104,11 @@ export interface DesktopPreparedRequestV1 {
   requestId: string;
   operation: "extend";
   operationInputs: Readonly<OpInputs>;
+  /** Exact apply contract; directive authority is still valid only this mount. */
+  traceAuthoring: PreparedTraceAuthoringV1;
   messages: readonly ChatMessage[];
+  /** Approved public provenance identity. Never a credential or signing key. */
+  modelVoicePubkey: string;
   provider: DesktopProviderIdentityV1;
   maxOutputTokens: number;
   targetRevision: PreparedTargetRevision;
@@ -298,7 +305,12 @@ export function createDesktopOperationEnvelopeV1(
     requestId: requireNonEmptyText(input.prepared.requestId, "requestId", 512),
     operation: "extend" as const,
     operationInputs: cloneJson(input.prepared.operationInputs),
+    traceAuthoring: cloneJson(requireExtendTraceAuthoring(input.prepared.traceAuthoring)),
     messages: input.prepared.messages.map((message) => ({ ...message })),
+    modelVoicePubkey: requireHash(
+      input.prepared.provenance.modelVoicePubkey,
+      "prepared modelVoicePubkey",
+    ),
     provider,
     maxOutputTokens: input.maxOutputTokens,
     targetRevision: { ...input.prepared.targetRevision },
@@ -417,13 +429,15 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
 
   const prepared = requireRecord(envelope.prepared, "prepared");
   requireExactKeys(prepared, [
-    "version", "requestId", "operation", "operationInputs", "messages", "provider", "maxOutputTokens",
+    "version", "requestId", "operation", "operationInputs", "traceAuthoring", "messages",
+    "modelVoicePubkey", "provider", "maxOutputTokens",
     "targetRevision", "upstreamPreparedRequestHash", "requestSha256",
   ], "prepared");
   if (prepared.version !== 1 || prepared.operation !== "extend") fail("prepared request is unsupported");
   requireNonEmptyText(prepared.requestId, "prepared.requestId", 512);
   requireHash(prepared.upstreamPreparedRequestHash, "prepared.upstreamPreparedRequestHash");
   requireHash(prepared.requestSha256, "prepared.requestSha256");
+  requireHash(prepared.modelVoicePubkey, "prepared.modelVoicePubkey");
   if (!Array.isArray(prepared.messages) || prepared.messages.length === 0) fail("prepared.messages must be non-empty");
   for (const [index, raw] of prepared.messages.entries()) {
     const message = requireRecord(raw, `prepared.messages[${index}]`);
@@ -481,6 +495,12 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   if (manifestOperation.operation !== "extend") fail("selected context is not for Extend");
   const manifestTarget = requireRecord(manifestOperation.target, "selectedContext.manifest.operation.target");
   const manifestCurrentText = requireText(manifestTarget.currentText, "manifest target currentText");
+  validatePreparedTraceAuthoringV1(
+    prepared.traceAuthoring,
+    operationInputs,
+    target,
+    manifestCurrentText,
+  );
   validateSelectedOperationRange(manifestOperation.range, operationInputs, manifestCurrentText);
   const manifestHashes = requireRecord(manifest.hashes, "selectedContext.manifest.hashes");
   requireHash(manifestHashes.frozenInputsSha256, "selectedContext.manifest.hashes.frozenInputsSha256");
@@ -639,7 +659,11 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   }
   if (status === "stale") {
     const staleFault = requireRecord(envelope.fault, "fault");
-    const expectedStage = finalTransitionFromStatus === "accepted" ? "apply" : "review";
+    const expectedStage = finalTransitionFromStatus === "accepted"
+      ? "apply"
+      : finalTransitionFromStatus === "prepared" || finalTransitionFromStatus === "approved"
+        ? "approve"
+        : "review";
     if (staleFault.stage !== expectedStage) {
       fail(`TARGET_STALE stage must be ${expectedStage} for its transition chain`);
     }
@@ -753,6 +777,230 @@ function validateSelectedOperationRange(
   }
 }
 
+function requireExtendTraceAuthoring(
+  value: PreparedOperation["traceAuthoring"],
+): PreparedTraceAuthoringV1 {
+  if (!value || value.operation !== "extend") {
+    fail("prepared Extend must carry its exact trace-authoring apply contract");
+  }
+  return value;
+}
+
+function validatePreparedTraceAuthoringV1(
+  value: unknown,
+  operationInputs: Record<string, unknown>,
+  target: PreparedTargetRevision,
+  currentText: string,
+): asserts value is PreparedTraceAuthoringV1 {
+  const authoring = requireRecord(value, "prepared.traceAuthoring");
+  requireExactKeys(authoring, [
+    "version", "kernelVersion", "authorityPersistence", "operation", "operationRange",
+    "operationText", "compiled", "instructionSection", "quotedExcerptSection",
+    "promptTargetText", "protectedTokens", "stagedDirectiveDeletions",
+  ], "prepared.traceAuthoring");
+  if (
+    authoring.version !== 1
+    || authoring.kernelVersion !== 1
+    || authoring.authorityPersistence !== "current-editor-session-only"
+    || authoring.operation !== "extend"
+  ) fail("prepared trace authoring contract is unsupported");
+  const operationRange = requireUtf16Range(
+    authoring.operationRange,
+    "prepared.traceAuthoring.operationRange",
+  );
+  const expectedRange = traceSourceRangeForOperationV1("extend", operationInputs, currentText);
+  if (
+    operationRange.fromUtf16 !== expectedRange.fromUtf16
+    || operationRange.toUtf16 !== expectedRange.toUtf16
+  ) fail("prepared trace authoring range does not match the exact Extend source range");
+  if (
+    requireText(authoring.operationText, "prepared.traceAuthoring.operationText")
+    !== currentText.slice(operationRange.fromUtf16, operationRange.toUtf16)
+  ) fail("prepared trace authoring text does not match the selected target bytes");
+  requireText(authoring.instructionSection, "prepared.traceAuthoring.instructionSection");
+  requireText(authoring.quotedExcerptSection, "prepared.traceAuthoring.quotedExcerptSection");
+  requireText(authoring.promptTargetText, "prepared.traceAuthoring.promptTargetText");
+  if (!Array.isArray(authoring.protectedTokens) || authoring.protectedTokens.length !== 0) {
+    fail("prepared Extend trace authoring must not carry Settle protected tokens");
+  }
+
+  const compiled = requireRecord(authoring.compiled, "prepared.traceAuthoring.compiled");
+  requireExactKeys(compiled, [
+    "version", "ok", "operationRange", "scan", "decisions", "directives", "excerpts",
+    "renderedText", "errors",
+  ], "prepared.traceAuthoring.compiled");
+  if (compiled.version !== 1 || compiled.ok !== true) fail("prepared trace authoring compile failed");
+  const compiledRange = requireUtf16Range(
+    compiled.operationRange,
+    "prepared.traceAuthoring.compiled.operationRange",
+  );
+  if (canonicalJsonV1(compiledRange) !== canonicalJsonV1(operationRange)) {
+    fail("compiled trace authoring range does not match its operation range");
+  }
+  requireText(compiled.renderedText, "prepared.traceAuthoring.compiled.renderedText");
+  if (!Array.isArray(compiled.errors) || compiled.errors.length !== 0) {
+    fail("prepared trace authoring must not carry compile errors");
+  }
+  validateAuthoringScan(compiled.scan);
+  validateAuthoringDecisions(compiled.decisions);
+  validateAuthoringExcerpts(compiled.excerpts, currentText);
+  if (!Array.isArray(compiled.directives)) fail("prepared trace authoring directives must be an array");
+  const directiveRanges = compiled.directives.map((raw, index) => (
+    validateCompiledDirective(raw, index, operationRange, target, currentText)
+  ));
+  if (!Array.isArray(authoring.stagedDirectiveDeletions)) {
+    fail("prepared trace authoring staged deletions must be an array");
+  }
+  const deletions = authoring.stagedDirectiveDeletions.map((raw, index) =>
+    requireUtf16Range(raw, `prepared.traceAuthoring.stagedDirectiveDeletions[${index}]`));
+  if (canonicalJsonV1(deletions) !== canonicalJsonV1(directiveRanges)) {
+    fail("prepared trace authoring staged deletions must exactly match its directives");
+  }
+}
+
+function validateAuthoringScan(value: unknown): void {
+  const scan = requireRecord(value, "prepared.traceAuthoring.compiled.scan");
+  requireExactKeys(scan, ["version", "protectedRanges", "directiveCandidates", "errors"], "prepared.traceAuthoring.compiled.scan");
+  if (scan.version !== 1) fail("prepared trace authoring scan version is unsupported");
+  if (!Array.isArray(scan.protectedRanges) || !Array.isArray(scan.directiveCandidates) || !Array.isArray(scan.errors)) {
+    fail("prepared trace authoring scan arrays are invalid");
+  }
+  scan.protectedRanges.forEach((raw, index) => {
+    const item = requireRecord(raw, `prepared.traceAuthoring.compiled.scan.protectedRanges[${index}]`);
+    requireExactKeys(item, ["version", "id", "range", "text"], `prepared.traceAuthoring.compiled.scan.protectedRanges[${index}]`);
+    if (item.version !== 1) fail("prepared protected range version is unsupported");
+    requireNonEmptyText(item.id, "prepared protected range id", 512);
+    requireUtf16Range(item.range, "prepared protected range range");
+    requireText(item.text, "prepared protected range text");
+  });
+  scan.directiveCandidates.forEach((raw, index) => validateDirectiveCandidate(raw, `prepared.traceAuthoring.compiled.scan.directiveCandidates[${index}]`));
+  scan.errors.forEach((raw, index) => validateTraceContextError(raw, `prepared.traceAuthoring.compiled.scan.errors[${index}]`));
+}
+
+function validateAuthoringDecisions(value: unknown): void {
+  if (!Array.isArray(value)) fail("prepared trace authoring decisions must be an array");
+  value.forEach((raw, index) => {
+    const subject = `prepared.traceAuthoring.compiled.decisions[${index}]`;
+    const decision = requireRecord(raw, subject);
+    requireExactKeys(decision, ["version", "candidate", "reason", "authoritySpanIds"], subject);
+    if (decision.version !== 1) fail(`${subject} version is unsupported`);
+    validateDirectiveCandidate(decision.candidate, `${subject}.candidate`);
+    requireNonEmptyText(decision.reason, `${subject}.reason`, 128);
+    if (!Array.isArray(decision.authoritySpanIds) || !decision.authoritySpanIds.every((id) => typeof id === "string")) {
+      fail(`${subject}.authoritySpanIds must be strings`);
+    }
+  });
+}
+
+function validateAuthoringExcerpts(value: unknown, currentText: string): void {
+  if (!Array.isArray(value)) fail("prepared trace authoring excerpts must be an array");
+  value.forEach((raw, index) => {
+    const subject = `prepared.traceAuthoring.compiled.excerpts[${index}]`;
+    const excerpt = requireRecord(raw, subject);
+    requireExactKeys(excerpt, [
+      "version", "id", "sourceRange", "text", "byteLength", "mode", "omittedBefore", "omittedAfter",
+    ], subject);
+    if (excerpt.version !== 1) fail(`${subject} version is unsupported`);
+    requireNonEmptyText(excerpt.id, `${subject}.id`, 512);
+    const range = requireUtf16Range(excerpt.sourceRange, `${subject}.sourceRange`);
+    if (range.toUtf16 > currentText.length) fail(`${subject} is outside the target text`);
+    const text = requireText(excerpt.text, `${subject}.text`);
+    if (!Number.isSafeInteger(excerpt.byteLength) || excerpt.byteLength !== encoder.encode(text).length) {
+      fail(`${subject}.byteLength does not match its text`);
+    }
+    requireNonEmptyText(excerpt.mode, `${subject}.mode`, 128);
+    if (typeof excerpt.omittedBefore !== "boolean" || typeof excerpt.omittedAfter !== "boolean") {
+      fail(`${subject} omission flags must be booleans`);
+    }
+  });
+}
+
+function validateCompiledDirective(
+  value: unknown,
+  index: number,
+  operationRange: { fromUtf16: number; toUtf16: number },
+  target: PreparedTargetRevision,
+  currentText: string,
+): { fromUtf16: number; toUtf16: number } {
+  const subject = `prepared.traceAuthoring.compiled.directives[${index}]`;
+  const directive = requireRecord(value, subject);
+  requireExactKeys(directive, [
+    "version", "id", "ordinal", "marker", "instruction", "operation", "sourceRevision",
+    "sourceRange", "instructionRange", "authority", "lifecycle", "localAnchor",
+  ], subject);
+  if (directive.version !== 1 || directive.operation !== "extend" || directive.ordinal !== index + 1) {
+    fail(`${subject} identity is invalid`);
+  }
+  requireNonEmptyText(directive.id, `${subject}.id`, 512);
+  requireNonEmptyText(directive.marker, `${subject}.marker`, 4_096);
+  requireNonEmptyText(directive.instruction, `${subject}.instruction`, 64 * 1_024);
+  const sourceRange = requireUtf16Range(directive.sourceRange, `${subject}.sourceRange`);
+  const instructionRange = requireUtf16Range(directive.instructionRange, `${subject}.instructionRange`);
+  if (
+    sourceRange.fromUtf16 < operationRange.fromUtf16
+    || sourceRange.toUtf16 > operationRange.toUtf16
+    || instructionRange.fromUtf16 < sourceRange.fromUtf16
+    || instructionRange.toUtf16 > sourceRange.toUtf16
+    || sourceRange.toUtf16 > currentText.length
+  ) fail(`${subject} ranges are outside the exact operation bytes`);
+  const revision = requireRecord(directive.sourceRevision, `${subject}.sourceRevision`);
+  requireExactKeys(revision, ["traceId", "headId", "path", "contentHash"], `${subject}.sourceRevision`);
+  if (
+    revision.traceId !== target.traceId || revision.headId !== target.headId
+    || revision.path !== target.path || revision.contentHash !== target.contentHash
+  ) fail(`${subject} source revision does not match the durable target`);
+  const authority = requireRecord(directive.authority, `${subject}.authority`);
+  requireExactKeys(authority, ["kind", "actorId", "origin", "spanIds"], `${subject}.authority`);
+  if (authority.kind !== "acting-author-current-target-v1") fail(`${subject} authority kind is unsupported`);
+  requireNonEmptyText(authority.actorId, `${subject}.authority.actorId`, 512);
+  requireNonEmptyText(authority.origin, `${subject}.authority.origin`, 512);
+  if (!Array.isArray(authority.spanIds) || authority.spanIds.length === 0 || !authority.spanIds.every((id) => typeof id === "string")) {
+    fail(`${subject} authority span ids are invalid`);
+  }
+  const lifecycle = requireRecord(directive.lifecycle, `${subject}.lifecycle`);
+  requireExactKeys(lifecycle, ["mode", "state"], `${subject}.lifecycle`);
+  if (lifecycle.mode !== "one-shot" || lifecycle.state !== "pending") fail(`${subject} lifecycle is unsupported`);
+  const anchor = requireRecord(directive.localAnchor, `${subject}.localAnchor`);
+  requireExactKeys(anchor, ["version", "containingRange", "relation", "excerptId"], `${subject}.localAnchor`);
+  if (anchor.version !== 1) fail(`${subject} local anchor version is unsupported`);
+  requireUtf16Range(anchor.containingRange, `${subject}.localAnchor.containingRange`);
+  requireNonEmptyText(anchor.relation, `${subject}.localAnchor.relation`, 128);
+  requireNonEmptyText(anchor.excerptId, `${subject}.localAnchor.excerptId`, 512);
+  return sourceRange;
+}
+
+function validateDirectiveCandidate(value: unknown, subject: string): void {
+  const candidate = requireRecord(value, subject);
+  requireExactKeys(candidate, ["version", "id", "ordinal", "range", "instructionRange", "instruction"], subject);
+  if (candidate.version !== 1 || !Number.isSafeInteger(candidate.ordinal) || (candidate.ordinal as number) <= 0) {
+    fail(`${subject} identity is invalid`);
+  }
+  requireNonEmptyText(candidate.id, `${subject}.id`, 512);
+  requireUtf16Range(candidate.range, `${subject}.range`);
+  requireUtf16Range(candidate.instructionRange, `${subject}.instructionRange`);
+  requireText(candidate.instruction, `${subject}.instruction`);
+}
+
+function validateTraceContextError(value: unknown, subject: string): void {
+  const error = requireRecord(value, subject);
+  requireExactKeys(error, ["version", "code", "message", "range", "relatedRange"], subject);
+  if (error.version !== 1) fail(`${subject} version is unsupported`);
+  requireNonEmptyText(error.code, `${subject}.code`, 128);
+  requireText(error.message, `${subject}.message`);
+  requireUtf16Range(error.range, `${subject}.range`);
+  if (error.relatedRange !== undefined) requireUtf16Range(error.relatedRange, `${subject}.relatedRange`);
+}
+
+function requireUtf16Range(
+  value: unknown,
+  subject: string,
+): { fromUtf16: number; toUtf16: number } {
+  const range = requireRecord(value, subject);
+  requireExactKeys(range, ["fromUtf16", "toUtf16"], subject);
+  requireRange(range.fromUtf16, range.toUtf16, subject);
+  return range as { fromUtf16: number; toUtf16: number };
+}
+
 function validateSelectedContextPlacement(
   messages: readonly ChatMessage[],
   renderedContext: string,
@@ -829,12 +1077,16 @@ function validateLifecycleInvariant(
     if (certainty !== "known-not-dispatched" && certainty !== "provider-completed-without-result") {
       fail("failed certainty is invalid");
     }
+  } else if (status === "stale") {
+    if (certainty !== "known-not-dispatched" && certainty !== "response-recorded") {
+      fail("stale certainty is invalid");
+    }
   } else if (certainty !== "response-recorded") {
     fail(`${status} requires a recorded response`);
   }
-  if (["response-completed", "accepted", "stale", "rejected"].includes(status) !== (response !== null)) {
-    fail(`${status} response presence is inconsistent`);
-  }
+  const requiresResponse = ["response-completed", "accepted", "rejected"].includes(status)
+    || (status === "stale" && certainty === "response-recorded");
+  if (requiresResponse !== (response !== null)) fail(`${status} response presence is inconsistent`);
   if (status === "accepted" !== (artifactIntent !== null)) fail("accepted status alone may carry artifact intent");
   if (artifactReceipt !== null && (status !== "accepted" || artifactIntent === null)) {
     fail("artifact receipt requires an accepted artifact intent");
@@ -848,8 +1100,11 @@ function validateLifecycleInvariant(
     const staleFault = requireRecord(fault, "fault");
     if (
       staleFault.code !== "TARGET_STALE"
-      || (staleFault.stage !== "review" && staleFault.stage !== "apply")
-    ) fail("stale requires a TARGET_STALE fault at review or apply");
+      || !["approve", "review", "apply"].includes(staleFault.stage as string)
+    ) fail("stale requires a TARGET_STALE fault at approve, review, or apply");
+    if ((staleFault.stage === "approve") !== (certainty === "known-not-dispatched")) {
+      fail("pre-dispatch stale state must remain known-not-dispatched");
+    }
   }
   if (ambiguousAbandon) {
     const abandonFault = requireRecord(fault, "fault");
@@ -1139,7 +1394,7 @@ function transitionTargetStatus(
       if (fromStatus === "response-completed") return "accepted";
       break;
     case "mark-target-stale":
-      if (fromStatus === "response-completed" || fromStatus === "accepted") return "stale";
+      if (["prepared", "approved", "response-completed", "accepted"].includes(fromStatus)) return "stale";
       break;
     case "reject-result":
       if (fromStatus === "response-completed" || fromStatus === "stale") return "rejected";

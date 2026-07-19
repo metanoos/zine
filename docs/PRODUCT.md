@@ -90,10 +90,9 @@ preserve. `(( author directive ))` is a one-shot instruction to the selected
 operation: it is removed only after accepted success and cannot grant tools
 or access outside that operation's approved scope. A shared syntax kernel and
 the first desktop operations already enforce exact operation ranges,
-protected bytes, and current-session author authority. Deterministic
-task-specific selection and cross-press projection now share one verified
-runtime; the exclusion and correction surface, scoped memory, and durable
-context binding remain sequenced in the [Roadmap](ROADMAP.md).
+protected bytes, and current-session author authority; the complete selector,
+exclusion and correction surface, scoped memory, and durable context binding
+are sequenced in the [Roadmap](ROADMAP.md).
 
 ## Three deliberate gestures
 
@@ -250,12 +249,10 @@ to sell.
 
 The desktop press, headless MCP press, local relay, recursive file and folder
 traces, and the complete gesture set — Step, Publish, Attest, Mint, Cite,
-fork, merge, replay, and Reify export — work today. The shared deterministic
-selector and process projector now bind canonical selected context across the
-desktop and MCP adapters. The first authoring-syntax kernel and prepared
-desktop model operations also exist, but the correction and memory model,
-durable context binding, and complete operation coverage do not yet operate as
-one system.
+fork, merge, replay, and Reify export — work today. The first shared
+authoring-syntax kernel and prepared desktop model operations also exist, but
+the task-specific selector, correction and memory model, durable context
+binding, and cross-press rendering contract do not yet operate as one system.
 
 Three proofs govern what comes next:
 

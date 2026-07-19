@@ -17,6 +17,7 @@ import type { CompleteOptions, CompletePreparedRequest } from "./llm.js";
 import type { ProviderConfig } from "./models-store.js";
 import type { PreparedOperation } from "./prepared-operation.js";
 import { providerProfileFingerprint } from "./provider-fingerprint.js";
+import { isDesktopOperationAuthorizationSatisfiedV1 } from "./desktop-operation-authorization.js";
 
 export interface DesktopOperationKeyV1 {
   operationId: string;
@@ -84,7 +85,9 @@ export type DesktopOperationTransportV1 = (
 
 export type DesktopArtifactApplyResultV1 =
   | { status: "applied" | "already-applied"; resultingContentHash: string }
-  | { status: "stale" };
+  | { status: "stale" }
+  /** The target workspace is not currently restored; recovery must retry later. */
+  | { status: "deferred" };
 
 export interface DesktopArtifactApplyInputV1 {
   envelope: DesktopOperationEnvelopeV1;
@@ -127,6 +130,10 @@ export interface DesktopOperationRuntimeDependenciesV1 {
   ): DesktopCurrentTargetRevisionV1 | null | Promise<DesktopCurrentTargetRevisionV1 | null>;
   completePrepared: DesktopOperationTransportV1;
   applyArtifact: DesktopArtifactApplierV1;
+  /** Absent means directive-bearing durable attempts are unauthorized. */
+  isAttemptAuthorizedForCurrentEditorSession?: (
+    envelope: DesktopOperationEnvelopeV1,
+  ) => boolean;
   presentResult?: DesktopOperationPresenterV1;
 }
 
@@ -161,7 +168,8 @@ export interface RetryDesktopOperationCommandV1 {
 
 export type DesktopOperationAcceptResultV1 =
   | { status: "applied" | "already-applied"; envelope: DesktopOperationEnvelopeV1 }
-  | { status: "stale"; envelope: DesktopOperationEnvelopeV1 };
+  | { status: "stale"; envelope: DesktopOperationEnvelopeV1 }
+  | { status: "deferred"; envelope: DesktopOperationEnvelopeV1 };
 
 export interface DesktopOperationRecoveryResultV1 {
   deletedCount: number;
@@ -232,6 +240,15 @@ export function desktopCredentialFreeTransportConfigSha256V1(
   });
 }
 
+export function desktopOperationRetryAttemptIdV1(
+  parent: DesktopOperationKeyV1,
+): string {
+  return `retry:${hashCanonicalV1("zine.desktop-operation.retry-child.v1", {
+    operationId: parent.operationId,
+    parentAttemptId: parent.attemptId,
+  })}`;
+}
+
 /**
  * Freeze one approved exact-context Extend request into the private envelope.
  * Approval itself remains owned by `PreparedOperationApproval`; this boundary
@@ -263,9 +280,6 @@ function bindApprovedDesktopExtendPreparationV1(
   if (prepared.operation !== "extend") fail("durable Phase 2 execution supports Extend only");
   const selected = prepared.traceContextSelection;
   if (!selected) fail("approved Extend request has no exact trace-context selection");
-  if ((prepared.traceAuthoring?.stagedDirectiveDeletions.length ?? 0) > 0) {
-    fail("durable Extend cannot yet recover active directive consumption");
-  }
   if (provider.id !== prepared.providerId) fail("provider id changed after request approval");
   if (providerProfileFingerprint(provider) !== prepared.providerFingerprint) {
     fail("provider configuration changed after request approval");
@@ -337,7 +351,10 @@ export class DesktopOperationRuntimeV1 {
     command: DesktopOperationCommandV1 = {},
   ): Promise<DesktopOperationEnvelopeV1> {
     return this.withOperation(key, async () => {
-      const current = await this.requireEnvelope(key);
+      const current = await this.reconcileUnauthorizedPreDispatch(
+        await this.requireEnvelope(key),
+      );
+      if (current.lifecycle.status === "stale") return current;
       return (await this.commit(current, this.transition("approve", current, command))).envelope;
     });
   }
@@ -348,6 +365,8 @@ export class DesktopOperationRuntimeV1 {
   ): Promise<DesktopOperationEnvelopeV1> {
     return this.withOperation(key, async () => {
       let current = await this.requireEnvelope(key);
+      current = await this.reconcileUnauthorizedPreDispatch(current);
+      if (current.lifecycle.status === "stale") return current;
       if (current.lifecycle.status === "approved") {
         current = (await this.commit(
           current,
@@ -406,13 +425,37 @@ export class DesktopOperationRuntimeV1 {
   ): Promise<DesktopOperationEnvelopeV1> {
     return this.withOperation(key, async () => {
       const prior = await this.requireEnvelope(key);
+      if (!this.isAuthorized(prior)) {
+        if (
+          prior.lifecycle.retryPolicy === "operator-confirmation-required"
+          && command.freshPreparation !== undefined
+          && command.possibleDuplicateAcknowledged !== true
+        ) {
+          fail("possible provider dispatch requires explicit operator confirmation before retry");
+        }
+        const confirmedAmbiguousFreshRetry =
+          prior.lifecycle.retryPolicy === "operator-confirmation-required"
+          && command.freshPreparation !== undefined
+          && command.possibleDuplicateAcknowledged === true;
+        if (prior.lifecycle.status !== "stale" && !confirmedAmbiguousFreshRetry) {
+          fail("expired directive authority requires a fresh operation");
+        }
+        if (command.freshPreparation === undefined) {
+          fail("expired directive authority requires exact-target fresh preparation");
+        }
+      }
       const ambiguous = prior.lifecycle.retryPolicy === "operator-confirmation-required";
       if (!ambiguous && command.possibleDuplicateAcknowledged === true) {
         fail("duplicate-risk acknowledgement is allowed only for an ambiguous attempt");
       }
+      const retryAttemptId = desktopOperationRetryAttemptIdV1(keyFor(prior));
+      if (command.attemptId !== undefined && command.attemptId !== retryAttemptId) {
+        fail("retry attempt id must match the deterministic parent claim");
+      }
       const next = createDesktopOperationRetryV1(prior, {
-        attemptId: command.attemptId ?? this.dependencies.ids.next("attempt"),
-        createdAtMs: command.createdAtMs ?? this.atOrAfter(prior),
+        attemptId: retryAttemptId,
+        createdAtMs: command.createdAtMs
+          ?? Math.max(this.now(), prior.updatedAtMs + 1),
         ...(command.retainForMs === undefined ? {} : { retainForMs: command.retainForMs }),
         ...(command.possibleDuplicateAcknowledged === undefined
           ? {}
@@ -428,21 +471,72 @@ export class DesktopOperationRuntimeV1 {
       if (this.now() >= next.retention.deleteByMs) {
         fail("cannot persist a retry after its privacy deadline");
       }
+      const priorChild = await this.findDurableRetryChild(prior);
+      if (priorChild) return this.convergeRetryChild(priorChild, next);
       const result = await this.dependencies.repository.create(next);
       if (result === "created") {
         await this.assertLive(next);
         return next;
       }
       const existing = await this.dependencies.repository.load(keyFor(next));
-      if (
-        existing
-        && hashDesktopOperationEnvelopeV1(existing) === hashDesktopOperationEnvelopeV1(next)
-      ) {
-        await this.assertLive(existing);
-        return existing;
-      }
-      fail(`retry attempt ${next.attempt.attemptId} already exists with different bytes`);
+      if (existing) return this.convergeRetryChild(existing, next);
+      fail(`retry attempt ${next.attempt.attemptId} exists but cannot be loaded`);
     });
+  }
+
+  private async findDurableRetryChild(
+    parent: DesktopOperationEnvelopeV1,
+  ): Promise<DesktopOperationEnvelopeV1 | null> {
+    let found: DesktopOperationEnvelopeV1 | null = null;
+    let cursor: string | null = null;
+    while (true) {
+      const page = await this.dependencies.repository.listPage(cursor, RECOVERY_PAGE_LIMIT);
+      if (page.records.length > RECOVERY_PAGE_LIMIT) {
+        fail("operation repository returned an oversized retry-claim page");
+      }
+      if (page.nextCursor !== null && page.records.length === 0) {
+        fail("operation repository made no progress while checking retry claims");
+      }
+      if (page.nextCursor !== null && page.nextCursor === cursor) {
+        fail("operation repository repeated a retry-claim cursor");
+      }
+      for (const envelope of page.records) {
+        if (
+          envelope.operationId !== parent.operationId
+          || envelope.attempt.retryOfAttemptId !== parent.attempt.attemptId
+        ) continue;
+        if (
+          found
+          && found.attempt.attemptId !== envelope.attempt.attemptId
+        ) {
+          fail("retry parent already has multiple durable children");
+        }
+        found = envelope;
+      }
+      if (page.nextCursor === null) return found;
+      cursor = page.nextCursor;
+    }
+  }
+
+  private async convergeRetryChild(
+    existing: DesktopOperationEnvelopeV1,
+    requested: DesktopOperationEnvelopeV1,
+  ): Promise<DesktopOperationEnvelopeV1> {
+    const existingRetention = existing.retention.deleteByMs - existing.retention.startedAtMs;
+    const requestedRetention = requested.retention.deleteByMs - requested.retention.startedAtMs;
+    if (
+      existing.operationId !== requested.operationId
+      || existing.attempt.retryOfAttemptId !== requested.attempt.retryOfAttemptId
+      || existing.prepared.requestSha256 !== requested.prepared.requestSha256
+      || existing.selectedContext.manifestSha256 !== requested.selectedContext.manifestSha256
+      || (existing.attempt.possibleDuplicateAcknowledgedAtMs !== null)
+        !== (requested.attempt.possibleDuplicateAcknowledgedAtMs !== null)
+      || existingRetention !== requestedRetention
+    ) {
+      fail("retry parent already has a different durable child");
+    }
+    await this.assertLive(existing);
+    return existing;
   }
 
   /**
@@ -541,12 +635,33 @@ export class DesktopOperationRuntimeV1 {
     if (!providerMatchesEnvelope(provider, current)) {
       return this.recordKnownNotDispatchedFailure(current, "APPROVAL_INVALID");
     }
+    // Provider resolution may cross a vault-unmount or editor-authorization
+    // boundary. Recheck both immediately before the durable I/O claim: a
+    // cancellation here is still provably known-not-dispatched.
+    if (signal?.aborted) {
+      return (await this.commit(current, this.transition("cancel", current))).envelope;
+    }
+    if (!this.isAuthorized(current)) {
+      return this.recordKnownNotDispatchedFailure(current, "APPROVAL_INVALID");
+    }
     const marked = await this.commit(
       current,
       this.transition("record-provider-io-may-have-started", current),
     );
     if (marked.replayed) return marked.envelope;
     await this.assertLive(marked.envelope);
+    // Once the marker is durable, even a cancellation that wins before the
+    // transport call cannot disprove provider dispatch (the native command may
+    // have been accepted before this continuation). Preserve ambiguity and do
+    // not call the transport from this runtime.
+    if (signal?.aborted) {
+      return (await this.commit(
+        marked.envelope,
+        this.transition("mark-dispatch-unknown", marked.envelope, {}, {
+          diagnosticRef: this.diagnosticRef(),
+        }),
+      )).envelope;
+    }
     return this.invokeTransport(marked.envelope, provider, signal);
   }
 
@@ -682,6 +797,9 @@ export class DesktopOperationRuntimeV1 {
       intent,
       responseText: response.text,
     });
+    if (result.status === "deferred") {
+      return { status: "deferred", envelope: current };
+    }
     if (result.status === "stale") {
       const latest = await this.requireEnvelope(keyFor(current));
       if (latest.artifactReceipt) {
@@ -749,21 +867,28 @@ export class DesktopOperationRuntimeV1 {
   }
 
   private async recoverEnvelope(current: DesktopOperationEnvelopeV1): Promise<void> {
+    if (
+      (current.lifecycle.status === "prepared" || current.lifecycle.status === "approved")
+      && !this.isAuthorized(current)
+    ) {
+      await this.reconcileUnauthorizedPreDispatch(current);
+      return;
+    }
     switch (current.lifecycle.status) {
       case "dispatch-intent":
-      case "provider-io":
+      case "provider-io": {
         await this.commit(current, this.transition("mark-dispatch-unknown", current, {}, {
           diagnosticRef: this.diagnosticRef(),
         }));
         return;
+      }
       case "response-completed":
-        await this.present(current, "recovery");
         return;
-      case "accepted":
+      case "accepted": {
         if (!current.artifactReceipt) await this.applyAcceptedIntent(current);
         return;
+      }
       case "stale":
-        await this.present(current, "recovery");
         return;
       case "prepared":
       case "approved":
@@ -826,6 +951,25 @@ export class DesktopOperationRuntimeV1 {
     if (!envelope) fail(`operation attempt ${key.operationId}/${key.attemptId} does not exist`);
     await this.assertLive(envelope);
     return envelope;
+  }
+
+  private isAuthorized(envelope: DesktopOperationEnvelopeV1): boolean {
+    return isDesktopOperationAuthorizationSatisfiedV1(
+      envelope,
+      this.dependencies.isAttemptAuthorizedForCurrentEditorSession,
+    );
+  }
+
+  private async reconcileUnauthorizedPreDispatch(
+    current: DesktopOperationEnvelopeV1,
+  ): Promise<DesktopOperationEnvelopeV1> {
+    if (this.isAuthorized(current)) return current;
+    if (current.lifecycle.status !== "prepared" && current.lifecycle.status !== "approved") {
+      return current;
+    }
+    return (await this.commit(current, this.transition("mark-target-stale", current, {}, {
+      diagnosticRef: this.diagnosticRef(),
+    }))).envelope;
   }
 
   private async present(

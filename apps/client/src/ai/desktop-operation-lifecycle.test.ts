@@ -33,6 +33,7 @@ import {
   type PreparedOperation,
 } from "./prepared-operation.js";
 import type { ProviderConfig } from "./models-store.js";
+import { compileTraceAuthoringOperation } from "./trace-authoring-adapter.js";
 
 const TARGET_TEXT = "draft";
 const BASE_TIME = 1_000;
@@ -147,12 +148,26 @@ function prepared(renderedContext: string): PreparedOperation {
   const dependencyFingerprint = HASH("dependency");
   const requestId = "request-0001";
   const createdAt = BASE_TIME;
+  const traceAuthoring = compileTraceAuthoringOperation({
+    operation: "extend",
+    operationInputs,
+    targetText: TARGET_TEXT,
+    renderedContextBlock: renderedContext,
+    actingAuthorId: "",
+    authoritySpans: [],
+    sourceRevision: {
+      traceId: TRACE_ID,
+      headId: HEAD_ID,
+      path: "draft.md",
+      contentHash: CONTENT_HASH,
+    },
+  }).authoring!;
   const preparedRequestHash = computePreparedOperationRequestHashV1({
     requestId,
     operation: "extend",
     operationInputs,
     messages,
-    traceAuthoring: null,
+    traceAuthoring,
     providerFingerprint: HASH("provider"),
     targetRevision,
     dependencyFingerprint,
@@ -165,7 +180,7 @@ function prepared(renderedContext: string): PreparedOperation {
     operationInputs,
     contextSnapshot: {} as PreparedOperation["contextSnapshot"],
     contextFingerprint: HASH("context"),
-    traceAuthoring: null,
+    traceAuthoring,
     messages,
     providerId: "provider-0001",
     providerFingerprint: HASH("provider"),
@@ -329,6 +344,8 @@ test("creates a frozen private envelope bound to exact request and selected-cont
   assert.equal(Object.isFrozen(subject), true);
   assert.equal(Object.isFrozen(subject.selectedContext.manifest), true);
   assert.match(subject.prepared.requestSha256, /^[0-9a-f]{64}$/);
+  assert.equal(subject.prepared.modelVoicePubkey, "a".repeat(64));
+  assert.equal(subject.prepared.traceAuthoring.operation, "extend");
   assert.match(hashDesktopOperationEnvelopeV1(subject), /^[0-9a-f]{64}$/);
   assert.doesNotMatch(JSON.stringify(subject), /credential|api.?key|bearer/i);
   assert.equal(subject.retention.classification, "vault-local-private");
@@ -354,6 +371,15 @@ test("canonical bytes are deterministic, I-JSON safe, and round-trip with integr
   corrupted.prepared.messages[1]!.content = "tampered";
   assert.throws(
     () => parseDesktopOperationEnvelopeV1(JSON.stringify(corrupted)),
+    /prepared request hash does not match/,
+  );
+
+  const changedModelVoice = JSON.parse(serialized) as {
+    prepared: { modelVoicePubkey: string };
+  };
+  changedModelVoice.prepared.modelVoicePubkey = "b".repeat(64);
+  assert.throws(
+    () => parseDesktopOperationEnvelopeV1(JSON.stringify(changedModelVoice)),
     /prepared request hash does not match/,
   );
 
@@ -953,6 +979,25 @@ test("target staleness is durable before review or after acceptance and never re
     focusOnlyRetry.prepared.upstreamPreparedRequestHash,
     focusOnlyPrepared.preparedRequestHash,
   );
+  const differentTargetPreparation = withRecomputedPreparedRequestHash({
+    ...focusOnlyPrepared,
+    requestId: "request-different-target-stale",
+    targetRevision: { ...focusOnlyPrepared.targetRevision, path: "different.md" },
+  });
+  assert.throws(() => createDesktopOperationRetryV1(reviewStale, {
+    attemptId: "attempt-different-target-stale",
+    createdAtMs: reviewStale.updatedAtMs + 1,
+    freshPreparation: {
+      prepared: differentTargetPreparation,
+      provider: {
+        protocol: "openai",
+        modelId: "model-1",
+        transportConfigSha256: HASH("redacted-transport-config"),
+      },
+      selectedContext: withPlacement(focusOnlySelected),
+      maxOutputTokens: 1_024,
+    },
+  }), /same stable folder, path, and trace target/);
 
   const freshText = "draft changed after response";
   const freshHeadId = HASH("head-after-stale");
@@ -1083,7 +1128,7 @@ test("target staleness is durable before review or after acceptance and never re
       selectedContext: withPlacement(focusOnlySelected),
       maxOutputTokens: 1_024,
     },
-  }), /valid only for a stale retry/);
+  }), /valid only for stale or ambiguous retries/);
 
   const accepted = await atStatus("accepted");
   const applyStaleReduction = reduceDesktopOperationV1(
@@ -1120,10 +1165,36 @@ test("target staleness is durable before review or after acceptance and never re
   assert.strictEqual(discarded.response?.text, applyStale.response?.text);
 });
 
+test("pre-dispatch target staleness is a durable response-free authorization tombstone", async () => {
+  for (const status of ["prepared", "approved"] as const) {
+    const current = await atStatus(status);
+    const stale = reduceDesktopOperationV1(
+      current,
+      transition("mark-target-stale", current.updatedAtMs + 1, {}),
+    ).envelope;
+    assert.equal(stale.lifecycle.status, "stale");
+    assert.equal(stale.lifecycle.executionCertainty, "known-not-dispatched");
+    assert.equal(stale.lifecycle.retryPolicy, "safe-new-attempt");
+    assert.equal(stale.response, null);
+    assert.equal(stale.fault?.code, "TARGET_STALE");
+    assert.equal(stale.fault?.stage, "approve");
+    assert.doesNotThrow(() => parseDesktopOperationEnvelopeV1(
+      serializeDesktopOperationEnvelopeV1(stale),
+    ));
+    assert.throws(
+      () => reduceDesktopOperationV1(
+        stale,
+        transition("reject-result", stale.updatedAtMs + 1, {}),
+      ),
+      /recorded response/,
+    );
+  }
+});
+
 test("legal transitions are idempotent and every omitted graph edge fails closed", async () => {
   const legal: Readonly<Record<DesktopOperationEnvelopeV1["lifecycle"]["status"], readonly DesktopOperationTransitionV1["type"][]>> = {
-    prepared: ["approve", "cancel", "abandon"],
-    approved: ["record-dispatch-intent", "record-failure", "cancel", "abandon"],
+    prepared: ["approve", "mark-target-stale", "cancel", "abandon"],
+    approved: ["record-dispatch-intent", "record-failure", "mark-target-stale", "cancel", "abandon"],
     "dispatch-intent": [
       "record-provider-io-may-have-started", "record-failure", "cancel",
       "mark-dispatch-unknown", "abandon",
@@ -1383,6 +1454,23 @@ test("recovery re-presents completed responses and replays only pending local ar
 
 test("retries keep operation identity, create a linked attempt, and require ambiguity acknowledgement", async () => {
   const cancelled = await atStatus("cancelled");
+  assert.throws(() => createDesktopOperationRetryV1(cancelled, {
+    attemptId: "attempt-retry-equal-time",
+    createdAtMs: cancelled.updatedAtMs,
+  }), /advance past the parent attempt/);
+  const exactBoundaryCreatedAtMs = cancelled.updatedAtMs + 1;
+  const exactBoundaryRetainForMs = cancelled.retention.deleteByMs - exactBoundaryCreatedAtMs;
+  assert.throws(() => createDesktopOperationRetryV1(cancelled, {
+    attemptId: "attempt-retry-short-retention",
+    createdAtMs: exactBoundaryCreatedAtMs,
+    retainForMs: exactBoundaryRetainForMs - 1,
+  }), /cover the parent attempt privacy deadline/);
+  const exactBoundaryRetry = createDesktopOperationRetryV1(cancelled, {
+    attemptId: "attempt-retry-exact-retention",
+    createdAtMs: exactBoundaryCreatedAtMs,
+    retainForMs: exactBoundaryRetainForMs,
+  });
+  assert.equal(exactBoundaryRetry.retention.deleteByMs, cancelled.retention.deleteByMs);
   const safeRetry = createDesktopOperationRetryV1(cancelled, {
     attemptId: "attempt-retry-0001",
     createdAtMs: cancelled.updatedAtMs + 1,

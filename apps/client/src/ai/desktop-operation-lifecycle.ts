@@ -268,20 +268,22 @@ export function reduceDesktopOperationV1(
       break;
     }
     case "mark-target-stale": {
-      requireCurrent(envelope, transition.type, "response-completed", "accepted");
+      requireCurrent(envelope, transition.type, "prepared", "approved", "response-completed", "accepted");
       if (envelope.lifecycle.status === "accepted" && envelope.artifactReceipt) {
         fail("an applied artifact cannot later be marked target-stale");
       }
+      const preDispatch = envelope.lifecycle.status === "prepared"
+        || envelope.lifecycle.status === "approved";
       const fault: OperationFaultV1 = {
         version: 1,
         code: "TARGET_STALE",
-        stage: envelope.lifecycle.status === "accepted" ? "apply" : "review",
+        stage: preDispatch ? "approve" : envelope.lifecycle.status === "accepted" ? "apply" : "review",
         observedAtMs: transition.atMs,
         ...(transition.diagnosticRef ? { diagnosticRef: transition.diagnosticRef } : {}),
       };
       next = withLifecycle(envelope, transition, actionSha256, {
         status: "stale",
-        executionCertainty: "response-recorded",
+        executionCertainty: preDispatch ? "known-not-dispatched" : "response-recorded",
         retryPolicy: "safe-new-attempt",
       }, {
         fault,
@@ -292,6 +294,7 @@ export function reduceDesktopOperationV1(
     }
     case "reject-result":
       requireCurrent(envelope, transition.type, "response-completed", "stale");
+      if (!envelope.response) fail("reject-result requires a recorded response");
       next = withLifecycle(envelope, transition, actionSha256, {
         status: "rejected",
         executionCertainty: "response-recorded",
@@ -448,7 +451,7 @@ export interface CreateDesktopOperationRetryV1Input {
   createdAtMs: number;
   retainForMs?: number;
   possibleDuplicateAcknowledged?: true;
-  /** Required after TARGET_STALE; must be captured from the current editor revision. */
+  /** Required after TARGET_STALE or expired authority on an ambiguous attempt. */
   freshPreparation?: Pick<
     CreateDesktopOperationEnvelopeV1Input,
     "prepared" | "provider" | "selectedContext" | "maxOutputTokens"
@@ -474,20 +477,28 @@ export function createDesktopOperationRetryV1(
   ) {
     fail("safe retry must not acknowledge a possible duplicate");
   }
-  if (!Number.isSafeInteger(input.createdAtMs) || input.createdAtMs < prior.updatedAtMs) {
-    fail("retry time must be monotonic");
+  if (!Number.isSafeInteger(input.createdAtMs) || input.createdAtMs <= prior.updatedAtMs) {
+    fail("retry time must advance past the parent attempt");
   }
   const retainForMs = input.retainForMs
     ?? (prior.retention.deleteByMs - prior.retention.startedAtMs);
   if (!Number.isSafeInteger(retainForMs) || retainForMs <= 0 || retainForMs > DESKTOP_OPERATION_MAX_RETENTION_MS) {
     fail(`retry retention must be between 1 and ${DESKTOP_OPERATION_MAX_RETENTION_MS}`);
   }
+  const retryDeleteByMs = input.createdAtMs + retainForMs;
+  if (
+    !Number.isSafeInteger(retryDeleteByMs)
+    || retryDeleteByMs < prior.retention.deleteByMs
+  ) {
+    fail("retry retention must cover the parent attempt privacy deadline");
+  }
+  const ambiguous = prior.lifecycle.retryPolicy === "operator-confirmation-required";
   if (prior.lifecycle.status === "stale" && !input.freshPreparation) {
     fail("stale retry requires a fresh prepared operation and selected context");
   }
   if (input.freshPreparation) {
-    if (prior.lifecycle.status !== "stale") {
-      fail("fresh preparation is valid only for a stale retry");
+    if (prior.lifecycle.status !== "stale" && !ambiguous) {
+      fail("fresh preparation is valid only for stale or ambiguous retries");
     }
     if (input.freshPreparation.prepared.requestId === prior.prepared.requestId) {
       fail("fresh retry must use a new prepared request id");
@@ -497,6 +508,15 @@ export function createDesktopOperationRetryV1(
       === prior.prepared.upstreamPreparedRequestHash
     ) {
       fail("fresh retry must use a new prepared request identity");
+    }
+    const freshTarget = input.freshPreparation.prepared.targetRevision;
+    const priorTarget = prior.prepared.targetRevision;
+    if (
+      freshTarget.folderId !== priorTarget.folderId
+      || freshTarget.path !== priorTarget.path
+      || freshTarget.traceId !== priorTarget.traceId
+    ) {
+      fail("fresh retry must re-prepare the same stable folder, path, and trace target");
     }
     const fresh = createDesktopOperationEnvelopeV1({
       operationId: prior.operationId,
