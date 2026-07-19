@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# post-checkout hook — propagates the gbrain source pin to new worktrees.
+#
+# Fires after `git checkout <branch>` ($3 == 1) and after `git worktree add`.
+# If the main worktree (where the shared .git lives) has a .gbrain-source pin,
+# copy it into this worktree's toplevel so gbrain code queries scope correctly
+# without the user having to run /sync-gbrain first.
+#
+# Behavior:
+#   - Skip file checkouts ($3 == 0): only branch checkouts / worktree adds.
+#   - Skip if the common dir is relative (".git" → we're IN the main worktree;
+#     nothing to copy, we're the source of truth).
+#   - Skip if the main worktree has no .gbrain-source (machine has no gbrain).
+#   - Skip if this worktree already has a pin (idempotent; respect existing).
+#   - Otherwise: copy the pin, print a one-line confirmation.
+#
+# Idempotent, silent on no-op, never fails the checkout.
+
+set -u
+
+# $1 = previous HEAD, $2 = new HEAD, $3 = 1 if branch checkout (incl worktree add)
+is_branch_checkout="${3:-0}"
+[ "$is_branch_checkout" = "1" ] || exit 0
+
+# Resolve the common (main) worktree's .git dir. From a linked worktree this is
+# an absolute path like /Users/x/zine/.git; from the main worktree it's ".git".
+common_dir=$(git rev-parse --git-common-dir 2>/dev/null || echo "")
+
+# If the common dir is relative (".git" or "gitdir"), we ARE the main worktree.
+# Nothing to copy — we're the source.
+case "$common_dir" in
+  /*) ;;  # absolute → linked worktree, proceed
+  *)  exit 0 ;;  # relative or empty → main worktree, nothing to do
+esac
+
+# Main worktree root = parent of the common .git dir.
+main_root=$(cd "$common_dir/.." && pwd)
+
+main_pin="$main_root/.gbrain-source"
+this_pin="$(git rev-parse --show-toplevel 2>/dev/null)/.gbrain-source"
+
+# Main worktree has no gbrain pin → machine doesn't use gbrain, stay quiet.
+[ -f "$main_pin" ] || exit 0
+
+# This worktree already has a pin → respect it, don't overwrite.
+[ -f "$this_pin" ] && exit 0
+
+# Copy the pin.
+cp "$main_pin" "$this_pin" 2>/dev/null || exit 0
+echo "[post-checkout] copied gbrain source pin from main worktree → .gbrain-source"
+echo "[post-checkout] gbrain code queries (code-def/code-refs/code-callers) will scope to: $(cat "$this_pin")"
+
+exit 0

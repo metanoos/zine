@@ -38,3 +38,6 @@ data/
 apps/client/*-test.mjs
 apps/client/ws-test.mjs
 .gstack/
+
+# --- gbrain local pin (machine-specific source ID; see AGENTS.md "GBrain") ---
+.gbrain-source
