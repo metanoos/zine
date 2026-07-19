@@ -302,15 +302,80 @@ async function completeViaTauri(
     }
   };
 
-  await invoke("llm_fetch", {
+  await invokeCancellableTauriLlmFetchV1(invoke, {
+    requestId: crypto.randomUUID(),
     url,
     method: "POST",
     headers,
     body,
     stream,
     onEvent: channel,
-  });
+  }, opts.signal);
   return assembled;
+}
+
+type TauriLlmInvokeV1 = (
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown>;
+
+interface TauriLlmFetchArgumentsV1 extends Record<string, unknown> {
+  requestId: string;
+  url: string;
+  method: "POST" | "GET";
+  headers: Record<string, string>;
+  body: string;
+  stream: boolean;
+  onEvent: unknown;
+}
+
+function abortError(): DOMException {
+  return new DOMException("The operation was aborted", "AbortError");
+}
+
+/**
+ * Keep the AbortSignal contract across Tauri IPC. Exported only for a focused
+ * transport race test; production callers go through `completeViaTauri`.
+ */
+export async function invokeCancellableTauriLlmFetchV1(
+  invoke: TauriLlmInvokeV1,
+  args: TauriLlmFetchArgumentsV1,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) throw abortError();
+
+  let rejectAbort!: (error: DOMException) => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  let cancelStarted = false;
+  const cancelNative = () => {
+    if (cancelStarted) return;
+    cancelStarted = true;
+    // Do not surface or log native/provider detail from a cancellation race.
+    void Promise.resolve()
+      .then(() => invoke("llm_cancel", { requestId: args.requestId }))
+      .catch(() => undefined);
+    rejectAbort(abortError());
+  };
+  signal?.addEventListener("abort", cancelNative, { once: true });
+  if (signal?.aborted) cancelNative();
+
+  const nativeRequest = invoke("llm_fetch", args);
+  try {
+    await (signal ? Promise.race([nativeRequest, aborted]) : nativeRequest);
+  } catch (error) {
+    if (signal?.aborted) {
+      // The native command still owns cleanup. Observe its eventual settlement
+      // so rejecting the webview call immediately cannot create an unhandled
+      // provider or IPC error containing remote bytes.
+      void nativeRequest.catch(() => undefined);
+      throw abortError();
+    }
+    throw error;
+  } finally {
+    signal?.removeEventListener("abort", cancelNative);
+  }
 }
 
 // --- SSE plumbing ------------------------------------------------------

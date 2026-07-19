@@ -635,12 +635,33 @@ export class DesktopOperationRuntimeV1 {
     if (!providerMatchesEnvelope(provider, current)) {
       return this.recordKnownNotDispatchedFailure(current, "APPROVAL_INVALID");
     }
+    // Provider resolution may cross a vault-unmount or editor-authorization
+    // boundary. Recheck both immediately before the durable I/O claim: a
+    // cancellation here is still provably known-not-dispatched.
+    if (signal?.aborted) {
+      return (await this.commit(current, this.transition("cancel", current))).envelope;
+    }
+    if (!this.isAuthorized(current)) {
+      return this.recordKnownNotDispatchedFailure(current, "APPROVAL_INVALID");
+    }
     const marked = await this.commit(
       current,
       this.transition("record-provider-io-may-have-started", current),
     );
     if (marked.replayed) return marked.envelope;
     await this.assertLive(marked.envelope);
+    // Once the marker is durable, even a cancellation that wins before the
+    // transport call cannot disprove provider dispatch (the native command may
+    // have been accepted before this continuation). Preserve ambiguity and do
+    // not call the transport from this runtime.
+    if (signal?.aborted) {
+      return (await this.commit(
+        marked.envelope,
+        this.transition("mark-dispatch-unknown", marked.envelope, {}, {
+          diagnosticRef: this.diagnosticRef(),
+        }),
+      )).envelope;
+    }
     return this.invokeTransport(marked.envelope, provider, signal);
   }
 

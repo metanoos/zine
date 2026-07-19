@@ -2468,6 +2468,7 @@ pub fn run() {
     let app = builder
         .manage(kademlia::KademliaRuntime::default())
         .manage(rendezvous_relay::RendezvousRelayRuntime::default())
+        .manage(llm_proxy::LlmRequestRegistry::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -2500,6 +2501,7 @@ pub fn run() {
             scan_external,
             write_text_file,
             llm_proxy::llm_fetch,
+            llm_proxy::llm_cancel,
             stamp_ots,
             upgrade_ots,
             spawn_tor,
