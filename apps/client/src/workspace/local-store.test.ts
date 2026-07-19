@@ -514,6 +514,96 @@ test("a file referencing a dropped structural journal drops its phantom pendingO
   );
 });
 
+test("a dropped journal also clears a co-existing pendingSignedEvent bound to the same operation id", () => {
+  // A file whose gesture was partially applied may carry BOTH pendingOperationId
+  // and pendingSignedEvent (the exact bytes signed under that operation id).
+  // When the journal is dropped, clearing only pendingOperationId leaves
+  // pendingSignedEvent pointing at a dead operation id, and pushToRelay would
+  // then throw because the signed event's embedded id does not match the
+  // freshly-minted operation id. The reconciliation must clear both when their
+  // ids match the dropped journal; pendingMove is a separate durable movement
+  // journal and must survive so an interrupted move can still resume.
+  values.clear();
+  const droppedOperationId = "ab".repeat(32);
+  const unrelatedOperationId = "cd".repeat(32);
+  // Sign one real event per operation id so pendingSignedEvent is valid.
+  // `operationId` lives in the content JSON (read by traceOperationIdFromEvent),
+  // not in a tag — that is what operationIdFromNode extracts to decide whether
+  // the signed event is bound to the dropped journal.
+  const signedUnderDropped = finalizeEvent({
+    kind: 4290,
+    created_at: 1,
+    tags: [
+      ["z", "file"],
+      ["F", "a.md"],
+      ["f", "root"],
+    ],
+    content: JSON.stringify({ snapshot: "a", kedits: [], operationId: droppedOperationId }),
+  }, new Uint8Array(32).fill(7));
+  const signedUnderUnrelated = finalizeEvent({
+    kind: 4290,
+    created_at: 1,
+    tags: [
+      ["z", "file"],
+      ["F", "b.md"],
+      ["f", "root"],
+    ],
+    content: JSON.stringify({ snapshot: "b", kedits: [], operationId: unrelatedOperationId }),
+  }, new Uint8Array(32).fill(7));
+  values.set("zine.folder.root", JSON.stringify({
+    id: "root",
+    files: {
+      // Both pending fields reference the dropped operation id → both cleared.
+      "dropped-signed.md": {
+        kind: "file",
+        content: "a",
+        tags: [],
+        nodeId: signedUnderDropped.id,
+        updatedAt: 1,
+        pendingOperationId: droppedOperationId,
+        pendingSignedEvent: signedUnderDropped,
+        // pendingMove is a separate journal and must survive.
+        pendingMove: { kind: "move", fromPath: "old/dropped-signed.md" },
+      },
+      // pendingSignedEvent bound to an UNRELATED (still-live) operation id →
+      // the signed event must be preserved even though pendingOperationId
+      // (pointing at the dropped journal) is cleared.
+      "live-signed.md": {
+        kind: "file",
+        content: "b",
+        tags: [],
+        nodeId: signedUnderUnrelated.id,
+        updatedAt: 1,
+        pendingOperationId: droppedOperationId,
+        pendingSignedEvent: signedUnderUnrelated,
+      },
+    },
+    pendingStructuralOperations: {
+      [droppedOperationId]: { version: 2, kind: "delete", operationId: "not-an-id" },
+    },
+  }));
+  const loaded = loadLocalFolder("root");
+  assert.deepEqual(pendingStructuralOperations("root"), []);
+
+  const droppedSigned = loaded?.files["dropped-signed.md"];
+  assert.equal(droppedSigned?.pendingOperationId, undefined, "dropped pendingOperationId cleared");
+  assert.equal(droppedSigned?.pendingSignedEvent, undefined, "co-existing pendingSignedEvent cleared");
+  assert.deepEqual(
+    droppedSigned?.pendingMove,
+    { kind: "move", fromPath: "old/dropped-signed.md" },
+    "pendingMove must survive (separate durable movement journal)",
+  );
+
+  const liveSigned = loaded?.files["live-signed.md"];
+  assert.equal(liveSigned?.pendingOperationId, undefined, "dropped pendingOperationId cleared");
+  assert.deepEqual(
+    liveSigned?.pendingSignedEvent,
+    signedUnderUnrelated,
+    "pendingSignedEvent bound to a live operation id must be preserved",
+  );
+});
+
+
 
 test("durable recovery journals surface rejected browser-storage writes", () => {
   values.clear();

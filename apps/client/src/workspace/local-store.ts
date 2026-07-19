@@ -25,6 +25,7 @@ import { vaultStorage as localStorage } from "../storage/vault-storage.js";
 import type { Event } from "nostr-tools";
 import { verifyEvent } from "nostr-tools/pure";
 import type { KEdit } from "../provenance/provenance.js";
+import { operationIdFromNode } from "../provenance/provenance.js";
 import { contentFingerprint } from "../ai/context-snapshot.js";
 import { hashCanonicalV1 } from "../ai/desktop-operation-envelope.js";
 import type { FolderRef, Run } from "./workspace-core.js";
@@ -249,12 +250,31 @@ export function loadLocalFolder(folderId: string): LocalFolder | null {
     );
     // Reconcile phantom projections: if a file references a dropped operation
     // id, drop the reference so the next gesture does not attempt to resume a
-    // journal that no longer exists. `pendingSignedEvent` (the exact bytes to
-    // republish) is validated separately by `isLocalFile` and is left intact.
+    // journal that no longer exists. A file may also carry `pendingSignedEvent`
+    // — the exact signed bytes staged to republish under that operation id. If
+    // its embedded operation id matches a dropped journal, those bytes cannot
+    // be safely republished (their causal binding is gone and `pushToRelay`
+    // would throw on the id mismatch against a freshly-minted operation id),
+    // so clear it too and let the next push re-sign under the new id. Other
+    // pending fields (`pendingMove`, `pendingEmptyGenesis`) are durable
+    // movement/bootstrap journals of their own and are left intact so an
+    // interrupted move/bootstrap can still resume.
     if (droppedOperationIds.size > 0) {
       for (const file of Object.values(files)) {
-        if (file.pendingOperationId && droppedOperationIds.has(file.pendingOperationId)) {
+        const droppedId = file.pendingOperationId;
+        if (droppedId && droppedOperationIds.has(droppedId)) {
           delete file.pendingOperationId;
+        }
+        if (file.pendingSignedEvent) {
+          let signedOperationId: string | null = null;
+          try {
+            signedOperationId = operationIdFromNode(file.pendingSignedEvent);
+          } catch {
+            signedOperationId = null;
+          }
+          if (signedOperationId !== null && droppedOperationIds.has(signedOperationId)) {
+            delete file.pendingSignedEvent;
+          }
         }
       }
     }

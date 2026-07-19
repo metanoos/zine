@@ -513,3 +513,161 @@ test("folder conformance requires integer timestamps on every membership delta",
     );
   }
 });
+
+test("folder conformance rejects a non-genesis node that omits or mismatches its identity tag", async () => {
+  // A folder node after genesis must carry exactly one `f` tag naming its
+  // genesis identity (parent membership owns the structural name). Two cases
+  // are rejected: missing the tag, or naming the wrong trace id.
+  const member = {
+    kind: "file" as const,
+    relativePath: "essay.md",
+    latestNodeId: "aa".repeat(32),
+    contentHash: "cc".repeat(32),
+  };
+  const genesis = await folderNode([member], { version: 1, cause: "genesis" }, "2a".repeat(32));
+  const base = await folderNode(
+    [member],
+    { version: 1, cause: "explicit-step" },
+    "2b".repeat(32),
+    genesis,
+  );
+  const payload = JSON.parse(base.content) as Record<string, unknown>;
+
+  const missingTag = finalizeEvent({
+    kind: base.kind,
+    created_at: base.created_at,
+    tags: base.tags.filter((tag) => tag[0] !== "f"),
+    content: base.content,
+  }, FOLDER_TEST_SECRET);
+  assert.equal((await verifyFolderTraceChain([genesis, missingTag], verifyEvent)).status, "invalid");
+  assert.ok(
+    (await verifyFolderTraceChain([genesis, missingTag], verifyEvent))
+      .issues.some((issue) => issue.code === "invalid-folder-tag"),
+  );
+
+  const wrongTag = finalizeEvent({
+    kind: base.kind,
+    created_at: base.created_at,
+    tags: base.tags.map((tag) => (tag[0] === "f" ? ["f", "de".repeat(32)] : tag)),
+    content: base.content,
+  }, FOLDER_TEST_SECRET);
+  assert.equal((await verifyFolderTraceChain([genesis, wrongTag], verifyEvent)).status, "invalid");
+  assert.ok(
+    (await verifyFolderTraceChain([genesis, wrongTag], verifyEvent))
+      .issues.some((issue) => issue.code === "invalid-folder-tag"),
+  );
+  void payload;
+});
+
+test("folder conformance rejects a genesis node that carries its own identity tag", async () => {
+  // Folder genesis must omit `f` — it has no parent membership to inherit from
+  // and its own id IS the trace identity, established by being the chain head.
+  const valid = await folderNode([], { version: 1, cause: "genesis" }, "2c".repeat(32));
+  const invalid = finalizeEvent({
+    kind: valid.kind,
+    created_at: valid.created_at,
+    tags: [...valid.tags, ["f", "2c".repeat(32)]],
+    content: valid.content,
+  }, FOLDER_TEST_SECRET);
+  const verdict = await verifyFolderTraceChain([invalid], verifyEvent);
+  assert.equal(verdict.status, "invalid");
+  assert.ok(verdict.issues.some((issue) => issue.code === "genesis-folder-tag"));
+});
+
+test("folder conformance rejects malformed folder checkpoint metadata", async () => {
+  // The folder checkpoint envelope carries version, cause, and (for child-
+  // advance) sourceNodeId. A bad version, an unknown cause, or a missing
+  // envelope must be rejected so a hostile publisher cannot forge a structural
+  // anchor with bogus causation.
+  for (const checkpoint of [
+    undefined,
+    { version: 2, cause: "genesis" },
+    { version: 1, cause: "bogus" },
+    { cause: "genesis" },
+  ]) {
+    const body = JSON.stringify([]);
+    const contentHash = Buffer.from(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)),
+    ).toString("hex");
+    const event = await new Promise<Event>((resolve) => {
+      const unsigned = {
+        kind: 4290,
+        created_at: 1,
+        tags: [["z", "folder"], ["x", contentHash], ["action", "import"]],
+        content: JSON.stringify({
+          steppedAt: 1_000,
+          snapshot: { members: [] },
+          contentHash,
+          operationId: "2d".repeat(32),
+          deltas: [],
+          ...(checkpoint === undefined ? {} : { folderCheckpoint: checkpoint }),
+        }),
+      };
+      resolve(finalizeEvent(unsigned, FOLDER_TEST_SECRET));
+    });
+    const verdict = await verifyFolderTraceChain([event], verifyEvent);
+    assert.equal(verdict.status, "invalid", `checkpoint ${JSON.stringify(checkpoint)}`);
+    assert.ok(
+      verdict.issues.some((issue) => issue.code === "invalid-folder-checkpoint"),
+      `checkpoint ${JSON.stringify(checkpoint)}`,
+    );
+  }
+});
+
+test("folder conformance ties cause genesis to the chain head and rejects repeats", async () => {
+  // Only the chain's first node may declare cause genesis; a non-genesis node
+  // declaring genesis, or a genesis-declared head that carries a prev edge,
+  // are both rejected as structural forgeries.
+  const member = {
+    kind: "file" as const,
+    relativePath: "essay.md",
+    latestNodeId: "aa".repeat(32),
+    contentHash: "cc".repeat(32),
+  };
+  const genesis = await folderNode([member], { version: 1, cause: "genesis" }, "2e".repeat(32));
+  const repeatedGenesis = await folderNode(
+    [member],
+    { version: 1, cause: "genesis" },
+    "2f".repeat(32),
+    genesis,
+  );
+  const repeatVerdict = await verifyFolderTraceChain([genesis, repeatedGenesis], verifyEvent);
+  assert.equal(repeatVerdict.status, "invalid");
+  assert.ok(repeatVerdict.issues.some((issue) => issue.code === "repeated-genesis-cause"));
+});
+
+test("folder conformance rejects a child-advance whose source does not match the member's new head", async () => {
+  // A child-advance checkpoint declares `sourceNodeId` naming the member's new
+  // head; the advance delta's `nodeId` must equal it. A mismatch would let a
+  // publisher claim a structural change under one head while pointing the
+  // cause at another.
+  const oldHead = "30".repeat(32);
+  const newHead = "31".repeat(32);
+  const member = {
+    kind: "file" as const,
+    relativePath: "essay.md",
+    latestNodeId: newHead,
+    contentHash: "cc".repeat(32),
+  };
+  const oldMember = { ...member, latestNodeId: oldHead };
+  const genesis = await folderNode([oldMember], { version: 1, cause: "genesis" }, "32".repeat(32));
+  const invalid = await folderNode(
+    [member],
+    // sourceNodeId deliberately names the OLD head, not the new one.
+    { version: 1, cause: "child-advance", sourceNodeId: oldHead },
+    "33".repeat(32),
+    genesis,
+    [{
+      type: "advance",
+      kind: "file",
+      relativePath: "essay.md",
+      previousNodeId: oldHead,
+      nodeId: newHead,
+      timestamp: 2,
+    }],
+  );
+  const verdict = await verifyFolderTraceChain([genesis, invalid], verifyEvent);
+  assert.equal(verdict.status, "invalid");
+  assert.ok(verdict.issues.some((issue) => issue.code === "invalid-child-advance-source"));
+});
+

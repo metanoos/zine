@@ -891,3 +891,34 @@ test("runRootMutationSerialized coalesces duplicate operation ids on the same ro
   assert.equal(runs.has("root"), false);
 });
 
+test("runRootMutationSerialized isolates a synchronous throw on the chained branch", async () => {
+  // The chained branch (`queue.tail.catch(() => undefined).then(task)`)
+  // delegates a synchronous throw inside `task` to `.then(task)`'s implicit
+  // rejection handler. A regression that let the sync throw escape (or
+  // reject the tail so the successor never runs) would corrupt serialization.
+  // This pins: op #2's sync throw does not poison op #3, and the queue cleans
+  // up to empty once all three resolve.
+  type Run = import("./workspace-local.js").RootMutationRun;
+  const runs = new Map<string, Run>();
+  const events: string[] = [];
+  const op1 = runRootMutationSerialized(runs, "root", "11".repeat(32), async () => {
+    events.push("op1");
+    return "ok1" as const;
+  });
+  // Non-async task that throws synchronously on the chained branch.
+  const op2 = runRootMutationSerialized(runs, "root", "22".repeat(32), () => {
+    events.push("op2-throws");
+    throw new Error("sync boom");
+  });
+  const op3 = runRootMutationSerialized(runs, "root", "33".repeat(32), async () => {
+    events.push("op3");
+    return "ok3" as const;
+  });
+  assert.equal(await op1, "ok1");
+  await assert.rejects(op2, /sync boom/);
+  assert.equal(await op3, "ok3");
+  assert.deepEqual(events, ["op1", "op2-throws", "op3"]);
+  assert.equal(runs.has("root"), false, "queue cleaned up after all three resolved");
+});
+
+
