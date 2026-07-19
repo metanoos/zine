@@ -52,9 +52,12 @@ import { traceSignedEventBytes } from "../provenance/provenance.js";
 import { authorVoice, loadKeys } from "../identity/keys-store.js";
 import {
   clearStructuralOperation,
+  failStructuralOperation,
   hasPendingStructuralPathMutation,
   loadLocalFolder,
+  loadLocalShielded,
   saveLocalFile,
+  saveLocalShielded,
   stageStructuralOperation,
 } from "./local-store.js";
 
@@ -921,25 +924,33 @@ test("runRootMutationSerialized isolates a synchronous throw on the chained bran
   assert.equal(runs.has("root"), false, "queue cleaned up after all three resolved");
 });
 
-test("an unarchived recovery throw blocks successor mutations until the stuck journal entry is force-cleared", async () => {
+test("an unarchived recovery throw blocks successor mutations until the stuck journal entry is abandoned via failStructuralOperation (shield rollback, NOT forward-roll)", async () => {
   // Defect class surfaced in review: when structural recovery throws WITHOUT
   // calling failStructuralOperation (e.g. an unclassified throw like "cannot
   // fetch expected folder head" or "cannot find folder membership"), the
   // journal entry stays in pendingStructuralOperations. runRootMutationAfterRecovery
   // runs recover() before task(), so every later Root mutation re-runs that
   // recovery and re-throws — bricking the workspace for new writes. The only
-  // in-app escape is for the UI to force-clear the stuck entry (App.tsx's
-  // Dismiss path calls clearStructuralOperation when structuralConflictId is
-  // null). This test pins both halves of that contract.
+  // in-app escape is for the UI to abandon the stuck entry (App.tsx's Dismiss
+  // path when structuralConflictId is null).
+  //
+  // CRITICAL: the escape MUST use failStructuralOperation, NOT
+  // clearStructuralOperation. clearStructuralOperation rolls shields
+  // during->after (the SUCCESS semantic), which would move shields to the
+  // destination even though the op never completed — unshielding content
+  // still sitting at the source. failStructuralOperation rolls during->before,
+  // restoring the original shield set so source content stays protected.
+  // This test pins both the unblock AND the shield-rollback direction.
   localStorage.clear();
+  saveLocalShielded("root", new Set(["notes/private"]));
   const stuckOperationId = "e1".repeat(32);
-  stageStructuralOperation("root", {
-    version: 2,
-    kind: "move",
+  const stuckOperation = {
+    version: 2 as const,
+    kind: "move" as const,
     operationId: stuckOperationId,
     sourcePath: "notes",
     targetPath: "archive/notes",
-    isFolder: true,
+    isFolder: true as const,
     moves: [{ oldRel: "notes", newRel: "archive/notes" }],
     expectedFolder: {
       traceId: "11".repeat(32),
@@ -951,7 +962,17 @@ test("an unarchived recovery throw blocks successor mutations until the stuck jo
         nodeId: "22".repeat(32),
       },
     },
-  });
+    shieldedPathsBefore: ["notes/private"],
+    shieldedPathsDuring: ["archive/notes/private", "notes/private"],
+    shieldedPathsAfter: ["archive/notes/private"],
+  };
+  stageStructuralOperation("root", stuckOperation);
+  // Staging sets the live shield set to the during-union (both old and new
+  // coordinates shielded across the crash window).
+  assert.deepEqual(
+    [...loadLocalShielded("root")].sort(),
+    ["archive/notes/private", "notes/private"],
+  );
   assert.equal(
     hasPendingStructuralPathMutation("root", "notes", "archive/notes"),
     true,
@@ -979,29 +1000,43 @@ test("an unarchived recovery throw blocks successor mutations until the stuck jo
     "stuck entry still in the journal — nothing cleared it",
   );
 
-  // The UI escape: force-clear the stuck entry. Now a successor mutation's
-  // recover() can observe the journal is empty and the task() can proceed.
-  const successorAfterForceClear = runRootMutationAfterRecovery(
+  // The UI escape: abandon the stuck entry via failStructuralOperation (the
+  // production Dismiss path). Shields roll BACK to before — content still at
+  // the source stays protected. A clearStructuralOperation here would have
+  // rolled FORWARD to after, unshielding notes/private (the defect).
+  failStructuralOperation(
+    "root",
+    stuckOperation,
+    "abandoned by user: recovery could not classify the failure",
+  );
+  assert.deepEqual(
+    [...loadLocalShielded("root")].sort(),
+    ["notes/private"],
+    "shields rolled BACK to before — source content stays shielded (NOT forward to archive/notes/private)",
+  );
+  assert.ok(
+    loadLocalFolder("root")?.structuralConflicts?.[stuckOperationId],
+    "abandoned op archived to structuralConflicts for an honest audit trail",
+  );
+  assert.equal(
+    hasPendingStructuralPathMutation("root", "notes", "archive/notes"),
+    false,
+    "journal is clear — successor mutation can proceed",
+  );
+
+  // Now a successor mutation's recover() observes the journal is empty and
+  // the task() proceeds.
+  const successorAfterAbandon = runRootMutationAfterRecovery(
     runs,
     "root",
     "f2".repeat(32),
-    async () => {
-      // The recover callback mirrors what App.tsx's Dismiss handler triggers
-      // via clearStructuralOperation before the next gesture is attempted.
-      clearStructuralOperation("root", stuckOperationId);
-    },
-    async () => {
-      assert.equal(
-        hasPendingStructuralPathMutation("root", "notes", "archive/notes"),
-        false,
-        "journal is clear — successor mutation can proceed",
-      );
-      return "ok";
-    },
+    async () => {},
+    async () => "ok",
   );
-  assert.equal(await successorAfterForceClear, "ok");
+  assert.equal(await successorAfterAbandon, "ok");
   assert.equal(runs.has("root"), false, "queue cleaned up");
 });
+
 
 
 

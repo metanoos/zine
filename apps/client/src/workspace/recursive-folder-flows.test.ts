@@ -133,6 +133,26 @@ test("structural gestures persist shield rebases and scope refreshes stay Root-b
   assert.match(hardDelete, /setScope\(/);
 });
 
+test("structural-error abandon path rolls shields BACK via failStructuralOperation, not forward via clearStructuralOperation", () => {
+  // When recovery throws without classifying a terminal conflict, the Dismiss
+  // handler abandons the stuck journal entry. It MUST call failStructuralOperation
+  // (during->before, rollback) — NOT clearStructuralOperation (during->after,
+  // forward-roll/success semantic). clearStructuralOperation would move shields
+  // to the destination even though the op never completed, unshielding content
+  // still sitting at the source: a shield leak / trust-boundary violation.
+  const banner = sourceBetween(
+    'className="reconcile-banner structural-error-banner"',
+    "{stagedMergeView && (",
+  );
+  assert.match(banner, /failStructuralOperation\(/);
+  assert.doesNotMatch(
+    banner,
+    /clearStructuralOperation\(/,
+    "abandon path must not use clearStructuralOperation (forward-rolls shields, leaking source protection)",
+  );
+});
+
+
 test("structural checkpoints stay local and recovery is identity-guarded", () => {
   const recovery = workspaceSource.match(
     /async function removeStagedFolder[\s\S]*?async function completeStagedFolderCreation/,

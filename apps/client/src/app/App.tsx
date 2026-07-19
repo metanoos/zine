@@ -316,10 +316,10 @@ import {
 } from "../workspace/workspace-local.js";
 import {
   clearStructuralConflict,
-  clearStructuralOperation,
   clearFolderStepOperation,
   clearPadPath,
   createDesktopOperationCrashPadReceiptV1,
+  failStructuralOperation,
   hasPendingStructuralPathMutation,
   isExactDesktopOperationCrashPadReceipt,
   loadLocalFolder,
@@ -17940,11 +17940,26 @@ function App() {
                         // archiving it to structuralConflicts. Without a
                         // force-clear, every later Root mutation re-runs
                         // recovery and re-throws, bricking the workspace for
-                        // new writes with no other in-app escape. Clear the
-                        // oldest stuck entry so the next mutation can proceed;
-                        // the user explicitly abandons the op.
+                        // new writes with no other in-app escape. Archive the
+                        // oldest stuck entry via failStructuralOperation (NOT
+                        // clearStructuralOperation): clearStructuralOperation
+                        // rolls shields during->after, which is the SUCCESS
+                        // semantic and would move shields to the destination
+                        // even though the op never completed — unshielding
+                        // content still sitting at the source (a shield leak
+                        // / trust-boundary violation). failStructuralOperation
+                        // rolls during->before, restoring the original shield
+                        // set so source content stays protected. The user
+                        // explicitly abandons the op; archiving also leaves an
+                        // honest structuralConflicts audit trail.
                         const stuck = pendingStructuralOperations(folder.id)[0];
-                        if (stuck) clearStructuralOperation(folder.id, stuck.operationId);
+                        if (stuck) {
+                          failStructuralOperation(
+                            folder.id,
+                            stuck,
+                            "abandoned by user: recovery could not classify the failure",
+                          );
+                        }
                       }
                       setStructuralConflictId(null);
                       setStructuralError(null);
