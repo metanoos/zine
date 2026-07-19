@@ -264,7 +264,7 @@ test("fails closed for incomplete selected trace and mandatory context budget fa
   );
 });
 
-test("blocks selection when authoring would need to substitute markerized context bytes", async () => {
+test("keeps selected context exact while carrying authorized directives separately", async () => {
   const body = "Draft ((tighten this))";
   const node = await fileNode(body);
   const input = preparationInput(node, body);
@@ -276,10 +276,10 @@ test("blocks selection when authoring would need to substitute markerized contex
     fromUtf16: body.indexOf("(("),
     toUtf16: body.length,
   }];
-  await assert.rejects(
-    prepareDesktopTraceContextOperationV1(input, boundary(node)),
-    /cannot silently substitute markerized authoring bytes/,
-  );
+  const prepared = await prepareDesktopTraceContextOperationV1(input, boundary(node));
+  assert.equal(prepared.traceContextSelection?.renderedContext.includes(body), true);
+  assert.equal(prepared.traceAuthoring?.compiled.directives.length, 1);
+  assert.match(prepared.operationInputs.seed ?? "", /ZINE_DIRECTIVE_V1/);
 });
 
 test("rejects a target/head mismatch and a mutated selected output", async () => {

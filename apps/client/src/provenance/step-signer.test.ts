@@ -46,7 +46,11 @@ test("durable Extend attributes local MODEL text without signing or stepping it"
   const apply = functionSource("applyDesktopArtifact", "function editFile");
 
   assert.doesNotMatch(extend, /beginOp|secretKeyForVoice/);
-  assert.match(apply, /opVoiceEffect\.of\(modelPubkeyRef\.current\)/);
+  assert.match(
+    apply,
+    /const modelVoicePubkey = input\.envelope\.prepared\.modelVoicePubkey/,
+  );
+  assert.match(apply, /opVoiceEffect\.of\(modelVoicePubkey\)/);
   assert.doesNotMatch(apply, /stepFile\(|sendStep\(|publish|mint/i);
 });
 
