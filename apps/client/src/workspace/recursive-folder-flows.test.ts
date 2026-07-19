@@ -125,6 +125,12 @@ test("structural gestures persist shield rebases and scope refreshes stay Root-b
   assert.match(move, /refreshMountedReplay\(operationFolderId\)/);
   assert.match(hardDelete, /refreshMountedReplay\(operationFolderId\)/);
   assert.match(rename, /refreshMountedReplay\(operationFolderId\)/);
+  // The context mount follows every structural gesture, not just moveNodes.
+  // Without these, renaming or hard-deleting the scope mount leaves scope
+  // pointing at a path that no longer exists.
+  assert.match(move, /setScope\(/);
+  assert.match(rename, /setScope\(/);
+  assert.match(hardDelete, /setScope\(/);
 });
 
 test("structural checkpoints stay local and recovery is identity-guarded", () => {

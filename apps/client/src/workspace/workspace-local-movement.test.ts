@@ -921,4 +921,87 @@ test("runRootMutationSerialized isolates a synchronous throw on the chained bran
   assert.equal(runs.has("root"), false, "queue cleaned up after all three resolved");
 });
 
+test("an unarchived recovery throw blocks successor mutations until the stuck journal entry is force-cleared", async () => {
+  // Defect class surfaced in review: when structural recovery throws WITHOUT
+  // calling failStructuralOperation (e.g. an unclassified throw like "cannot
+  // fetch expected folder head" or "cannot find folder membership"), the
+  // journal entry stays in pendingStructuralOperations. runRootMutationAfterRecovery
+  // runs recover() before task(), so every later Root mutation re-runs that
+  // recovery and re-throws — bricking the workspace for new writes. The only
+  // in-app escape is for the UI to force-clear the stuck entry (App.tsx's
+  // Dismiss path calls clearStructuralOperation when structuralConflictId is
+  // null). This test pins both halves of that contract.
+  localStorage.clear();
+  const stuckOperationId = "e1".repeat(32);
+  stageStructuralOperation("root", {
+    version: 2,
+    kind: "move",
+    operationId: stuckOperationId,
+    sourcePath: "notes",
+    targetPath: "archive/notes",
+    isFolder: true,
+    moves: [{ oldRel: "notes", newRel: "archive/notes" }],
+    expectedFolder: {
+      traceId: "11".repeat(32),
+      nodeId: "22".repeat(32),
+    },
+    expectedFolders: {
+      notes: {
+        traceId: "11".repeat(32),
+        nodeId: "22".repeat(32),
+      },
+    },
+  });
+  assert.equal(
+    hasPendingStructuralPathMutation("root", "notes", "archive/notes"),
+    true,
+  );
+
+  type Run = import("./workspace-local.js").RootMutationRun;
+  const runs = new Map<string, Run>();
+
+  // A successor mutation whose recover() re-throws (the stuck op is still in
+  // the journal and cannot make progress) MUST reject. This is the brick.
+  const recoverThatReThrows = async () => {
+    throw new Error("cannot fetch expected folder head 2222222222222222222222222222222222222222222222222222222222222222");
+  };
+  const blockedSuccessor = runRootMutationAfterRecovery(
+    runs,
+    "root",
+    "f1".repeat(32),
+    recoverThatReThrows,
+    async () => "should-not-run",
+  );
+  await assert.rejects(blockedSuccessor, /cannot fetch expected folder head/);
+  assert.equal(
+    hasPendingStructuralPathMutation("root", "notes", "archive/notes"),
+    true,
+    "stuck entry still in the journal — nothing cleared it",
+  );
+
+  // The UI escape: force-clear the stuck entry. Now a successor mutation's
+  // recover() can observe the journal is empty and the task() can proceed.
+  const successorAfterForceClear = runRootMutationAfterRecovery(
+    runs,
+    "root",
+    "f2".repeat(32),
+    async () => {
+      // The recover callback mirrors what App.tsx's Dismiss handler triggers
+      // via clearStructuralOperation before the next gesture is attempted.
+      clearStructuralOperation("root", stuckOperationId);
+    },
+    async () => {
+      assert.equal(
+        hasPendingStructuralPathMutation("root", "notes", "archive/notes"),
+        false,
+        "journal is clear — successor mutation can proceed",
+      );
+      return "ok";
+    },
+  );
+  assert.equal(await successorAfterForceClear, "ok");
+  assert.equal(runs.has("root"), false, "queue cleaned up");
+});
+
+
 

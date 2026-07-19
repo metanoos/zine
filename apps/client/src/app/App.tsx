@@ -316,6 +316,7 @@ import {
 } from "../workspace/workspace-local.js";
 import {
   clearStructuralConflict,
+  clearStructuralOperation,
   clearFolderStepOperation,
   clearPadPath,
   createDesktopOperationCrashPadReceiptV1,
@@ -326,6 +327,7 @@ import {
   loadPad,
   mirrorPad,
   pendingFolderStepOperation,
+  pendingStructuralOperations,
   saveLocalFile,
   saveLocalShielded,
   stageFolderStepOperation,
@@ -13412,12 +13414,21 @@ function App() {
           const storedConflicts = Object.values(
             loadLocalFolder(folder.id)?.structuralConflicts ?? {},
           ).sort((left, right) => right.failedAt - left.failedAt);
-          setStructuralError(
-            storedConflicts[0]
-              ? `A ${storedConflicts[0].operation.kind} could not be recovered: ${storedConflicts[0].reason}`
-              : `Workspace recovery failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          setStructuralConflictId(storedConflicts[0]?.operation.operationId ?? null);
+          if (storedConflicts[0]) {
+            setStructuralError(
+              `A ${storedConflicts[0].operation.kind} could not be recovered: ${storedConflicts[0].reason}`,
+            );
+            setStructuralConflictId(storedConflicts[0].operation.operationId);
+          } else {
+            // Recovery threw without archiving a terminal conflict — a journal
+            // entry is stuck in pendingStructuralOperations. Surface the reason
+            // and let Dismiss force-clear it; otherwise every later Root
+            // mutation re-throws on recovery and the workspace is bricked.
+            setStructuralError(
+              `Workspace recovery failed and a structural operation is stuck: ${error instanceof Error ? error.message : String(error)}. Dismiss abandons the stuck operation so new edits can proceed.`,
+            );
+            setStructuralConflictId(null);
+          }
         });
         const scanned = attached.files;
         if (cancelled) return;
@@ -17310,6 +17321,15 @@ function App() {
     if (uiFocusRef.current?.path && under(uiFocusRef.current.path)) {
       commitUiFocus(null);
     }
+    // A scope mount sitting on or beneath a deleted subtree is now dangling.
+    // Drop it and fall back to the whole-folder mount, matching the reset on
+    // folder switch. Writes already follow the rebased focus, so this is a
+    // state-machine fix — without it the scope UI keeps pointing at a path
+    // that no longer exists and the next MODEL op silently loses the scope
+    // subtree (activePath is still included, but nothing else under scope is).
+    if (scopeRef.current.some((mount) => under(mount.path))) {
+      setScope(folder ? [{ kind: "folder", path: ROOT }] : []);
+    }
 
     // Disk delete + delete node + manifest tombstone. Each top-level path is an
     // independent backend delete, so partial failures don't block the rest.
@@ -17463,6 +17483,12 @@ function App() {
       directorySelectionRef.current.map((item) => ({ ...item, path: rebaser(item.path) })),
     );
     commitUiFocus(rebaseUiFocus(uiFocusRef.current, rebaser, renameTabRebaser));
+    // The context mount follows the renamed path too, mirroring moveNodes.
+    // Without this, renaming (or reparenting-under-rename) the scope mount
+    // leaves scope pointing at a path that no longer exists.
+    setScope((current) =>
+      current.map((mount) => ({ ...mount, path: rebaser(mount.path) })) as ContextMounts,
+    );
 
     // Storage rename + an identity-preserving provenance step. Carry each
     // affected file's user tags through, same as moveNodes.
@@ -17906,7 +17932,19 @@ function App() {
                     className="staged-merges-review"
                     onClick={() => {
                       if (folder && structuralConflictId) {
+                        // Archived terminal conflict: dismiss clears the record.
                         clearStructuralConflict(folder.id, structuralConflictId);
+                      } else if (folder) {
+                        // Unclassified recovery throw left a journal entry
+                        // stuck in pendingStructuralOperations without
+                        // archiving it to structuralConflicts. Without a
+                        // force-clear, every later Root mutation re-runs
+                        // recovery and re-throws, bricking the workspace for
+                        // new writes with no other in-app escape. Clear the
+                        // oldest stuck entry so the next mutation can proceed;
+                        // the user explicitly abandons the op.
+                        const stuck = pendingStructuralOperations(folder.id)[0];
+                        if (stuck) clearStructuralOperation(folder.id, stuck.operationId);
                       }
                       setStructuralConflictId(null);
                       setStructuralError(null);
