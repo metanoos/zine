@@ -1612,7 +1612,14 @@ export async function flushRendezvousPublicationOutbox(): Promise<{
             !isTauri() ||
             !loadKademliaConfig().enabled
           ) return false;
-          if (!report.complete) {
+          if (report.complete && report.pointersPublished === 0) {
+            // Terminal abandon: corrupt genesis or durable pair can never index.
+            // Still remove the outbox row, but never do so silently.
+            console.warn(
+              `[rendezvous] Coin ${event.id} abandoned indexing (terminal):`,
+              report.failures,
+            );
+          } else if (!report.complete) {
             console.warn(
               `[rendezvous] Coin ${event.id} remains queued for indexing:`,
               report.failures,

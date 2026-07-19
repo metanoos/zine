@@ -55,6 +55,13 @@ const MAX_RELAY_URL_BYTES: usize = 2_048;
 const MAX_RECORD_BYTES: usize = 12 * 1024;
 const MAX_OWNED_POINTER_FILE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_STARTUP_REPUBLISH_QUERIES: usize = 4;
+/// Hard ceiling on a single republish query, after which the event loop
+/// reclaims the `republish_in_flight` slot itself. libp2p's own
+/// `QUERY_TIMEOUT` (12s) is supposed to emit a terminal event, but if it ever
+/// drops a query without one, this is the structural backstop.
+const REPUBLISH_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cadence at which the event loop sweeps expired republish deadlines.
+const REPUBLISH_DEADLINE_TICK: Duration = Duration::from_secs(5);
 const MAX_REMOTE_RECORDS: usize = 1_024;
 const MAX_PENDING_PERSISTENCE: usize = 64;
 const MAX_PRE_CANCELLED_OPERATIONS: usize = 256;
@@ -316,6 +323,12 @@ struct EventLoop {
     republish_queue: VecDeque<String>,
     republish_pending: BTreeSet<String>,
     republish_in_flight: usize,
+    /// QueryIds of in-flight republish queries (GetRecord leg, then the
+    /// PutRecord leg that follows it), with the deadline after which the event
+    /// loop reclaims the slot itself if libp2p never emits a terminal
+    /// `OutboundQueryProgressed`. Defense-in-depth against `republish_in_flight`
+    /// leaking and background republish stalling.
+    republish_deadlines: HashMap<kad::QueryId, Instant>,
     owned: BTreeMap<String, Vec<RendezvousPointer>>,
     store_owned: Arc<RwLock<BTreeMap<String, Vec<RendezvousPointer>>>>,
     owned_path: PathBuf,
@@ -407,6 +420,8 @@ impl EventLoop {
         self.fill_republish_window();
         let mut publication_timer =
             interval_at(Instant::now() + PUBLICATION_INTERVAL, PUBLICATION_INTERVAL);
+        let mut deadline_timer =
+            interval_at(Instant::now() + REPUBLISH_DEADLINE_TICK, REPUBLISH_DEADLINE_TICK);
         let mut stop_reply = None;
         loop {
             tokio::select! {
@@ -438,6 +453,7 @@ impl EventLoop {
                     }
                 }
                 _ = publication_timer.tick() => self.enqueue_republish_cycle(),
+                _ = deadline_timer.tick() => self.sweep_republish_deadlines(),
                 event = self.swarm.select_next_some() => self.handle_swarm_event(event),
             }
         }
@@ -718,7 +734,64 @@ impl EventLoop {
                     pointers: BTreeSet::new(),
                 },
             );
+            // Record a deadline so the event loop can reclaim the slot itself
+            // if libp2p never emits a terminal `OutboundQueryProgressed` for
+            // this query. `QUERY_TIMEOUT` is supposed to guarantee one; this is
+            // the structural backstop that keeps the in-flight counter honest.
+            self.republish_deadlines
+                .insert(id, Instant::now() + REPUBLISH_QUERY_TIMEOUT);
             self.republish_in_flight += 1;
+        }
+    }
+
+    fn sweep_republish_deadlines(&mut self) {
+        if self.republish_deadlines.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let expired: Vec<kad::QueryId> = self
+            .republish_deadlines
+            .iter()
+            .filter_map(|(id, deadline)| (*deadline <= now).then_some(*id))
+            .collect();
+        for id in expired {
+            self.republish_deadlines.remove(&id);
+            // Force libp2p to end the query the same way cancel_operation does.
+            // Reclaiming `republish_in_flight` without finishing leaves an orphan
+            // Kad query alive if the terminal OutboundQueryProgressed never arrives.
+            if let Some(mut query) = self.swarm.behaviour_mut().kad.query_mut(&id) {
+                query.finish();
+            }
+            // A republish's deadline may cover either leg — the GetRecord query
+            // (pending_gets) or the PutRecord query that follows it
+            // (pending_puts). Only Republish pendings carry deadlines; leave any
+            // other pending waiter intact.
+            let coordinate = if matches!(
+                self.pending_gets.get(&id),
+                Some(PendingGet::Republish { .. })
+            ) {
+                match self.pending_gets.remove(&id) {
+                    Some(PendingGet::Republish { coordinate, .. }) => Some(coordinate),
+                    _ => None,
+                }
+            } else if matches!(
+                self.pending_puts.get(&id),
+                Some(PendingPut::Republish { .. })
+            ) {
+                match self.pending_puts.remove(&id) {
+                    Some(PendingPut::Republish { coordinate }) => Some(coordinate),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(coordinate) = coordinate {
+                self.last_error = Some(format!(
+                    "Kademlia republish query for {coordinate} did not terminate within {:?}; reclaiming the slot",
+                    REPUBLISH_QUERY_TIMEOUT,
+                ));
+                self.finish_republish(coordinate);
+            }
         }
     }
 
@@ -760,6 +833,9 @@ impl EventLoop {
                     ..
                 },
             )) if step.last || result.is_err() => {
+                // The PutRecord leg of a republish recorded its own deadline in
+                // finish_get; clear it now that the terminal event arrived.
+                self.republish_deadlines.remove(&id);
                 if let Some(pending) = self.pending_puts.remove(&id) {
                     // N(8) forces libp2p to run the complete closest-peer Put
                     // instead of returning after the first ACK. A genuinely
@@ -821,6 +897,10 @@ impl EventLoop {
     }
 
     fn finish_get(&mut self, id: kad::QueryId) {
+        // The GetRecord query has terminated (success or error), so its
+        // republish deadline is obsolete even if the matching PutRecord has
+        // not yet fired finish_republish.
+        self.republish_deadlines.remove(&id);
         let Some(mut pending) = self.pending_gets.remove(&id) else {
             return;
         };
@@ -874,6 +954,12 @@ impl EventLoop {
                     Ok(Some(query_id)) => {
                         self.pending_puts
                             .insert(query_id, PendingPut::Republish { coordinate });
+                        // The GetRecord leg's deadline was cleared at the top of
+                        // finish_get. Record a fresh deadline for the PutRecord
+                        // leg so the sweep can reclaim this slot too if libp2p
+                        // ever drops the PutRecord terminal event.
+                        self.republish_deadlines
+                            .insert(query_id, Instant::now() + REPUBLISH_QUERY_TIMEOUT);
                     }
                     Ok(None) => self.finish_republish(coordinate),
                     Err(error) => {
@@ -1890,6 +1976,7 @@ async fn start_runtime(
             republish_queue,
             republish_pending,
             republish_in_flight: 0,
+            republish_deadlines: HashMap::new(),
             owned,
             store_owned,
             owned_path,

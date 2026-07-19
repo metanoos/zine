@@ -337,6 +337,71 @@ test("missing or wrong-minter completion proof remains retryable and publishes n
   }
 });
 
+test("corrupt local genesis abandons the outbox row without claiming a pointer", async () => {
+  const secret = generateSecretKey();
+  // Kind-4290 without Coin origin metadata — never a verified Coin genesis.
+  const notACoin = finalizeEvent({
+    kind: 4290,
+    created_at: 1,
+    tags: [["z", "file"], ["F", "note.md"], ["f", FOLDER], ["action", "import"]],
+    content: JSON.stringify({
+      snapshot: "not a coin",
+      contentHash: await sha256HexLocal("not a coin"),
+      operationId: "cd".repeat(32),
+      kedits: [{
+        op: "ins",
+        from: 0,
+        to: 0,
+        text: "not a coin",
+        voice: getPublicKey(secret),
+        t: 1_000,
+        tx: 0,
+      }],
+    }),
+  }, secret);
+  let puts = 0;
+  const report = await publishCompletedCoinMint(notACoin, {
+    adapters: adaptersForEvents(new Map([[notACoin.id, notACoin]]), {
+      publishPointer: async () => { puts++; },
+    }),
+  });
+  assert.equal(report.complete, true);
+  assert.equal(report.pointersPublished, 0);
+  assert.equal(puts, 0);
+  assert.equal(report.failures.some((failure) => failure.stage === "pair-invalid"), true);
+});
+
+test("durable wrong-minter completion attestation abandons without claiming a pointer", async () => {
+  const { coin } = await directMint("durable wrong minter");
+  const wrongMinter = minterAttestation(coin, generateSecretKey());
+  let puts = 0;
+  const report = await publishCompletedCoinMint(coin, {
+    completionAttestation: wrongMinter,
+    adapters: adaptersForEvents(new Map([[coin.id, coin], [wrongMinter.id, wrongMinter]]), {
+      publishPointer: async () => { puts++; },
+    }),
+  });
+  assert.equal(report.complete, true);
+  assert.equal(report.pointersPublished, 0);
+  assert.equal(puts, 0);
+  assert.equal(report.failures.some((failure) => failure.stage === "pair-invalid"), true);
+});
+
+test("disabled rendezvous leaves the indexing row retryable", async () => {
+  const { coin, attestation } = await directMint("coins off");
+  let puts = 0;
+  const report = await publishCompletedCoinMint(coin, {
+    completionAttestation: attestation,
+    adapters: adaptersForEvents(new Map([[coin.id, coin], [attestation.id, attestation]]), {
+      enabled: () => false,
+      publishPointer: async () => { puts++; },
+    }),
+  });
+  assert.equal(report.complete, false);
+  assert.equal(report.pointersPublished, 0);
+  assert.equal(puts, 0);
+});
+
 test("global discovery matches independent minters with different Coin ids and the same H", async () => {
   const first = await directMint("independently minted");
   const second = await directMint("  independently\n minted  ");

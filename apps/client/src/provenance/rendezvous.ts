@@ -56,7 +56,13 @@ export interface VerifiedRendezvousCandidate extends RendezvousPointer {
 }
 
 export interface RendezvousPublishReport {
-  /** True once the completed Mint has one persisted public Coin pointer. */
+  /**
+   * True when the durable outbox may forget this row: either at least one
+   * public Coin pointer landed, or the local Coin/attestation is permanently
+   * unindexable (`pointersPublished === 0` with a terminal failure). Callers
+   * must not treat this alone as a successful H publication; check
+   * `pointersPublished` (and log terminal abandons).
+   */
   complete: boolean;
   coordinates: string[];
   pointersPublished: number;
@@ -558,21 +564,33 @@ export async function publishCompletedCoinMint(
 ): Promise<RendezvousPublishReport> {
   const adapters = adaptersFor(options.adapters);
   const report: RendezvousPublishReport = {
-    complete: true,
+    complete: false,
     coordinates: [],
     pointersPublished: 0,
     skippedRelays: [],
     failures: [],
   };
+  // Leave the row queued while Coins/Kademlia is off; the drain path already
+  // refuses to act when disabled, and a false complete must not clear work.
   if (!adapters.enabled()) return report;
   const localGenesis = await verifiedCoinGenesis(coin);
   // Corrupt queue rows are terminal: retry cannot turn them into completed Coins.
-  if (!localGenesis) return report;
+  // complete=true still means "forget the outbox row", not "pointer published".
+  if (!localGenesis) {
+    report.complete = true;
+    report.failures.push({
+      coinNodeId: coin.id,
+      stage: "pair-invalid",
+      error: "local event is not a verified Full Trace Coin genesis; abandoning indexing",
+    });
+    return report;
+  }
   const completionAttestation = options.completionAttestation;
   if (
     completionAttestation &&
     !isValidMinterAttestation(coin, completionAttestation)
   ) {
+    report.complete = true;
     report.failures.push({
       coinNodeId: coin.id,
       coordinate: localGenesis.coordinate,
