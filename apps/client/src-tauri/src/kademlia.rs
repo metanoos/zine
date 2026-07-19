@@ -56,6 +56,13 @@ const MAX_RELAY_URL_BYTES: usize = 256;
 const MAX_RECORD_BYTES: usize = 12 * 1024;
 const MAX_OWNED_POINTER_FILE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_STARTUP_REPUBLISH_QUERIES: usize = 4;
+/// Hard ceiling on a single republish query, after which the event loop
+/// reclaims the `republish_in_flight` slot itself. libp2p's own
+/// `QUERY_TIMEOUT` (12s) is supposed to emit a terminal event, but if it ever
+/// drops a query without one, this is the structural backstop.
+const REPUBLISH_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cadence at which the event loop sweeps expired republish deadlines.
+const REPUBLISH_DEADLINE_TICK: Duration = Duration::from_secs(5);
 const MAX_REMOTE_RECORDS: usize = 1_024;
 const MAX_PENDING_PERSISTENCE: usize = 64;
 const MAX_PRE_CANCELLED_OPERATIONS: usize = 256;
@@ -316,6 +323,12 @@ struct EventLoop {
     republish_queue: VecDeque<String>,
     republish_pending: BTreeSet<String>,
     republish_in_flight: usize,
+    /// QueryIds of in-flight republish queries (GetRecord leg, then the
+    /// PutRecord leg that follows it), with the deadline after which the event
+    /// loop reclaims the slot itself if libp2p never emits a terminal
+    /// `OutboundQueryProgressed`. Defense-in-depth against `republish_in_flight`
+    /// leaking and background republish stalling.
+    republish_deadlines: HashMap<kad::QueryId, Instant>,
     owned: BTreeMap<String, Vec<RendezvousPointer>>,
     store_owned: Arc<RwLock<BTreeMap<String, Vec<RendezvousPointer>>>>,
     owned_path: PathBuf,
@@ -407,6 +420,8 @@ impl EventLoop {
         self.fill_republish_window();
         let mut publication_timer =
             interval_at(Instant::now() + PUBLICATION_INTERVAL, PUBLICATION_INTERVAL);
+        let mut deadline_timer =
+            interval_at(Instant::now() + REPUBLISH_DEADLINE_TICK, REPUBLISH_DEADLINE_TICK);
         let mut stop_reply = None;
         loop {
             tokio::select! {
@@ -438,6 +453,7 @@ impl EventLoop {
                     }
                 }
                 _ = publication_timer.tick() => self.enqueue_republish_cycle(),
+                _ = deadline_timer.tick() => self.sweep_republish_deadlines(),
                 event = self.swarm.select_next_some() => self.handle_swarm_event(event),
             }
         }
@@ -689,7 +705,51 @@ impl EventLoop {
                     pointers: BTreeSet::new(),
                 },
             );
+            // Record a deadline so the event loop can reclaim the slot itself
+            // if libp2p never emits a terminal `OutboundQueryProgressed` for
+            // this query. `QUERY_TIMEOUT` is supposed to guarantee one; this is
+            // the structural backstop that keeps the in-flight counter honest.
+            self.republish_deadlines
+                .insert(id, Instant::now() + REPUBLISH_QUERY_TIMEOUT);
             self.republish_in_flight += 1;
+        }
+    }
+
+    fn sweep_republish_deadlines(&mut self) {
+        if self.republish_deadlines.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let expired: Vec<kad::QueryId> = self
+            .republish_deadlines
+            .iter()
+            .filter_map(|(id, deadline)| (*deadline <= now).then_some(*id))
+            .collect();
+        for id in expired {
+            self.republish_deadlines.remove(&id);
+            // A republish's deadline may cover either leg — the GetRecord query
+            // (pending_gets) or the PutRecord query that follows it
+            // (pending_puts). Reap whichever map holds the expired id.
+            let coordinate = self
+                .pending_gets
+                .remove(&id)
+                .and_then(|pending| match pending {
+                    PendingGet::Republish { coordinate, .. } => Some(coordinate),
+                    _ => None,
+                })
+                .or_else(|| {
+                    self.pending_puts.remove(&id).and_then(|pending| match pending {
+                        PendingPut::Republish { coordinate } => Some(coordinate),
+                        _ => None,
+                    })
+                });
+            if let Some(coordinate) = coordinate {
+                self.last_error = Some(format!(
+                    "Kademlia republish query for {coordinate} did not terminate within {:?}; reclaiming the slot",
+                    REPUBLISH_QUERY_TIMEOUT,
+                ));
+                self.finish_republish(coordinate);
+            }
         }
     }
 
@@ -731,6 +791,9 @@ impl EventLoop {
                     ..
                 },
             )) if step.last || result.is_err() => {
+                // The PutRecord leg of a republish recorded its own deadline in
+                // finish_get; clear it now that the terminal event arrived.
+                self.republish_deadlines.remove(&id);
                 if let Some(pending) = self.pending_puts.remove(&id) {
                     // N(8) forces libp2p to run the complete closest-peer Put
                     // instead of returning after the first ACK. A genuinely
@@ -792,6 +855,10 @@ impl EventLoop {
     }
 
     fn finish_get(&mut self, id: kad::QueryId) {
+        // The GetRecord query has terminated (success or error), so its
+        // republish deadline is obsolete even if the matching PutRecord has
+        // not yet fired finish_republish.
+        self.republish_deadlines.remove(&id);
         let Some(mut pending) = self.pending_gets.remove(&id) else {
             return;
         };
@@ -845,6 +912,12 @@ impl EventLoop {
                     Ok(Some(query_id)) => {
                         self.pending_puts
                             .insert(query_id, PendingPut::Republish { coordinate });
+                        // The GetRecord leg's deadline was cleared at the top of
+                        // finish_get. Record a fresh deadline for the PutRecord
+                        // leg so the sweep can reclaim this slot too if libp2p
+                        // ever drops the PutRecord terminal event.
+                        self.republish_deadlines
+                            .insert(query_id, Instant::now() + REPUBLISH_QUERY_TIMEOUT);
                     }
                     Ok(None) => self.finish_republish(coordinate),
                     Err(error) => {
@@ -1205,6 +1278,19 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
     if let Some(mapped) = ip.to_ipv4_mapped() {
         return is_public_ipv4(mapped);
     }
+    // The deprecated IPv4-compatible form (::a.b.c.d, first 96 bits zero) is
+    // not unwrapped by to_ipv4_mapped, so decode it explicitly. An all-zero
+    // address (::/128, the unspecified address) is handled by is_unspecified
+    // below rather than treated as 0.0.0.0.
+    let octets = ip.octets();
+    if octets[..12].iter().all(|&byte| byte == 0) && octets[12..].iter().any(|&byte| byte != 0) {
+        return is_public_ipv4(Ipv4Addr::new(
+            octets[12],
+            octets[13],
+            octets[14],
+            octets[15],
+        ));
+    }
     let segments = ip.segments();
     let global_unicast = (segments[0] & 0xe000) == 0x2000;
     let ietf_protocol_assignment = segments[0] == 0x2001 && segments[1] < 0x0200;
@@ -1270,6 +1356,7 @@ fn validate_pointer(pointer: &RendezvousPointer) -> Result<(), String> {
             IpAddr::V4(ip) => is_private_ipv4(ip),
             IpAddr::V6(ip) => {
                 ip.to_ipv4_mapped().is_some_and(is_private_ipv4)
+                    || ipv4_compatible(ip).is_some_and(is_private_ipv4)
                     || ip.is_loopback()
                     || ip.is_unspecified()
                     || ip.is_unique_local()
@@ -1282,6 +1369,25 @@ fn validate_pointer(pointer: &RendezvousPointer) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Decode the deprecated IPv4-compatible IPv6 form (`::a.b.c.d`, first 96 bits
+/// zero) as its trailing Ipv4Addr. Returns None for the mapped prefix
+/// (`::ffff:0:0/96`, handled by `to_ipv4_mapped`) and for the all-zero
+/// unspecified address `::` (so it is not silently treated as `0.0.0.0`).
+fn ipv4_compatible(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    let octets = ip.octets();
+    let trailing_zero = octets[12..].iter().all(|&byte| byte == 0);
+    if octets[..12].iter().all(|&byte| byte == 0) && !trailing_zero {
+        Some(Ipv4Addr::new(
+            octets[12],
+            octets[13],
+            octets[14],
+            octets[15],
+        ))
+    } else {
+        None
+    }
 }
 
 fn is_private_ipv4(ip: std::net::Ipv4Addr) -> bool {
@@ -1804,6 +1910,7 @@ async fn start_runtime(
             republish_queue,
             republish_pending,
             republish_in_flight: 0,
+            republish_deadlines: HashMap::new(),
             owned,
             store_owned,
             owned_path,

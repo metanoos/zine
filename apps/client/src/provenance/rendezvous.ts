@@ -128,26 +128,61 @@ function mappedIpv4Bytes(host: string): number[] | null {
   return [high >>> 8, high & 0xff, low >>> 8, low & 0xff];
 }
 
+/** Decode the deprecated IPv4-compatible IPv6 form (`::a.b.c.d`, first 96 bits
+ * zero) as its trailing IPv4 bytes. Returns null for the mapped prefix
+ * (`::ffff:0:0/96`, handled by {@link mappedIpv4Bytes}) and for the all-zero
+ * unspecified address `::` (so it is not silently treated as 0.0.0.0). */
+function ipv4CompatibleBytes(host: string): number[] | null {
+  if (!host.startsWith("::")) return null;
+  const suffix = host.slice(2);
+  if (suffix.length === 0) return null;
+  const dotted = ipv4Bytes(suffix);
+  if (dotted) return dotted;
+  const groups = suffix.split(":");
+  if (groups.length !== 2 || !groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) {
+    return null;
+  }
+  const high = Number.parseInt(groups[0]!, 16);
+  const low = Number.parseInt(groups[1]!, 16);
+  return [high >>> 8, high & 0xff, low >>> 8, low & 0xff];
+}
+
+/** Reject every IPv4 range the native dialer (`rendezvous_relay.rs::is_public_ipv4`)
+ * rejects, so the application-level filter and the dialer agree. This is layered
+ * defense — the dialer re-validates at TCP-connect — but keeping the two reject
+ * lists in sync prevents a pointer naming a TEST-NET or CGNAT literal from being
+ * accepted into the DHT only to fail every downstream fetch. */
 function isPrivateIpv4(bytes: number[]): boolean {
+  const [a, b, c] = bytes;
   return (
-    bytes[0] === 0 ||
-    bytes[0] === 10 ||
-    bytes[0] === 127 ||
-    (bytes[0] === 169 && bytes[1] === 254) ||
-    (bytes[0] === 172 && bytes[1]! >= 16 && bytes[1]! <= 31) ||
-    (bytes[0] === 192 && bytes[1] === 168)
+    a === 0 || // 0.0.0.0/8 "this host"
+    a === 10 || // RFC1918
+    a === 127 || // loopback
+    (a === 169 && b === 254) || // link-local
+    (a === 172 && b! >= 16 && b! <= 31) || // RFC1918
+    (a === 192 && b === 168) || // RFC1918
+    // Special-purpose ranges the dialer also blocks:
+    (a === 100 && b! >= 64 && b! <= 127) || // RFC6598 CGNAT
+    (a === 192 && b === 0 && (c === 0 || c === 2)) || // TEST-NET-adjacent / doc
+    (a === 192 && b === 88 && c === 99) || // 6to4 anycast (deprecated)
+    (a === 198 && (b === 18 || b === 19)) || // RFC2544 benchmarking
+    (a === 198 && b === 51 && c === 100) || // TEST-NET-2
+    (a === 203 && b === 0 && c === 113) || // TEST-NET-3
+    a! >= 240 // reserved (class E) + broadcast 255.255.255.255
   );
 }
 
 function isPrivateIpLiteral(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  const bytes = ipv4Bytes(host) ?? mappedIpv4Bytes(host);
+  const bytes =
+    ipv4Bytes(host) ?? mappedIpv4Bytes(host) ?? ipv4CompatibleBytes(host);
   if (bytes) return isPrivateIpv4(bytes);
   return (
     host === "::" ||
     host === "::1" ||
     /^f[cd][0-9a-f]*:/.test(host) ||
-    /^fe[89ab][0-9a-f]*:/.test(host)
+    /^fe[89ab][0-9a-f]*:/.test(host) ||
+    /^ff[0-9a-f]{1,2}:/.test(host)
   );
 }
 
