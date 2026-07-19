@@ -1140,7 +1140,14 @@ async fn factory_reset(
     let active_kademlia_directory = active_runtime.directory.clone();
     let active_journal_directory = active_runtime.journal_directory.clone();
     let rendezvous_runtime = app.state::<rendezvous_relay::RendezvousRelayRuntime>();
-    lock_vault_runtime_under_transition(&app, &kademlia_runtime, &rendezvous_runtime).await?;
+    let llm_registry = app.state::<llm_proxy::LlmRequestRegistry>();
+    lock_vault_runtime_under_transition(
+        &app,
+        &kademlia_runtime,
+        &rendezvous_runtime,
+        &llm_registry,
+    )
+    .await?;
     kademlia::reset_runtime(&active_kademlia_directory, &kademlia_runtime).await?;
     desktop_operation_journal::remove_database_files(&active_journal_directory)?;
     let bin = resolve_relay_binary(&app)?;
@@ -2183,13 +2190,15 @@ async fn lock_vault_runtime_inner(
     llm_registry: &llm_proxy::LlmRequestRegistry,
 ) -> Result<(), String> {
     let _transition = acquire_vault_transition_guard().await;
-    lock_vault_runtime_under_transition(app, kademlia_runtime, rendezvous_runtime).await
+    lock_vault_runtime_under_transition(app, kademlia_runtime, rendezvous_runtime, llm_registry)
+        .await
 }
 
 async fn lock_vault_runtime_under_transition(
     app: &tauri::AppHandle,
     kademlia_runtime: &kademlia::KademliaRuntime,
     rendezvous_runtime: &rendezvous_relay::RendezvousRelayRuntime,
+    llm_registry: &llm_proxy::LlmRequestRegistry,
 ) -> Result<(), String> {
     let binding = {
         let _gate = VAULT_RUNTIME_GATE
