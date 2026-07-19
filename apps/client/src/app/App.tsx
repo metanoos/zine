@@ -388,6 +388,7 @@ import {
   contextMountState,
   pathInEffectiveScope,
   rebaseContextMountAfterMove,
+  rebaseContextMountAfterRename,
   rebaseShieldedAfterMove,
   rebaseShieldedPath,
   rebaseTraceRefsAfterMove,
@@ -17485,9 +17486,11 @@ function App() {
     commitUiFocus(rebaseUiFocus(uiFocusRef.current, rebaser, renameTabRebaser));
     // The context mount follows the renamed path too, mirroring moveNodes.
     // Without this, renaming (or reparenting-under-rename) the scope mount
-    // leaves scope pointing at a path that no longer exists.
+    // leaves scope pointing at a path that no longer exists. The rebase rule
+    // (exact-match rewrite, plus prefix rewrite for folder renames) is the
+    // pure helper in scope-model.ts, unit-tested for all four cases.
     setScope((current) =>
-      current.map((mount) => ({ ...mount, path: rebaser(mount.path) })) as ContextMounts,
+      rebaseContextMountAfterRename(current, path, destPath, isFolderRename),
     );
 
     // Storage rename + an identity-preserving provenance step. Carry each

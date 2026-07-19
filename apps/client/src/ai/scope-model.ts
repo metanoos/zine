@@ -105,6 +105,33 @@ export function rebaseContextMountAfterMove(
   return [rebaseTraceRefsAfterMove(mounts, movedRoots, destFolder)[0]];
 }
 
+/** Carry the one context mount across an in-place rename. `path` is the
+ * pre-rename node, `destPath` its post-rename path. A folder rename rewrites
+ * every mount whose path is the renamed folder or sits beneath it; a file
+ * rename rewrites only an exact-match mount. An ancestor-of-the-rename mount
+ * and any unrelated mount pass through unchanged. Mirrors the path-rewrite
+ * rule the storage layer applies to file keys, so scope stays consistent with
+ * the live tree. */
+export function rebaseContextMountAfterRename(
+  mounts: ContextMounts,
+  path: string,
+  destPath: string,
+  isFolderRename: boolean,
+): ContextMounts {
+  if (mounts.length === 0) return [];
+  const mount = mounts[0];
+  const p = mount.path;
+  let nextPath: string;
+  if (p === path) {
+    nextPath = destPath;
+  } else if (isFolderRename && p.startsWith(path + "/")) {
+    nextPath = destPath + p.slice(path.length);
+  } else {
+    nextPath = p;
+  }
+  return nextPath === p ? mounts : [{ ...mount, path: nextPath }];
+}
+
 /** Carry shield boundaries through one exact path-prefix rewrite. If the moved
  * root inherited a broader shield that stays behind, install an explicit
  * boundary at the destination so moving sensitive content cannot unshield it. */
