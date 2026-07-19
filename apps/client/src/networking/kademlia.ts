@@ -93,6 +93,7 @@ export function saveKademliaConfig(
 ): KademliaConfig {
   const normalized = normalizeKademliaConfig(config);
   storage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+  invalidateKademliaConfigCache();
   for (const listener of configListeners) listener();
   return normalized;
 }
@@ -103,13 +104,19 @@ export function saveKademliaConfig(
  * this module's listeners directly while the DOM listener covers other tabs. */
 export function subscribeKademliaConfig(listener: ConfigListener): () => void {
   configListeners.add(listener);
-  const unsubscribeVaultStorage = subscribeVaultStorage(listener);
+  const unsubscribeVaultStorage = subscribeVaultStorage(() => {
+    invalidateKademliaConfigCache();
+    listener();
+  });
   const storageTarget = typeof window !== "undefined" &&
       typeof window.addEventListener === "function"
     ? window
     : null;
   const onStorage = (event: StorageEvent) => {
-    if (event.key === null || event.key === STORAGE_KEY) listener();
+    if (event.key === null || event.key === STORAGE_KEY) {
+      invalidateKademliaConfigCache();
+      listener();
+    }
   };
   storageTarget?.addEventListener("storage", onStorage);
   return () => {
@@ -119,9 +126,29 @@ export function subscribeKademliaConfig(listener: ConfigListener): () => void {
   };
 }
 
+// Memoize the parsed config so `useSyncExternalStore`'s getSnapshot does not
+// re-read and JSON.parse storage on every App render. Invalidated by
+// `saveKademliaConfig` (same tab), the `storage` event (other tabs), and the
+// vault-storage subscription (vault switches) — every path that can change the
+// stored config.
+let cachedConfig: { storage: ReadStorage; value: KademliaConfig } | undefined;
+
+function invalidateKademliaConfigCache(): void {
+  cachedConfig = undefined;
+}
+
+function readKademliaConfigCached(storage: ReadStorage = vaultStorage): KademliaConfig {
+  if (cachedConfig && cachedConfig.storage === storage) {
+    return cachedConfig.value;
+  }
+  const value = loadKademliaConfig(storage);
+  cachedConfig = { storage, value };
+  return value;
+}
+
 /** Stable scalar snapshot for React's external-store subscription. */
 export function kademliaEnabledSnapshot(): boolean {
-  return loadKademliaConfig().enabled;
+  return readKademliaConfigCached().enabled;
 }
 
 class StaleVaultOperationError extends Error {

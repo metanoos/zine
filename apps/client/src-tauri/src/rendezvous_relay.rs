@@ -198,6 +198,19 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
     if let Some(mapped) = ip.to_ipv4_mapped() {
         return is_public_ipv4(mapped);
     }
+    // The deprecated IPv4-compatible form (::a.b.c.d, first 96 bits zero) is
+    // not unwrapped by to_ipv4_mapped, so decode it explicitly. An all-zero
+    // address (::/128, the unspecified address) is handled by is_unspecified
+    // below rather than treated as 0.0.0.0.
+    let octets = ip.octets();
+    if octets[..12].iter().all(|&byte| byte == 0) && octets[12..].iter().any(|&byte| byte != 0) {
+        return is_public_ipv4(Ipv4Addr::new(
+            octets[12],
+            octets[13],
+            octets[14],
+            octets[15],
+        ));
+    }
     let segments = ip.segments();
     let global_unicast = (segments[0] & 0xe000) == 0x2000;
     let ietf_protocol_assignment = segments[0] == 0x2001 && segments[1] < 0x0200;
@@ -382,50 +395,95 @@ async fn sample(request: RendezvousRelaySampleRequest) -> Result<Vec<Value>, Str
     let mut events = Vec::new();
     let mut seen = BTreeSet::new();
     let mut total_bytes = 0usize;
+    // Per protocol/rendezvous.md §2.2 the reference press "closes each
+    // subscription on completion, timeout, bound violation, or cancellation."
+    // Receive-loop errors set `outcome` and break so the CLOSE + websocket
+    // close epilogue below runs on every exit path, not just the success path.
+    let mut outcome: Result<(), String> = Ok(());
     while let Some(message) = websocket.next().await {
-        let message = message.map_err(|error| format!("read rendezvous relay: {error}"))?;
-        charge_inbound_message(&mut total_bytes, &message, request.max_total_bytes)?;
+        let message = match message {
+            Ok(message) => message,
+            Err(error) => {
+                outcome = Err(format!("read rendezvous relay: {error}"));
+                break;
+            }
+        };
+        if let Err(error) = charge_inbound_message(&mut total_bytes, &message, request.max_total_bytes) {
+            outcome = Err(error);
+            break;
+        }
         if message.is_close() {
             break;
         }
         if !message.is_text() {
             continue;
         }
-        let text = message
-            .to_text()
-            .map_err(|error| format!("decode rendezvous relay frame: {error}"))?;
-        let envelope: Value = serde_json::from_str(text)
-            .map_err(|_| "rendezvous relay returned malformed JSON".to_string())?;
-        let values = envelope
-            .as_array()
-            .ok_or_else(|| "rendezvous relay returned a malformed envelope".to_string())?;
+        let text = match message.to_text() {
+            Ok(text) => text,
+            Err(error) => {
+                outcome = Err(format!("decode rendezvous relay frame: {error}"));
+                break;
+            }
+        };
+        let envelope: Value = match serde_json::from_str(text) {
+            Ok(value) => value,
+            Err(_) => {
+                outcome = Err("rendezvous relay returned malformed JSON".to_string());
+                break;
+            }
+        };
+        let values = match envelope.as_array() {
+            Some(values) => values,
+            None => {
+                outcome = Err("rendezvous relay returned a malformed envelope".to_string());
+                break;
+            }
+        };
         match values.first().and_then(Value::as_str) {
             Some("EOSE") if values.get(1).and_then(Value::as_str) == Some(subscription) => break,
             Some("EVENT") if values.get(1).and_then(Value::as_str) == Some(subscription) => {
-                let event = values
-                    .get(2)
-                    .ok_or_else(|| "rendezvous relay omitted its event".to_string())?;
-                let encoded = serde_json::to_vec(event)
-                    .map_err(|error| format!("measure rendezvous relay event: {error}"))?;
+                let Some(event) = values.get(2) else {
+                    outcome = Err("rendezvous relay omitted its event".to_string());
+                    break;
+                };
+                let encoded = match serde_json::to_vec(event) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        outcome = Err(format!("measure rendezvous relay event: {error}"));
+                        break;
+                    }
+                };
                 if encoded.len() > request.max_event_bytes {
-                    return Err("rendezvous relay event exceeds byte limit".to_string());
+                    outcome = Err("rendezvous relay event exceeds byte limit".to_string());
+                    break;
                 }
-                let id = validate_event(event, &request, requested_ids.as_ref())?;
+                let id = match validate_event(event, &request, requested_ids.as_ref()) {
+                    Ok(id) => id,
+                    Err(error) => {
+                        outcome = Err(error);
+                        break;
+                    }
+                };
                 if seen.insert(id) {
                     if events.len() >= request.max_unique_events {
-                        return Err(
-                            "rendezvous relay sample exceeds unique event limit".to_string()
-                        );
+                        outcome =
+                            Err("rendezvous relay sample exceeds unique event limit".to_string());
+                        break;
                     }
                     events.push(event.clone());
                 }
             }
             Some("AUTH") => {
-                return Err("rendezvous relay requires authentication".to_string());
+                outcome = Err("rendezvous relay requires authentication".to_string());
+                break;
             }
             _ => {}
         }
     }
+    // Epilogue: always send CLOSE and close the socket, whether the loop ended
+    // on EOSE (Ok), an error (bound violation / AUTH / malformed frame / read
+    // failure), or the relay closing first. Errors are ignored — the relay may
+    // have already dropped the connection.
     let _ = websocket
         .send(Message::Text(
             serde_json::to_string(&json!(["CLOSE", subscription]))
@@ -434,6 +492,7 @@ async fn sample(request: RendezvousRelaySampleRequest) -> Result<Vec<Value>, Str
         ))
         .await;
     let _ = websocket.close(None).await;
+    outcome?;
     Ok(events)
 }
 
