@@ -804,9 +804,9 @@ hypotheses. Last updated 2026-07-18.
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
 | Desktop Stronghold storage for signing and provider secrets | Implemented on desktop; browser remains read-only | `secret-store.test.ts`, `secret-migration.test.ts`, key/model store tests, and the Tauri Stronghold shell |
 | Headless MCP press with its own voice key and permanent profile Root | Implemented | Offline stdio smoke proves zero-folder cold start, exact signed-event outbox, raw node reads, and Root/key reuse; isolated real-relay integration flushes a queued event unchanged, preserves optional source forks, and exercises external Publish |
-| Prepared desktop MODEL operations and approval gating | Implemented for direct single-shot gestures; not yet enforced on every live model call | `prepared-operation.test.ts`, `context-snapshot.test.ts`, `model-operation-executor.test.ts`, and `llm-prepared.test.ts`; the separate agent loop still uses its own transport, and `preparedRequestHash` is not yet stored in Step metadata |
-| Current text plus structured trace context in desktop prompts | Implemented as a client-local compatibility baseline | Direct operations gather current file/folder text and a chronological process log through `context-block.ts`, `context-snapshot.ts`, and `prepared-operation.ts`; there is no shared task-specific selector, scoped memory, cross-press fixture contract, or durable context binding yet |
-| Shared authoring-syntax kernel and a desktop adapter for the Extend (continuation) and Settle (revision) operations | Initial deterministic slice implemented; authority is current-editor-session-only | `packages/trace-context` pins UTF-16 parsing, protected precedence, exact operation clipping, authority failures, directive markers, local excerpts, malformed syntax, and generated 0/100/1,000/10,000-candidate scale fixtures. Desktop tests cover manual versus paste/drop/MODEL/undo/reload authority, exact prepared identity, protected-output rejection, atomic accepted-success cleanup, and inert legacy behavior. Persisted authority, promotion, durable consumption receipts, crash recovery, other operations, and MCP parity remain deferred |
+| Prepared desktop MODEL operations and approval gating | Direct gestures are prepared; Extend also has a durable private execution path | `prepared-operation.test.ts`, `context-snapshot.test.ts`, `model-operation-executor.test.ts`, and `llm-prepared.test.ts` cover preparation. `desktop-operation-runtime.test.ts`, `desktop-operation-review.test.ts`, and the native journal/proxy tests cover persist-before-provider ordering, bounded recovery, ambiguous no-redispatch, explicit duplicate-risk retry, provisional review, compare-and-set application, exact receipts, and vault-bound cancellation. The separate agent loop shares the cancellable native transport but remains outside the durable operation journal; `preparedRequestHash` is not yet signed into Step metadata |
+| Current text plus structured trace context in desktop prompts | Implemented as a client-local compatibility baseline; privately exact-bound for durable Extend | Direct operations gather current file/folder text and a chronological process log through `context-block.ts`, `context-snapshot.ts`, and `prepared-operation.ts`. The Extend journal self-consistency-checks the exact selected context and approved request, but there is no shared task-specific selector, scoped memory, cross-press fixture contract, or portable signed context/result binding yet |
+| Shared authoring-syntax kernel and desktop adapters for Extend (continuation) and Settle (revision) | Initial deterministic slice implemented; authority is current-editor-session-only | `packages/trace-context` pins UTF-16 parsing, protected precedence, exact operation clipping, authority failures, directive markers, local excerpts, malformed syntax, and generated 0/100/1,000/10,000-candidate scale fixtures. Desktop tests cover manual versus paste/drop/MODEL/undo/reload authority, exact prepared identity, protected-output rejection, and inert legacy behavior. Extend additionally records the exact directive deletion plan and durable accepted-application receipt so crash recovery can converge without restoring authority or redispatching provider work. Persisted authority, explicit promotion, Inspector correction/exclusion, durable Settle, other operations, and MCP parity remain deferred |
 | Per-delta human/model attribution | Implemented | Attribution regression suite; trust status remains asserted unless corroborated through a signed seam |
 | Fork and merge | Implemented for owned recursive destinations and current top-level foreign flows | Nested Scan/adoption/fork tests plus merge and ownership tests; recursive fork-on-write through an already-foreign folder remains deferred |
 | Mutual-peer co-citation and process vet | Implemented with a Coin-eligibility gap | `co-citation.ts` currently intersects ordinary social `q` targets; the revised protocol requires valid-Coin verification before a match. `vet.ts`, `vet-walker.ts`, and their tests cover the process vet |
@@ -1013,17 +1013,21 @@ Already built:
 - a desktop adapter for the Extend (continuation) and Settle (revision)
   operations with exact current-session manual-origin authority,
   protected-output validation, and accepted-success cleanup;
+- a vault-scoped encrypted desktop Extend journal that binds the exact approved
+  request, selected context, provider profile, attempt, provisional result,
+  application intent, and crash-pad receipt; recovers without ambiguous
+  redispatch; and cancels/drains native HTTP work at the vault boundary;
 - a read-only trace-context Inspector presentation for prepared operations;
 - a preregistered writing-outcome study and operational scoring rubric; and
 - a preregistered narration study showing a narrow process-description effect.
 
 Not yet built as one system: task-specific evidence selection and rendering,
 cross-press manifest parity, Inspector exclusions/corrections/promotion,
-persisted directive authority and durable consumption receipts, scoped memory,
-durable result-to-context binding, writing-outcome evaluation, or complete
-desktop/MCP operation coverage. Fixed cross-runtime folder vectors and explicit
-crash-boundary real-relay recovery fixtures remain hardening work for the
-recursive checkpoint cut.
+persisted directive authority, scoped memory, durable Settle and other
+operation adapters, portable signed result-to-context binding,
+writing-outcome evaluation, or complete desktop/MCP operation coverage. Fixed
+cross-runtime folder vectors and explicit crash-boundary real-relay recovery
+fixtures remain hardening work for the recursive checkpoint cut.
 
 ## Phase 0: declare and preregister
 
@@ -1087,11 +1091,18 @@ oversized, Unicode, cancelled, and invalid-trace cases.
 
 ## Phase 2: one complete desktop vertical slice
 
-This phase has an initial read-only dogfood slice: Extend and Settle prepare
-through the shared syntax kernel, and Prompt Inspector can present the frozen
-boundary. Exclusion, correction, explicit promotion, persisted authority,
-durable receipts, and crash recovery are still required before the vertical
-slice is complete.
+This phase now has one private execution-and-recovery cut for desktop Extend.
+Extend prepares through the shared syntax kernel and Prompt Inspector, then
+persists the exact approved boundary before provider I/O. Its encrypted
+vault-scoped journal supports bounded review history, explicit ambiguous retry,
+provisional result review, compare-and-set application, exact accepted receipts,
+and crash recovery without automatic provider redispatch. Native vault lock,
+reload recovery, and factory reset cancel and drain active provider requests.
+
+The broader phase is not complete. Settle still uses the syntax kernel without
+the durable execution journal, and exclusion, correction, explicit promotion,
+persisted directive authority, task-specific selection, and scoped memory
+remain open.
 
 Integrate Extend and Settle first because continuation and revision expose
 different ways trace may help. Preserve today's Stir behavior through the new
@@ -1111,10 +1122,11 @@ grammar, but gate its generalized adapter separately.
 - Preparation, approval, provider dispatch, result review, compare-and-set
   application, consumption receipts, and cleanup are idempotent and recoverable.
 
-Disposable local envelopes are allowed for dogfood. They must not be described
-as final protocol binding or generally released private storage.
+The current dogfood envelope is encrypted, vault-scoped, retention-bounded
+private recovery state. It must not be described as portable signed provenance,
+final protocol binding, or a generally released private-storage contract.
 
-## Phase 3: durable binding and outcome evidence
+## Phase 3: portable signed binding and outcome evidence
 
 After the trust/schema review:
 

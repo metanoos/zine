@@ -71,17 +71,21 @@ Already built:
 - a desktop adapter for the Extend (continuation) and Settle (revision)
   operations with exact current-session manual-origin authority,
   protected-output validation, and accepted-success cleanup;
+- a vault-scoped encrypted desktop Extend journal that binds the exact approved
+  request, selected context, provider profile, attempt, provisional result,
+  application intent, and crash-pad receipt; recovers without ambiguous
+  redispatch; and cancels/drains native HTTP work at the vault boundary;
 - a read-only trace-context Inspector presentation for prepared operations;
 - a preregistered writing-outcome study and operational scoring rubric; and
 - a preregistered narration study showing a narrow process-description effect.
 
 Not yet built as one system: task-specific evidence selection and rendering,
 cross-press manifest parity, Inspector exclusions/corrections/promotion,
-persisted directive authority and durable consumption receipts, scoped memory,
-durable result-to-context binding, writing-outcome evaluation, or complete
-desktop/MCP operation coverage. Fixed cross-runtime folder vectors and explicit
-crash-boundary real-relay recovery fixtures remain hardening work for the
-recursive checkpoint cut.
+persisted directive authority, scoped memory, durable Settle and other
+operation adapters, portable signed result-to-context binding,
+writing-outcome evaluation, or complete desktop/MCP operation coverage. Fixed
+cross-runtime folder vectors and explicit crash-boundary real-relay recovery
+fixtures remain hardening work for the recursive checkpoint cut.
 
 ## Phase 0: declare and preregister
 
@@ -145,11 +149,18 @@ oversized, Unicode, cancelled, and invalid-trace cases.
 
 ## Phase 2: one complete desktop vertical slice
 
-This phase has an initial read-only dogfood slice: Extend and Settle prepare
-through the shared syntax kernel, and Prompt Inspector can present the frozen
-boundary. Exclusion, correction, explicit promotion, persisted authority,
-durable receipts, and crash recovery are still required before the vertical
-slice is complete.
+This phase now has one private execution-and-recovery cut for desktop Extend.
+Extend prepares through the shared syntax kernel and Prompt Inspector, then
+persists the exact approved boundary before provider I/O. Its encrypted
+vault-scoped journal supports bounded review history, explicit ambiguous retry,
+provisional result review, compare-and-set application, exact accepted receipts,
+and crash recovery without automatic provider redispatch. Native vault lock,
+reload recovery, and factory reset cancel and drain active provider requests.
+
+The broader phase is not complete. Settle still uses the syntax kernel without
+the durable execution journal, and exclusion, correction, explicit promotion,
+persisted directive authority, task-specific selection, and scoped memory
+remain open.
 
 Integrate Extend and Settle first because continuation and revision expose
 different ways trace may help. Preserve today's Stir behavior through the new
@@ -169,10 +180,11 @@ grammar, but gate its generalized adapter separately.
 - Preparation, approval, provider dispatch, result review, compare-and-set
   application, consumption receipts, and cleanup are idempotent and recoverable.
 
-Disposable local envelopes are allowed for dogfood. They must not be described
-as final protocol binding or generally released private storage.
+The current dogfood envelope is encrypted, vault-scoped, retention-bounded
+private recovery state. It must not be described as portable signed provenance,
+final protocol binding, or a generally released private-storage contract.
 
-## Phase 3: durable binding and outcome evidence
+## Phase 3: portable signed binding and outcome evidence
 
 After the trust/schema review:
 
