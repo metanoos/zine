@@ -607,7 +607,10 @@ export function folderReplayState(event: Event, path: string): ReplayFolderState
       !isFocusSelection(delta.selection) ||
       !Number.isInteger(delta.panelIndex) ||
       (delta.panelIndex ?? -1) < 0 ||
-      !Number.isFinite(delta.timestamp)
+      // Integer milliseconds, matching the wire gate in trace-conformance.ts
+      // (focus-delta timestamp rule). `Number.isFinite` would admit fractional
+      // ms that conformance rejects.
+      !Number.isInteger(delta.timestamp)
     ) {
       continue;
     }

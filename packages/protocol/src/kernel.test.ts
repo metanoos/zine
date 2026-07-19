@@ -421,6 +421,40 @@ test("folder conformance rejects a changed child hash without a new child node",
   assert.ok(verdict.issues.some((issue) => issue.code === "nonconforming-deltas"));
 });
 
+test("folder conformance rejects an advance delta that does not move the child head", async () => {
+  // A self-referential advance (previousNodeId === nodeId) is a no-op that a
+  // misbehaving publisher would emit if it conflated the child's latest head
+  // with the parent's pointer to it. The kernel rejects it so a republished
+  // checkpoint cannot pass as a forward step. Mirrors the defensive skip in
+  // replay-timeline.ts folderReplayState, locking the invariant here too.
+  const nodeId = "aa".repeat(32);
+  const member = {
+    kind: "file" as const,
+    relativePath: "essay.md",
+    latestNodeId: nodeId,
+    contentHash: "cc".repeat(32),
+  };
+  const genesis = await folderNode([member], { version: 1, cause: "genesis" }, "1a".repeat(32));
+  const invalid = await folderNode(
+    [member],
+    { version: 1, cause: "child-advance", sourceNodeId: nodeId },
+    "1b".repeat(32),
+    genesis,
+    [{
+      type: "advance",
+      kind: "file",
+      relativePath: "essay.md",
+      previousNodeId: nodeId,
+      nodeId,
+      timestamp: 2,
+    }],
+  );
+
+  const verdict = await verifyFolderTraceChain([genesis, invalid], verifyEvent);
+  assert.equal(verdict.status, "invalid");
+  assert.ok(verdict.issues.some((issue) => issue.code === "nonconforming-deltas"));
+});
+
 test("folder conformance requires remove to pin the removed child head", async () => {
   const member = {
     kind: "file" as const,

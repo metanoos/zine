@@ -43,6 +43,7 @@ import {
   previousStepCitationTargets,
   publishEmptyGenesisIfNeeded,
   runRootMutationAfterRecovery,
+  runRootMutationSerialized,
   sameBodyDescendantCanFastForward,
   stageFileStepAfterPendingRecovery,
   structuralShieldJournal,
@@ -799,3 +800,94 @@ test("a genuinely foreign folder still fails closed", () => {
   assert.ok(fileSigner);
   assert.equal(folderWriteSigner(foreignOwner, fileSigner), null);
 });
+
+test("runRootMutationSerialized serializes per-root and cleans up an empty queue", async () => {
+  // The per-root mutation serializer is the spine of crash-safe structural
+  // gestures: every delete/move/rename/recovery flows through it. This test
+  // pins its three load-bearing guarantees with two concurrent operations on
+  // the same root:
+  //   (1) strict non-overlap — task 2 cannot start until task 1 has resolved,
+  //   (2) arrival-order execution (FIFO via the tail chain),
+  //   (3) a failed operation does not reject the chained successor
+  //       (`.catch(() => undefined)` on the tail), and
+  //   (4) once both resolve, the runs map no longer carries the root
+  //       (the empty queue is removable / GC-able).
+  type Run = import("./workspace-local.js").RootMutationRun;
+  const runs = new Map<string, Run>();
+  const events: string[] = [];
+  let task1Resolve: () => void = () => {};
+  const task1Gate = new Promise<void>((resolve) => { task1Resolve = resolve; });
+
+  const task1 = runRootMutationSerialized(runs, "root", "11".repeat(32), async () => {
+    events.push("task1:start");
+    await task1Gate;
+    events.push("task1:end");
+    return "task1-result" as const;
+  });
+  // Kick off task2 before task1 resolves: it must NOT start until task1 ends.
+  const task2 = runRootMutationSerialized(runs, "root", "22".repeat(32), async () => {
+    events.push("task2:start");
+    events.push("task2:end");
+    return "task2-result" as const;
+  });
+  // Yield once to let the first task reach its await; task2 must still be
+  // queued and not have started.
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(events, ["task1:start"], "task2 must not start before task1 ends");
+
+  task1Resolve();
+  assert.equal(await task1, "task1-result");
+  assert.equal(await task2, "task2-result");
+  assert.deepEqual(events, [
+    "task1:start",
+    "task1:end",
+    "task2:start",
+    "task2:end",
+  ], "tasks must run in arrival order with strict non-overlap");
+  // Queue cleanup: an empty operations map should let the root entry go.
+  assert.equal(runs.has("root"), false, "empty queue must be removed from the runs map");
+});
+
+test("runRootMutationSerialized does not let a failed task reject its successor", async () => {
+  type Run = import("./workspace-local.js").RootMutationRun;
+  const runs = new Map<string, Run>();
+  const failing = runRootMutationSerialized(runs, "root", "11".repeat(32), async () => {
+    throw new Error("boom");
+  });
+  await assert.rejects(failing, /boom/);
+
+  // The successor must still run to completion despite the prior rejection.
+  // This is the `.catch(() => undefined).then(task)` chain doing real work.
+  const successorRan: string[] = [];
+  const successor = runRootMutationSerialized(runs, "root", "22".repeat(32), async () => {
+    successorRan.push("ran");
+    return "ok" as const;
+  });
+  assert.equal(await successor, "ok");
+  assert.deepEqual(successorRan, ["ran"]);
+  assert.equal(runs.has("root"), false);
+});
+
+test("runRootMutationSerialized coalesces duplicate operation ids on the same root", async () => {
+  type Run = import("./workspace-local.js").RootMutationRun;
+  const runs = new Map<string, Run>();
+  let callCount = 0;
+  const operationId = "11".repeat(32);
+  const first = runRootMutationSerialized(runs, "root", operationId, async () => {
+    callCount++;
+    return "first" as const;
+  });
+  // Second call with the same operationId must return the same in-flight
+  // promise — recovery code relies on this coalescing so a duplicate resume
+  // attempt cannot re-enter a journal that is already completing.
+  const second = runRootMutationSerialized(runs, "root", operationId, async () => {
+    callCount++;
+    return "second" as const;
+  });
+  assert.equal(await first, "first");
+  assert.equal(await second, "first");
+  assert.equal(callCount, 1, "duplicate operationId must coalesce to one execution");
+  assert.equal(runs.has("root"), false);
+});
+

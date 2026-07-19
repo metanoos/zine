@@ -466,6 +466,55 @@ test("malformed structural journals are ignored without hiding the workspace", (
   assert.deepEqual(pendingStructuralOperations("root"), []);
 });
 
+test("a file referencing a dropped structural journal drops its phantom pendingOperationId", () => {
+  // Covers both the today-reachable case (a corrupt/future-version journal
+  // entry that fails isPendingStructuralOperation) and the forward-incompat
+  // case (a future schema bump): the journal entry is filter-dropped on load,
+  // and any optimistic projection that still points at it via pendingOperationId
+  // must be reconciled so the next gesture does not attempt to resume a
+  // journal that no longer exists.
+  values.clear();
+  const droppedOperationId = "ab".repeat(32);
+  values.set("zine.folder.root", JSON.stringify({
+    id: "root",
+    files: {
+      "moved.md": {
+        kind: "file",
+        content: "body",
+        tags: [],
+        nodeId: "",
+        updatedAt: 1,
+        pendingOperationId: droppedOperationId,
+      },
+      "untouched.md": {
+        kind: "file",
+        content: "body",
+        tags: [],
+        nodeId: "",
+        updatedAt: 1,
+        pendingOperationId: "cd".repeat(32),
+      },
+    },
+    pendingStructuralOperations: {
+      // Malformed (bad operationId) → filter-dropped, its id tracked.
+      [droppedOperationId]: { version: 2, kind: "delete", operationId: "not-an-id" },
+    },
+  }));
+  const loaded = loadLocalFolder("root");
+  assert.deepEqual(pendingStructuralOperations("root"), []);
+  assert.equal(
+    loaded?.files["moved.md"]?.pendingOperationId,
+    undefined,
+    "phantom pendingOperationId referencing a dropped journal must be reconciled",
+  );
+  assert.equal(
+    loaded?.files["untouched.md"]?.pendingOperationId,
+    "cd".repeat(32),
+    "an unrelated pendingOperationId must be preserved",
+  );
+});
+
+
 test("durable recovery journals surface rejected browser-storage writes", () => {
   values.clear();
   storageWriteError = new Error("quota exceeded");

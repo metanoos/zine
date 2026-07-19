@@ -233,12 +233,31 @@ export function loadLocalFolder(folderId: string): LocalFolder | null {
     const unknownFiles = parsed.files as Record<string, unknown>;
     if (!Object.values(unknownFiles).every(isLocalFile)) return null;
     const files = unknownFiles as Record<string, LocalFile>;
+    const droppedOperationIds = new Set<string>();
     const structuralOperations = Object.fromEntries(
       Object.entries(parsed.pendingStructuralOperations ?? {})
-        .filter((entry): entry is [string, PendingStructuralOperation] =>
-          isPendingStructuralOperation(entry[1]),
-        ),
+        .filter((entry): entry is [string, PendingStructuralOperation] => {
+          const accepted = isPendingStructuralOperation(entry[1]);
+          // Track which causal ids were filter-dropped (unknown version,
+          // malformed shape, or a future schema) so a file whose optimistic
+          // projection still points at one of them via `pendingOperationId`
+          // can be reconciled below instead of leaving a phantom path
+          // mutation whose journal can no longer be recovered.
+          if (!accepted && entry[0]) droppedOperationIds.add(entry[0]);
+          return accepted;
+        }),
     );
+    // Reconcile phantom projections: if a file references a dropped operation
+    // id, drop the reference so the next gesture does not attempt to resume a
+    // journal that no longer exists. `pendingSignedEvent` (the exact bytes to
+    // republish) is validated separately by `isLocalFile` and is left intact.
+    if (droppedOperationIds.size > 0) {
+      for (const file of Object.values(files)) {
+        if (file.pendingOperationId && droppedOperationIds.has(file.pendingOperationId)) {
+          delete file.pendingOperationId;
+        }
+      }
+    }
     const structuralConflicts = Object.fromEntries(
       Object.entries(parsed.structuralConflicts ?? {})
         .filter((entry): entry is [string, StructuralOperationConflict] => {

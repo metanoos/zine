@@ -2927,7 +2927,11 @@ function isFocusDelta(value: unknown): value is Extract<FolderDelta, { type: "fo
     isFocusSelection(delta.selection) &&
     Number.isInteger(delta.panelIndex) &&
     (delta.panelIndex as number) >= 0 &&
-    Number.isFinite(delta.timestamp)
+    // Integer milliseconds, matching the wire gate in trace-conformance.ts
+    // (focus-delta timestamp rule). `Number.isFinite` would admit fractional
+    // ms that conformance rejects, so the parser would render a delta the
+    // wire layer considers non-conforming.
+    Number.isInteger(delta.timestamp)
   );
 }
 
