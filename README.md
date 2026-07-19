@@ -164,17 +164,16 @@ behind it — and decide whether the resonance is real. If it isn't, swipe
 left; nothing enters your `peers.json` without the process-evidence vet and
 your explicit choice.
 
-Mint, Cite, mutual-peer matching, and process vetting are implemented and
-tested, but mutual-peer matching still accepts ordinary `q` targets and must
-be narrowed to valid Coins. Publish-side indexing and the Kademlia routing
-component are being implemented as part of the same Coins package; Kademlia
-is not a separate opt-in. The current code already filters bounded records,
+Mint, ordinary Cite, valid-Coin mutual-peer matching, and process vetting are
+implemented and tested. Publish-side indexing and the Kademlia routing
+component are integrated and exercised as part of the same Coins discovery
+package; Kademlia is not a separate opt-in. The code filters bounded records,
 reserves owned capacity, merges replicas before publication and republish,
-verifies hostile relays under deadlines and cancellation, batches valid-Coin
-`q` citations, and persists incomplete indexing in a durable outbox. It still
-needs complete package integration and operator-provided super-peers; this
-repository does not claim an operated public network or meaningful citation
-density. The [transport](protocol/transport.md) and
+verifies hostile relays under deadlines and cancellation, inspects every
+ordinary `q` citation while indexing only valid Coins, and persists incomplete
+indexing in a durable outbox. It still needs operator-provided super-peers and
+real deployment evidence; this repository does not claim an operated public
+network or meaningful citation density. The [transport](protocol/transport.md) and
 [rendezvous](protocol/rendezvous.md) specifications carry the exact rules.
 
 ## What exists today
@@ -188,13 +187,13 @@ density. The [transport](protocol/transport.md) and
 | Step, Publish, Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
 | Recursive folder checkpoint propagation | Implemented with verified checkpoint causes, distinct `advance` deltas, explicit folder/Root Step, durable operation ids, and collapsed derived roll-ups in Replay |
 | Top-level foreign-file fork-on-write | Implemented; recursive nested-folder fork-on-write is deferred |
-| Mutual-peer co-citation and process-evidence vet | Implemented and tested, but the matcher still accepts ordinary `q` targets and must be narrowed to valid Coins; calibration needs real corpora |
+| Valid-Coin mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
 | Raw-file Reify export with an optional signed-event bundle | Implemented on desktop |
 | Stronghold storage for signing and provider secrets | Implemented on desktop; the browser remains read-only |
 | Shared trace-context authoring-syntax kernel | Initial deterministic `[[…]]` / `((…))` scanner and compiler implemented with golden and generated scale corpora; task-specific evidence selection and cross-press rendering are not yet implemented |
 | Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures. Extend additionally persists the exact approved request, selected context, provider profile, attempt, result, and local application intent in a bounded encrypted vault journal before side effects; recovery never redispatches an ambiguous provider call, accepted application uses an exact crash-pad receipt and compare-and-set target check, and vault teardown cancels and drains native HTTP work. Settle uses the shared syntax kernel but not yet this durable execution path. Portable signed binding and the other operation adapters remain deferred |
 | Hosted relay | Implemented; an operator ACL equivalent to the local relay policy remains a gap |
-| Coins package: Mint, Coin indexing, and rendezvous | Under implementation as one user-facing discovery opt-in. Mint and the process vet work; ordinary Cite is a core composition gesture outside the opt-in. Attestation-gated Publish-side indexing is being implemented, mutual-peer matching still needs the valid-Coin eligibility filter, the Kademlia routing component is incomplete, and no bootstrap network is operated |
+| Coins package: Mint, Coin indexing, and rendezvous | Integrated and exercised as one user-facing discovery opt-in. Ordinary Cite remains core composition outside it. No bootstrap network is operated, and deployment/density evidence remains absent |
 | Managed remote, organization control plane, and no-install public verifier | Commercial product hypotheses, not shipping services |
 
 The complete evidence and limitation record lives in

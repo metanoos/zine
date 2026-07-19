@@ -182,12 +182,13 @@ Nothing enters your peer list without that vet and your explicit choice.
 
 Coins are the single user-facing discovery opt-in: enabling them covers Mint,
 valid-Coin Publish-side indexing, and both mutual-peer and global Coin
-rendezvous. Ordinary citation remains available without Coins. Mint and the
-process vet work today. Publish-side indexing is being implemented, mutual-peer
-matching must still be narrowed to valid Coins, the Kademlia routing component
-for global rendezvous remains under implementation, and no public bootstrap
-network is operated. The [Protocol](PROTOCOL.md#rendezvous--vetting) carries
-the exact mechanics and limits.
+rendezvous. Ordinary citation remains available without Coins. Mint,
+valid-Coin mutual-peer matching, Publish-side indexing, hostile-relay
+verification, and the Kademlia routing component are integrated and exercised.
+The routing layer still needs operator-provided super-peers and deployment
+evidence; no public bootstrap network is operated. The
+[Protocol](PROTOCOL.md#rendezvous--vetting) carries the exact mechanics and
+limits.
 
 ## One trace, three readers
 

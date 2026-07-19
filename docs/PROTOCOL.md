@@ -97,8 +97,8 @@ relays: SHA-256 ids, Schnorr signatures, and the seven NIP-01 fields. Tor can
 expose a private relay. Coins are the user-facing discovery opt-in for Mint,
 valid-Coin indexing, and rendezvous; ordinary citation is part of core
 composition. Kademlia is the internal routing component, not a separate opt-in,
-and remains under implementation; global discovery also needs
-operator-provided super-peers and real citation density.
+and is integrated and exercised; global discovery still needs operator-provided
+super-peers and real citation density.
 
 ---
 
@@ -385,8 +385,9 @@ trade is always reachability or privacy, never identity.
 A **super-peer** is an always-online relay holding a replica of *your published corpus*.
 It keeps cited traces reachable while your laptop is closed; it is not a
 discovery platform. Any NIP-01+NIP-33 relay suffices. OTS calendar hosting
-remains planned. Bootstrap configuration for the Coins package's Kademlia
-component is under implementation, and no bootstrap network is operated.
+remains planned. The Coins package validates Kademlia bootstrap protocol
+compatibility and commits configuration transactionally, but no bootstrap
+network is operated.
 
 Any NIP-01 relay that also implements parameterized-replaceable handling
 (NIP-33) is sufficient. There is no special relay class. For removal, the

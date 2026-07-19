@@ -24,9 +24,10 @@ sketches. Part II records the rationale.
 opt-in. Ordinary citation works without it. Enabling Coins covers Mint,
 valid-Coin Send-side indexing, and mutual-peer plus global Coin rendezvous.
 Kademlia is the routing component inside that package, not a separate feature
-or setting, and remains under implementation. The normative rules below define
-the intended interoperable behavior even where the reference package is
-incomplete.
+or setting. Its core routing path is integrated and exercised in the reference
+package. An operated bootstrap network, deployment evidence, and production
+security hardening remain future work. The normative rules below define the
+intended interoperable behavior.
 
 ---
 
@@ -171,16 +172,25 @@ literal (including IPv4-mapped IPv6), `.onion`, or value larger than 12 KiB.
 The reference server filters both local and remote inserts before storage; an
 untrusted peer cannot use a raw Kademlia Put to bypass those checks. It retains
 at most 64 distinct pointers per coordinate, keeps locally originated pointers
-ahead of disposable remote values when truncating, and reserves storage for up
-to 2,048 owned coordinates independently of its 1,024-record remote cache.
+ahead of disposable remote values when truncating, and ranks the merged remote
+set by `SHA-256(H || 0x00 || eventId || 0x00 || relayUrl)` before both count and
+byte truncation. Sequential replicas therefore converge on the same bounded
+set instead of granting lexicographically low event ids eviction priority. It
+reserves storage for up to 2,048 owned coordinates independently of its
+1,024-record remote cache.
 Remote-cache saturation therefore cannot evict or prevent an owned record.
 These are index-availability limits, not supply claims: Kademlia results MUST
 NOT be presented as global Coin supply, popularity, trust, or reputation.
 
 - **Put** — inspect every ordinary social `q` citation in the Sent carrying
   node, excluding structural `scope:llm` prompt dependencies. Implementations
-  MAY divide relay reads and writes into bounded batches, but MUST NOT silently
-  truncate a large anthology. For each target that resolves to a valid Coin,
+  that recognize `scope:llm` `targets-v1` process the carrying node's `q` set
+  minus its complete per-target structural set. A legacy, unknown-version, or
+  malformed `scope:llm` encoding excludes every `q` edge on that node from Put
+  and Get verification; readers MUST fail closed rather than infer which prompt
+  dependencies are public social citations. Implementations MAY divide relay
+  reads and writes into bounded batches, but MUST NOT silently truncate a large
+  anthology. For each target that resolves to a valid Coin,
   verify its body/`x`, derive `H`, and publish
   `{eventId, relayUrl}` under `H`. `eventId` is the Sent carrying node and
   `relayUrl` is at least one relay from which an unknown reader can fetch both
@@ -234,6 +244,12 @@ replica of your published corpus. Public libp2p/IPFS bootstrap peers are rejecte
 they bring a crowd and a trust posture incompatible with the protocol's
 sovereignty stance. Until the network is dense enough to self-seed, early
 users rely on operator-provided super-peers in this role.
+
+Before startup succeeds, every configured bootstrap MUST connect and Identify
+with protocol version `/zine/rendezvous/id/1.0.0` while advertising
+`/zine/rendezvous/kad/1.0.0`. Connection failure, timeout, or an incompatible
+Identify response rejects the candidate configuration; merely accepting a
+multiaddr or scheduling a dial is not bootstrap validation.
 
 The current desktop configuration path is transactional. A replacement
 listen/bootstrap configuration is normalized, stopped-and-started, and
@@ -639,12 +655,14 @@ may treat that as missing evidence, never as an invalid trace.
 # Open questions (deferred)
 
 **Implementation status.** The trust-bounded mutual-peer path and vet are built
-and tested. The Kademlia component remains under implementation inside the
-Coins package; its existing exercised slices include:
+and tested. The core Kademlia component is integrated and exercised inside the
+Coins package; the remaining work is operating bootstrap peers, gathering
+deployment evidence, and completing production security hardening. Its
+implemented slices include:
 - `provenance.ts` — `canonicalQuoteText`, `quoteHash` (the exact coordinate H)
 - `quote-fuzzy.ts` — MinHash signature + LSH banding (the fuzzy recall layer, §R2)
-- `co-citation.ts` — ordinary-`q` exact-target intersection + relay fetch glue;
-  valid-Coin verification remains a conformance gap (§4)
+- `co-citation.ts` — author-bound current-head resolution, completed-Coin
+  verification, and exact-target intersection for the mutual-peer path (§4)
 - `rendezvous.ts` — batched Send-side public-relay proof and bounded/cancellable read-side candidate verification (§2.2)
 - `rendezvous-outbox.ts` — durable retry queue for Send-side indexing (§2.2)
 - `networking/kademlia.ts` — desktop configuration and Tauri command boundary

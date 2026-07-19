@@ -75,6 +75,9 @@ Already built:
   request, selected context, provider profile, attempt, provisional result,
   application intent, and crash-pad receipt; recovers without ambiguous
   redispatch; and cancels/drains native HTTP work at the vault boundary;
+- the single Coins discovery opt-in with valid-Coin co-citation, durable
+  Publish-side indexing, hostile-relay verification, and native Kademlia
+  routing; no bootstrap network is operated;
 - a read-only trace-context Inspector presentation for prepared operations;
 - a preregistered writing-outcome study and operational scoring rubric; and
 - a preregistered narration study showing a narrow process-description effect.
@@ -265,8 +268,9 @@ humanness.
 
 Coins remain one user-facing discovery opt-in covering Mint, valid-Coin
 indexing, and rendezvous; ordinary citation remains part of core composition.
-Complete and harden that package, including its under-the-hood Kademlia
-component, without creating a second Kademlia product surface.
+The core package, including its under-the-hood Kademlia component, is integrated
+and exercised. Continue its security hardening without creating a second
+Kademlia product surface.
 Operating or expanding global rendezvous remains gated until real published
 citations produce organic co-citation matches, users ask to meet unknown
 co-citers, and the value outweighs privacy and abuse costs.
