@@ -103,6 +103,43 @@ transition into `provider-io` emits the single provider-dispatch effect, but
 only after the caller durably stores the new envelope. Replaying the same
 transition is idempotent and emits no effect.
 
+Every live desktop Extend owns an `AbortController` from before private-envelope
+persistence through provider completion. App teardown first clears ephemeral
+directive authority, then aborts every controller, and only then releases the
+vault-frozen runtime and repository references. An async persistence or
+approval continuation therefore cannot recreate authority or begin provider
+I/O after vault unmount. The runtime rechecks both cancellation and current-
+session authorization immediately before the `provider-io` compare-and-set. A
+cancellation that wins before that marker is durably `cancelled` and
+known-not-dispatched. A cancellation observed after the marker is durably
+`unknown` and may-have-dispatched, even when the runtime suppresses the pending
+transport call: the durable recovery contract cannot use local scheduling to
+prove that an external billable request did not start.
+
+The Tauri provider proxy carries an opaque lowercase UUID and the current
+native vault generation, both unrelated to prompt, credential, provider, or
+response bytes. A bounded native registry makes cancel idempotent across pre-
+registration, active, and recently completed states. It selects cancellation
+against request send, error and non-stream body reads, and each streaming read,
+then rechecks immediately before every IPC response delivery. The webview
+clears buffered frames and ignores later channel events as soon as its
+AbortSignal fires. Pre-registration cancellation uses a bounded five-minute
+monotonic tombstone; registry saturation fails closed for new registrations
+rather than evicting a cancellation that may still arrive out of IPC order.
+Every native exit removes active and tombstone state synchronously. The webview
+always reports cancellation as a generic `AbortError` and neither side logs raw
+provider failures or response bytes from the cancellation race.
+
+The registry starts closed and opens only when native vault activation has
+successfully bound it to that exact vault generation. Native lock and webview-
+reload recovery atomically stop new registrations, cancel every request in the
+generation, and wait for the registry to drain before releasing the vault
+binding. A drain failure leaves both the registry and vault generation closed
+to new provider work. Tombstones and completed ids are cleared only after the
+old generation drains; no request or late cancellation from one activation can
+enter the next. Both single-shot and agent-loop provider calls use this same
+request-id and shutdown boundary.
+
 Across a process or activation recovery boundary, both `dispatch-intent` and
 `provider-io` are ambiguous: a later marker could have rolled back after I/O
 began. Recovery never emits provider dispatch for either state. It emits only

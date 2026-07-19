@@ -39,6 +39,7 @@ const ACTIVE_ONION_MARKER_PREFIX: &str = ".zine-active-onion-";
 const LEGACY_VAULT_ID: &str = "legacy";
 const VAULT_REGISTRY_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const VAULT_REGISTRY_STALE_LOCK_AGE: Duration = Duration::from_secs(30);
+const LLM_VAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -775,6 +776,7 @@ fn activate_vault_runtime_under_transition(
     let verified = verify_vault_runtime_key(&directory, &workspace_key);
     verified?;
     let journal_key = desktop_operation_journal::JournalKey::derive(&workspace_key, &id)?;
+    let llm_registry = app.state::<llm_proxy::LlmRequestRegistry>();
 
     let mut active = ACTIVE_VAULT_RUNTIME
         .lock()
@@ -784,6 +786,7 @@ fn activate_vault_runtime_under_transition(
             return Err("The active vault is locking; wait for shutdown to finish".into());
         }
         if existing.id == id {
+            llm_registry.open(&existing.binding())?;
             return Ok(VaultRuntimeActivation {
                 journal_session_id: existing.journal_session_id.clone(),
                 journal_generation: existing.generation,
@@ -796,7 +799,7 @@ fn activate_vault_runtime_under_transition(
     getrandom::fill(&mut session_nonce)
         .map_err(|_| "The vault journal session cannot be created".to_string())?;
     let journal_session_id = hex::encode(session_nonce);
-    *active = Some(ActiveVaultRuntime {
+    let runtime = ActiveVaultRuntime {
         id,
         directory,
         generation,
@@ -804,7 +807,16 @@ fn activate_vault_runtime_under_transition(
         journal_key,
         journal_directory,
         journal_session_id: journal_session_id.clone(),
-    });
+    };
+    let binding = runtime.binding();
+    *active = Some(runtime);
+    if let Err(error) = llm_registry.open(&binding) {
+        // Activation is not successful until the provider boundary is bound to
+        // the exact same vault generation. Roll back rather than exposing an
+        // active vault whose LLM registry is stale or permissive.
+        *active = None;
+        return Err(error);
+    }
     Ok(VaultRuntimeActivation {
         journal_session_id,
         journal_generation: generation,
@@ -2168,6 +2180,7 @@ async fn lock_vault_runtime_inner(
     app: &tauri::AppHandle,
     kademlia_runtime: &kademlia::KademliaRuntime,
     rendezvous_runtime: &rendezvous_relay::RendezvousRelayRuntime,
+    llm_registry: &llm_proxy::LlmRequestRegistry,
 ) -> Result<(), String> {
     let _transition = acquire_vault_transition_guard().await;
     lock_vault_runtime_under_transition(app, kademlia_runtime, rendezvous_runtime).await
@@ -2186,11 +2199,19 @@ async fn lock_vault_runtime_under_transition(
             .lock()
             .map_err(|_| "active vault runtime lock is poisoned".to_string())?;
         let Some(active) = active.as_mut() else {
-            return Ok(());
+            return llm_registry.verify_closed();
         };
         active.closing = true;
         active.binding()
     };
+
+    tokio::time::timeout(
+        LLM_VAULT_DRAIN_TIMEOUT,
+        llm_registry.close_for_vault_transition(&binding),
+    )
+    .await
+    .map_err(|_| "LLM provider requests did not drain during vault shutdown".to_string())??;
+    llm_registry.verify_closed()?;
 
     kademlia::stop_for_vault_transition(kademlia_runtime, &binding).await?;
     rendezvous_runtime
@@ -2218,7 +2239,8 @@ async fn lock_vault_runtime_under_transition(
 async fn lock_vault_runtime(app: tauri::AppHandle) -> Result<(), String> {
     let kademlia_runtime = app.state::<kademlia::KademliaRuntime>();
     let rendezvous_runtime = app.state::<rendezvous_relay::RendezvousRelayRuntime>();
-    lock_vault_runtime_inner(&app, &kademlia_runtime, &rendezvous_runtime).await
+    let llm_registry = app.state::<llm_proxy::LlmRequestRegistry>();
+    lock_vault_runtime_inner(&app, &kademlia_runtime, &rendezvous_runtime, &llm_registry).await
 }
 
 /// A webview reload does not reset native plugin or sidecar state. If the new
@@ -2497,6 +2519,7 @@ pub fn run() {
     let app = builder
         .manage(kademlia::KademliaRuntime::default())
         .manage(rendezvous_relay::RendezvousRelayRuntime::default())
+        .manage(llm_proxy::LlmRequestRegistry::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -2529,6 +2552,7 @@ pub fn run() {
             scan_external,
             write_text_file,
             llm_proxy::llm_fetch,
+            llm_proxy::llm_cancel,
             stamp_ots,
             upgrade_ots,
             spawn_tor,

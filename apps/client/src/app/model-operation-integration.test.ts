@@ -127,7 +127,7 @@ test("directive authority gates provider dispatch and apply across App activatio
   assert.match(app, /desktopAuthorizedAttemptKeysRef = useRef\(new Set<string>\(\)\)/);
   assert.match(app, /isAttemptAuthorizedForCurrentEditorSession: \(envelope\) =>[\s\S]*isDesktopOperationAuthorizedThisSessionV1/);
   assert.match(dispatch, /runtime\.approve\(key\)/);
-  assert.match(dispatch, /runtime\.dispatch\(key, \{ signal \}\)/);
+  assert.match(dispatch, /runtime\.dispatch\(key, \{ signal: controller\.signal \}\)/);
   assert.match(apply, /isDesktopOperationAuthorizedThisSessionV1/);
   assert.match(apply, /return \{ status: "stale" \}/);
   assert.match(app, /desktopOperationReviewQueueV1\([\s\S]*isDesktopOperationAuthorizedThisSessionV1/);
@@ -189,7 +189,40 @@ test("recovery never publishes partial pins and cancellation or vault replacemen
   assert.match(app, /desktopOperationRefreshSequenceRef\.current \+= 1;[\s\S]*setDesktopOperationEnvelopes\(\[\]\)[\s\S]*setDesktopOperationPageLineageHeads\(\[\]\)[\s\S]*desktopOperationRuntimeRef\.current!\.recover\(\)/);
   assert.match(app, /sequence !== desktopOperationRefreshSequenceRef\.current/);
   assert.match(app, /desktopOperationStoreRef\.current !== repository/);
-  assert.match(app, /return \(\) => \{[\s\S]*desktopOperationRefreshSequenceRef\.current \+= 1;[\s\S]*desktopOperationRuntimeRef\.current = null;[\s\S]*desktopOperationStoreRef\.current = null;/);
+  assert.match(app, /return \(\) => \{[\s\S]*desktopOperationRefreshSequenceRef\.current \+= 1;[\s\S]*desktopAuthorizedAttemptKeysRef\.current\.clear\(\);[\s\S]*controller\.abort\(\);[\s\S]*desktopOperationRuntimeRef\.current = null;[\s\S]*desktopOperationStoreRef\.current = null;/);
+});
+
+test("vault cleanup owns and aborts every desktop Extend barrier before releasing runtime refs", () => {
+  const extend = functionBody("extendLLM", "function settleDeDupeLLM");
+  const dispatch = functionBody(
+    "dispatchDesktopOperationAttempt",
+    "async function retryDesktopOperation",
+  );
+  const retry = functionBody("retryDesktopOperation", "async function handleDesktopOperationAction");
+  const freshRetry = functionBody("dispatchFreshDesktopRetry", "const [opLenses");
+
+  assert.match(app, /desktopOperationAbortControllersRef = useRef\(new Set<AbortController>\(\)\)/);
+  assert.match(app, /desktopAuthorizedAttemptKeysRef\.current\.clear\(\);[\s\S]*for \(const controller of desktopOperationAbortControllersRef\.current\)[\s\S]*controller\.abort\(\);[\s\S]*desktopOperationRuntimeRef\.current = null;/);
+  assert.ok(
+    extend.indexOf("desktopOperationAbortControllersRef.current.add(controller)")
+      < extend.indexOf("runtime.persistApprovedExtend"),
+    "the controller must be owned before private request persistence begins",
+  );
+  assert.ok(
+    extend.indexOf("if (!controller.signal.aborted)")
+      < extend.indexOf("desktopAuthorizedAttemptKeysRef.current.add"),
+    "an unmounted continuation cannot recreate ephemeral directive authority",
+  );
+  assert.match(extend, /controller\.signal\.aborted[\s\S]*runtime\.cancel\(/);
+  assert.match(dispatch, /desktopOperationAbortControllersRef\.current\.add\(controller\)[\s\S]*runtime\.approve\(key\)[\s\S]*controller\.signal\.aborted[\s\S]*runtime\.cancel\(key\)[\s\S]*runtime\.dispatch\(key, \{ signal: controller\.signal \}\)/);
+  assert.ok(
+    retry.indexOf("desktopOperationAbortControllersRef.current.add(controller)")
+      < retry.indexOf("runtime.retry"),
+  );
+  assert.ok(
+    freshRetry.indexOf("desktopOperationAbortControllersRef.current.add(controller)")
+      < freshRetry.indexOf("runtime.retry"),
+  );
 });
 
 test("stale re-prepare opens only the original workspace path and trace", () => {
@@ -205,7 +238,10 @@ test("expired terminal directive re-prepare distinguishes safe fresh operations 
   assert.match(dispatch, /ambiguous = prior\.lifecycle\.retryPolicy === "operator-confirmation-required"/);
   assert.match(dispatch, /ambiguous[\s\S]*window\.confirm\(/);
   assert.ok(dispatch.indexOf("window.confirm(") < dispatch.indexOf("await runtime.retry(staleKey"));
-  assert.ok(dispatch.indexOf("await runtime.retry(staleKey") < dispatch.indexOf("dispatchDesktopOperationAttempt(retry)"));
+  assert.ok(
+    dispatch.indexOf("await runtime.retry(staleKey")
+      < dispatch.indexOf("dispatchDesktopOperationAttempt(retry, controller)"),
+  );
   assert.match(dispatch, /possibleDuplicateAcknowledged: true as const/);
   assert.match(dispatch, /prior\.lifecycle\.status === "stale" \|\| ambiguous[\s\S]*runtime\.retry\(staleKey/);
   assert.match(dispatch, /: await runtime\.persistApprovedExtend\(/);

@@ -367,6 +367,17 @@ class MutableClock {
   }
 }
 
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve(value?: T): void;
+} {
+  let resolve!: (value?: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = (value) => { done(value as T); };
+  });
+  return { promise, resolve };
+}
+
 function runtimeDependencies(input: {
   repository?: MemoryRepository;
   clock?: MutableClock;
@@ -1002,6 +1013,111 @@ test("typed completed failures remain typed while abort and generic transport am
   }, "abort-before-io", alreadyAborted.signal);
   assert.equal(cancelled.lifecycle.status, "cancelled");
   assert.equal(preAbortTransportCalls, 0);
+});
+
+test("vault cancellation while provider resolution is pending is durably known-not-dispatched", async () => {
+  const providerResolutionEntered = deferred();
+  const releaseProviderResolution = deferred<ProviderConfig>();
+  let transportCalls = 0;
+  const dependencies = runtimeDependencies({
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not dispatch";
+    },
+  });
+  dependencies.resolveProvider = async () => {
+    providerResolutionEntered.resolve();
+    return releaseProviderResolution.promise;
+  };
+  const runtime = new DesktopOperationRuntimeV1(dependencies);
+  const approved = await runtime.approve(keyFor(await persist(runtime, target("cancel-provider-resolve"))));
+  const controller = new AbortController();
+
+  const pending = runtime.dispatch(keyFor(approved), { signal: controller.signal });
+  await providerResolutionEntered.promise;
+  controller.abort();
+  releaseProviderResolution.resolve(provider());
+  const cancelled = await pending;
+
+  assert.equal(cancelled.lifecycle.status, "cancelled");
+  assert.equal(cancelled.lifecycle.executionCertainty, "known-not-dispatched");
+  assert.equal(transportCalls, 0);
+  assert.equal(
+    cancelled.appliedTransitions.some(({ transitionType }) => (
+      transitionType === "record-provider-io-may-have-started"
+    )),
+    false,
+  );
+});
+
+test("vault cancellation that crosses the provider-I/O CAS stays unknown without transport", async () => {
+  const repository = new MemoryRepository();
+  const providerIoCasEntered = deferred();
+  const releaseProviderIoCas = deferred();
+  const originalReplace = repository.replace.bind(repository);
+  repository.replace = async (...parameters) => {
+    if (parameters[2].lifecycle.status === "provider-io") {
+      providerIoCasEntered.resolve();
+      await releaseProviderIoCas.promise;
+    }
+    return originalReplace(...parameters);
+  };
+  let transportCalls = 0;
+  const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not dispatch";
+    },
+  }));
+  const approved = await runtime.approve(keyFor(await persist(runtime, target("cancel-provider-cas"))));
+  const controller = new AbortController();
+
+  const pending = runtime.dispatch(keyFor(approved), { signal: controller.signal });
+  await providerIoCasEntered.promise;
+  controller.abort();
+  releaseProviderIoCas.resolve();
+  const unknown = await pending;
+
+  assert.equal(unknown.lifecycle.status, "unknown");
+  assert.equal(unknown.lifecycle.executionCertainty, "may-have-dispatched");
+  assert.equal(unknown.lifecycle.retryPolicy, "operator-confirmation-required");
+  assert.equal(transportCalls, 0);
+});
+
+test("vault cancellation during approval cannot begin provider transport afterward", async () => {
+  const repository = new MemoryRepository();
+  const approvalCasEntered = deferred();
+  const releaseApprovalCas = deferred();
+  const originalReplace = repository.replace.bind(repository);
+  repository.replace = async (...parameters) => {
+    if (parameters[2].lifecycle.status === "approved") {
+      approvalCasEntered.resolve();
+      await releaseApprovalCas.promise;
+    }
+    return originalReplace(...parameters);
+  };
+  let transportCalls = 0;
+  const runtime = new DesktopOperationRuntimeV1(runtimeDependencies({
+    repository,
+    completePrepared: async () => {
+      transportCalls += 1;
+      return "must not dispatch";
+    },
+  }));
+  const prepared = await persist(runtime, target("cancel-approval-cas"));
+  const controller = new AbortController();
+
+  const approving = runtime.approve(keyFor(prepared));
+  await approvalCasEntered.promise;
+  controller.abort();
+  releaseApprovalCas.resolve();
+  const approved = await approving;
+  const cancelled = await runtime.dispatch(keyFor(approved), { signal: controller.signal });
+
+  assert.equal(cancelled.lifecycle.status, "cancelled");
+  assert.equal(cancelled.lifecycle.executionCertainty, "known-not-dispatched");
+  assert.equal(transportCalls, 0);
 });
 
 test("changed provider configuration fails before the durable provider-I/O boundary", async () => {

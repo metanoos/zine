@@ -10338,6 +10338,10 @@ function App() {
   // linked from an authorized attempt during this App activation may consume
   // prepared one-shot directives.
   const desktopAuthorizedAttemptKeysRef = useRef(new Set<string>());
+  // Desktop Extend requests outlive individual render frames, but never this
+  // App/vault activation. Cleanup aborts the complete set before releasing the
+  // native journal/runtime boundary.
+  const desktopOperationAbortControllersRef = useRef(new Set<AbortController>());
   const desktopOperationQueue = useMemo(
     () => desktopOperationReviewQueueV1([
       ...desktopOperationPinnedHeads,
@@ -10383,6 +10387,11 @@ function App() {
     }
     return () => {
       desktopOperationRefreshSequenceRef.current += 1;
+      desktopAuthorizedAttemptKeysRef.current.clear();
+      for (const controller of desktopOperationAbortControllersRef.current) {
+        controller.abort();
+      }
+      desktopOperationAbortControllersRef.current.clear();
       desktopOperationRuntimeRef.current = null;
       desktopOperationStoreRef.current = null;
       setDesktopRuntimeReady(false);
@@ -10550,24 +10559,43 @@ function App() {
 
   async function dispatchDesktopOperationAttempt(
     envelope: DesktopOperationEnvelopeV1,
-    signal?: AbortSignal,
+    providedController?: AbortController,
   ): Promise<DesktopOperationEnvelopeV1> {
     const runtime = desktopOperationRuntimeRef.current;
     if (!runtime) throw new Error("The desktop operation journal is unavailable");
+    const controller = providedController ?? new AbortController();
+    const alreadyTracked = desktopOperationAbortControllersRef.current.has(controller);
+    desktopOperationAbortControllersRef.current.add(controller);
     const key = {
       operationId: envelope.operationId,
       attemptId: envelope.attempt.attemptId,
     };
-    let current = envelope;
-    if (current.lifecycle.status === "prepared") {
-      current = await runtime.approve(key);
-      upsertDesktopOperationEnvelope(current);
+    try {
+      let current = envelope;
+      if (controller.signal.aborted && (
+        current.lifecycle.status === "prepared" || current.lifecycle.status === "approved"
+      )) {
+        current = await runtime.cancel(key);
+        upsertDesktopOperationEnvelope(current);
+        return current;
+      }
+      if (current.lifecycle.status === "prepared") {
+        current = await runtime.approve(key);
+        upsertDesktopOperationEnvelope(current);
+      }
+      if (controller.signal.aborted && current.lifecycle.status === "approved") {
+        current = await runtime.cancel(key);
+        upsertDesktopOperationEnvelope(current);
+        return current;
+      }
+      if (current.lifecycle.status === "approved") {
+        current = await runtime.dispatch(key, { signal: controller.signal });
+        upsertDesktopOperationEnvelope(current);
+      }
+      return current;
+    } finally {
+      if (!alreadyTracked) desktopOperationAbortControllersRef.current.delete(controller);
     }
-    if (current.lifecycle.status === "approved") {
-      current = await runtime.dispatch(key, { signal });
-      upsertDesktopOperationEnvelope(current);
-    }
-    return current;
   }
 
   async function retryDesktopOperation(
@@ -10576,16 +10604,27 @@ function App() {
   ): Promise<void> {
     const runtime = desktopOperationRuntimeRef.current;
     if (!runtime) throw new Error("The desktop operation journal is unavailable");
-    const retry = await runtime.retry(key, possibleDuplicateAcknowledged
-      ? { possibleDuplicateAcknowledged: true }
-      : {});
-    if (desktopAuthorizedAttemptKeysRef.current.has(desktopOperationAttemptKeyV1(key.operationId, key.attemptId))) {
-      desktopAuthorizedAttemptKeysRef.current.add(
-        desktopOperationAttemptKeyV1(retry.operationId, retry.attempt.attemptId),
-      );
+    const controller = new AbortController();
+    desktopOperationAbortControllersRef.current.add(controller);
+    try {
+      const retry = await runtime.retry(key, possibleDuplicateAcknowledged
+        ? { possibleDuplicateAcknowledged: true }
+        : {});
+      if (
+        !controller.signal.aborted
+        && desktopAuthorizedAttemptKeysRef.current.has(
+          desktopOperationAttemptKeyV1(key.operationId, key.attemptId),
+        )
+      ) {
+        desktopAuthorizedAttemptKeysRef.current.add(
+          desktopOperationAttemptKeyV1(retry.operationId, retry.attempt.attemptId),
+        );
+      }
+      upsertDesktopOperationEnvelope(retry);
+      await dispatchDesktopOperationAttempt(retry, controller);
+    } finally {
+      desktopOperationAbortControllersRef.current.delete(controller);
     }
-    upsertDesktopOperationEnvelope(retry);
-    await dispatchDesktopOperationAttempt(retry);
   }
 
   async function handleDesktopOperationAction(
@@ -10662,6 +10701,8 @@ function App() {
       return;
     }
     const busyKey = `${staleKey.operationId}\0${staleKey.attemptId}`;
+    const controller = new AbortController();
+    desktopOperationAbortControllersRef.current.add(controller);
     setDesktopOperationBusyKey(busyKey);
     setDesktopOperationError(null);
     try {
@@ -10684,16 +10725,19 @@ function App() {
             provider,
             maxOutputTokens: 4096,
           });
-      desktopAuthorizedAttemptKeysRef.current.add(
-        desktopOperationAttemptKeyV1(retry.operationId, retry.attempt.attemptId),
-      );
+      if (!controller.signal.aborted) {
+        desktopAuthorizedAttemptKeysRef.current.add(
+          desktopOperationAttemptKeyV1(retry.operationId, retry.attempt.attemptId),
+        );
+      }
       upsertDesktopOperationEnvelope(retry);
-      await dispatchDesktopOperationAttempt(retry);
+      await dispatchDesktopOperationAttempt(retry, controller);
       await refreshDesktopOperationEnvelopes();
     } catch (error) {
       setDesktopOperationError(error instanceof Error ? error.message : String(error));
       await refreshDesktopOperationEnvelopes().catch(() => undefined);
     } finally {
+      desktopOperationAbortControllersRef.current.delete(controller);
       setDesktopOperationBusyKey(null);
     }
   }
@@ -11427,6 +11471,7 @@ function App() {
       return;
     }
     const controller = new AbortController();
+    desktopOperationAbortControllersRef.current.add(controller);
     summonAbort.current[idx] = controller;
     setOpStatus(idx, "running", undefined, "extend");
     try {
@@ -11435,15 +11480,35 @@ function App() {
         provider,
         maxOutputTokens: 4096,
       });
-      desktopAuthorizedAttemptKeysRef.current.add(
-        desktopOperationAttemptKeyV1(envelope.operationId, envelope.attempt.attemptId),
-      );
+      if (!controller.signal.aborted) {
+        desktopAuthorizedAttemptKeysRef.current.add(
+          desktopOperationAttemptKeyV1(envelope.operationId, envelope.attempt.attemptId),
+        );
+      }
       upsertDesktopOperationEnvelope(envelope);
+      if (controller.signal.aborted) {
+        envelope = await runtime.cancel({
+          operationId: envelope.operationId,
+          attemptId: envelope.attempt.attemptId,
+        });
+        upsertDesktopOperationEnvelope(envelope);
+        setOpStatus(idx, "idle");
+        return;
+      }
       envelope = await runtime.approve({
         operationId: envelope.operationId,
         attemptId: envelope.attempt.attemptId,
       });
       upsertDesktopOperationEnvelope(envelope);
+      if (controller.signal.aborted && envelope.lifecycle.status === "approved") {
+        envelope = await runtime.cancel({
+          operationId: envelope.operationId,
+          attemptId: envelope.attempt.attemptId,
+        });
+        upsertDesktopOperationEnvelope(envelope);
+        setOpStatus(idx, "idle");
+        return;
+      }
       envelope = await runtime.dispatch({
         operationId: envelope.operationId,
         attemptId: envelope.attempt.attemptId,
@@ -11463,6 +11528,7 @@ function App() {
       setOpStatus(idx, "error", error instanceof Error ? error.message : String(error), "extend");
       await refreshDesktopOperationEnvelopes().catch(() => undefined);
     } finally {
+      desktopOperationAbortControllersRef.current.delete(controller);
       if (summonAbort.current[idx] === controller) summonAbort.current[idx] = null;
     }
   }
