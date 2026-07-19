@@ -25,6 +25,7 @@
 import { providerCredential, type ProviderConfig } from "./models-store.js";
 import { providerProfileFingerprint } from "./provider-fingerprint.js";
 import type { PreparedOperation } from "./prepared-operation.js";
+import { requireDesktopOperationJournalSessionV1 } from "./desktop-operation-journal-session.js";
 import { isTauri } from "../identity/identity.js";
 import {
   anthropicModelOptions,
@@ -289,7 +290,7 @@ async function completeViaTauri(
 
   let assembled = "";
   const channel = new Channel<string>();
-  channel.onmessage = (data) => {
+  const eventGate = createCancellableTauriEventGateV1(opts.signal, (data: string) => {
     if (!stream) {
       // Non-streaming: the single message carries the full response body.
       assembled = data;
@@ -300,18 +301,24 @@ async function completeViaTauri(
       assembled += delta;
       opts.onDelta?.(delta);
     }
-  };
+  }, () => { assembled = ""; });
+  channel.onmessage = eventGate.onEvent;
 
-  await invokeCancellableTauriLlmFetchV1(invoke, {
-    requestId: crypto.randomUUID(),
-    url,
-    method: "POST",
-    headers,
-    body,
-    stream,
-    onEvent: channel,
-  }, opts.signal);
-  return assembled;
+  try {
+    await invokeCancellableTauriLlmFetchV1(invoke, {
+      requestId: crypto.randomUUID(),
+      journalGeneration: requireDesktopOperationJournalSessionV1().journalGeneration,
+      url,
+      method: "POST",
+      headers,
+      body,
+      stream,
+      onEvent: channel,
+    }, opts.signal);
+    return assembled;
+  } finally {
+    eventGate.dispose();
+  }
 }
 
 type TauriLlmInvokeV1 = (
@@ -321,6 +328,7 @@ type TauriLlmInvokeV1 = (
 
 interface TauriLlmFetchArgumentsV1 extends Record<string, unknown> {
   requestId: string;
+  journalGeneration: number;
   url: string;
   method: "POST" | "GET";
   headers: Record<string, string>;
@@ -331,6 +339,26 @@ interface TauriLlmFetchArgumentsV1 extends Record<string, unknown> {
 
 function abortError(): DOMException {
   return new DOMException("The operation was aborted", "AbortError");
+}
+
+export function createCancellableTauriEventGateV1<T>(
+  signal: AbortSignal | undefined,
+  onEvent: (event: T) => void,
+  onAbort: () => void,
+): { onEvent(event: T): void; dispose(): void } {
+  let acceptsEvents = !signal?.aborted;
+  const abort = () => {
+    acceptsEvents = false;
+    onAbort();
+  };
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
+  return Object.freeze({
+    onEvent: (event: T) => {
+      if (acceptsEvents && !signal?.aborted) onEvent(event);
+    },
+    dispose: () => { signal?.removeEventListener("abort", abort); },
+  });
 }
 
 /**
@@ -354,7 +382,10 @@ export async function invokeCancellableTauriLlmFetchV1(
     cancelStarted = true;
     // Do not surface or log native/provider detail from a cancellation race.
     void Promise.resolve()
-      .then(() => invoke("llm_cancel", { requestId: args.requestId }))
+      .then(() => invoke("llm_cancel", {
+        requestId: args.requestId,
+        journalGeneration: args.journalGeneration,
+      }))
       .catch(() => undefined);
     rejectAbort(abortError());
   };

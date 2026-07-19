@@ -113,16 +113,29 @@ known-not-dispatched. A cancellation observed after the marker is durably
 transport call: the durable recovery contract cannot use local scheduling to
 prove that an external billable request did not start.
 
-The Tauri provider proxy carries an opaque lowercase UUID unrelated to prompt,
-credential, provider, or response bytes. A bounded native registry makes cancel
-idempotent across pre-registration, active, and recently completed states. It
-selects cancellation against request send, error and non-stream body reads, and
-each streaming read. Pre-registration cancellation uses a bounded five-minute
+The Tauri provider proxy carries an opaque lowercase UUID and the current
+native vault generation, both unrelated to prompt, credential, provider, or
+response bytes. A bounded native registry makes cancel idempotent across pre-
+registration, active, and recently completed states. It selects cancellation
+against request send, error and non-stream body reads, and each streaming read,
+then rechecks immediately before every IPC response delivery. The webview
+clears buffered frames and ignores later channel events as soon as its
+AbortSignal fires. Pre-registration cancellation uses a bounded five-minute
 monotonic tombstone; registry saturation fails closed for new registrations
 rather than evicting a cancellation that may still arrive out of IPC order.
-Every native exit removes active and tombstone state synchronously. The
-webview always reports cancellation as a generic `AbortError` and neither side
-logs raw provider failures or response bytes from the cancellation race.
+Every native exit removes active and tombstone state synchronously. The webview
+always reports cancellation as a generic `AbortError` and neither side logs raw
+provider failures or response bytes from the cancellation race.
+
+The registry starts closed and opens only when native vault activation has
+successfully bound it to that exact vault generation. Native lock and webview-
+reload recovery atomically stop new registrations, cancel every request in the
+generation, and wait for the registry to drain before releasing the vault
+binding. A drain failure leaves both the registry and vault generation closed
+to new provider work. Tombstones and completed ids are cleared only after the
+old generation drains; no request or late cancellation from one activation can
+enter the next. Both single-shot and agent-loop provider calls use this same
+request-id and shutdown boundary.
 
 Across a process or activation recovery boundary, both `dispatch-intent` and
 `provider-io` are ambiguous: a later marker could have rolled back after I/O
