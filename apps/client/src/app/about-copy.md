@@ -250,10 +250,19 @@ to sell.
 
 The desktop press, headless MCP press, local relay, recursive file and folder
 traces, and the complete gesture set — Step, Publish, Attest, Mint, Cite,
-fork, merge, replay, and Reify export — work today. The first shared
-authoring-syntax kernel and prepared desktop model operations also exist, but
-the task-specific selector, correction and memory model, durable context
-binding, and cross-press rendering contract do not yet operate as one system.
+fork, merge, replay, and Reify export — work today. The recursive file/folder
+ontology runs through the shared protocol kernel and the client: existing
+child heads advance separately from membership adds; folder and Root Step
+flush dirty descendants; one durable operation id groups the originating
+event with derived ancestor checkpoints; Replay collapses those roll-ups
+without hiding their signed nodes; folder appends serialize per identity; and
+interrupted folder moves or deletes resume from a durable local journal during
+workspace reconciliation. The first shared authoring-syntax kernel and
+prepared desktop model operations also exist, but the task-specific selector,
+correction and memory model, durable context binding, and cross-press
+rendering contract do not yet operate as one system. Fixed cross-runtime
+folder vectors and explicit crash-boundary real-relay fault fixtures remain
+hardening work.
 
 Three proofs govern what comes next:
 
@@ -800,7 +809,7 @@ hypotheses. Last updated 2026-07-18.
 | Capability | State | How to check |
 |---|---|---|
 | Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke; folder heads carry direct manifests and propagate recursively toward Root |
-| Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, membership transition, hash, lineage, and operation id; client tests exercise add versus advance, explicit folder/Root Step plumbing, durable retry ids, nested AI context, and Replay roll-up collapse. Fixed cross-runtime folder vectors and explicit crash-boundary real-relay fixtures remain hardening work |
+| Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, immutable child-head transitions, removal head pins, hash, lineage, operation id, and integer membership timestamps. Client tests exercise serialized file/folder/structural mutations, durable move/delete journal persistence and rejection paths, verified nested AI context, and inspectable Replay operation grouping. An explicit attach-after-crash real-relay fault fixture remains hardening work |
 | Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
 | Step, Publish (wire name Send), Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
@@ -1006,8 +1015,8 @@ Already built:
 - raw-file Reify with an optional signed-event bundle and report;
 - Stronghold-backed desktop signing and provider secrets;
 - verified recursive folder/Root checkpoint causes, distinct child `advance`,
-  durable operation grouping, explicit folder/Root Step, and derived Replay
-  collapse;
+  serialized folder appends, durable operation grouping and structural retry
+  journals, explicit folder/Root Step, and inspectable derived Replay collapse;
 - prepared direct MODEL operations with approval, stale-result protection,
   current file/folder text, and structured process history;
 - the initial shared `@zine/trace-context` authoring-syntax kernel, compatibility

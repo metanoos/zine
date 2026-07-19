@@ -39,6 +39,43 @@ test("canonical ordering makes randomized gather completion fingerprint-identica
   assert.deepEqual(first.inputs[1].citations, ["a", "z"]);
 });
 
+test("canonicalization preserves causal sequence across a backward wall clock", () => {
+  const laterClock = {
+    seq: 1,
+    steppedAt: 5_000,
+    action: "edit",
+    relativePath: "draft.md",
+    source: "file" as const,
+    prompt: null,
+    summary: null,
+    deltas: undefined,
+    process: undefined,
+    conformance: undefined,
+    conformanceReason: undefined,
+    nodeId: "genesis",
+  };
+  const earlierClock = { ...laterClock, seq: 2, steppedAt: 1_000, nodeId: "head" };
+  const snapshot = createContextSnapshot({
+    target,
+    mount: null,
+    shields: [],
+    inputs: [{
+      path: "draft.md",
+      traceId: "genesis",
+      headId: "head",
+      body: "draft",
+      citations: [],
+      deltaLog: [earlierClock, laterClock],
+      unstepped: false,
+    }],
+    deltaLog: [earlierClock, laterClock],
+    renderedBlock: "context",
+  });
+
+  assert.deepEqual(snapshot.deltaLog.map((entry) => entry.nodeId), ["genesis", "head"]);
+  assert.deepEqual(snapshot.inputs[0].deltaLog.map((entry) => entry.nodeId), ["genesis", "head"]);
+});
+
 test("snapshots are deeply immutable and account for UTF-8 bytes", () => {
   const snapshot = createContextSnapshot({
     target: { ...target, body: "你好" },

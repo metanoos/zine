@@ -249,10 +249,19 @@ to sell.
 
 The desktop press, headless MCP press, local relay, recursive file and folder
 traces, and the complete gesture set — Step, Publish, Attest, Mint, Cite,
-fork, merge, replay, and Reify export — work today. The first shared
-authoring-syntax kernel and prepared desktop model operations also exist, but
-the task-specific selector, correction and memory model, durable context
-binding, and cross-press rendering contract do not yet operate as one system.
+fork, merge, replay, and Reify export — work today. The recursive file/folder
+ontology runs through the shared protocol kernel and the client: existing
+child heads advance separately from membership adds; folder and Root Step
+flush dirty descendants; one durable operation id groups the originating
+event with derived ancestor checkpoints; Replay collapses those roll-ups
+without hiding their signed nodes; folder appends serialize per identity; and
+interrupted folder moves or deletes resume from a durable local journal during
+workspace reconciliation. The first shared authoring-syntax kernel and
+prepared desktop model operations also exist, but the task-specific selector,
+correction and memory model, durable context binding, and cross-press
+rendering contract do not yet operate as one system. Fixed cross-runtime
+folder vectors and explicit crash-boundary real-relay fault fixtures remain
+hardening work.
 
 Three proofs govern what comes next:
 

@@ -21,22 +21,319 @@ globalThis.localStorage = {
 };
 
 import {
+  buildRemoteAbsenceIndex,
   completeDeletion,
   completeBackgroundPush,
   completeStagedWrite,
   completedEmptyGenesisBootstrapHead,
+  crashPadDraftForPull,
+  consumeRecursivePullBudget,
+  consumeUniqueRecursivePullSignedEvents,
+  folderCheckpointExtendsExpectedForOperation,
+  folderEntryMatchesStructuralExpectation,
   folderTraceIdentityFromNode,
   folderWriteSigner,
   localFolderCoordinate,
+  localManifestProjectionMatches,
   localTreeFolderCoordinate,
   localFileSigner,
   ownershipDisposition,
   pendingMoveForPath,
+  planRemoteAbsenceReconciliation,
   previousStepCitationTargets,
   publishEmptyGenesisIfNeeded,
+  runRootMutationAfterRecovery,
+  sameBodyDescendantCanFastForward,
+  stageFileStepAfterPendingRecovery,
+  structuralShieldJournal,
 } from "./workspace-local.js";
+import { traceSignedEventBytes } from "../provenance/provenance.js";
 import { authorVoice, loadKeys } from "../identity/keys-store.js";
-import { saveLocalFile } from "./local-store.js";
+import {
+  clearStructuralOperation,
+  hasPendingStructuralPathMutation,
+  loadLocalFolder,
+  saveLocalFile,
+  stageStructuralOperation,
+} from "./local-store.js";
+
+test("a newer crash-pad body is the local side of pull reconciliation", () => {
+  const primary = {
+    kind: "file" as const,
+    content: "stepped",
+    tags: [],
+    nodeId: "head-1",
+    updatedAt: 1,
+  };
+  const pad = {
+    ...primary,
+    content: "unstepped draft",
+    kedits: [{ op: "ins" as const, from: 7, to: 7, text: " draft", t: 2, tx: 1, voice: "a" }],
+    updatedAt: 2,
+  };
+  assert.equal(crashPadDraftForPull(primary, pad), pad);
+  assert.equal(crashPadDraftForPull(primary, { ...primary }), undefined);
+});
+
+test("same-body remote descendants still advance the local immutable head", () => {
+  const event = (id: string): Event => ({
+    id,
+    pubkey: "a".repeat(64),
+    created_at: 1,
+    kind: 4290,
+    tags: [],
+    content: "",
+    sig: "b".repeat(128),
+  });
+  const chain = [event("local"), event("metadata-only")];
+  assert.equal(
+    sameBodyDescendantCanFastForward(chain, "local", "metadata-only", false),
+    true,
+  );
+  assert.equal(
+    sameBodyDescendantCanFastForward(chain, "local", "metadata-only", true),
+    false,
+  );
+  assert.equal(
+    sameBodyDescendantCanFastForward(chain, "sibling", "metadata-only", false),
+    false,
+  );
+});
+
+test("an exact clean member permits a newer sibling-only Root checkpoint", () => {
+  const entry = {
+    kind: "file" as const,
+    relativePath: "kept.md",
+    latestNodeId: "kept-head",
+    contentHash: "ab".repeat(32),
+  };
+  const exact = {
+    kind: "file" as const,
+    content: "kept",
+    tags: [],
+    nodeId: "kept-head",
+    updatedAt: Date.now(),
+  };
+  assert.equal(localManifestProjectionMatches(exact, entry, "kept"), true);
+  assert.equal(
+    localManifestProjectionMatches(
+      { ...exact, pendingOperationId: "operation" },
+      entry,
+      "kept",
+    ),
+    false,
+  );
+  assert.equal(localManifestProjectionMatches(exact, entry, "edited"), false);
+});
+
+test("structural recovery accepts only the journaled folder identity and head", () => {
+  const expected = {
+    traceId: "11".repeat(32),
+    nodeId: "22".repeat(32),
+  };
+  const entry = {
+    kind: "folder" as const,
+    relativePath: "notes",
+    latestNodeId: expected.nodeId,
+    contentHash: "33".repeat(32),
+  };
+  assert.equal(
+    folderEntryMatchesStructuralExpectation(entry, expected, entry.contentHash),
+    true,
+  );
+  assert.equal(
+    folderEntryMatchesStructuralExpectation(
+      { ...entry, latestNodeId: "44".repeat(32) },
+      expected,
+      entry.contentHash,
+    ),
+    false,
+  );
+  assert.equal(
+    folderEntryMatchesStructuralExpectation(
+      { ...entry, contentHash: "55".repeat(32) },
+      expected,
+      entry.contentHash,
+    ),
+    false,
+  );
+});
+
+test("a relay failure retains the structural projection until the next mutation recovers it", async () => {
+  localStorage.clear();
+  const operationId = "d2".repeat(32);
+  stageStructuralOperation("root", {
+    version: 2,
+    kind: "move",
+    operationId,
+    sourcePath: "notes",
+    targetPath: "archive/notes",
+    isFolder: true,
+    moves: [{ oldRel: "notes", newRel: "archive/notes" }],
+    expectedFolder: {
+      traceId: "11".repeat(32),
+      nodeId: "22".repeat(32),
+    },
+    expectedFolders: {
+      notes: {
+        traceId: "11".repeat(32),
+        nodeId: "22".repeat(32),
+      },
+    },
+  });
+
+  await assert.rejects(Promise.reject(new Error("relay unavailable")), /relay unavailable/);
+  assert.equal(
+    hasPendingStructuralPathMutation("root", "notes", "archive/notes"),
+    true,
+  );
+
+  let nextMutationRan = false;
+  await runRootMutationAfterRecovery(
+    new Map(),
+    "root",
+    "d3".repeat(32),
+    async () => clearStructuralOperation("root", operationId),
+    async () => {
+      assert.equal(
+        hasPendingStructuralPathMutation("root", "notes", "archive/notes"),
+        false,
+      );
+      nextMutationRan = true;
+    },
+  );
+  assert.equal(nextMutationRan, true);
+});
+
+test("a new file gesture cannot replace an unrecovered exact signed Step", async () => {
+  const order: string[] = [];
+  let durableHead = "old-head";
+  await assert.rejects(
+    stageFileStepAfterPendingRecovery(
+      "old-operation",
+      async () => {
+        order.push("recover");
+        throw new Error("folder propagation failed");
+      },
+      async () => {
+        order.push("stage-new");
+        durableHead = "wrong-sibling";
+      },
+    ),
+    /folder propagation failed/,
+  );
+  assert.deepEqual(order, ["recover"]);
+  assert.equal(durableHead, "old-head");
+
+  const recoveredId = await stageFileStepAfterPendingRecovery(
+    "old-operation",
+    async () => {
+      order.push("recover-again");
+      durableHead = "persisted-signed-head";
+    },
+    async () => {
+      order.push(`stage-after:${durableHead}`);
+      return "new-descendant";
+    },
+  );
+  assert.equal(recoveredId, "new-descendant");
+  assert.deepEqual(order, [
+    "recover",
+    "recover-again",
+    "stage-after:persisted-signed-head",
+  ]);
+});
+
+test("verified remote absence removes clean members and preserves dirty ones", () => {
+  localStorage.clear();
+  saveLocalFile("root", "old", {
+    kind: "folder",
+    content: "",
+    tags: [],
+    nodeId: "old-folder-head",
+    traceId: "old-folder",
+  });
+  saveLocalFile("root", "old/draft.md", {
+    content: "clean",
+    tags: [],
+    nodeId: "clean-head",
+  });
+  saveLocalFile("root", "dirty.md", {
+    content: "dirty",
+    tags: [],
+    nodeId: "dirty-head",
+    pendingOperationId: "operation",
+  });
+  saveLocalFile("root", "oblivion/kept.md", {
+    content: "private",
+    tags: [],
+    nodeId: "private-head",
+  });
+
+  const plan = planRemoteAbsenceReconciliation(
+    loadLocalFolder("root"),
+    "",
+    new Set(["renamed", "current.md"]),
+  );
+  assert.deepEqual(plan.deletions, ["old/draft.md", "old"]);
+  assert.deepEqual(plan.conflicts, ["dirty.md"]);
+});
+
+test("remote rename treats the clean old coordinate as an authoritative absence", () => {
+  localStorage.clear();
+  saveLocalFile("root", "old.md", {
+    content: "same trace",
+    tags: [],
+    nodeId: "file-head",
+  });
+  assert.deepEqual(
+    planRemoteAbsenceReconciliation(
+      loadLocalFolder("root"),
+      "",
+      new Set(["new.md"]),
+    ),
+    { deletions: ["old.md"], conflicts: [] },
+  );
+});
+
+test("recursive absence planning shares one workspace enumeration", () => {
+  const stored: NonNullable<ReturnType<typeof loadLocalFolder>>["files"] = {};
+  for (let index = 0; index < 2_000; index++) {
+    const folder = `folder-${index.toString().padStart(4, "0")}`;
+    stored[folder] = {
+      kind: "folder",
+      content: "",
+      tags: [],
+      nodeId: `${folder}-head`,
+      traceId: `${folder}-trace`,
+      updatedAt: 1,
+    };
+    stored[`${folder}/note.md`] = {
+      kind: "file",
+      content: "note",
+      tags: [],
+      nodeId: `${folder}-note-head`,
+      updatedAt: 1,
+    };
+  }
+  let enumerations = 0;
+  const files = new Proxy(stored, {
+    ownKeys(target) {
+      enumerations++;
+      return Reflect.ownKeys(target);
+    },
+  });
+  const local = { id: "root", files };
+  const index = buildRemoteAbsenceIndex(local);
+  for (let folderIndex = 0; folderIndex < 2_000; folderIndex++) {
+    const folder = `folder-${folderIndex.toString().padStart(4, "0")}`;
+    assert.deepEqual(
+      planRemoteAbsenceReconciliation(local, folder, new Set(), {}, [], index),
+      { deletions: [`${folder}/note.md`], conflicts: [] },
+    );
+  }
+  assert.equal(enumerations, 1);
+});
 
 test("flat local paths resolve to direct recursive folder coordinates", () => {
   localStorage.clear();
@@ -138,6 +435,160 @@ test("folder heads recover their recursive trace identity without file-chain res
   assert.equal(
     folderTraceIdentityFromNode(event("file-head", [["z", "file"]])),
     null,
+  );
+});
+
+test("recursive deletion accepts only descendant folder checkpoints from the same gesture", () => {
+  const operationId = "ab".repeat(32);
+  const otherOperationId = "cd".repeat(32);
+  const event = (id: string, previous: string | null, op: string): Event => ({
+    id,
+    kind: 4290,
+    pubkey: "owner",
+    created_at: 1,
+    content: JSON.stringify({ operationId: op }),
+    sig: "",
+    tags: [
+      ["z", "folder"],
+      ...(previous ? [["e", previous, "", "prev"]] : []),
+    ],
+  });
+  const expected = event("expected", null, "ef".repeat(32));
+  const derived = event("derived", expected.id, operationId);
+  const secondDerived = event("second-derived", derived.id, operationId);
+  assert.equal(
+    folderCheckpointExtendsExpectedForOperation(
+      [expected, derived, secondDerived],
+      secondDerived.id,
+      expected.id,
+      operationId,
+    ),
+    true,
+  );
+  const unrelated = event("unrelated", derived.id, otherOperationId);
+  assert.equal(
+    folderCheckpointExtendsExpectedForOperation(
+      [expected, derived, unrelated],
+      unrelated.id,
+      expected.id,
+      operationId,
+    ),
+    false,
+  );
+});
+
+test("recursive attach budget rejects depth, fan-out, members, and bytes before mutating", () => {
+  const budget = { folderOccurrences: 0, members: 0, signedBytes: 0 };
+  const limits = {
+    maxFolderOccurrences: 2,
+    maxDepth: 1,
+    maxMembers: 3,
+    maxSignedBytes: 4,
+  };
+  assert.equal(
+    consumeRecursivePullBudget(
+      budget,
+      { folderOccurrences: 1, members: 2, signedBytes: 3, depth: 1 },
+      limits,
+    ),
+    null,
+  );
+  assert.match(
+    consumeRecursivePullBudget(budget, { folderOccurrences: 2 }, limits) ?? "",
+    /occurrences/,
+  );
+  assert.deepEqual(budget, { folderOccurrences: 1, members: 2, signedBytes: 3 });
+  assert.match(consumeRecursivePullBudget(budget, { depth: 2 }, limits) ?? "", /depth/);
+  assert.match(consumeRecursivePullBudget(budget, { members: 2 }, limits) ?? "", /members/);
+  assert.match(consumeRecursivePullBudget(budget, { signedBytes: 2 }, limits) ?? "", /bytes/);
+});
+
+test("recursive pull charges complete signed events once across repeated aliases", () => {
+  const event: Event = {
+    id: "12".repeat(32),
+    pubkey: "34".repeat(32),
+    created_at: 1,
+    kind: 4290,
+    tags: Array.from({ length: 32 }, (_, index) => [
+      "tag",
+      `${index}`.repeat(64),
+    ]),
+    content: "{}",
+    sig: "56".repeat(64),
+  };
+  const exactBytes = traceSignedEventBytes(event);
+  assert.ok(exactBytes > new TextEncoder().encode(event.content).byteLength);
+
+  const budget = { folderOccurrences: 0, members: 0, signedBytes: 0 };
+  const charged = new Set<string>();
+  assert.equal(
+    consumeUniqueRecursivePullSignedEvents(
+      budget,
+      charged,
+      [event, event],
+      { maxSignedBytes: exactBytes },
+    ),
+    null,
+  );
+  assert.equal(budget.signedBytes, exactBytes);
+  assert.deepEqual([...charged], [event.id]);
+
+  // The same immutable history mounted at another path is cache work, not a
+  // second budget charge.
+  assert.equal(
+    consumeUniqueRecursivePullSignedEvents(
+      budget,
+      charged,
+      [event],
+      { maxSignedBytes: exactBytes },
+    ),
+    null,
+  );
+  assert.equal(budget.signedBytes, exactBytes);
+
+  const next = { ...event, id: "78".repeat(32) };
+  assert.match(
+    consumeUniqueRecursivePullSignedEvents(
+      budget,
+      charged,
+      [next],
+      { maxSignedBytes: exactBytes + traceSignedEventBytes(next) - 1 },
+    ) ?? "",
+    /signed bytes/,
+  );
+  assert.equal(charged.has(next.id), false);
+  assert.equal(budget.signedBytes, exactBytes);
+});
+
+test("structural shield journals cover old and new paths across a crash", () => {
+  assert.deepEqual(
+    structuralShieldJournal(
+      ["notes/private", "elsewhere"],
+      "notes",
+      "archive/notes",
+      true,
+    ),
+    {
+      shieldedPathsBefore: ["elsewhere", "notes/private"],
+      shieldedPathsDuring: ["archive/notes/private", "elsewhere", "notes/private"],
+      shieldedPathsAfter: ["archive/notes/private", "elsewhere"],
+    },
+  );
+  assert.deepEqual(
+    structuralShieldJournal(["notes/private"], "notes", null, true),
+    {
+      shieldedPathsBefore: ["notes/private"],
+      shieldedPathsDuring: ["notes/private"],
+      shieldedPathsAfter: [],
+    },
+  );
+  assert.deepEqual(
+    structuralShieldJournal(["private"], "private/a.md", "public/a.md", false),
+    {
+      shieldedPathsBefore: ["private"],
+      shieldedPathsDuring: ["private", "public/a.md"],
+      shieldedPathsAfter: ["private", "public/a.md"],
+    },
   );
 });
 

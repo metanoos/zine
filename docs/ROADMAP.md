@@ -62,8 +62,8 @@ Already built:
 - raw-file Reify with an optional signed-event bundle and report;
 - Stronghold-backed desktop signing and provider secrets;
 - verified recursive folder/Root checkpoint causes, distinct child `advance`,
-  durable operation grouping, explicit folder/Root Step, and derived Replay
-  collapse;
+  serialized folder appends, durable operation grouping and structural retry
+  journals, explicit folder/Root Step, and inspectable derived Replay collapse;
 - prepared direct MODEL operations with approval, stale-result protection,
   current file/folder text, and structured process history;
 - the initial shared `@zine/trace-context` authoring-syntax kernel, compatibility

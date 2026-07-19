@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Event } from "nostr-tools";
-import { verifyEvent } from "nostr-tools/pure";
+import { finalizeEvent, verifyEvent } from "nostr-tools/pure";
 
 import corpus from "../corpus/conformance-v1.json" with { type: "json" };
 import folderCorpus from "../corpus/folder-conformance-v1.json" with { type: "json" };
@@ -51,6 +51,50 @@ function eventsFor(nodeIds: readonly string[]): Event[] {
     assert.equal(event.id, nodeId, `folder corpus key does not match signed id ${nodeId}`);
     return event;
   });
+}
+
+const FOLDER_TEST_SECRET = Uint8Array.from([...new Uint8Array(31), 7]);
+
+async function folderNode(
+  members: Array<{
+    kind: "file" | "folder";
+    relativePath: string;
+    latestNodeId: string;
+    contentHash: string;
+  }>,
+  folderCheckpoint: { version: 1; cause: string; sourceNodeId?: string },
+  operationId: string,
+  previous?: Event,
+  deltas: unknown[] = [],
+): Promise<Event> {
+  const body = JSON.stringify(
+    members.map((member) => [member.relativePath, member.kind, member.contentHash]),
+  );
+  const contentHash = Buffer.from(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)),
+  ).toString("hex");
+  const traceId = previous?.tags.find((tag) => tag[0] === "f")?.[1] ?? previous?.id;
+  const createdAt = (previous?.created_at ?? 0) + 1;
+  return finalizeEvent({
+    kind: 4290,
+    created_at: createdAt,
+    tags: [
+      ["z", "folder"],
+      ...(traceId ? [["f", traceId]] : []),
+      ...members.map((member) => ["q", member.latestNodeId]),
+      ["action", previous ? "edit" : "import"],
+      ...(previous ? [["e", previous.id, "", "prev"]] : []),
+      ["x", contentHash],
+    ],
+    content: JSON.stringify({
+      steppedAt: createdAt * 1_000,
+      snapshot: { members },
+      contentHash,
+      operationId,
+      deltas,
+      folderCheckpoint,
+    }),
+  }, FOLDER_TEST_SECRET);
 }
 
 function operationVectorValid(vector: OperationVector): boolean {
@@ -275,5 +319,163 @@ test("malformed fixed folder chains fail closed", async () => {
     for (const code of vector.issueCodes) {
       assert.ok(verdict.issues.some((issue) => issue.code === code), `${vector.name}: missing ${code}`);
     }
+  }
+});
+
+test("folder conformance rejects structural F tags owned by parent membership", async () => {
+  const valid = await folderNode([], { version: 1, cause: "genesis" }, "67".repeat(32));
+  const invalid = finalizeEvent({
+    kind: valid.kind,
+    created_at: valid.created_at,
+    tags: [...valid.tags, ["F", "alias"]],
+    content: valid.content,
+  }, FOLDER_TEST_SECRET);
+  const verdict = await verifyFolderTraceChain([invalid], verifyEvent);
+  assert.equal(verdict.status, "invalid");
+  assert.ok(verdict.issues.some((issue) => issue.code === "folder-name-tag"));
+});
+
+test("folder conformance rejects malformed recognized deltas and ignores unknown ones", async () => {
+  for (const delta of [
+    { type: "focus", op: "mount", selection: { kind: "file", path: "a.md" }, panelIndex: 0, timestamp: 1.5 },
+    { type: "cite", role: "tag", sourceEventId: "not-an-id", timestamp: 1 },
+  ]) {
+    const genesis = await folderNode([], { version: 1, cause: "genesis" }, "68".repeat(32), undefined, [delta]);
+    const verdict = await verifyFolderTraceChain([genesis], verifyEvent);
+    assert.equal(verdict.status, "invalid");
+    assert.ok(verdict.issues.some((issue) => issue.code === "nonconforming-deltas"));
+  }
+  const extensible = await folderNode(
+    [], { version: 1, cause: "genesis" }, "69".repeat(32), undefined,
+    [{ type: "future-observation", timestamp: 1 }],
+  );
+  assert.equal((await verifyFolderTraceChain([extensible], verifyEvent)).status, "full");
+});
+
+test("folder conformance accepts a valid cite delta and matching q edge", async () => {
+  const sourceEventId = "ab".repeat(32);
+  const unsignedQ = await folderNode(
+    [], { version: 1, cause: "genesis" }, "6a".repeat(32), undefined,
+    [{ type: "cite", role: "tag", op: "add", sourceEventId, timestamp: 1 }],
+  );
+  const cited = finalizeEvent({
+    kind: unsignedQ.kind,
+    created_at: unsignedQ.created_at,
+    tags: [...unsignedQ.tags, ["q", sourceEventId]],
+    content: unsignedQ.content,
+  }, FOLDER_TEST_SECRET);
+  assert.equal((await verifyFolderTraceChain([cited], verifyEvent)).status, "full");
+});
+
+test("folder conformance rejects duplicate q targets and invalid citation roles", async () => {
+  const first = "ac".repeat(32);
+  const second = "ad".repeat(32);
+  const base = await folderNode(
+    [], { version: 1, cause: "genesis" }, "6b".repeat(32), undefined,
+    [first, second].map((sourceEventId) => ({
+      type: "cite", role: "tag", op: "add", sourceEventId, timestamp: 1,
+    })),
+  );
+  const duplicate = finalizeEvent({
+    kind: base.kind,
+    created_at: base.created_at,
+    tags: [...base.tags, ["q", first], ["q", first]],
+    content: base.content,
+  }, FOLDER_TEST_SECRET);
+  assert.equal((await verifyFolderTraceChain([duplicate], verifyEvent)).status, "invalid");
+
+  const invalidRemove = await folderNode(
+    [], { version: 1, cause: "genesis" }, "6c".repeat(32), undefined,
+    [{ type: "cite", role: "inline", op: "remove", sourceEventId: first, timestamp: 1 }],
+  );
+  assert.equal((await verifyFolderTraceChain([invalidRemove], verifyEvent)).status, "invalid");
+});
+
+test("folder conformance rejects a changed child hash without a new child node", async () => {
+  const nodeId = "aa".repeat(32);
+  const member = {
+    kind: "file" as const,
+    relativePath: "essay.md",
+    latestNodeId: nodeId,
+    contentHash: "cc".repeat(32),
+  };
+  const genesis = await folderNode([member], { version: 1, cause: "genesis" }, "77".repeat(32));
+  const impossible = { ...member, contentHash: "dd".repeat(32) };
+  const invalid = await folderNode(
+    [impossible],
+    { version: 1, cause: "child-advance", sourceNodeId: nodeId },
+    "88".repeat(32),
+    genesis,
+    [{
+      type: "advance",
+      kind: "file",
+      relativePath: "essay.md",
+      previousNodeId: nodeId,
+      nodeId,
+      timestamp: 2,
+    }],
+  );
+
+  const verdict = await verifyFolderTraceChain([genesis, invalid], verifyEvent);
+  assert.equal(verdict.status, "invalid");
+  assert.ok(verdict.issues.some((issue) => issue.code === "nonconforming-deltas"));
+});
+
+test("folder conformance requires remove to pin the removed child head", async () => {
+  const member = {
+    kind: "file" as const,
+    relativePath: "essay.md",
+    latestNodeId: "aa".repeat(32),
+    contentHash: "cc".repeat(32),
+  };
+  const genesis = await folderNode([member], { version: 1, cause: "genesis" }, "99".repeat(32));
+  const invalid = await folderNode(
+    [],
+    { version: 1, cause: "structure-change" },
+    "aa".repeat(32),
+    genesis,
+    [{
+      type: "remove",
+      kind: "file",
+      relativePath: "essay.md",
+      timestamp: 2,
+    }],
+  );
+
+  const verdict = await verifyFolderTraceChain([genesis, invalid], verifyEvent);
+  assert.equal(verdict.status, "invalid");
+  assert.ok(verdict.issues.some((issue) => issue.code === "nonconforming-deltas"));
+});
+
+test("folder conformance requires integer timestamps on every membership delta", async () => {
+  const member = {
+    kind: "file" as const,
+    relativePath: "essay.md",
+    latestNodeId: "aa".repeat(32),
+    contentHash: "cc".repeat(32),
+  };
+
+  for (const timestamp of [undefined, "1", 1.5, Number.POSITIVE_INFINITY]) {
+    const genesis = await folderNode([], { version: 1, cause: "genesis" }, "bb".repeat(32));
+    const invalid = await folderNode(
+      [member],
+      { version: 1, cause: "structure-change" },
+      "cc".repeat(32),
+      genesis,
+      [{
+        type: "add",
+        kind: member.kind,
+        relativePath: member.relativePath,
+        nodeId: member.latestNodeId,
+        ...(timestamp === undefined ? {} : { timestamp }),
+      }],
+    );
+
+    const verdict = await verifyFolderTraceChain([genesis, invalid], verifyEvent);
+    assert.equal(verdict.status, "invalid", `timestamp ${String(timestamp)}`);
+    assert.ok(
+      verdict.issues.some((issue) => issue.code === "nonconforming-deltas"),
+      `timestamp ${String(timestamp)}`,
+    );
   }
 });

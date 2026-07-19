@@ -229,6 +229,29 @@ function folderMembershipTransition(
       return { valid: false, membershipTypes, reason: `folder delta ${index} is not an object` };
     }
     const delta = value as Record<string, unknown>;
+    if (delta.type === "focus") {
+      const selection = delta.selection as Record<string, unknown> | undefined;
+      const selectionValid = !!selection && !Array.isArray(selection) && (
+        ((selection.kind === "file" || selection.kind === "folder") &&
+          typeof selection.path === "string" &&
+          (selection.nodeId === undefined || typeof selection.nodeId === "string")) ||
+        (selection.kind === "coin" &&
+          typeof selection.nodeId === "string" &&
+          typeof selection.phrase === "string" &&
+          typeof selection.originPath === "string")
+      );
+      if (
+        (delta.op !== "mount" && delta.op !== "unmount") ||
+        !selectionValid ||
+        !Number.isInteger(delta.panelIndex) ||
+        (delta.panelIndex as number) < 0 ||
+        !Number.isInteger(delta.timestamp)
+      ) {
+        return { valid: false, membershipTypes, reason: `folder focus delta ${index} is malformed` };
+      }
+      continue;
+    }
+    if (delta.type === "cite") continue;
     if (
       delta.type !== "add" &&
       delta.type !== "remove" &&
@@ -236,6 +259,13 @@ function folderMembershipTransition(
       delta.type !== "advance"
     ) continue;
     membershipTypes.push(delta.type);
+    if (!Number.isInteger(delta.timestamp)) {
+      return {
+        valid: false,
+        membershipTypes,
+        reason: `folder delta ${index} has no integer millisecond timestamp`,
+      };
+    }
     if (delta.kind !== "file" && delta.kind !== "folder") {
       return { valid: false, membershipTypes, reason: `folder delta ${index} has no member kind` };
     }
@@ -253,12 +283,12 @@ function folderMembershipTransition(
     }
 
     if (delta.type === "remove") {
-      if (typeof delta.relativePath !== "string") {
-        return { valid: false, membershipTypes, reason: `remove delta ${index} has no path` };
+      if (typeof delta.relativePath !== "string" || !isNodeId(delta.nodeId)) {
+        return { valid: false, membershipTypes, reason: `remove delta ${index} is malformed` };
       }
       const existing = current.find((member) => member.relativePath === delta.relativePath);
-      if (!existing || existing.kind !== delta.kind) {
-        return { valid: false, membershipTypes, reason: `remove delta ${index} names a missing member` };
+      if (!existing || existing.kind !== delta.kind || existing.latestNodeId !== delta.nodeId) {
+        return { valid: false, membershipTypes, reason: `remove delta ${index} does not pin the removed head` };
       }
       current = current.filter((member) => member.relativePath !== delta.relativePath);
       continue;
@@ -299,6 +329,7 @@ function folderMembershipTransition(
       !existing ||
       existing.kind !== delta.kind ||
       existing.latestNodeId !== delta.previousNodeId ||
+      delta.previousNodeId === delta.nodeId ||
       !next ||
       next.kind !== delta.kind ||
       next.latestNodeId !== delta.nodeId
@@ -578,6 +609,7 @@ export async function verifyFolderTraceChain(
   const owner = chain[0]!.pubkey;
   const traceId = chain[0]!.id;
   let previousMembers: FolderMember[] = [];
+  const activeCitationTargets = new Set<string>();
   let ancestorIntegrityFailed = false;
   for (let stepIndex = 0; stepIndex < chain.length; stepIndex += 1) {
     const event = chain[stepIndex]!;
@@ -592,6 +624,9 @@ export async function verifyFolderTraceChain(
       addIntegrity("not-folder-node", "event is not exactly one folder TraceNode");
     }
     if (event.pubkey !== owner) addIntegrity("owner-changed", "prev chain changes owner");
+    if (event.tags.some((tag) => tag[0] === "F")) {
+      addIntegrity("folder-name-tag", "folder TraceNodes must omit F; parent membership owns the name");
+    }
 
     const previousTags = event.tags.filter((tag) => tag[0] === "e" && tag[3] === "prev");
     if (previousTags.length > 1) {
@@ -649,10 +684,9 @@ export async function verifyFolderTraceChain(
       addIntegrity("invalid-folder-hash-tag", "folder x tag does not match its canonical body hash");
     }
     const qTargets = event.tags.filter((tag) => tag[0] === "q").map((tag) => tag[1]);
-    if (
-      qTargets.length !== validMembers.length ||
-      qTargets.some((target, index) => target !== validMembers[index]?.latestNodeId)
-    ) {
+    if (qTargets.length < validMembers.length || qTargets.slice(0, validMembers.length).some(
+      (target, index) => target !== validMembers[index]?.latestNodeId,
+    )) {
       addIntegrity("folder-q-order", "folder q tags do not match member order");
     }
     if (!isTraceOperationId(parsed.operationId)) {
@@ -679,14 +713,43 @@ export async function verifyFolderTraceChain(
     if (parsed.deltas !== undefined && !Array.isArray(parsed.deltas)) {
       addIntegrity("nonconforming-deltas", "folder deltas is not an array");
     }
-    const declaredMembershipTypes = deltas.flatMap((delta) => {
-      if (!delta || typeof delta !== "object" || Array.isArray(delta)) return [];
-      const type = (delta as { type?: unknown }).type;
-      return type === "add" || type === "remove" || type === "rename" || type === "advance"
-        ? [type]
-        : [];
-    });
-    const transition = stepIndex === 0 && declaredMembershipTypes.length === 0
+    for (const [deltaIndex, value] of deltas.entries()) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const delta = value as Record<string, unknown>;
+      if (delta.type !== "cite") continue;
+      const op = delta.op ?? "add";
+      const position = delta.position as Record<string, unknown> | undefined;
+      const validInlineShape = (delta.role === "inline" || delta.role === "live") &&
+        op === "add" &&
+        !!position && !Array.isArray(position) &&
+        Number.isInteger(position.start) && Number.isInteger(position.end) &&
+        (position.start as number) >= 0 &&
+        (position.end as number) >= (position.start as number) &&
+        typeof delta.newValue === "string";
+      const validBodylessShape = (delta.role === "tag" || delta.role === "reply") &&
+        delta.position === undefined && delta.newValue === undefined &&
+        (op === "add" || (delta.role === "tag" && op === "remove"));
+      if (
+        (!validInlineShape && !validBodylessShape) ||
+        !isNodeId(delta.sourceEventId) ||
+        !Number.isInteger(delta.timestamp) ||
+        (delta.sourceContentHash !== undefined && !isNodeId(delta.sourceContentHash))
+      ) {
+        addIntegrity("nonconforming-deltas", `folder cite delta ${deltaIndex} is malformed`);
+        continue;
+      }
+      if (op === "add") activeCitationTargets.add(delta.sourceEventId as string);
+      else activeCitationTargets.delete(delta.sourceEventId as string);
+    }
+    const citationQTargets = qTargets.slice(validMembers.length);
+    if (
+      new Set(citationQTargets).size !== citationQTargets.length ||
+      citationQTargets.length !== activeCitationTargets.size ||
+      citationQTargets.some((target) => !activeCitationTargets.has(target))
+    ) {
+      addIntegrity("folder-q-citations", "folder q tags do not match active citation deltas");
+    }
+    const transition = stepIndex === 0 && deltas.length === 0
       ? { valid: true, membershipTypes: [] as string[] }
       : folderMembershipTransition(previousMembers, validMembers, deltas);
     if (!transition.valid) {

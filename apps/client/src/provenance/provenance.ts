@@ -123,6 +123,48 @@ export interface ManifestFileEntry {
   contentHash: string;
 }
 
+export interface VerifiedFolderMutationSnapshot {
+  chain: Event[];
+  head: Event;
+  members: ManifestFileEntry[];
+}
+
+export const TRACE_TRAVERSAL_MAX_EVENTS = 4_096;
+export const TRACE_TRAVERSAL_MAX_SIGNED_BYTES = 32 * 1024 * 1024;
+
+export function traceSignedEventBytes(event: Event): number {
+  return new TextEncoder().encode(JSON.stringify({
+    id: event.id,
+    pubkey: event.pubkey,
+    created_at: event.created_at,
+    kind: event.kind,
+    tags: event.tags,
+    content: event.content,
+    sig: event.sig,
+  })).byteLength;
+}
+
+/** Fail closed before retaining or verifying an individually oversized trace.
+ * Callers may share a stricter aggregate budget, but no one file/folder
+ * history is allowed to exceed these protocol-reader ceilings. */
+export function assertTraceTraversalBudget(
+  events: readonly Event[],
+  limits: { maxEvents?: number; maxSignedBytes?: number } = {},
+): void {
+  const maxEvents = limits.maxEvents ?? TRACE_TRAVERSAL_MAX_EVENTS;
+  const maxSignedBytes = limits.maxSignedBytes ?? TRACE_TRAVERSAL_MAX_SIGNED_BYTES;
+  if (events.length > maxEvents) {
+    throw new Error(`trace history exceeds ${maxEvents} signed events`);
+  }
+  let signedBytes = 0;
+  for (const event of events) {
+    signedBytes += traceSignedEventBytes(event);
+    if (signedBytes > maxSignedBytes) {
+      throw new Error(`trace history exceeds ${maxSignedBytes} signed bytes`);
+    }
+  }
+}
+
 export interface EditorDelta {
   type: "insert" | "delete" | "replace";
   positionStart: number;
@@ -400,6 +442,10 @@ export interface PublishEditInput {
    * first durability boundary. The prepared event is stepped later by
    * `completeCoinMint`; ordinary callers should leave this false. */
   prepareOnly?: boolean;
+  /** Durability boundary invoked with the complete signed node before any
+   * outbox or relay write. Callers journal these exact bytes so a crash cannot
+   * turn recovery into a sibling append. */
+  onSigned?: (event: Event) => void | Promise<void>;
   /** Per-character attribution for `snapshot`, serialized into the node's
    *  `authors` field (protocol §FileTraceNode Content). Concatenating the runs'
    *  text in order MUST reproduce `snapshot` exactly; readers validate this and
@@ -1152,6 +1198,7 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
 
   const signed = finalizeEvent(template, signer);
   if (input.prepareOnly) return signed;
+  await input.onSigned?.(signed);
   // Step (localOnly): publish to the home relay only — the node is recorded but
   // hasn't left the machine. A newly-created Step under Send fans out to all
   // write-enabled relays. Sending unchanged state uses sendStep on the existing
@@ -1182,6 +1229,28 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
     }
   }
   return signed;
+}
+
+/** Republish one already-signed file Step during crash recovery. Relay writes
+ * are idempotent by event id; this path deliberately never calls finalizeEvent
+ * and therefore cannot manufacture a replacement node. */
+export async function republishSignedEdit(
+  event: Event,
+  localOnly: boolean,
+): Promise<void> {
+  if (
+    !verifyEvent(event) ||
+    event.kind !== TRACE_NODE_KIND ||
+    !event.tags.some((tag) => tag[0] === "z" && tag[1] === "file")
+  ) {
+    throw new Error(`cannot republish invalid signed file Step ${event.id}`);
+  }
+  if (localOnly) {
+    enqueueLocalEvent(event);
+    await flushLocalEventOutbox();
+    return;
+  }
+  await publishToMany(await getWriteRelays(), event);
 }
 
 /** Parse the signed Coin envelope. `extracted-from` is only a query index; it
@@ -1986,8 +2055,10 @@ export async function fetchChain(folderId: string, relativePath: string): Promis
     kinds: [TRACE_NODE_KIND],
     "#F": [relativePath],
     "#f": [folderId],
+    limit: TRACE_TRAVERSAL_MAX_EVENTS + 1,
   };
   const all = await queryMany(relays, filter);
+  assertTraceTraversalBudget([...new Map(all.map((event) => [event.id, event])).values()]);
   const byId = new Map(all.map((e) => [e.id, e]));
 
   const head = resolveHead(all);
@@ -2036,6 +2107,9 @@ export async function resolveTraceChainCandidates(
   loadEvents: TraceEventBatchLoader,
 ): Promise<TraceChainResolution> {
   const heads = [...new Set(candidateHeadIds.filter(Boolean))];
+  if (heads.length > TRACE_TRAVERSAL_MAX_EVENTS) {
+    throw new Error(`trace heads exceed ${TRACE_TRAVERSAL_MAX_EVENTS} events`);
+  }
   if (heads.length === 0) {
     return { status: "missing", traceId, chain: [], candidateHeadIds: [] };
   }
@@ -2057,13 +2131,27 @@ export async function resolveTraceChainCandidates(
     broken: false,
   }));
   const byId = new Map<string, Event>();
+  let signedBytes = 0;
 
   for (let depth = 0; depth < 10_000; depth++) {
     const active = walks.filter((walk) => !walk.complete && !walk.broken && walk.cursor);
     if (active.length === 0) break;
     const needed = [...new Set(active.map((walk) => walk.cursor!).filter((id) => !byId.has(id)))];
     if (needed.length > 0) {
-      for (const event of await loadEvents(needed)) byId.set(event.id, event);
+      for (const event of await loadEvents(needed)) {
+        if (!byId.has(event.id)) {
+          if (byId.size >= TRACE_TRAVERSAL_MAX_EVENTS) {
+            throw new Error(`trace history exceeds ${TRACE_TRAVERSAL_MAX_EVENTS} signed events`);
+          }
+          signedBytes += traceSignedEventBytes(event);
+          if (signedBytes > TRACE_TRAVERSAL_MAX_SIGNED_BYTES) {
+            throw new Error(
+              `trace history exceeds ${TRACE_TRAVERSAL_MAX_SIGNED_BYTES} signed bytes`,
+            );
+          }
+        }
+        byId.set(event.id, event);
+      }
     }
 
     for (const walk of active) {
@@ -2152,15 +2240,23 @@ export async function resolveTraceIdentity(
     if (cached) return cached;
   }
   const newestFirst: Event[] = [];
+  let signedBytes = 0;
   const seen = new Set<string>();
   let cursor: string | null = nodeId;
-  for (let depth = 0; cursor && depth < 10_000; depth++) {
+  for (let depth = 0; cursor && depth <= TRACE_TRAVERSAL_MAX_EVENTS; depth++) {
     if (seen.has(cursor)) return null;
     seen.add(cursor);
     const loaded: Event[] = await loadEvents([cursor]);
     const event: Event | undefined = loaded.find((candidate: Event) => candidate.id === cursor);
     if (!event || !isFileNode(event)) return null;
+    if (newestFirst.length >= TRACE_TRAVERSAL_MAX_EVENTS) {
+      throw new Error(`trace history exceeds ${TRACE_TRAVERSAL_MAX_EVENTS} signed events`);
+    }
     newestFirst.push(event);
+    signedBytes += traceSignedEventBytes(event);
+    if (signedBytes > TRACE_TRAVERSAL_MAX_SIGNED_BYTES) {
+      throw new Error(`trace history exceeds ${TRACE_TRAVERSAL_MAX_SIGNED_BYTES} signed bytes`);
+    }
     const prev: string | null =
       event.tags.find((tag: string[]) => tag[0] === "e" && tag[3] === "prev")?.[1] ?? null;
     if (!prev) {
@@ -2172,6 +2268,9 @@ export async function resolveTraceIdentity(
     }
     cursor = prev;
   }
+  if (cursor) {
+    throw new Error(`trace history exceeds ${TRACE_TRAVERSAL_MAX_EVENTS} signed events`);
+  }
   return null;
 }
 
@@ -2180,7 +2279,11 @@ async function traceHeadCandidateIds(traceId: string): Promise<string[]> {
   const heads = await queryMany(relays, {
     kinds: [TRACE_HEAD_KIND],
     "#d": [traceId],
+    limit: TRACE_TRAVERSAL_MAX_EVENTS + 1,
   });
+  if (heads.length > TRACE_TRAVERSAL_MAX_EVENTS) {
+    throw new Error(`trace heads exceed ${TRACE_TRAVERSAL_MAX_EVENTS} events`);
+  }
   const ids = new Set<string>();
   for (const event of heads) {
     try {
@@ -2793,7 +2896,7 @@ export type FocusSelection =
  *  *same* `snapshot.members` as `prev` — `contentHash` is unaffected, exactly
  *  as a `quote`/`tag-add` delta never alters the file snapshot's text. */
 export type FolderDelta =
-  | { type: "add" | "remove"; kind: "file" | "folder"; relativePath: string; nodeId?: string; timestamp: number }
+  | { type: "add" | "remove"; kind: "file" | "folder"; relativePath: string; nodeId: string; timestamp: number }
   | { type: "rename"; kind: "file" | "folder"; fromPath: string; toPath: string; nodeId: string; timestamp: number }
   | { type: "advance"; kind: "file" | "folder"; relativePath: string; previousNodeId: string; nodeId: string; timestamp: number }
   | { type: "focus"; op: "mount" | "unmount"; selection: FocusSelection; panelIndex: number; timestamp: number };
@@ -2833,17 +2936,66 @@ function isFocusDelta(value: unknown): value is Extract<FolderDelta, { type: "fo
  *  carry its own `f` identity tag. Does not resolve the chain — returns the raw
  *  node set for `fetchLatestFolderNode` to head-resolve, and for the context-
  *  block directory log to read every membership event (add/remove). */
-export async function fetchFolderNodes(folderId: string): Promise<Event[]> {
-  const relays = await getReadRelays();
-  const [byF, genesis] = await Promise.all([
-    queryMany(relays, { kinds: [TRACE_NODE_KIND], "#f": [folderId] }),
-    queryMany(relays, { ids: [folderId] }),
-  ]);
+export function verifiedFolderNodesFromRelayResults(
+  folderId: string,
+  byF: readonly Event[],
+  genesis: readonly Event[],
+): Event[] {
+  // Reconstruct the public wire fields so a cached verification symbol on a
+  // caller-owned/mutated object cannot authorize altered relay material.
+  const verifiesAsReceived = (event: Event): boolean => verifyEvent({
+    id: event.id,
+    pubkey: event.pubkey,
+    created_at: event.created_at,
+    kind: event.kind,
+    tags: event.tags,
+    content: event.content,
+    sig: event.sig,
+  });
   const isFolderNode = (e: Event) => e.tags.some((t) => t[0] === "z" && t[1] === "folder");
+  // Relay results are untrusted routing material. An invalid event that merely
+  // claims the genesis id must never choose the fixed owner and filter out the
+  // legitimate chain before downstream conformance checks run.
+  const trustedGenesis = genesis.find((event) =>
+    event.id === folderId && isFolderNode(event) && verifiesAsReceived(event)
+  );
+  const owner = trustedGenesis?.pubkey;
+  if (!owner) return [];
   const byIdMap = new Map<string, Event>();
-  for (const e of byF) if (isFolderNode(e)) byIdMap.set(e.id, e);
-  for (const e of genesis) if (isFolderNode(e)) byIdMap.set(e.id, e);
+  for (const e of byF) {
+    if (isFolderNode(e) && e.pubkey === owner && verifiesAsReceived(e)) byIdMap.set(e.id, e);
+  }
+  byIdMap.set(trustedGenesis.id, trustedGenesis);
   return [...byIdMap.values()];
+}
+
+export async function fetchFolderNodes(
+  folderId: string,
+  options: { complete?: boolean } = {},
+): Promise<Event[]> {
+  const relays = await getReadRelays();
+  const genesis = await queryMany(relays, { ids: [folderId], limit: 1 });
+  const trustedGenesis = genesis.find((event) =>
+    event.id === folderId &&
+    event.tags.some((tag) => tag[0] === "z" && tag[1] === "folder") &&
+    verifyEvent(event)
+  );
+  if (!trustedGenesis) return [];
+  // Establish the immutable trust root before requesting history so unrelated
+  // relay users cannot flood a complete mutation scan with matching f/z tags.
+  const byF = await queryMany(relays, {
+      kinds: [TRACE_NODE_KIND],
+      authors: [trustedGenesis.pubkey],
+      "#f": [folderId],
+      "#z": ["folder"],
+      ...(options.complete ? {} : { limit: TRACE_TRAVERSAL_MAX_EVENTS + 1 }),
+    });
+  const nodes = verifiedFolderNodesFromRelayResults(folderId, byF, genesis);
+  // Reader surfaces are explicitly bounded. Mutation/recovery callers need a
+  // complete protocol history so a valid long-lived Root never becomes
+  // unappendable merely because it crossed a UI resource ceiling.
+  if (!options.complete) assertTraceTraversalBudget(nodes);
+  return nodes;
 }
 
 /** Read only folder nodes the home relay has accepted. Unlike `queryMany`, this
@@ -2911,6 +3063,41 @@ async function requireValidFolderChain(
   return chain;
 }
 
+function claimedFolderTraceIdentity(event: Event | null): string | null {
+  const reifications = event?.tags.filter((tag) => tag[0] === "z") ?? [];
+  if (
+    !event ||
+    event.kind !== TRACE_NODE_KIND ||
+    reifications.length !== 1 ||
+    reifications[0]?.[1] !== "folder"
+  ) return null;
+  const folderTags = event.tags.filter((tag) => tag[0] === "f");
+  if (folderTags.length === 1 && folderTags[0]?.[1]) return folderTags[0][1];
+  if (folderTags.length > 0) return null;
+  const hasPrevious = event.tags.some((tag) => tag[0] === "e" && tag[3] === "prev");
+  return hasPrevious ? null : event.id;
+}
+
+/** Resolve a membership-pinned folder head to its stable identity only after
+ * proving that the exact signed node reaches that genesis on one Full Trace,
+ * fixed-owner chain. The node's `f` tag is a routing hint, never authority. */
+export async function resolveVerifiedFolderTraceIdentityAtHead(
+  head: Event | null,
+  loadNodes: (folderId: string) => Promise<Event[]> = fetchFolderNodes,
+): Promise<string | null> {
+  const folderId = claimedFolderTraceIdentity(head);
+  if (!head || !folderId) return null;
+  const nodes = await loadNodes(folderId);
+  const genesis = nodes.find((event) => event.id === folderId);
+  if (!genesis) return null;
+  try {
+    await requireValidFolderChain(folderId, head, nodes, genesis.pubkey);
+    return folderId;
+  } catch {
+    return null;
+  }
+}
+
 async function requireCurrentFolderChain(
   folderId: string,
   nodes: readonly Event[],
@@ -2935,67 +3122,346 @@ async function requireCurrentFolderChain(
  * operation on a Full Trace chain. This detects an interprocess sibling race
  * after publication; it does not prevent another process from racing after
  * this read completes. */
-export async function requireAcceptedCurrentFolderCheckpoint(
-  folderId: string,
+export function acceptedCurrentOperationCheckpoint(
+  chain: readonly Event[],
+  currentHead: Event,
   checkpoint: Event,
-  expectedOwnerPubkey: string,
-): Promise<Event> {
+): Event {
   const operationId = eventMeta(checkpoint).operationId;
   if (!operationId) {
     throw new Error(`folder checkpoint ${checkpoint.id} is missing its operation id`);
   }
-  const acceptedNodes = await fetchHomeFolderNodes(folderId);
-  const current = await requireCurrentFolderChain(
+  const accepted = chain.find((event) => event.id === checkpoint.id);
+  if (
+    !accepted ||
+    eventMeta(accepted).operationId !== operationId ||
+    currentHead.id !== checkpoint.id
+  ) {
+    throw new Error(
+      `folder checkpoint ${checkpoint.id} for operation ${operationId} is not the ` +
+        "current checkpoint accepted by the home relay",
+    );
+  }
+  return accepted;
+}
+
+/** Verify a bounded post-publish continuation against an already verified
+ * folder chain. The continuation query includes children of both the old head
+ * and the new checkpoint, so a sibling publish or a checkpoint already
+ * superseded by another writer still fails exactly as a full history scan
+ * would. */
+export async function requireFolderMutationContinuation(
+  folderId: string,
+  priorChain: readonly Event[],
+  continuation: readonly Event[],
+  expectedOwnerPubkey: string,
+): Promise<VerifiedFolderMutationSnapshot> {
+  const nodes = [...new Map(
+    [...priorChain, ...continuation].map((event) => [event.id, event]),
+  ).values()];
+  return requireCurrentFolderMutationSnapshot(folderId, nodes, expectedOwnerPubkey);
+}
+
+export async function requireAcceptedCurrentFolderCheckpoint(
+  folderId: string,
+  checkpoint: Event,
+  expectedOwnerPubkey: string,
+  options: { localOnly?: boolean; priorChain?: readonly Event[] } = {},
+): Promise<Event> {
+  // A delayed writer may publish a child of any older ancestor, not merely a
+  // sibling of the predecessor we just used. Only the complete accepted owner
+  // history can prove that the new checkpoint is the unique current head.
+  const acceptedNodes = options.localOnly && pendingLocalEventById(checkpoint.id)
+    ? await fetchFolderNodes(folderId, { complete: true })
+    : await fetchHomeFolderNodes(folderId);
+  const current = await requireCurrentFolderMutationSnapshot(
     folderId,
     acceptedNodes,
     expectedOwnerPubkey,
   );
-  const operationCheckpoints = current.chain.filter(
-    (event) => eventMeta(event).operationId === operationId,
-  );
-  if (operationCheckpoints.length !== 1) {
-    throw new Error(
-      `folder ${folderId} operation ${operationId} has ${operationCheckpoints.length} ` +
-        "accepted checkpoints on its current owner chain",
-    );
-  }
-  const accepted = operationCheckpoints[0]!;
-  if (accepted.id !== checkpoint.id || current.head.id !== checkpoint.id) {
-    throw new Error(
-      `folder checkpoint ${checkpoint.id} for operation ${operationId} is not the ` +
-        "unique current checkpoint accepted by the home relay",
-    );
-  }
+  const accepted = acceptedCurrentOperationCheckpoint(current.chain, current.head, checkpoint);
   return accepted;
 }
 
 /** Resolves the latest (uncited-as-prev) folder-trace node for `folderId`, or
  *  null if the folder has no folder chain yet. Same head-finding rule as file
  *  chains (`resolveHead`): a node nobody else cites as `prev` is the head. */
-export async function fetchLatestFolderNode(folderId: string): Promise<Event | null> {
-  const all = await fetchFolderNodes(folderId);
-  return resolveHead(all);
+export async function fetchLatestFolderNode(
+  folderId: string,
+  options: { complete?: boolean } = {},
+): Promise<Event | null> {
+  const all = await fetchFolderNodes(folderId, options);
+  const heads = listUncitedHeads(all);
+  if (heads.length > 1) {
+    throw new Error(`folder trace ${folderId} has ${heads.length} current heads`);
+  }
+  return heads[0] ?? null;
 }
 
-/** Parses `snapshot.members` out of a folder-reified 4290 node's content. Returns [] on
- *  malformed/empty content. */
-export function membersFromNode(event: Event): ManifestFileEntry[] {
-  try {
-    const parsed = JSON.parse(event.content) as { snapshot?: { members?: unknown[] } };
-    if (!Array.isArray(parsed.snapshot?.members)) return [];
-    return parsed.snapshot.members.filter((member): member is ManifestFileEntry => {
-      if (!member || typeof member !== "object") return false;
-      const entry = member as Partial<ManifestFileEntry>;
-      return (
-        (entry.kind === "file" || entry.kind === "folder") &&
-        typeof entry.relativePath === "string" &&
-        typeof entry.latestNodeId === "string" &&
-        typeof entry.contentHash === "string"
-      );
-    });
-  } catch {
-    return [];
+/** One append lane per folder identity. Folder nodes are immutable and cite one
+ * predecessor, so every read-plan-publish mutation must share this boundary or
+ * two locally concurrent gestures can sign sibling heads. */
+export interface FolderMutationRun {
+  tail: Promise<unknown>;
+}
+
+/** Minimal injectable shape for the browser-wide Web Locks boundary. Keeping
+ * this smaller than the DOM LockManager makes the two-context race regression
+ * deterministic without replacing the process-global navigator in tests. */
+export interface FolderMutationLockManager {
+  request<T>(name: string, callback: () => Promise<T>): Promise<T>;
+}
+
+export function runFolderMutationSerialized<T>(
+  runs: Map<string, FolderMutationRun>,
+  folderId: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = runs.get(folderId);
+  let result: Promise<T>;
+  if (previous) {
+    result = previous.tail.then(task, task);
+  } else {
+    try {
+      result = Promise.resolve(task());
+    } catch (error) {
+      result = Promise.reject(error);
+    }
   }
+  const run: FolderMutationRun = { tail: result.then(() => undefined, () => undefined) };
+  runs.set(folderId, run);
+  void run.tail.finally(() => {
+    if (runs.get(folderId) === run) runs.delete(folderId);
+  });
+  return result;
+}
+
+const FOLDER_MUTATION_LOCK_PREFIX = "zine.folder-mutation.";
+
+/** Hold one same-origin lock across the complete read/plan/publish/verify
+ * mutation. Web Locks coordinates separate windows and webviews that share an
+ * origin. Separate desktop processes may not share that manager, so every
+ * caller must still perform the home-relay acceptance check before reporting
+ * success. */
+export function runFolderMutationCrossContext<T>(
+  folderId: string,
+  task: () => Promise<T>,
+  lockManager?: FolderMutationLockManager | null,
+): Promise<T> {
+  if (lockManager !== undefined) {
+    return lockManager
+      ? lockManager.request(`${FOLDER_MUTATION_LOCK_PREFIX}${folderId}`, task)
+      : task();
+  }
+  if (typeof navigator !== "undefined" && navigator.locks) {
+    return navigator.locks.request(
+      `${FOLDER_MUTATION_LOCK_PREFIX}${folderId}`,
+      task,
+    );
+  }
+  return task();
+}
+
+/** Compose the module-local queue with the browser-wide lane. The queue avoids
+ * needless Web Lock contention within one context; the outer lock prevents a
+ * second context from reading the same predecessor while this task is live. */
+export function runFolderMutationCoordinated<T>(
+  runs: Map<string, FolderMutationRun>,
+  folderId: string,
+  task: () => Promise<T>,
+  lockManager?: FolderMutationLockManager | null,
+): Promise<T> {
+  return runFolderMutationSerialized(
+    runs,
+    folderId,
+    () => runFolderMutationCrossContext(folderId, task, lockManager),
+  );
+}
+
+const folderMutationRuns = new Map<string, FolderMutationRun>();
+
+function mutateFolder<T>(folderId: string, task: () => Promise<T>): Promise<T> {
+  return runFolderMutationCoordinated(folderMutationRuns, folderId, task);
+}
+
+/** Parse one signed folder snapshot without repairing it. Mutation callers
+ * must never reinterpret malformed state as an empty or partial manifest: that
+ * would turn one bad member into a signed removal on the next checkpoint. */
+export function membersFromNode(event: Event): ManifestFileEntry[] {
+  let value: unknown;
+  try {
+    value = JSON.parse(event.content) as unknown;
+  } catch {
+    throw new Error(`folder node ${event.id} content is not valid JSON`);
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`folder node ${event.id} content is not an object`);
+  }
+  const snapshot = (value as { snapshot?: unknown }).snapshot;
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new Error(`folder node ${event.id} has no folder snapshot`);
+  }
+  const rawMembers = (snapshot as { members?: unknown }).members;
+  if (!Array.isArray(rawMembers)) {
+    throw new Error(`folder node ${event.id} snapshot has malformed members`);
+  }
+  const members = rawMembers.map((member, index): ManifestFileEntry => {
+    if (!member || typeof member !== "object" || Array.isArray(member)) {
+      throw new Error(`folder node ${event.id} member ${index} is malformed`);
+    }
+    const entry = member as Partial<ManifestFileEntry>;
+    if (
+      (entry.kind !== "file" && entry.kind !== "folder") ||
+      typeof entry.relativePath !== "string" ||
+      entry.relativePath.length === 0 ||
+      entry.relativePath.includes("/") ||
+      typeof entry.latestNodeId !== "string" ||
+      !HEX_64.test(entry.latestNodeId) ||
+      typeof entry.contentHash !== "string" ||
+      !HEX_64.test(entry.contentHash)
+    ) {
+      throw new Error(`folder node ${event.id} member ${index} is malformed`);
+    }
+    return entry as ManifestFileEntry;
+  });
+  if (new Set(members.map((member) => member.relativePath)).size !== members.length) {
+    throw new Error(`folder node ${event.id} repeats a structural member name`);
+  }
+  return members;
+}
+
+/** Validate the exact current owner chain before exposing its snapshot to any
+ * mutation planner. This is stronger than parsing the head alone: q ordering,
+ * canonical hashes, delta transitions, signatures, and fixed ownership all
+ * have to conform before bytes can be republished. */
+export async function requireCurrentFolderMutationSnapshot(
+  folderId: string,
+  nodes: readonly Event[],
+  expectedOwnerPubkey: string,
+): Promise<VerifiedFolderMutationSnapshot> {
+  const current = await requireCurrentFolderChain(folderId, nodes, expectedOwnerPubkey);
+  return { ...current, members: membersFromNode(current.head) };
+}
+
+/** Return the exact verified suffix that home must accept before an append.
+ * Callers validate both chains first; this pure seam keeps the critical
+ * prefix/divergence rule executable without a relay fixture. */
+export function folderReconciliationSuffix(
+  acceptedChain: readonly Event[],
+  observedChain: readonly Event[],
+): Event[] {
+  if (
+    acceptedChain.length >= observedChain.length ||
+    acceptedChain.some((event, index) => observedChain[index]?.id !== event.id)
+  ) {
+    throw new Error("federated folder head does not extend its home checkpoint");
+  }
+  return observedChain.slice(acceptedChain.length);
+}
+
+async function reconcileFolderMutationSnapshotToHome(
+  home: Relay,
+  folderId: string,
+  expectedOwnerPubkey: string,
+  observed: VerifiedFolderMutationSnapshot,
+  accepted: VerifiedFolderMutationSnapshot | null,
+): Promise<VerifiedFolderMutationSnapshot> {
+  if (accepted?.head.id === observed.head.id) return observed;
+  let suffix: Event[];
+  try {
+    suffix = folderReconciliationSuffix(accepted?.chain ?? [], observed.chain);
+  } catch {
+    throw new Error(
+      `folder ${folderId} has a federated head that does not extend its home checkpoint`,
+    );
+  }
+  for (const event of suffix) {
+    await publishWithAuth(home, event);
+    removeLocalEvent(event.id);
+  }
+  // Re-read the complete home history after publication. A writer that read an
+  // older ancestor can land a late branch while this reconciliation is in
+  // flight; a frontier-only query would never see that branch.
+  const reconciled = await requireCurrentFolderMutationSnapshot(
+    folderId,
+    await fetchHomeFolderNodes(folderId),
+    expectedOwnerPubkey,
+  );
+  if (reconciled.head.id !== observed.head.id) {
+    throw new Error(`folder ${folderId} home reconciliation did not accept the exact federated head`);
+  }
+  return observed;
+}
+
+async function fetchCurrentFolderMutationSnapshotFull(
+  folderId: string,
+  expectedOwnerPubkey: string,
+  home: Relay | null,
+  opts: { localOnly?: boolean },
+): Promise<VerifiedFolderMutationSnapshot> {
+  const federatedNodes = await fetchFolderNodes(folderId, { complete: true });
+  if (!home) {
+    // Step is explicitly allowed to remain on this machine. The durable signed
+    // outbox participates in fetchFolderNodes, so an offline press can keep
+    // appending to its exact verified local chain. Send-capable mutations still
+    // require home authority, and the next online append reconciles this exact
+    // suffix into home before planning anything new.
+    if (!opts.localOnly) {
+      throw new Error(`cannot verify folder ${folderId} on the home relay`);
+    }
+    const observed = await requireCurrentFolderMutationSnapshot(
+      folderId,
+      federatedNodes,
+      expectedOwnerPubkey,
+    );
+    return observed;
+  }
+  const homeNodes = await fetchHomeFolderNodes(folderId);
+  const observedNodes = [...new Map(
+    [...federatedNodes, ...homeNodes].map((event) => [event.id, event]),
+  ).values()];
+  const observed = await requireCurrentFolderMutationSnapshot(
+    folderId,
+    observedNodes,
+    expectedOwnerPubkey,
+  );
+  // An empty home view is a valid prefix when an offline/local outbox already
+  // contains one fully verified chain. Reconcile that entire chain rather than
+  // requiring an unrelated flush to seed home first. A non-empty malformed
+  // home view still fails closed through the normal snapshot verifier.
+  const accepted = homeNodes.length > 0
+    ? await requireCurrentFolderMutationSnapshot(
+        folderId,
+        homeNodes,
+        expectedOwnerPubkey,
+      )
+    : null;
+  const reconciled = await reconcileFolderMutationSnapshotToHome(
+    home,
+    folderId,
+    expectedOwnerPubkey,
+    observed,
+    accepted,
+  );
+  return reconciled;
+}
+
+async function fetchCurrentFolderMutationSnapshot(
+  folderId: string,
+  expectedOwnerPubkey: string,
+  opts: { localOnly?: boolean } = {},
+): Promise<VerifiedFolderMutationSnapshot> {
+  const home = await getRelayRetrying(resolveRelayUrl(), 1);
+  // An immutable append protocol has no relay-side compare-and-swap. A delayed
+  // writer can publish from any older ancestor, so a cached frontier can never
+  // prove that the owner history still has one head. Mutations deliberately
+  // pay for complete revalidation before signing.
+  return fetchCurrentFolderMutationSnapshotFull(
+    folderId,
+    expectedOwnerPubkey,
+    home,
+    opts,
+  );
 }
 
 /** Reads the current file set for a folder from its latest 4290-z:folder node's
@@ -3165,36 +3631,50 @@ function canonicalFolderBody(members: ManifestFileEntry[]): string {
 // dedupes against the last published key) keeps the buffer from growing
 // unbounded under a flurry of selections.
 
-const focusBuffer = new Map<string, FolderDelta[]>();
 const FOCUS_BUFFER_PREFIX = "zine.pending-folder-focus.";
 
-function storedFocus(folderId: string): FolderDelta[] {
-  const cached = focusBuffer.get(folderId);
-  if (cached) return cached;
-  let loaded: FolderDelta[] = [];
+function focusRecordPrefix(folderId: string): string {
+  return `${FOCUS_BUFFER_PREFIX}${folderId}.`;
+}
+
+function storedFocusRecords(
+  folderId: string,
+  storage: Storage,
+): Array<{ key: string; delta: FolderDelta }> {
+  const loaded: Array<{ key: string; delta: FolderDelta }> = [];
   try {
-    if (typeof localStorage !== "undefined") {
-      const raw = localStorage.getItem(FOCUS_BUFFER_PREFIX + folderId);
-      const parsed: unknown = raw ? JSON.parse(raw) : [];
-      if (Array.isArray(parsed)) loaded = parsed.filter(isFocusDelta);
+    if (storage) {
+      const prefix = focusRecordPrefix(folderId);
+      for (let index = 0; index < storage.length; index++) {
+        const key = storage.key(index);
+        if (!key?.startsWith(prefix)) continue;
+        const raw = storage.getItem(key);
+        const parsed: unknown = raw ? JSON.parse(raw) : null;
+        if (isFocusDelta(parsed)) loaded.push({ key, delta: parsed });
+      }
+      // Adopt the pre-record format once. Unique record keys make later
+      // cross-window appends independent instead of read/modify/write races.
+      const legacyKey = FOCUS_BUFFER_PREFIX + folderId;
+      const legacyRaw = storage.getItem(legacyKey);
+      const legacy: unknown = legacyRaw ? JSON.parse(legacyRaw) : [];
+      if (Array.isArray(legacy)) {
+        for (const delta of legacy.filter(isFocusDelta)) {
+          const key = `${prefix}${createTraceOperationId()}`;
+          storage.setItem(key, JSON.stringify(delta));
+          loaded.push({ key, delta });
+        }
+      }
+      if (legacyRaw) storage.removeItem(legacyKey);
     }
   } catch {
     // Focus is observational; an unavailable/corrupt local buffer must not
     // block authoring or a structural folder Step.
   }
-  focusBuffer.set(folderId, loaded);
-  return loaded;
-}
-
-function persistFocus(folderId: string, entries: FolderDelta[]): void {
-  try {
-    if (typeof localStorage === "undefined") return;
-    if (entries.length === 0) localStorage.removeItem(FOCUS_BUFFER_PREFIX + folderId);
-    else localStorage.setItem(FOCUS_BUFFER_PREFIX + folderId, JSON.stringify(entries));
-  } catch {
-    // Best-effort observation buffer; the in-memory copy remains authoritative
-    // for the current session when storage is unavailable.
-  }
+  return loaded.sort((left, right) =>
+    ((left.delta as Extract<FolderDelta, { type: "focus" }>).timestamp -
+      (right.delta as Extract<FolderDelta, { type: "focus" }>).timestamp) ||
+    left.key.localeCompare(right.key)
+  );
 }
 
 /** Append a focus observation to `folderId`'s pending buffer. Called from the
@@ -3203,28 +3683,37 @@ function persistFocus(folderId: string, entries: FolderDelta[]): void {
  *  the persisted buffer. Safe to call before the folder has any chain; the
  *  buffer simply holds until the first Step. */
 export function bufferFocus(folderId: string, delta: FolderDelta): void {
-  const arr = storedFocus(folderId);
-  arr.push(delta);
-  persistFocus(folderId, arr);
+  bufferFocusInStorage(localStorage, folderId, delta);
+}
+
+export function bufferFocusInStorage(storage: Storage, folderId: string, delta: FolderDelta): void {
+  if (!isFocusDelta(delta)) return;
+  try {
+    storage.setItem(
+      `${focusRecordPrefix(folderId)}${createTraceOperationId()}`,
+      JSON.stringify(delta),
+    );
+  } catch {
+    // Observational buffering remains best effort when vault storage is down.
+  }
 }
 
 /** Take and clear `folderId`'s pending focus buffer. Called by publishFolderNode
  *  so every folder-chain step flushes whatever focus accumulated since the last
  *  one — the §7/§8 drain-on-step rule. Returns the deltas in arrival order;
  *  empty array if nothing pending. */
-function drainFocusBuffer(folderId: string): FolderDelta[] {
-  const arr = storedFocus(folderId);
-  if (arr.length === 0) return [];
-  const out = arr.splice(0, arr.length);
-  persistFocus(folderId, arr);
-  return out;
+export function drainFocusBuffer(folderId: string): FolderDelta[] {
+  return drainFocusBufferFromStorage(localStorage, folderId);
 }
 
-function restoreFocusBuffer(folderId: string, entries: FolderDelta[]): void {
-  if (entries.length === 0) return;
-  const current = storedFocus(folderId);
-  current.unshift(...entries);
-  persistFocus(folderId, current);
+export function drainFocusBufferFromStorage(storage: Storage, folderId: string): FolderDelta[] {
+  const records = storedFocusRecords(folderId, storage);
+  acknowledgeFocusRecords(storage, records.map((record) => record.key));
+  return records.map((record) => record.delta);
+}
+
+function acknowledgeFocusRecords(storage: Storage, keys: readonly string[]): void {
+  for (const key of keys) storage.removeItem(key);
 }
 
 /** Publishes a folder-reified 4290 node stepping `members` as the current
@@ -3253,6 +3742,9 @@ async function publishFolderNode(
     geohashes?: string[];
     operationId?: string;
     folderCheckpoint: FolderCheckpoint;
+    /** Persist an immutable recovery journal after signing but before the
+     * first relay write. A rejected callback prevents publication. */
+    onSigned?: (event: Event) => void | Promise<void>;
     /** Step the folder manifest only to the home relay. Used when a local
      *  file Step changes membership but has not been Sent. */
     localOnly?: boolean;
@@ -3269,7 +3761,10 @@ async function publishFolderNode(
   // first so directory-log readers that take deltas[0] still see it.
   // Genesis (folderId null) has no focus buffer — it's the identity-minting
   // node, nothing to drain.
-  const drainedFocus = folderId ? drainFocusBuffer(folderId) : [];
+  // Peek stable append-only records. They remain restart-durable until the
+  // complete carrying event itself has entered the signed-event outbox.
+  const pendingFocusRecords = folderId ? storedFocusRecords(folderId, localStorage) : [];
+  const drainedFocus = pendingFocusRecords.map((record) => record.delta);
   const allDeltas = [...(opts.deltas ?? []), ...drainedFocus];
   const template = buildFolderNodeTemplate(
     folderId,
@@ -3290,7 +3785,6 @@ async function publishFolderNode(
   // `x` tag (spec §3.1: REQUIRED on folder nodes). `#x` content-identity
   // queries then cluster byte-identical folders across authors — the property
   // the canonical projection (no latestNodeId) was designed to enable (§R3).
-  let nodePublished = false;
   try {
     const parsed = JSON.parse(template.content) as { contentHash?: string };
     parsed.contentHash = await hashFolderSnapshot(members);
@@ -3298,10 +3792,18 @@ async function publishFolderNode(
     template.tags.push(["x", parsed.contentHash!]);
 
     const signed = finalizeEvent(template, key);
+    await opts.onSigned?.(signed);
+    // Every immutable folder checkpoint enters the durable exact-event outbox
+    // before the first relay write, including federated Sends. If only an
+    // external relay accepts (or the process stops mid-publication), recovery
+    // can republish these same bytes instead of signing a sibling from `prev`.
+    enqueueLocalEvent(signed);
+    acknowledgeFocusRecords(
+      localStorage,
+      pendingFocusRecords.map((record) => record.key),
+    );
     let relays: Relay[] = [];
     if (opts.localOnly) {
-      enqueueLocalEvent(signed);
-      nodePublished = true;
       const home = await getRelayRetrying(resolveRelayUrl(), 1);
       if (home) {
         await flushLocalEventOutboxThrough(home);
@@ -3310,7 +3812,10 @@ async function publishFolderNode(
     } else {
       relays = await getWriteRelays();
       await publishToMany(relays, signed);
-      nodePublished = true;
+      // Clear the recovery record only after home has acknowledged it. A
+      // write-only external success is not enough to authorize a new append.
+      const home = await getRelayRetrying(resolveRelayUrl(), 1);
+      if (home) await flushLocalEventOutboxThrough(home);
     }
     // Spec §4: also publish a TraceHead (kind 34290) head-pointer cache so the
     // folder's head resolves as one bounded fetch for O(1) consumers. `d` = trace
@@ -3321,10 +3826,9 @@ async function publishFolderNode(
     }
     return signed;
   } catch (error) {
-    // If the node itself never landed, put its observations back at the front so
-    // the next real folder Step can carry them. A TraceHead-cache failure happens
-    // after the node is durable and must not duplicate the deltas.
-    if (folderId && !nodePublished) restoreFocusBuffer(folderId, drainedFocus);
+    // Before durable enqueue the append-only focus records are still present;
+    // after enqueue their exact bytes live in the outbox event. No restoration
+    // or duplicate record synthesis is needed on either side of the boundary.
     throw error;
   }
 }
@@ -3410,17 +3914,30 @@ export async function fetchFolderGeohashes(folderId: string): Promise<string[]> 
  *  current membership on a new folder node carrying the new `g` tags. The Press
  *  "pin to map" affordance calls this. A no-op when the set is unchanged. */
 export async function setFolderGeohashes(folderId: string, geohashes: string[]): Promise<Event | null> {
-  const previous = await fetchLatestFolderNode(folderId);
-  const members = previous ? membersFromNode(previous) : [];
-  const current = previous ? geohashesFromNode(previous) : [];
-  const next = Array.from(new Set(geohashes.filter((h) => typeof h === "string" && h.length > 0)));
-  // Equal (order-insensitive) → no node needed.
-  if (current.length === next.length && current.every((h) => next.includes(h))) return null;
-  return publishFolderNode(folderId, members, {
-    prevEventId: previous?.id ?? null,
-    action: previous ? "edit" : "import",
-    geohashes: next,
-    folderCheckpoint: { version: 1, cause: "metadata-change" },
+  const signer = authoringVoice().secretKey;
+  const expectedOwnerPubkey = getPublicKey(signer);
+  return mutateFolder(folderId, async () => {
+    const currentFolder = await fetchCurrentFolderMutationSnapshot(
+      folderId,
+      expectedOwnerPubkey,
+    );
+    const current = geohashesFromNode(currentFolder.head);
+    const next = Array.from(new Set(geohashes.filter((h) => typeof h === "string" && h.length > 0)));
+    // Equal (order-insensitive) → no node needed.
+    if (current.length === next.length && current.every((h) => next.includes(h))) return null;
+    const published = await publishFolderNode(folderId, currentFolder.members, {
+      prevEventId: currentFolder.head.id,
+      action: "edit",
+      geohashes: next,
+      signer,
+      folderCheckpoint: { version: 1, cause: "metadata-change" },
+    });
+    return requireAcceptedCurrentFolderCheckpoint(
+      folderId,
+      published,
+      expectedOwnerPubkey,
+      { priorChain: currentFolder.chain },
+    );
   });
 }
 
@@ -3481,6 +3998,7 @@ export async function createFolderGenesis(opts?: {
   operationId?: string;
   /** Keep the new folder identity on the home relay until an explicit Send. */
   localOnly?: boolean;
+  onSigned?: (event: Event) => void | Promise<void>;
 }): Promise<string> {
   const event = await publishFolderNode(null, opts?.members ?? [], {
     prevEventId: null,
@@ -3490,9 +4008,55 @@ export async function createFolderGenesis(opts?: {
     memberOwners: opts?.memberOwners,
     localOnly: opts?.localOnly,
     operationId: opts?.operationId,
+    onSigned: opts?.onSigned,
     folderCheckpoint: { version: 1, cause: "genesis" },
   });
   return event.id;
+}
+
+export type FolderHeadRelation =
+  | "same"
+  | "current-newer"
+  | "entry-newer"
+  | "diverged";
+
+function folderTraceIdFromNode(event: Event | null): string | null {
+  if (!event?.tags.some((tag) => tag[0] === "z" && tag[1] === "folder")) return null;
+  const traceId = event.tags.find((tag) => tag[0] === "f")?.[1];
+  if (traceId) return traceId;
+  const previous = event.tags.find(
+    (tag) => tag[0] === "e" && tag[3] === "prev",
+  )?.[1];
+  return previous ? null : event.id;
+}
+
+/** Compare two immutable heads in one folder trace. This is intentionally
+ *  lineage-based rather than timestamp-based: a delayed ancestor cascade may
+ *  arrive after a newer child head and must not move the parent backward. */
+export function folderHeadRelation(
+  events: readonly Event[],
+  currentHeadId: string,
+  entryHeadId: string,
+): FolderHeadRelation {
+  if (currentHeadId === entryHeadId) return "same";
+  const byId = new Map(events.map((event) => [event.id, event]));
+  const descendsFrom = (headId: string, ancestorId: string): boolean => {
+    const seen = new Set<string>();
+    let cursor: string | undefined = headId;
+    while (cursor && !seen.has(cursor)) {
+      if (cursor === ancestorId) return true;
+      seen.add(cursor);
+      const event = byId.get(cursor);
+      if (!event) return false;
+      cursor = event.tags.find(
+        (tag) => tag[0] === "e" && tag[3] === "prev",
+      )?.[1];
+    }
+    return false;
+  };
+  if (descendsFrom(currentHeadId, entryHeadId)) return "current-newer";
+  if (descendsFrom(entryHeadId, currentHeadId)) return "entry-newer";
+  return "diverged";
 }
 
 /** Reads the current membership, replaces the single entry for
@@ -3504,6 +4068,7 @@ export function planManifestUpsert(
   current: readonly ManifestFileEntry[],
   entry: ManifestFileEntry,
   timestamp: number,
+  folderRelation?: FolderHeadRelation,
 ):
   | { unchanged: true }
   | {
@@ -3520,6 +4085,23 @@ export function planManifestUpsert(
     existing.contentHash === entry.contentHash
   ) {
     return { unchanged: true };
+  }
+  if (
+    existing?.kind === "folder" &&
+    entry.kind === "folder" &&
+    existing.latestNodeId !== entry.latestNodeId
+  ) {
+    if (folderRelation === "current-newer") return { unchanged: true };
+    if (folderRelation !== "entry-newer") {
+      throw new Error(`cannot advance ${entry.relativePath}: folder heads do not form one forward lineage`);
+    }
+  }
+  if (
+    existing &&
+    existing.kind === entry.kind &&
+    existing.latestNodeId === entry.latestNodeId
+  ) {
+    throw new Error(`cannot advance ${entry.relativePath}: same node with a different content hash`);
   }
   const members = existing
     ? current.map((member) => member.relativePath === entry.relativePath ? entry : member)
@@ -3572,23 +4154,56 @@ export async function upsertManifestEntry(
   folderId: string,
   entry: ManifestFileEntry,
   signer?: Uint8Array,
-  opts?: { localOnly?: boolean; operationId?: string },
+  opts?: {
+    localOnly?: boolean;
+    operationId?: string;
+    monotonicFolderId?: string;
+  },
 ): Promise<Event> {
-  const previous = await fetchLatestFolderNode(folderId);
-  const current = previous ? membersFromNode(previous) : [];
-  const plan = planManifestUpsert(current, entry, Date.now());
-  if (plan.unchanged && previous) return previous;
-  if (plan.unchanged) {
-    throw new Error(`cannot preserve ${entry.relativePath} without a folder head`);
-  }
-  return publishFolderNode(folderId, plan.members, {
-    prevEventId: previous?.id ?? null,
-    action: previous ? "edit" : "import",
-    deltas: plan.deltas,
-    signer,
-    localOnly: opts?.localOnly,
-    operationId: opts?.operationId,
-    folderCheckpoint: plan.folderCheckpoint,
+  const key = signer ?? authoringVoice().secretKey;
+  const expectedOwnerPubkey = getPublicKey(key);
+  return mutateFolder(folderId, async () => {
+    const currentFolder = await fetchCurrentFolderMutationSnapshot(
+      folderId,
+      expectedOwnerPubkey,
+      { localOnly: opts?.localOnly },
+    );
+    const current = currentFolder.members;
+    const existing = current.find(
+      (member) => member.relativePath === entry.relativePath,
+    );
+    const monotonicFolderId = opts?.monotonicFolderId ?? (
+      existing?.kind === "folder" && entry.kind === "folder"
+        ? folderTraceIdFromNode(await fetchEventById(entry.latestNodeId))
+        : null
+    );
+    const relation = monotonicFolderId &&
+        existing?.kind === "folder" &&
+        entry.kind === "folder" &&
+        existing.latestNodeId !== entry.latestNodeId
+      ? folderHeadRelation(
+          await fetchFolderNodes(monotonicFolderId, { complete: true }),
+          existing.latestNodeId,
+          entry.latestNodeId,
+        )
+      : undefined;
+    const plan = planManifestUpsert(current, entry, Date.now(), relation);
+    if (plan.unchanged) return currentFolder.head;
+    const published = await publishFolderNode(folderId, plan.members, {
+      prevEventId: currentFolder.head.id,
+      action: "edit",
+      deltas: plan.deltas,
+      signer: key,
+      localOnly: opts?.localOnly,
+      operationId: opts?.operationId,
+      folderCheckpoint: plan.folderCheckpoint,
+    });
+    return requireAcceptedCurrentFolderCheckpoint(
+      folderId,
+      published,
+      expectedOwnerPubkey,
+      { localOnly: opts?.localOnly, priorChain: currentFolder.chain },
+    );
   });
 }
 
@@ -3601,31 +4216,106 @@ export async function removeManifestEntry(
   folderId: string,
   relativePath: string,
   signer?: Uint8Array,
-  opts?: { localOnly?: boolean; operationId?: string },
+  opts?: {
+    localOnly?: boolean;
+    operationId?: string;
+    expectedNodeId?: string;
+  },
 ): Promise<Event | null> {
-  const previous = await fetchLatestFolderNode(folderId);
-  const current = previous ? membersFromNode(previous) : [];
-  const existing = current.find((entry) => entry.relativePath === relativePath);
-  if (!existing) return null;
-  const next = current.filter((f) => f.relativePath !== relativePath);
-  return publishFolderNode(folderId, next, {
-    prevEventId: previous?.id ?? null,
-    action: previous ? "edit" : "import",
-    deltas: [{ type: "remove", kind: existing.kind, relativePath, timestamp: Date.now() }],
-    signer,
-    localOnly: opts?.localOnly,
-    operationId: opts?.operationId,
-    folderCheckpoint: { version: 1, cause: "structure-change" },
+  const key = signer ?? authoringVoice().secretKey;
+  const expectedOwnerPubkey = getPublicKey(key);
+  return mutateFolder(folderId, async () => {
+    const currentFolder = await fetchCurrentFolderMutationSnapshot(
+      folderId,
+      expectedOwnerPubkey,
+      { localOnly: opts?.localOnly },
+    );
+    const current = currentFolder.members;
+    const existing = current.find((entry) => entry.relativePath === relativePath);
+    if (!existing) return null;
+    if (opts?.expectedNodeId && existing.latestNodeId !== opts.expectedNodeId) {
+      throw new Error(
+        `cannot remove replaced folder member ${relativePath}: expected ` +
+          `${opts.expectedNodeId}, found ${existing.latestNodeId}`,
+      );
+    }
+    const next = current.filter((f) => f.relativePath !== relativePath);
+    const published = await publishFolderNode(folderId, next, {
+      prevEventId: currentFolder.head.id,
+      action: "edit",
+      deltas: [{ type: "remove", kind: existing.kind, relativePath, nodeId: existing.latestNodeId, timestamp: Date.now() }],
+      signer: key,
+      localOnly: opts?.localOnly,
+      operationId: opts?.operationId,
+      folderCheckpoint: { version: 1, cause: "structure-change" },
+    });
+    return requireAcceptedCurrentFolderCheckpoint(
+      folderId,
+      published,
+      expectedOwnerPubkey,
+      { localOnly: opts?.localOnly, priorChain: currentFolder.chain },
+    );
   });
+}
+
+/** Build the exact member projection for a rename. A same-gesture file Step
+ * changes both the immutable node id and its body hash; retaining the old hash
+ * would make the resulting folder snapshot unverifiable. */
+export async function renamedManifestMember(
+  existing: ManifestFileEntry,
+  toPath: string,
+  nodeId: string,
+  nextNode: Event | null = null,
+): Promise<ManifestFileEntry> {
+  if (nodeId === existing.latestNodeId) {
+    return { ...existing, relativePath: toPath };
+  }
+  let contentHash: string | null = null;
+  try {
+    const parsed = nextNode
+      ? JSON.parse(nextNode.content) as { contentHash?: unknown; snapshot?: unknown }
+      : null;
+    if (
+      nextNode?.id === nodeId &&
+      verifyEvent(nextNode) &&
+      typeof parsed?.contentHash === "string" &&
+      HEX_64.test(parsed.contentHash)
+    ) {
+      if (
+        existing.kind === "file" &&
+        typeof parsed.snapshot === "string" &&
+        await sha256HexLocal(parsed.snapshot) === parsed.contentHash
+      ) {
+        // Named-file x participation is optional in the protocol. The signed
+        // snapshot and its signed contentHash are the integrity authority.
+        contentHash = parsed.contentHash;
+      } else if (
+        existing.kind === "folder" &&
+        nextNode.tags.some((tag) => tag[0] === "x" && tag[1] === parsed.contentHash)
+      ) {
+        contentHash = parsed.contentHash;
+      }
+    }
+  } catch {
+    contentHash = null;
+  }
+  if (!contentHash) {
+    throw new Error(`cannot verify renamed folder member node ${nodeId}`);
+  }
+  return {
+    ...existing,
+    relativePath: toPath,
+    latestNodeId: nodeId,
+    contentHash,
+  };
 }
 
 /** Renames a member's `relativePath` from `fromPath` to `toPath` and publishes
  *  the next folder node with a single `rename` delta — one replayable event for
  *  one user gesture, instead of the pre-rename decomposition into add+remove
- *  (which orphaned the file's history from its new path). The member's
- *  `latestNodeId` and `contentHash` are carried over unchanged: the file's own
- *  4290 chain is untouched, only the folder's addressing of it moves. The new
- *  file node at `toPath` (stepped by the caller before this) is the `nodeId`.
+ *  (which orphaned the file's history from its new path). The supplied
+ *  `nodeId` may be the existing head or a file Step landed by the same gesture;
+ *  the membership hash is derived from that exact signed node when it changes.
  *  The folder's `contentHash`/`x` DOES change — correct, since the §2 canonical
  *  projection is the ordered `(relativePath, memberContentHash)` list and a path
  *  moved is a different projection. */
@@ -3635,34 +4325,74 @@ export async function renameManifestEntry(
   toPath: string,
   nodeId: string,
   signer?: Uint8Array,
-  opts?: { localOnly?: boolean; operationId?: string },
+  opts?: {
+    localOnly?: boolean;
+    operationId?: string;
+    expectedCurrentNodeId?: string;
+  },
 ): Promise<Event> {
-  const previous = await fetchLatestFolderNode(folderId);
-  const current = previous ? membersFromNode(previous) : [];
-  // Repoint the renamed member's path; carry over latestNodeId/contentHash.
-  // Races and target collisions are rejected so the writer cannot emit a node
-  // that the strict folder-chain verifier would reject.
-  const existing = current.find((f) => f.relativePath === fromPath);
-  if (!existing) {
-    throw new Error(`cannot rename missing folder member ${fromPath}`);
-  }
-  if (fromPath !== toPath && current.some((member) => member.relativePath === toPath)) {
-    throw new Error(`cannot rename folder member ${fromPath}: target ${toPath} already exists`);
-  }
-  const renamed: ManifestFileEntry = { ...existing, relativePath: toPath, latestNodeId: nodeId };
-  const next = current
-    .filter((member) => member.relativePath !== toPath)
-    .map((member) => member.relativePath === fromPath ? renamed : member);
-  return publishFolderNode(folderId, next, {
-    prevEventId: previous?.id ?? null,
-    action: previous ? "edit" : "import",
-    // Carry the member's kind onto the rename delta (spec §3.3 — kind mirrors
-    // the member entry).
-    deltas: [{ type: "rename", kind: existing.kind, fromPath, toPath, nodeId, timestamp: Date.now() }],
-    signer,
-    localOnly: opts?.localOnly,
-    operationId: opts?.operationId,
-    folderCheckpoint: { version: 1, cause: "structure-change" },
+  const key = signer ?? authoringVoice().secretKey;
+  const expectedOwnerPubkey = getPublicKey(key);
+  return mutateFolder(folderId, async () => {
+    const currentFolder = await fetchCurrentFolderMutationSnapshot(
+      folderId,
+      expectedOwnerPubkey,
+      { localOnly: opts?.localOnly },
+    );
+    const current = currentFolder.members;
+    // Repoint the renamed member's path. Races and target collisions are
+    // rejected so the writer cannot emit a node that the strict folder-chain
+    // verifier would reject.
+    const existing = current.find((f) => f.relativePath === fromPath);
+    if (!existing) {
+      const recovered = current.find((member) =>
+        member.relativePath === toPath && member.latestNodeId === nodeId
+      );
+      if (
+        recovered &&
+        opts?.operationId &&
+        eventMeta(currentFolder.head).operationId === opts.operationId
+      ) return currentFolder.head;
+      throw new Error(`cannot rename missing folder member ${fromPath}`);
+    }
+    if (
+      opts?.expectedCurrentNodeId &&
+      existing.latestNodeId !== opts.expectedCurrentNodeId
+    ) {
+      throw new Error(
+        `cannot rename replaced folder member ${fromPath}: expected ` +
+          `${opts.expectedCurrentNodeId}, found ${existing.latestNodeId}`,
+      );
+    }
+    if (fromPath !== toPath && current.some((member) => member.relativePath === toPath)) {
+      throw new Error(`cannot rename folder member ${fromPath}: target ${toPath} already exists`);
+    }
+    const renamed = await renamedManifestMember(
+      existing,
+      toPath,
+      nodeId,
+      nodeId === existing.latestNodeId ? null : await fetchEventById(nodeId),
+    );
+    const next = current
+      .filter((member) => member.relativePath !== toPath)
+      .map((member) => member.relativePath === fromPath ? renamed : member);
+    const published = await publishFolderNode(folderId, next, {
+      prevEventId: currentFolder.head.id,
+      action: "edit",
+      // Carry the member's kind onto the rename delta (spec §3.3 — kind mirrors
+      // the member entry).
+      deltas: [{ type: "rename", kind: existing.kind, fromPath, toPath, nodeId, timestamp: Date.now() }],
+      signer: key,
+      localOnly: opts?.localOnly,
+      operationId: opts?.operationId,
+      folderCheckpoint: { version: 1, cause: "structure-change" },
+    });
+    return requireAcceptedCurrentFolderCheckpoint(
+      folderId,
+      published,
+      expectedOwnerPubkey,
+      { localOnly: opts?.localOnly, priorChain: currentFolder.chain },
+    );
   });
 }
 
@@ -3674,20 +4404,15 @@ async function stepFolderManifestOnce(
   opts: { localOnly?: boolean; operationId: string },
 ): Promise<Event> {
   const expectedOwnerPubkey = getPublicKey(signer);
-  const federatedNodes = await fetchFolderNodes(folderId);
-  const acceptedNodes = opts.localOnly
-    ? await fetchHomeFolderNodes(folderId)
-    : federatedNodes;
-  const observedNodes = [...new Map(
-    [...federatedNodes, ...acceptedNodes].map((event) => [event.id, event]),
-  ).values()];
-  const current = await requireCurrentFolderChain(
+  // This reconciles a pending/external-only exact checkpoint into home before
+  // examining the operation id, so retry returns that event instead of
+  // planning a replacement sibling from a stale accepted head.
+  const current = await fetchCurrentFolderMutationSnapshot(
     folderId,
-    acceptedNodes,
     expectedOwnerPubkey,
+    { localOnly: opts.localOnly },
   );
-
-  const matchingExplicit = observedNodes.filter((event) => {
+  const matchingExplicit = current.chain.filter((event) => {
     const meta = eventMeta(event);
     return meta.operationId === opts.operationId &&
       meta.folderCheckpoint?.cause === "explicit-step";
@@ -3702,14 +4427,9 @@ async function stepFolderManifestOnce(
     await requireValidFolderChain(
       folderId,
       acceptedExplicit,
-      observedNodes,
+      current.chain,
       expectedOwnerPubkey,
     );
-    if (!acceptedNodes.some((event) => event.id === acceptedExplicit.id)) {
-      throw new Error(
-        `folder Step operation ${opts.operationId} is not accepted by the home relay`,
-      );
-    }
     if (acceptedExplicit.id !== current.head.id) {
       throw new Error(
         `cannot resume folder Step operation ${opts.operationId}: folder head advanced after its explicit checkpoint`,
@@ -3718,7 +4438,7 @@ async function stepFolderManifestOnce(
     return current.head;
   }
 
-  const published = await publishFolderNode(folderId, membersFromNode(current.head), {
+  const published = await publishFolderNode(folderId, current.members, {
     prevEventId: current.head.id,
     action: "edit",
     signer,
@@ -3730,6 +4450,7 @@ async function stepFolderManifestOnce(
     folderId,
     published,
     expectedOwnerPubkey,
+    { localOnly: opts.localOnly, priorChain: current.chain },
   );
 }
 
@@ -3751,10 +4472,10 @@ export async function stepFolderManifest(
   const existing = folderStepManifestFlights.get(flightKey);
   if (existing) return existing;
 
-  const pending = stepFolderManifestOnce(folderId, key, {
+  const pending = mutateFolder(folderId, () => stepFolderManifestOnce(folderId, key, {
     localOnly: opts?.localOnly,
     operationId,
-  });
+  }));
   folderStepManifestFlights.set(flightKey, pending);
   try {
     return await pending;
@@ -3811,18 +4532,20 @@ export async function focusTimeline(folderId: string): Promise<FocusEntry[]> {
   // trust created_at; order comes from the chain). A folder with no
   // chain yet yields [].
   const byId = new Map(all.map((e) => [e.id, e]));
-  const head = resolveHead(all);
-  if (!head) return [];
+  const heads = listUncitedHeads([...byId.values()]);
+  if (heads.length !== 1) return [];
+  const head = heads[0]!;
   const chain: Event[] = [];
   let cursor: string | undefined = head.id;
   const guard = new Set<string>();
   while (cursor && !guard.has(cursor)) {
     guard.add(cursor);
     const event = byId.get(cursor);
-    if (!event) break;
+    if (!event) return [];
     chain.push(event);
     cursor = event.tags.find((t) => t[0] === "e" && t[3] === "prev")?.[1];
   }
+  if (chain.length !== byId.size || chain[chain.length - 1]?.id !== folderId) return [];
   chain.reverse();
 
   const out: FocusEntry[] = [];
@@ -4009,7 +4732,12 @@ export async function forkFileFromNode(
   sourceNodeId: string,
   destFolderId: string,
   destRelativePath: string,
-  opts?: { signer?: Uint8Array; localOnly?: boolean; operationId?: string },
+  opts?: {
+    signer?: Uint8Array;
+    localOnly?: boolean;
+    operationId?: string;
+    onSigned?: (event: Event) => void | Promise<void>;
+  },
 ): Promise<Event> {
   const sourceEvent = await fetchEventById(sourceNodeId);
   if (!sourceEvent) {
@@ -4038,6 +4766,7 @@ export async function forkFileFromNode(
     forkedFrom: sourceNodeId,
     kedits: synthesizeKEditTransition("", snapshot, getPublicKey(signer)),
     operationId: opts?.operationId,
+    onSigned: opts?.onSigned,
   });
 }
 
@@ -4089,8 +4818,15 @@ export async function mergeFile(input: {
   snapshot?: string;
   /** Per-character attribution. Defaults when snapshot equals first parent. */
   authors?: Run[];
+  tags?: string[];
+  citations?: string[];
+  inlineCitations?: PublishEditInput["inlineCitations"];
+  citationIds?: string[];
   summary?: string | null;
   signer?: Uint8Array;
+  localOnly?: boolean;
+  operationId?: string;
+  onSigned?: (event: Event) => void | Promise<void>;
 }): Promise<Event> {
   if (!input.prevEventId) {
     throw new Error("mergeFile requires prevEventId — merge extends an existing chain, it is not genesis.");
@@ -4137,8 +4873,15 @@ export async function mergeFile(input: {
     action: "merge",
     summary: input.summary ?? `merged ${parentId.slice(0, 8)}`,
     authors,
+    tags: input.tags,
+    citations: input.citations,
+    inlineCitations: input.inlineCitations,
+    citationIds: input.citationIds,
     mergeParents: input.mergeParentIds,
     signer,
+    localOnly: input.localOnly,
+    operationId: input.operationId,
+    onSigned: input.onSigned,
     kedits: synthesizeKEditTransition(prevSnapshot, snapshot, getPublicKey(signer)),
   });
 }
@@ -5082,8 +5825,20 @@ export function keditsFromEvent(event: Event): KEdit[] {
  *  throwing. Non-content deltas (`reply-to`, `tag-add`, `tag-remove`) carry
  *  no position/newValue and are skipped (they don't touch text). Adjacent
  *  same-voice ranges collapse into single runs at the end. */
-export function reconstructRunsFromChain(chain: Event[]): Run[] {
+/** Reconstruct every attribution frontier in one pass. Replay uses this rather
+ * than replaying the entire prefix for each cursor position. */
+export function reconstructRunsTimeline(chain: Event[]): Run[][] {
   let chars: { ch: string; voice: string }[] = [];
+  const timeline: Run[][] = [];
+  const currentRuns = (): Run[] => {
+    const runs: Run[] = [];
+    for (const c of chars) {
+      const last = runs[runs.length - 1];
+      if (last && last.voice === c.voice) last.text += c.ch;
+      else runs.push({ voice: c.voice, text: c.ch });
+    }
+    return runs;
+  };
   // Dev-only attribution accounting, surfaced when localStorage flag
   // `zine.debug.attribution` is set. Tallies per-chain how many nodes hit each
   // tier (authors map adopted / wholesale-signer reset / delta-signer insert /
@@ -5121,6 +5876,7 @@ export function reconstructRunsFromChain(chain: Event[]): Run[] {
       if (fromAuthors) {
         chars = runsToChars(fromAuthors);
         if (dbg) dbg.tiers[0]++;
+        timeline.push(currentRuns());
         continue;
       }
       // No content deltas on this step. Two sub-cases:
@@ -5141,6 +5897,7 @@ export function reconstructRunsFromChain(chain: Event[]): Run[] {
       } else if (dbg) {
         dbg.tiers[3]++; // tag/reply-only or snapshot-stable — attribution preserved
       }
+      timeline.push(currentRuns());
       continue;
     }
     // Apply deltas last-to-first so earlier positions stay valid within one
@@ -5166,16 +5923,16 @@ export function reconstructRunsFromChain(chain: Event[]): Run[] {
         dbg.signers.add(signer);
       }
     }
+    timeline.push(currentRuns());
   }
-  // Collapse adjacent same-voice chars into runs, mirroring charsToRuns.
-  const runs: Run[] = [];
-  for (const c of chars) {
-    const last = runs[runs.length - 1];
-    if (last && last.voice === c.voice) last.text += c.ch;
-    else runs.push({ voice: c.voice, text: c.ch });
-  }
+  const runs = timeline[timeline.length - 1] ?? [];
   if (dbg) recordAttributionAudit(dbg.tiers, dbg.signers, runs);
-  return runs;
+  return timeline;
+}
+
+export function reconstructRunsFromChain(chain: Event[]): Run[] {
+  const timeline = reconstructRunsTimeline(chain);
+  return timeline[timeline.length - 1] ?? [];
 }
 
 /** Whether attribution debugging is on. Set `localStorage.setItem("zine.debug

@@ -9,8 +9,13 @@ import {
   pathInEffectiveScope,
   pathInTraceScopes,
   rebaseContextMountAfterMove,
+  rebaseShieldedAfterMove,
+  rebaseShieldedPath,
   rebaseTraceRefsAfterMove,
+  removeDeletedShieldedPaths,
+  revertShieldedPathChange,
   selectionForGroupAction,
+  shieldedPathChange,
   topLevelSelectedPaths,
   type ContextMounts,
   type ScopeRef,
@@ -218,5 +223,59 @@ test("the singular mount label and move rebase stay stable", () => {
       "",
     ),
     [{ kind: "file", path: "draft.md" }],
+  );
+});
+
+test("moving or renaming a shield boundary carries its nested exclusions", () => {
+  assert.deepEqual(
+    rebaseShieldedPath(
+      new Set(["private", "private/deeper", "untouched"]),
+      "private",
+      "archive/private",
+    ),
+    new Set(["archive/private", "archive/private/deeper", "untouched"]),
+  );
+  assert.deepEqual(
+    rebaseShieldedPath(new Set(["notes/draft.md"]), "notes/draft.md", "notes/final.md"),
+    new Set(["notes/final.md"]),
+  );
+});
+
+test("moving content out of an inherited shield keeps the destination shielded", () => {
+  assert.deepEqual(
+    rebaseShieldedAfterMove(
+      new Set(["private"]),
+      ["private/a.md", "private/sub"],
+      "archive",
+    ),
+    new Set(["private", "archive/a.md", "archive/sub"]),
+  );
+});
+
+test("hard delete drops contained shield boundaries without removing ancestors", () => {
+  assert.deepEqual(
+    removeDeletedShieldedPaths(
+      new Set(["private", "private/deleted/secret", "other"]),
+      ["private/deleted"],
+    ),
+    new Set(["private", "other"]),
+  );
+});
+
+test("failed moves reverse only their own shield changes", () => {
+  const before = new Set(["private"]);
+  const movedOut = rebaseShieldedPath(before, "private/a.md", "archive/a.md");
+  assert.deepEqual(
+    revertShieldedPathChange(movedOut, shieldedPathChange(before, movedOut)),
+    before,
+  );
+
+  // Moving an unshielded source into a shielded destination changes no explicit
+  // boundary. A failed move must not install a new shield at the old source.
+  const movedIn = rebaseShieldedPath(before, "public/a.md", "private/a.md");
+  assert.deepEqual(shieldedPathChange(before, movedIn), { added: [], removed: [] });
+  assert.deepEqual(
+    revertShieldedPathChange(movedIn, shieldedPathChange(before, movedIn)),
+    before,
   );
 });

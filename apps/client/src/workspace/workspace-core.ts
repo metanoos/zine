@@ -582,6 +582,25 @@ export interface Workspace {
     operationId?: string,
   ): Promise<string>;
 
+  /** Append one merge node from an exact local head, repoint folder
+   * membership at that same node, and adopt it as the local stepped baseline.
+   * The backend serializes this with ordinary file Steps so accepting a merge
+   * can never publish a merge and then accidentally append a sibling/extra
+   * ordinary edit. `expectedContent` also makes a staged pull decision stale
+   * as soon as the author changes the local buffer. */
+  acceptMerge(input: {
+    relativePath: string;
+    expectedNodeId: string;
+    expectedContent: string;
+    mergeParentId: string;
+    mergeParentPubkey: string;
+    snapshot: string;
+    tags?: string[];
+    runs?: Run[];
+    citationIds?: string[];
+    summary?: string;
+  }): Promise<{ id: string; content: string }>;
+
   /** Immediately drain a staged local write to the home relay and return its
    *  signed node id. Minting uses this barrier because `[[ text | nodeId ]]`
    *  cannot be resolved against the normal debounced write's temporary empty

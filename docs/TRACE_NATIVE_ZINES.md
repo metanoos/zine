@@ -390,10 +390,12 @@ The pre-product cut proceeds in dependency order:
 1. **Landed:** recursive zine ontology, folder checkpoint causes, operation
    ids, `advance` delta, and kernel conformance tests.
 2. **Landed:** protocol kernel, desktop/MCP writers, client readers, replay,
-   and durable local operation recovery.
+   durable local operation recovery, serialized folder appends, and durable
+   recovery journals for folder moves and deletes.
 3. **Landed:** explicit folder/Root Step with descendant flushing, fixed
    cross-runtime folder vectors, and interrupted/retried recursive checkpoint
-   recovery against a real relay.
+   recovery against a real relay. Explicit crash-boundary real-relay fault
+   fixtures remain hardening work.
 4. Introduce first-class AI attempt, dispatch, response/effect, and disposition
    records with exact reconstructability.
 5. Preserve `[[…]]`, implement versioned `((…))`, and make provenance-aware

@@ -735,6 +735,17 @@ html[data-theme="light"] .rail-brand-wordmark {
   cursor: default;
 }
 
+.structural-error-banner {
+  pointer-events: auto;
+  top: 0.6rem;
+  right: 0.6rem;
+  max-width: min(42rem, calc(100% - 1.2rem));
+  opacity: 1;
+  background: var(--surface-raised, var(--surface));
+  border-color: var(--danger, #b33);
+  color: var(--text, inherit);
+}
+
 .view-placeholder-soon {
   margin: 0.5rem 0 0;
   font-family: var(--font-mono);
