@@ -1077,3 +1077,32 @@ test("recovery aborts on a vault switch without reading vault B as its remaining
 
   assert.equal(pendingCoinMint("vault-b-pending")?.coin.id, pendingB.coin.id);
 });
+
+test("Mint journal refuses to persist a record whose coin is not cryptographically verifiable", async () => {
+  installLocalStorage(new FakeStorage());
+  activateVaultStorage("vault-a", VAULT_KEY_A);
+  // An unsigned coin (verifyEvent returns false) trips isPendingCoinMint, so
+  // preparePendingCoinMint must reject with the "refusing to journal" guard
+  // rather than persisting a structurally invalid record.
+  const unsignedCoin = {
+    kind: 4290,
+    created_at: 1_234,
+    tags: [["z", "file"], ["x", "a".repeat(64)]],
+    content: JSON.stringify({ snapshot: "coin", coin: { version: 1, origin: { kind: "direct" } } }),
+    id: "0".repeat(64),
+    pubkey: "0".repeat(64),
+    sig: "0".repeat(128),
+  };
+  await assert.rejects(
+    preparePendingCoinMint("invalid-coin", async () => ({
+      sourceFolderId: "source",
+      mintFolderId: "mint",
+      localPath: "mint/invalid.md",
+      memberName: "invalid.md",
+      phrase: "invalid",
+      coin: unsignedCoin as unknown as ReturnType<typeof coin>,
+    })),
+    /refusing to journal an invalid pending Mint/,
+  );
+  assert.equal(pendingCoinMint("invalid-coin"), null);
+});
