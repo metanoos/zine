@@ -279,7 +279,10 @@ lineage reserves only its operation id in a bounded activation fence; it
 consumes none of the 16 visible pins and a later partial callback cannot
 resurrect it. The fence also remembers the verified cut for each visible head,
 so later lifecycle snapshots of that same proven chain need not retain all of
-its ancestors in the 16-pin overlay. Fence overflow hides the entire overlay.
+its ancestors in the 16-pin overlay. When an action on a full-scan-proven page
+head creates a child, that exact page head seeds the activation fence before
+the child is pinned, so opaque archive row order cannot hide the new attempt.
+Fence overflow hides the entire overlay.
 Scan failure or vault-session change clears archive actions rather than
 projecting a partial lineage. The deterministic retry claim reuses the existing
 encrypted envelope and opaque keyed row id; no operation id, attempt id,

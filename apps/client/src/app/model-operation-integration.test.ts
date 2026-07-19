@@ -173,6 +173,8 @@ test("recovery errors stay generic and saved operations navigate exact bounded c
   assert.match(refresh, /setDesktopOperationEnvelopes\(\[\]\)[\s\S]*setDesktopOperationPageLineageHeads\(\[\]\)/);
   assert.match(refresh, /desktopOperationStoreRef\.current !== repository/);
   assert.match(app, /createDesktopOperationPinnedLineageFenceV1\(\)/);
+  assert.match(app, /provenParent = desktopOperationPageLineageHeads\.find/);
+  assert.match(app, /mergeDesktopOperationPinnedDescendantV1\([\s\S]*current,[\s\S]*provenParent,[\s\S]*envelope,[\s\S]*16,[\s\S]*desktopOperationPinnedLineageFenceRef\.current/);
   assert.match(app, /mergeDesktopOperationPinnedHeadsV1\([\s\S]*current,[\s\S]*\[envelope\],[\s\S]*16,[\s\S]*desktopOperationPinnedLineageFenceRef\.current/);
   assert.match(app, />Previous<\/button>/);
   assert.match(app, /"More \/ Next"/);

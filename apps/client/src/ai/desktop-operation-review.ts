@@ -239,6 +239,45 @@ export function mergeDesktopOperationPinnedHeadsV1(
 }
 
 /**
+ * Activate a durable child of a full-scan-proven archive head. The archive
+ * head may itself be a retry whose older ancestors are absent from the small
+ * activation overlay, so seed that exact verified cut before merging the
+ * parent and child into the pinned lineage.
+ */
+export function mergeDesktopOperationPinnedDescendantV1(
+  current: readonly DesktopOperationEnvelopeV1[],
+  provenParent: DesktopOperationEnvelopeV1,
+  descendant: DesktopOperationEnvelopeV1,
+  limit = 16,
+  fence: DesktopOperationPinnedLineageFenceV1 = createDesktopOperationPinnedLineageFenceV1(),
+): readonly DesktopOperationEnvelopeV1[] {
+  if (
+    descendant.operationId !== provenParent.operationId
+    || descendant.attempt.retryOfAttemptId !== provenParent.attempt.attemptId
+  ) {
+    throw new Error("desktop operation activated descendant must directly follow the proven head");
+  }
+  if (
+    !fence.allOperationsBlocked
+    && !fence.blockedOperationIds.has(provenParent.operationId)
+  ) {
+    fence.provenHeadAttemptIdsByOperation.set(
+      provenParent.operationId,
+      provenParent.attempt.attemptId,
+    );
+  }
+  const otherPinnedOperations = current.filter(({ operationId }) => (
+    operationId !== provenParent.operationId
+  ));
+  return mergeDesktopOperationPinnedHeadsV1(
+    otherPinnedOperations,
+    [provenParent, descendant],
+    limit,
+    fence,
+  );
+}
+
+/**
  * Resolve only the lineage heads needed by one native archive page. The full
  * journal is streamed in bounded pages. For each visible-page operation the
  * scan retains only capped lineage metadata, then proves one connected root-
@@ -381,7 +420,9 @@ export function projectDesktopOperationReviewV1(
         ...common,
         label: "AI draft authorization expired · provider outcome uncertain",
         detail: "Re-prepare the exact target; final dispatch may duplicate provider work",
-        actions: ["reprepare-possible-duplicate", "abandon"],
+        actions: envelope.lifecycle.status === "failed"
+          ? ["reprepare-possible-duplicate"]
+          : ["reprepare-possible-duplicate", "abandon"],
       };
     }
     return {

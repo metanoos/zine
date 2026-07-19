@@ -6,6 +6,7 @@ import {
   compareDesktopOperationAttemptLineageV1,
   createDesktopOperationPinnedLineageFenceV1,
   desktopOperationReviewQueueV1,
+  mergeDesktopOperationPinnedDescendantV1,
   mergeDesktopOperationPinnedHeadsV1,
   projectDesktopOperationReviewV1,
   resolveDesktopOperationPageLineageV1,
@@ -165,6 +166,18 @@ test("expired directive attempts expose exact-target re-prepare only", () => {
   assert.equal(ambiguous?.label.includes("provider outcome uncertain"), true);
   assert.deepEqual(ambiguous?.actions, ["reprepare-possible-duplicate", "abandon"]);
 
+  const failedAmbiguous = directiveEnvelope("failed", "operator-confirmation-required");
+  const failedProjection = projectDesktopOperationReviewV1({
+    ...failedAmbiguous,
+    lifecycle: {
+      ...failedAmbiguous.lifecycle,
+      executionCertainty: "provider-completed-without-result",
+    },
+  });
+  assert.equal(failedProjection?.label.includes("provider outcome uncertain"), true);
+  assert.deepEqual(failedProjection?.actions, ["reprepare-possible-duplicate"]);
+  assert.doesNotMatch(failedProjection?.actions.join(" ") ?? "", /abandon/);
+
   assert.deepEqual(
     projectDesktopOperationReviewV1(directiveEnvelope("prepared"), () => true)?.actions,
     ["resume", "abandon"],
@@ -274,6 +287,84 @@ test("bounded pinned heads surface off-page completion and dedupe the exact arch
   assert.equal(pinned.some(({ attempt }) => attempt.attemptId === older.attempt.attemptId), false);
   const queue = desktopOperationReviewQueueV1([...pinned, current]);
   assert.equal(queue.filter(({ key }) => key.attemptId === current.attempt.attemptId).length, 1);
+});
+
+test("a child of a non-pinned proven archive head stays active when its row lands off-page", async () => {
+  const origin = attempt(109, "attempt-archive-origin", 600);
+  const olderPinnedHead = attempt(
+    109,
+    "attempt-archive-older-pin",
+    700,
+    origin.attempt.attemptId,
+  );
+  const archiveParent = attempt(
+    109,
+    "attempt-archive-parent",
+    800,
+    olderPinnedHead.attempt.attemptId,
+  );
+  const unrelated = Array.from({ length: 16 }, (_, index) => (
+    attempt(index + 700, `attempt-archive-unrelated-${String(index).padStart(2, "0")}`, 900 + index)
+  ));
+  const initialRecords = [archiveParent, ...unrelated, olderPinnedHead, origin];
+  const provenPageHeads = await resolveDesktopOperationPageLineageV1(
+    pagedRepository(initialRecords),
+    initialRecords.slice(0, 16),
+  );
+  const provenParent = provenPageHeads.find(({ operationId }) => (
+    operationId === archiveParent.operationId
+  ));
+  assert.ok(provenParent);
+
+  const child = attempt(
+    109,
+    "attempt-archive-off-page-child",
+    1_000,
+    archiveParent.attempt.attemptId,
+  );
+  const recordsAfterRetry = [
+    archiveParent,
+    ...unrelated.slice(0, 15),
+    child,
+    unrelated[15]!,
+    olderPinnedHead,
+    origin,
+  ];
+  assert.equal(
+    recordsAfterRetry.slice(0, 16).includes(child),
+    false,
+    "opaque row order keeps the child off-page",
+  );
+  assert.deepEqual(
+    mergeDesktopOperationPinnedHeadsV1([], [child]),
+    [],
+    "the child alone is correctly treated as an orphan",
+  );
+
+  const fence = createDesktopOperationPinnedLineageFenceV1();
+  const priorPins = mergeDesktopOperationPinnedHeadsV1(
+    [],
+    [origin, olderPinnedHead],
+    16,
+    fence,
+  );
+  assert.deepEqual(
+    priorPins.map(({ attempt }) => attempt.attemptId),
+    [olderPinnedHead.attempt.attemptId],
+  );
+  const pinned = mergeDesktopOperationPinnedDescendantV1(
+    priorPins,
+    provenParent,
+    child,
+    16,
+    fence,
+  );
+  assert.deepEqual(pinned.map(({ attempt }) => attempt.attemptId), [child.attempt.attemptId]);
+  assert.equal(fence.blockedOperationIds.has(child.operationId), false);
+  assert.deepEqual(
+    desktopOperationReviewQueueV1(pinned).map(({ key }) => key.attemptId),
+    [child.attempt.attemptId],
+  );
 });
 
 test("lineage ordering follows immutable retry identity and scans fail closed", async () => {

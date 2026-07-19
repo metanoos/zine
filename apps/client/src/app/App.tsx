@@ -255,6 +255,7 @@ import type { DesktopOperationEnvelopeV1 } from "../ai/desktop-operation-envelop
 import {
   createDesktopOperationPinnedLineageFenceV1,
   desktopOperationReviewQueueV1,
+  mergeDesktopOperationPinnedDescendantV1,
   mergeDesktopOperationPinnedHeadsV1,
   resolveDesktopOperationPageLineageV1,
   type DesktopOperationReviewActionV1,
@@ -10441,13 +10442,25 @@ function App() {
   }, [desktopRuntimeReady, bootState, folder?.id]);
 
   function upsertDesktopOperationEnvelope(envelope: DesktopOperationEnvelopeV1): void {
+    const provenParent = desktopOperationPageLineageHeads.find((candidate) => (
+      candidate.operationId === envelope.operationId
+      && candidate.attempt.attemptId === envelope.attempt.retryOfAttemptId
+    ));
     setDesktopOperationPinnedHeads((current) => [
-      ...mergeDesktopOperationPinnedHeadsV1(
-        current,
-        [envelope],
-        16,
-        desktopOperationPinnedLineageFenceRef.current,
-      ),
+      ...(provenParent
+        ? mergeDesktopOperationPinnedDescendantV1(
+            current,
+            provenParent,
+            envelope,
+            16,
+            desktopOperationPinnedLineageFenceRef.current,
+          )
+        : mergeDesktopOperationPinnedHeadsV1(
+            current,
+            [envelope],
+            16,
+            desktopOperationPinnedLineageFenceRef.current,
+          )),
     ]);
     setDesktopOperationEnvelopes((current) => {
       const existing = current.findIndex((candidate) => (
