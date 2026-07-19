@@ -95,8 +95,9 @@ peers, but local authoring never requires them.
 
 Underneath, Zine uses Nostr events over local and configured remote WebSocket
 relays: SHA-256 ids, Schnorr signatures, and the seven NIP-01 fields. Tor can
-expose a private relay. Coins are the user-facing opt-in for minting, citation,
-indexing, and rendezvous together. Kademlia is the internal routing component,
+expose a private relay. Coins are the user-facing opt-in for Mint, Mint-side
+indexing, and rendezvous together. Ordinary citation remains available without
+Coins. Kademlia is the internal routing component,
 not a separate opt-in, and remains under implementation; global discovery also
 needs operator-provided super-peers and real co-Mint density.
 
@@ -403,7 +404,8 @@ recipient then evaluates the other signer's process evidence before deciding
 whether to admit that key.
 
 Coins are the only product opt-in in this flow. Enabling them covers Mint,
-Cite, Mint-side indexing, and both mutual-peer and global rendezvous. The
+Mint-side indexing, and both mutual-peer and global rendezvous. Ordinary
+citation remains available without Coins. The
 Kademlia details below explain the routing component inside that package, not
 a separately enabled feature.
 

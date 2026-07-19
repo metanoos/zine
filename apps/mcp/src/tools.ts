@@ -101,6 +101,30 @@ export function requireMcpMintIndexingBackend(): void {
   );
 }
 
+/** Headless Mint cannot finish H-indexing, so reserved sources must stay
+ * frozen until the operator finishes on desktop or clears the journal. */
+function assertMcpSourceNotReservedByPendingMint(
+  folderId: string,
+  relativePath: string,
+  action: "step" | "send" | "delete",
+  isFolder = false,
+): void {
+  if (!pendingCoinMintBlockingSourceMutation(
+    folderId,
+    relativePath,
+    isFolder,
+    localStorage,
+  )) {
+    return;
+  }
+  throw new Error(
+    `cannot ${action} ${relativePath}: a pending Mint journal still reserves ` +
+      "its source citation, and zine-mcp cannot complete Mint indexing " +
+      "without a headless Kademlia backend; finish the Mint in the desktop " +
+      "Coins interface or clear the profile's pending-Mint journal",
+  );
+}
+
 /** Bridge the owner-only MCP profile key into the shared session-only signing
  * boundary. Desktop secrets remain Stronghold-backed; the headless press
  * already persists this key in its chmod-0600 atomic profile and exposes only
@@ -560,6 +584,7 @@ export function registerTools(
     },
     async ({ relativePath, content, tags, replyingTo, citationIds }) => runMcpMintLifecycle(async () => {
       const ref = requireFolder(workspace);
+      assertMcpSourceNotReservedByPendingMint(ref.id, relativePath, "step");
       const signer = agentVoice().secretKey;
       // Step steps locally (localOnly=true); Send is a separate, deliberate act.
       const nodeId = await workspace.writeFile(
@@ -602,6 +627,7 @@ export function registerTools(
     },
     async ({ relativePath, content, tags, replyingTo, citationIds }) => runMcpMintLifecycle(async () => {
       const ref = requireFolder(workspace);
+      assertMcpSourceNotReservedByPendingMint(ref.id, relativePath, "send");
       const signer = agentVoice().secretKey;
       const nodeId = await workspace.writeFile(
         relativePath,
@@ -798,16 +824,12 @@ export function registerTools(
     async ({ relativePath, isFolder }) => runMcpMintLifecycle(async () => {
       const ref = requireFolder(workspace);
       const deletingFolder = isFolder ?? false;
-      if (pendingCoinMintBlockingSourceMutation(
+      assertMcpSourceNotReservedByPendingMint(
         ref.id,
         relativePath,
+        "delete",
         deletingFolder,
-        localStorage,
-      )) {
-        throw new Error(
-          `Finish or retry the pending Mint before deleting its source ${relativePath}`,
-        );
-      }
+      );
       await workspace.deletePath(relativePath, deletingFolder);
       return jsonResult({ deleted: relativePath, isFolder: deletingFolder });
     }),

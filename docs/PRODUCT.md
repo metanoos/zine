@@ -185,7 +185,8 @@ Mint-side indexing, and both mutual-peer and global co-Mint rendezvous.
 Ordinary citation remains available without Coins and never creates or gates
 rendezvous membership. Mint, mutual-peer co-Mint matching, Mint-side durable
 indexing, hostile-relay verification, and the Kademlia routing component are
-integrated and exercised. The routing layer still needs operator-provided
+implemented and tested inside the Coins opt-in, but the package remains under
+implementation: the routing layer still needs operator-provided
 super-peers and deployment evidence; no public bootstrap network is operated. The
 [Protocol](PROTOCOL.md#rendezvous--vetting) carries the exact mechanics and
 limits.
@@ -270,8 +271,8 @@ Three proofs govern what comes next:
 2. **Buyer proof:** accountable teams use the evidence to answer consequential
    questions, return to the workflow, and show willingness to pay for the
    operational layer.
-3. **Network proof:** real published citations create enough useful
-   co-citation density to justify operating and expanding discovery.
+3. **Network proof:** real completed Mints create enough useful
+   co-Mint density to justify operating and expanding discovery.
 
 The first two are the immediate product gates; the third stays downstream of
 real use.

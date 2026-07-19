@@ -154,6 +154,29 @@ export function rebasedFinalizedCoinMintSourceText(
   throw new Error("Mint source citation changed while its Step was in flight");
 }
 
+/** Finalize an extracted Mint citation against the correct UTF-16 space.
+ *
+ * Journal ranges start in the captured-source snapshot. After an earlier
+ * same-source Mint completes, `rebasePendingSourceAfter` shifts later rows
+ * into post-citation live space while leaving `sourceNodeId` /
+ * `sourceContentHash` pointed at the original capture. Applying those
+ * rebased ranges against the capture strands a public Coin; applying
+ * still-original ranges only against live text drops concurrent-edit
+ * translation. Detect which space the durable ranges occupy, then either
+ * translate from the capture or apply directly to the live document. */
+export function resolvedFinalizedCoinMintSourceText(
+  record: PendingCoinMint,
+  capturedSourceText: string,
+  currentText: string,
+): string {
+  try {
+    finalizedCoinMintSourceText(record, capturedSourceText);
+  } catch {
+    return finalizedCoinMintSourceText(record, currentText);
+  }
+  return rebasedFinalizedCoinMintSourceText(record, capturedSourceText, currentText);
+}
+
 /** Preserve every editor transaction already pending on the source and append
  * the citation resolution as one later transaction. The workspace validates
  * this complete log against the prior signed Step before publication. */

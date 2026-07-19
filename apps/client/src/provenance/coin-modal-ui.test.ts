@@ -352,7 +352,7 @@ test("Mint completes Step, Publish, and minter-Attest before success", () => {
   assert.match(phraseMint, /sourceFinalization|metadata:[\s\S]*?kind: "pending-bracket"/);
   assert.match(
     phraseMint,
-    /rebasedFinalizedCoinMintSourceText\(\s*record,\s*sourceSnapshot,\s*afterWrite/,
+    /resolvedFinalizedCoinMintSourceText\(\s*record,\s*sourceSnapshot,\s*afterWrite/,
   );
   assert.ok(
     phraseMint.indexOf("await mintCoinTrace(") <

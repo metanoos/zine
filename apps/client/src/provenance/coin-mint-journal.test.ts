@@ -20,6 +20,7 @@ import {
   pendingCoinMintBlockingSourceMutation,
   preparePendingCoinMint,
   rebasedFinalizedCoinMintSourceText,
+  resolvedFinalizedCoinMintSourceText,
   rebaseFinalizedCoinMintSourceFile,
   retryCoinMintRecovery,
   resumePendingCoinMints,
@@ -667,6 +668,59 @@ test("same-source Mints rebase a later range after the earlier citation resolves
   );
   assert.deepEqual(published, [earlier.coin.id, later.coin.id]);
   assert.deepEqual(pendingCoinMints(store), []);
+});
+
+test("desktop finalize uses live space after an earlier same-source Mint rebases ranges", async () => {
+  const store = storage();
+  const captured = "[[ alpha ]] middle [[ omega ]]";
+  let live = captured;
+  const sourceNodeId = "b".repeat(64);
+  const sourceContentHash = "c".repeat(64);
+  const makePending = async (operationKey: string, phrase: string, createdAt: number) => {
+    const bracket = `[[ ${phrase} ]]`;
+    const matchStart = captured.indexOf(bracket);
+    const phraseStart = matchStart + "[[ ".length;
+    return preparePendingCoinMint(operationKey, async () => ({
+      sourceFolderId: "source",
+      mintFolderId: "mint",
+      localPath: `Mint/${phrase}.md`,
+      memberName: `${phrase}.md`,
+      phrase,
+      coin: coin(createdAt),
+      sourceFinalization: {
+        kind: "pending-bracket" as const,
+        relativePath: "source.md",
+        sourceNodeId,
+        sourceContentHash,
+        range: { start: phraseStart, end: phraseStart + phrase.length },
+        bracketRange: { start: matchStart, end: matchStart + bracket.length },
+      },
+    }), store, createdAt);
+  };
+  const earlier = await makePending("earlier", "alpha", 20_101);
+  const later = await makePending("later", "omega", 20_102);
+
+  await completePendingCoinMint(earlier, {
+    publishPair: async (event) => event.id,
+    finalizeSource: async (record) => {
+      live = finalizedCoinMintSourceText(record, live);
+      return record.coin.id;
+    },
+    persistMembership: async () => undefined,
+    persistLocal: () => undefined,
+  }, store);
+
+  const rebasedLater = pendingCoinMint("later", store);
+  assert.ok(rebasedLater?.sourceFinalization);
+  assert.throws(
+    () => rebasedFinalizedCoinMintSourceText(rebasedLater!, captured, live),
+    /pending bracket is missing/,
+  );
+  assert.equal(
+    resolvedFinalizedCoinMintSourceText(rebasedLater!, captured, live),
+    `${resolvedBracketMarkup("alpha", earlier.coin.id)} middle ` +
+      resolvedBracketMarkup("omega", later.coin.id),
+  );
 });
 
 test("same-source Mints preserve an earlier range after the later citation resolves", async () => {

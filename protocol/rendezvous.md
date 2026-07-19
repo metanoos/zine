@@ -22,11 +22,12 @@ It introduces three things the provenance and transport protocols do not have:
 sketches. Part II records the rationale.
 
 **Product packaging and status.** Coins are the sole user-facing opt-in.
-Enabling Coins covers Mint, Cite, Mint-side indexing, and mutual-peer plus
-global rendezvous. Kademlia is the routing component inside that package, not
-a separate feature or setting, and remains under implementation. The normative
-rules below define the intended interoperable behavior even where the reference
-package is incomplete.
+Enabling Coins covers Mint, Mint-side indexing, and mutual-peer plus
+global rendezvous. Ordinary citation remains available without Coins and never
+creates or gates rendezvous membership. Kademlia is the routing component inside
+that package, not a separate feature or setting, and remains under
+implementation. The normative rules below define the intended interoperable
+behavior even where the reference package is incomplete.
 
 ---
 

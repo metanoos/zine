@@ -475,7 +475,33 @@ test("cold headless profile mints one Root and Steps exact events while the rela
         .filter((block) => block.type === "text")
         .map((block) => block.text ?? "")
         .join("\n"),
-      /pending Mint before deleting its source result\.md/,
+      /cannot delete result\.md: a pending Mint journal still reserves/,
+    );
+
+    const blockedStep = await second.client.callTool({
+      name: "zine_step",
+      arguments: { relativePath: "result.md", content: "mutated while reserved" },
+    });
+    assert.equal(blockedStep.isError, true);
+    assert.match(
+      (blockedStep.content as Array<{ type?: string; text?: string }>)
+        .filter((block) => block.type === "text")
+        .map((block) => block.text ?? "")
+        .join("\n"),
+      /cannot step result\.md: a pending Mint journal still reserves/,
+    );
+
+    const blockedSend = await second.client.callTool({
+      name: "zine_send",
+      arguments: { relativePath: "result.md", content: "mutated while reserved" },
+    });
+    assert.equal(blockedSend.isError, true);
+    assert.match(
+      (blockedSend.content as Array<{ type?: string; text?: string }>)
+        .filter((block) => block.type === "text")
+        .map((block) => block.text ?? "")
+        .join("\n"),
+      /cannot send result\.md: a pending Mint journal still reserves/,
     );
 
     const files = jsonToolResult(await second.client.callTool({

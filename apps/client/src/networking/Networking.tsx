@@ -86,7 +86,8 @@ const NETWORK_CATEGORIES: Array<{
  *     backups — durable, always-online services peers can read when your
  *     desktop is offline.
  *
- *   - Coins: the one product opt-in for Mint, Cite, indexing, and rendezvous.
+ *   - Coins: the one product opt-in for Mint, Mint-side indexing, and
+ *     rendezvous. Ordinary Cite stays outside that opt-in.
  *     Listen/bootstrap fields remain an advanced operator configuration.
  *
  *   - Peers (desktop only): who can reach your node — the networked-mode gate
@@ -388,9 +389,9 @@ function CoinsSection() {
     <div className="networking-section">
       <h2 className="networking-section-title">Coins</h2>
       <p className="networking-section-sub">
-        One opt-in covers Mint, Cite, Mint-side indexing, and rendezvous. Mint
-        publishes the exact Coin text and a same-minter attestation through
-        configured publication relays, then durably indexes that completed Coin.
+        One opt-in covers Mint, Mint-side indexing, and rendezvous. Ordinary
+        citation stays available without Coins. Mint publishes the exact Coin text and a same-minter attestation
+        through configured publication relays, then durably indexes that completed Coin.
         A later citation or Send is not required. The rendezvous index carries only
         event and relay pointers, never Coin text, private onions, supply, or reputation;
         every result is verified against its relay.

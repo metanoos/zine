@@ -233,8 +233,9 @@ sampling, retention, false-positive, and false-negative behavior. The protocol
 continues to carry evidence and never promotes a model score into proof of
 humanness.
 
-Coins remain one user-facing opt-in covering minting, citation, indexing, and
-rendezvous. Complete and harden that package, including its under-the-hood
+Coins remain one user-facing opt-in covering Mint, Mint-side indexing, and
+rendezvous. Ordinary citation remains available without it. Complete and harden
+that package, including its under-the-hood
 Kademlia component, without creating a second Kademlia product surface.
 Operating or expanding global rendezvous remains gated until real completed
 Mints produce organic same-content co-Mint matches, users ask to meet unknown

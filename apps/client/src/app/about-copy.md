@@ -186,7 +186,8 @@ Mint-side indexing, and both mutual-peer and global co-Mint rendezvous.
 Ordinary citation remains available without Coins and never creates or gates
 rendezvous membership. Mint, mutual-peer co-Mint matching, Mint-side durable
 indexing, hostile-relay verification, and the Kademlia routing component are
-integrated and exercised. The routing layer still needs operator-provided
+implemented and tested inside the Coins opt-in, but the package remains under
+implementation: the routing layer still needs operator-provided
 super-peers and deployment evidence; no public bootstrap network is operated. The
 [Protocol](PROTOCOL.md#rendezvous--vetting) carries the exact mechanics and
 limits.
@@ -382,8 +383,9 @@ peers, but local authoring never requires them.
 
 Underneath, Zine uses Nostr events over local and configured remote WebSocket
 relays: SHA-256 ids, Schnorr signatures, and the seven NIP-01 fields. Tor can
-expose a private relay. Coins are the user-facing opt-in for minting, citation,
-indexing, and rendezvous together. Kademlia is the internal routing component,
+expose a private relay. Coins are the user-facing opt-in for Mint, Mint-side
+indexing, and rendezvous together. Ordinary citation remains available without
+Coins. Kademlia is the internal routing component,
 not a separate opt-in, and remains under implementation; global discovery also
 needs operator-provided super-peers and real co-Mint density.
 
@@ -690,7 +692,8 @@ recipient then evaluates the other signer's process evidence before deciding
 whether to admit that key.
 
 Coins are the only product opt-in in this flow. Enabling them covers Mint,
-Cite, Mint-side indexing, and both mutual-peer and global rendezvous. The
+Mint-side indexing, and both mutual-peer and global rendezvous. Ordinary
+citation remains available without Coins. The
 Kademlia details below explain the routing component inside that package, not
 a separately enabled feature.
 
@@ -1187,8 +1190,9 @@ sampling, retention, false-positive, and false-negative behavior. The protocol
 continues to carry evidence and never promotes a model score into proof of
 humanness.
 
-Coins remain one user-facing opt-in covering minting, citation, indexing, and
-rendezvous. Complete and harden that package, including its under-the-hood
+Coins remain one user-facing opt-in covering Mint, Mint-side indexing, and
+rendezvous. Ordinary citation remains available without it. Complete and harden
+that package, including its under-the-hood
 Kademlia component, without creating a second Kademlia product surface.
 Operating or expanding global rendezvous remains gated until real completed
 Mints produce organic same-content co-Mint matches, users ask to meet unknown

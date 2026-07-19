@@ -105,7 +105,7 @@ import {
   createCoinMintSourceReservationRegistry,
   finalizedCoinMintSourceStepKEdits,
   retryCoinMintRecovery,
-  rebasedFinalizedCoinMintSourceText,
+  resolvedFinalizedCoinMintSourceText,
   pendingCoinMints,
   pendingCoinMintBlockingSourceMutation,
   preparePendingCoinMint,
@@ -9898,7 +9898,11 @@ function App() {
       throw new Error(`cannot verify captured Mint source ${source.relativePath}`);
     }
     assertLease();
-    const nextText = rebasedFinalizedCoinMintSourceText(
+    // Journal ranges may already sit in post-rebase live space after an
+    // earlier same-source Mint completed. Prefer that space when the capture
+    // no longer hosts the recorded bracket; otherwise translate concurrent
+    // edits from the verified capture.
+    const nextText = resolvedFinalizedCoinMintSourceText(
       record,
       capturedSourceText,
       currentText,
@@ -10522,7 +10526,10 @@ function App() {
           finalize: async (record, publicationFence) => {
             assertPublicationFence(publicationFence);
             const afterWrite = view.state.doc.toString();
-            const resolved = rebasedFinalizedCoinMintSourceText(
+            // Same-source completions may have rebased this row into live
+            // UTF-16 space while this gesture still holds the original
+            // snapshot. resolvedFinalized picks the matching coordinate model.
+            const resolved = resolvedFinalizedCoinMintSourceText(
               record,
               sourceSnapshot,
               afterWrite,

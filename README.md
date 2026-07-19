@@ -127,7 +127,8 @@ Discussion is common; commitment is rare.
 Copied passages can be minted as immutable **coins** and cited by exact node
 id. Forking starts a proposal under a new owner's key; merging accepts chosen
 work into the receiving owner's chain. Coins are one user-facing opt-in:
-enabling them covers minting, citation, indexing, and rendezvous together.
+enabling them covers Mint, Mint-side indexing, and rendezvous together.
+Ordinary citation remains available without Coins.
 
 ## Sovereign by key, connected by coins
 
@@ -191,7 +192,7 @@ not claim an operated public network or meaningful co-Mint density. The
 | Shared trace-context authoring-syntax kernel | Initial deterministic `[[…]]` / `((…))` scanner and compiler implemented with golden and generated scale corpora; task-specific evidence selection and cross-press rendering are not yet implemented |
 | Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures; Extend (continuation) and Settle (revision) now use the shared syntax kernel, exact current-session authority spans, protected-output validation, and accepted-success directive cleanup, while the other operations, durable receipts, and context binding remain deferred |
 | Hosted relay | Implemented; an operator ACL equivalent to the local relay policy remains a gap |
-| Coins package: Mint, Cite, indexing, and rendezvous | Under implementation as one user-facing opt-in. Mint-side indexing and `H`-based mutual-peer matching are implemented and tested, but no bootstrap network is operated |
+| Coins package: Mint, indexing, and rendezvous | Under implementation as one user-facing opt-in. Mint-side indexing and `H`-based mutual-peer matching are implemented and tested; ordinary Cite stays outside the opt-in. No bootstrap network is operated |
 | Managed remote, organization control plane, and no-install public verifier | Commercial product hypotheses, not shipping services |
 
 The complete evidence and limitation record lives in
