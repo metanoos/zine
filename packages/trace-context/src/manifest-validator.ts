@@ -16,6 +16,10 @@ import { validateSelectorManifestSemanticsV1 } from "./selector.js";
 const encoder = new TextEncoder();
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const VOICE_PUBKEY_PATTERN = /^[0-9a-f]{64}$/;
+// Canonical protocol-valid KEdit voice for legacy non-pubkey voices. Must stay
+// in lockstep with selector.ts NON_PUBKEY_VOICE_PATTERN / isTraceVoiceId and
+// process-projector.ts selectorVoiceId, which emit this form.
+const VOICE_KEDIT_PATTERN = /^kedit-voice-utf16-v1:(?:[0-9a-f]{4})*$/;
 
 const POLICIES = new Set<TraceContextPolicyV1>(["text-only-v1", "selected-trace-v1"]);
 const KINDS = new Set<EvidenceCandidateKindV1>([
@@ -436,7 +440,7 @@ function validateProcessFact(value: unknown, path: string): TraceProcessFactV1 {
       exact(fact, path, [
         "kind", "transactionCount", "rangeCount", "insertedCodePointCount",
         "deletedCodePointCount", "spanMs", "longestGapMs", "undoCount", "redoCount",
-      ], ["firstCapturedAtMs", "lastCapturedAtMs"]);
+      ], ["firstCapturedAtMs", "lastCapturedAtMs", "timingStatus"]);
       const transactionCount = nonNegative(fact.transactionCount, `${path}.transactionCount`);
       const rangeCount = nonNegative(fact.rangeCount, `${path}.rangeCount`);
       const insertedCodePointCount = nonNegative(fact.insertedCodePointCount, `${path}.insertedCodePointCount`);
@@ -445,20 +449,34 @@ function validateProcessFact(value: unknown, path: string): TraceProcessFactV1 {
       const longestGapMs = nonNegative(fact.longestGapMs, `${path}.longestGapMs`);
       const undoCount = nonNegative(fact.undoCount, `${path}.undoCount`);
       const redoCount = nonNegative(fact.redoCount, `${path}.redoCount`);
+      // timingStatus is emitted by process-projector when KEdit capture times
+      // are non-finite or overflow Number.MAX_SAFE_INTEGER. When set it must be
+      // the only timing signal: capture times absent and span/gap zeroed.
+      const timingStatus = fact.timingStatus;
+      if (timingStatus !== undefined && timingStatus !== "outside-summary-domain") {
+        fail(`${path}.timingStatus`, "must be outside-summary-domain when present");
+      }
       const hasFirst = fact.firstCapturedAtMs !== undefined;
       if (hasFirst !== (fact.lastCapturedAtMs !== undefined)) fail(path, "capture times must be paired");
+      if (timingStatus !== undefined && hasFirst) {
+        fail(path, "capture times and timingStatus are mutually exclusive");
+      }
       const firstCapturedAtMs = hasFirst ? nonNegative(fact.firstCapturedAtMs, `${path}.firstCapturedAtMs`) : undefined;
       const lastCapturedAtMs = hasFirst ? nonNegative(fact.lastCapturedAtMs, `${path}.lastCapturedAtMs`) : undefined;
       if (hasFirst && (lastCapturedAtMs! < firstCapturedAtMs! || spanMs !== lastCapturedAtMs! - firstCapturedAtMs!)) {
         fail(path, "capture times and span are inconsistent");
       }
       if (!hasFirst && spanMs !== 0) fail(`${path}.spanMs`, "must be zero without capture times");
+      if (timingStatus !== undefined && (spanMs !== 0 || longestGapMs !== 0)) {
+        fail(path, "span and gap must be zero when timingStatus is set");
+      }
       if (longestGapMs > spanMs || undoCount + redoCount > transactionCount) fail(path, "summary counts are inconsistent");
       return {
         kind: "step-summary", transactionCount, rangeCount, insertedCodePointCount,
         deletedCodePointCount,
         ...(firstCapturedAtMs === undefined ? {} : { firstCapturedAtMs }),
         ...(lastCapturedAtMs === undefined ? {} : { lastCapturedAtMs }),
+        ...(timingStatus === undefined ? {} : { timingStatus }),
         spanMs, longestGapMs, undoCount, redoCount,
       };
     }
@@ -583,7 +601,9 @@ function hash(value: unknown, path: string): string {
 
 function voiceId(value: unknown, path: string): string {
   const result = text(value, path);
-  if (!VOICE_PUBKEY_PATTERN.test(result)) fail(path, "must be a lowercase Nostr pubkey");
+  if (!VOICE_PUBKEY_PATTERN.test(result) && !VOICE_KEDIT_PATTERN.test(result)) {
+    fail(path, "must be a lowercase Nostr pubkey or canonical protocol-valid KEdit voice");
+  }
   return result;
 }
 

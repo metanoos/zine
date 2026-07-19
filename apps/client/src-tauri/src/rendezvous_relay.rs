@@ -203,7 +203,7 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
     let ietf_protocol_assignment = segments[0] == 0x2001 && segments[1] < 0x0200;
     let documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
     let deprecated_6to4 = segments[0] == 0x2002;
-    let documentation_v2 = segments[0] & 0xfff0 == 0x3ff0;
+    let documentation_v2 = (segments[0] & 0xfff0) == 0x3ff0;
     global_unicast
         && !ietf_protocol_assignment
         && !documentation
