@@ -370,8 +370,6 @@ async function main(): Promise<void> {
   assert.equal(firstManifest[0]?.latestNodeId, first.id);
 
   let attestationId: string | null = null;
-  let mcpMintNodeId: string | null = null;
-  let mcpMintAttestationId: string | null = null;
   if (externalRelay) {
     await assert.rejects(
       () => attestNode(first.id, voice.publicKey, { signer: voice.secretKey }),
@@ -607,30 +605,23 @@ async function main(): Promise<void> {
       assert.match(exactRootId, /^[0-9a-f]{64}$/);
       assert.equal(info.ownerPubkey, voice.publicKey);
 
-      const stalePath = "stale-mint-source.md";
-      const staleSnapshot = "same snapshot, newer node\n";
-      const staleOrigin = jsonToolResult(await client.callTool({
-        name: "zine_step",
-        arguments: { relativePath: stalePath, content: staleSnapshot },
-      }));
-      const currentOrigin = jsonToolResult(await client.callTool({
-        name: "zine_step",
-        arguments: { relativePath: stalePath, content: staleSnapshot },
-      }));
-      assert.notEqual(staleOrigin.nodeId, currentOrigin.nodeId);
-      const staleMint = await client.callTool({
+      // Headless Mint fails closed until a real Kademlia indexing backend
+      // exists. Compound Mint + common-relay are covered by the client-side
+      // completeCoinMint path earlier in this smoke; MCP must not publish a
+      // Coin it can never durably H-index.
+      const blockedMint = await client.callTool({
         name: "zine_mint_span",
         arguments: {
-          originPath: stalePath,
-          phrase: "same snapshot",
-          originNodeId: staleOrigin.nodeId,
+          originPath: "unused-mint-source.md",
+          phrase: "selected public",
+          originNodeId: "a".repeat(64),
           sourceStart: 0,
         },
       });
-      assert.equal(staleMint.isError, true);
+      assert.equal(blockedMint.isError, true);
       assert.match(
-        toolText(staleMint),
-        /current local node does not match originNodeId/,
+        toolText(blockedMint),
+        /requires a headless Kademlia indexing backend/,
       );
 
       const exactPath = "exact-handoff.md";
@@ -665,7 +656,9 @@ async function main(): Promise<void> {
       }));
       assert.equal(resent.nodeId, sent.nodeId, "unchanged Send must reuse the selected Step");
 
-      const minted = jsonToolResult(await client.callTool({
+      // Even after a real public Send exists, Mint remains unavailable without
+      // a headless indexer — fail before any Coin/attestation is created.
+      const mintAfterSend = await client.callTool({
         name: "zine_mint_span",
         arguments: {
           originPath: exactPath,
@@ -673,25 +666,18 @@ async function main(): Promise<void> {
           originNodeId: sent.nodeId,
           sourceStart: 0,
         },
-      }));
-      mcpMintNodeId = String(minted.mintedNodeId);
-      mcpMintAttestationId = String(minted.attestationId);
-      assert.match(mcpMintNodeId, /^[0-9a-f]{64}$/);
-      assert.match(mcpMintAttestationId, /^[0-9a-f]{64}$/);
-      assert.equal(minted.published, true);
-      const sourceCitationNodeId = String(minted.sourceNodeId);
-      assert.match(sourceCitationNodeId, /^[0-9a-f]{64}$/);
-      const resolvedSource = `[[ selected public | ${mcpMintNodeId} ]] handoff\n`;
-      exactNodeIds.push(sourceCitationNodeId);
-      exactSnapshots.push(resolvedSource);
+      });
+      assert.equal(mintAfterSend.isError, true);
+      assert.match(
+        toolText(mintAfterSend),
+        /requires a headless Kademlia indexing backend/,
+      );
 
       assert.ok(attestationId);
       const publicMint = await queryRelay(
         externalRelay,
         {
           ids: [
-            mcpMintNodeId,
-            mcpMintAttestationId,
             attestationId,
             coinAttestation.id,
             directCoinAttestation.id,
@@ -699,29 +685,13 @@ async function main(): Promise<void> {
         },
         voice.secretKey,
       );
-      const publicMintById = new Map(publicMint.map((event) => [event.id, event]));
-      assert.equal(
-        publicMintById.get(mcpMintNodeId)?.kind,
-        4290,
-        "MCP Mint did not publish its Coin genesis",
-      );
-      assert.ok(
-        publicMintById.get(mcpMintAttestationId)?.tags.some(
-          (tag) =>
-            tag[0] === "e" &&
-            tag[1] === mcpMintNodeId &&
-            tag[3] === "target",
-        ),
-        "MCP Mint did not publish its minter attestation",
-      );
       const attestationCounts = attestationCountsFromEvents(
         publicMint,
-        [first.id, coin.id, directCoin.id, mcpMintNodeId],
+        [first.id, coin.id, directCoin.id],
       );
       assert.equal(attestationCounts.get(first.id), 1, "Attest was not durably queryable");
       assert.equal(attestationCounts.get(coin.id), 1, "extracted Mint attestation was not queryable");
       assert.equal(attestationCounts.get(directCoin.id), 1, "direct Mint attestation was not queryable");
-      assert.equal(attestationCounts.get(mcpMintNodeId), 1, "MCP Mint attestation was not queryable");
 
       const history = jsonToolResult(await client.callTool({
         name: "zine_get_history",
@@ -743,21 +713,7 @@ async function main(): Promise<void> {
         event: Event;
       }>;
       assert.deepEqual(rows.map((row) => row.nodeId), exactNodeIds);
-      assert.equal(rows.at(-1)?.payload.snapshot, resolvedSource);
-      assert.ok(
-        rows.at(-1)?.event.tags.some((tag) => tag[0] === "q" && tag[1] === mcpMintNodeId),
-        "MCP Mint source Step did not carry its paired q citation",
-      );
-      assert.ok(
-        rows.at(-1)?.payload.deltas?.some(
-          (delta) =>
-            delta.type === "cite" &&
-            delta.role === "inline" &&
-            delta.sourceEventId === mcpMintNodeId &&
-            delta.newValue === "selected public",
-        ),
-        "MCP Mint source Step did not carry its inline citation delta",
-      );
+      assert.equal(rows.at(-1)?.payload.snapshot, exactSnapshots[2]);
       let priorSnapshot = "";
       for (let index = 0; index < rows.length; index += 1) {
         const row = rows[index]!;
@@ -787,11 +743,11 @@ async function main(): Promise<void> {
         name: "zine_get_handoff",
         arguments: { relativePath: exactPath },
       }));
-      assert.equal(handoff.sent, false);
+      assert.equal(handoff.sent, true);
       const locator = handoff.locator as Record<string, unknown>;
       assert.equal(locator.rootId, exactRootId);
       assert.equal(locator.traceId, exactNodeIds[0]);
-      assert.equal(locator.nodeId, sourceCitationNodeId);
+      assert.equal(locator.nodeId, sent.nodeId);
       assert.equal(locator.relativePath, exactPath);
       assert.equal(locator.ownerPubkey, voice.publicKey);
 
@@ -856,8 +812,6 @@ async function main(): Promise<void> {
     coinAttestationId: coinAttestation.id,
     directCoinId: directCoin.id,
     directCoinAttestationId: directCoinAttestation.id,
-    mcpMintNodeId,
-    mcpMintAttestationId,
     externalRelayExercised: Boolean(externalRelay),
   })}\n`);
 }
