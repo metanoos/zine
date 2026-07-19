@@ -17,21 +17,36 @@ const META_STORE = "vault-meta";
 const USAGE_KEY = "usage";
 const BROWSER_SCOPE = "browser";
 const HEX_64 = /^[0-9a-f]{64}$/;
+const MAX_PROVEN_RELAY_URLS = 32;
+const MAX_RELAY_URL_LENGTH = 2_048;
+const MAX_DRAIN_RECORDS = 8;
+const MAX_DRAIN_WINDOW_MS = 20_000;
+const RETRY_BASE_MS = 5_000;
+const RETRY_MAX_MS = 5 * 60_000;
+const MAX_RETRY_ATTEMPTS = 32;
 
-/** The queue stores immutable event ids, not complete trace snapshots. Send
- * durably enqueues the id before publication. A crash in that narrow window
- * leaves a harmless unresolvable record; a later idempotent Send makes the same
- * event fetchable and eligible for removal. Byte backpressure remains explicit
- * instead of discarding old work. */
+/** The queue stores immutable Coin genesis ids plus the exact signed completion
+ * attestation needed to restore the public pair after relay/config churn. Byte
+ * backpressure remains explicit instead of discarding old work. */
 export const MAX_RENDEZVOUS_OUTBOX_BYTES = 16 * 1024 * 1024;
 
 export interface PendingRendezvousEvent {
   eventId: string;
   queuedAt: number;
+  /** Per-Coin durable retry posture. Omitted until the first failed attempt. */
+  retryAttempts?: number;
+  nextAttemptAt?: number;
+  /** Exact same-minter completion proof. Legacy rows may omit it and retain
+   * their read-only retry posture. */
+  completionAttestation?: Event;
+  /** Stranger-readable relays already proven to contain both Coin and
+   * same-minter attestation. Retained across later relay-config changes. */
+  relayUrls?: string[];
 }
 
 export interface RendezvousOutboxStorage {
   add(scope: string, record: PendingRendezvousEvent): Promise<"added" | "exists">;
+  defer(scope: string, eventId: string, retryAttempts: number, nextAttemptAt: number): Promise<void>;
   remove(scope: string, eventId: string): Promise<void>;
   list(scope: string): Promise<PendingRendezvousEvent[]>;
 }
@@ -75,15 +90,147 @@ function recordBytes(record: PendingRendezvousEvent): number {
   return new TextEncoder().encode(JSON.stringify({
     eventId: record.eventId,
     queuedAt: record.queuedAt,
+    ...(record.completionAttestation
+      ? { completionAttestation: record.completionAttestation }
+      : {}),
+    ...(record.relayUrls && record.relayUrls.length > 0
+      ? { relayUrls: record.relayUrls }
+      : {}),
   })).byteLength;
+}
+
+function validateCompletionAttestation(
+  value: unknown,
+  eventId: string,
+  index: number,
+): Event | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object") {
+    throw new Error(
+      `the rendezvous publication outbox contains an invalid completion attestation at index ${index}`,
+    );
+  }
+  const attestation = value as Event;
+  let validSignature = false;
+  try {
+    validSignature = verifyEvent(attestation);
+  } catch {
+    validSignature = false;
+  }
+  const tags = Array.isArray(attestation.tags) ? attestation.tags : [];
+  const targets = tags.filter((tag) => tag[0] === "e");
+  const kinds = tags.filter((tag) => tag[0] === "k");
+  const authors = tags.filter((tag) => tag[0] === "p");
+  const geohashes = tags.filter((tag) => tag[0] === "g");
+  let validContent = false;
+  try {
+    const parsed = JSON.parse(attestation.content) as unknown;
+    validContent = !!parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+      Object.keys(parsed).every((key) => key === "message") &&
+      ((parsed as { message?: unknown }).message === undefined ||
+        typeof (parsed as { message?: unknown }).message === "string");
+  } catch {
+    validContent = false;
+  }
+  if (
+    !validSignature ||
+    attestation.kind !== 4294 ||
+    !Array.isArray(attestation.tags) ||
+    targets.length !== 1 ||
+    targets[0]?.[1] !== eventId ||
+    targets[0]?.[2] !== "" ||
+    targets[0]?.[3] !== "target" ||
+    kinds.length !== 1 ||
+    kinds[0]?.[1] !== "4290" ||
+    authors.length > 1 ||
+    (authors.length === 1 && authors[0]?.[1] !== attestation.pubkey) ||
+    geohashes.length > 1 ||
+    tags.some((tag) => !["e", "k", "p", "g"].includes(tag[0] ?? "")) ||
+    !validContent
+  ) {
+    throw new Error(
+      `the rendezvous publication outbox contains an invalid completion attestation at index ${index}`,
+    );
+  }
+  return attestation;
+}
+
+function validateRelayUrls(value: unknown, index: number): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_PROVEN_RELAY_URLS) {
+    throw new Error(`the rendezvous publication outbox contains invalid relay locators at index ${index}`);
+  }
+  const urls: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.length === 0 || entry.length > MAX_RELAY_URL_LENGTH) {
+      throw new Error(`the rendezvous publication outbox contains an invalid relay locator at index ${index}`);
+    }
+    try {
+      const parsed = new URL(entry);
+      if (
+        (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") ||
+        parsed.username ||
+        parsed.password
+      ) throw new Error("invalid relay URL");
+    } catch {
+      throw new Error(`the rendezvous publication outbox contains an invalid relay locator at index ${index}`);
+    }
+    if (!urls.includes(entry)) urls.push(entry);
+  }
+  return urls.length > 0 ? urls : undefined;
 }
 
 function validateRecord(value: unknown, index: number): PendingRendezvousEvent {
   const record = value as Partial<PendingRendezvousEvent>;
-  if (!HEX_64.test(record.eventId ?? "") || !Number.isFinite(record.queuedAt)) {
+  if (
+    !HEX_64.test(record.eventId ?? "") ||
+    !Number.isFinite(record.queuedAt) ||
+    (record.retryAttempts !== undefined && (
+      !Number.isInteger(record.retryAttempts) ||
+      record.retryAttempts < 0 ||
+      record.retryAttempts > MAX_RETRY_ATTEMPTS
+    )) ||
+    (record.nextAttemptAt !== undefined && (
+      !Number.isFinite(record.nextAttemptAt) || record.nextAttemptAt < 0
+    )) ||
+    ((record.retryAttempts === undefined) !== (record.nextAttemptAt === undefined))
+  ) {
     throw new Error(`the rendezvous publication outbox contains an invalid event id at index ${index}`);
   }
-  return { eventId: record.eventId!, queuedAt: record.queuedAt! };
+  const relayUrls = validateRelayUrls(record.relayUrls, index);
+  const completionAttestation = validateCompletionAttestation(
+    record.completionAttestation,
+    record.eventId!,
+    index,
+  );
+  return {
+    eventId: record.eventId!,
+    queuedAt: record.queuedAt!,
+    ...(record.retryAttempts !== undefined ? { retryAttempts: record.retryAttempts } : {}),
+    ...(record.nextAttemptAt !== undefined ? { nextAttemptAt: record.nextAttemptAt } : {}),
+    ...(completionAttestation ? { completionAttestation } : {}),
+    ...(relayUrls ? { relayUrls } : {}),
+  };
+}
+
+function mergeRecordLocators(
+  current: PendingRendezvousEvent,
+  incoming: PendingRendezvousEvent,
+): PendingRendezvousEvent {
+  const relayUrls = [...new Set([
+    ...(current.relayUrls ?? []),
+    ...(incoming.relayUrls ?? []),
+  ])].slice(0, MAX_PROVEN_RELAY_URLS);
+  return {
+    eventId: current.eventId,
+    queuedAt: Math.min(current.queuedAt, incoming.queuedAt),
+    // A fresh enqueue may carry new public relay evidence. Wake the record
+    // immediately instead of preserving an obsolete failure backoff.
+    ...((current.completionAttestation ?? incoming.completionAttestation)
+      ? { completionAttestation: current.completionAttestation ?? incoming.completionAttestation }
+      : {}),
+    ...(relayUrls.length > 0 ? { relayUrls } : {}),
+  };
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
@@ -219,34 +366,52 @@ export class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
   }
 
   async add(scope: string, record: PendingRendezvousEvent): Promise<"added" | "exists"> {
+    const validRecord = validateRecord(record, 0);
     const db = await this.open();
     await this.migrateLegacyIfAuthorized(db, scope);
     const transaction = db.transaction([EVENTS_STORE, META_STORE], "readwrite");
     const done = transactionDone(transaction);
     const events = transaction.objectStore(EVENTS_STORE);
     const meta = transaction.objectStore(META_STORE);
-    const eventKey: [string, string] = [scope, record.eventId];
+    const eventKey: [string, string] = [scope, validRecord.eventId];
     const usageKey: [string, typeof USAGE_KEY] = [scope, USAGE_KEY];
-    const existing = await requestResult(events.get(eventKey));
-    if (existing) {
-      await done;
-      return "exists";
-    }
+    const existing = await requestResult(events.get(eventKey)) as StoredRendezvousEvent | undefined;
     const usage = (await requestResult(meta.get(usageKey)) as OutboxUsage | undefined) ?? {
       scope,
       key: USAGE_KEY,
-      totalBytes: 0,
-      count: 0,
+      totalBytes: existing ? recordBytes(existing) : 0,
+      count: existing ? 1 : 0,
     };
-    const bytes = recordBytes(record);
+    if (existing) {
+      const current = validateRecord(existing, 0);
+      const merged = mergeRecordLocators(current, validRecord);
+      const extraBytes = recordBytes(merged) - recordBytes(current);
+      if (usage.totalBytes + extraBytes > MAX_RENDEZVOUS_OUTBOX_BYTES) {
+        transaction.abort();
+        await done.catch(() => undefined);
+        throw new Error(
+          `rendezvous outbox is full (${usage.totalBytes} of ${MAX_RENDEZVOUS_OUTBOX_BYTES} bytes); completed-Mint indexing must catch up`,
+        );
+      }
+      events.put({ scope, ...merged } satisfies StoredRendezvousEvent);
+      meta.put({
+        scope,
+        key: USAGE_KEY,
+        totalBytes: usage.totalBytes + extraBytes,
+        count: usage.count,
+      } satisfies OutboxUsage);
+      await done;
+      return "exists";
+    }
+    const bytes = recordBytes(validRecord);
     if (usage.totalBytes + bytes > MAX_RENDEZVOUS_OUTBOX_BYTES) {
       transaction.abort();
       await done.catch(() => undefined);
       throw new Error(
-        `rendezvous outbox is full (${usage.totalBytes} of ${MAX_RENDEZVOUS_OUTBOX_BYTES} bytes); indexing must catch up before Send can complete`,
+        `rendezvous outbox is full (${usage.totalBytes} of ${MAX_RENDEZVOUS_OUTBOX_BYTES} bytes); completed-Mint indexing must catch up`,
       );
     }
-    events.add({ scope, ...record } satisfies StoredRendezvousEvent);
+    events.add({ scope, ...validRecord } satisfies StoredRendezvousEvent);
     meta.put({
       scope,
       key: USAGE_KEY,
@@ -255,6 +420,39 @@ export class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
     } satisfies OutboxUsage);
     await done;
     return "added";
+  }
+
+  async defer(
+    scope: string,
+    eventId: string,
+    retryAttempts: number,
+    nextAttemptAt: number,
+  ): Promise<void> {
+    if (
+      !HEX_64.test(eventId) ||
+      !Number.isInteger(retryAttempts) ||
+      retryAttempts < 1 ||
+      retryAttempts > MAX_RETRY_ATTEMPTS ||
+      !Number.isFinite(nextAttemptAt) ||
+      nextAttemptAt < 0
+    ) throw new Error("invalid rendezvous retry state");
+    const db = await this.open();
+    await this.migrateLegacyIfAuthorized(db, scope);
+    const transaction = db.transaction(EVENTS_STORE, "readwrite");
+    const done = transactionDone(transaction);
+    const events = transaction.objectStore(EVENTS_STORE);
+    const eventKey: [string, string] = [scope, eventId];
+    const existing = await requestResult(events.get(eventKey)) as StoredRendezvousEvent | undefined;
+    if (existing) {
+      const current = validateRecord(existing, 0);
+      events.put({
+        scope,
+        ...current,
+        retryAttempts,
+        nextAttemptAt,
+      } satisfies StoredRendezvousEvent);
+    }
+    await done;
   }
 
   async remove(scope: string, eventId: string): Promise<void> {
@@ -317,14 +515,26 @@ export class MemoryRendezvousOutbox implements RendezvousOutboxStorage {
   constructor(private readonly maxBytes = MAX_RENDEZVOUS_OUTBOX_BYTES) {}
 
   async add(scope: string, record: PendingRendezvousEvent): Promise<"added" | "exists"> {
+    const validRecord = validateRecord(record, 0);
     const records = this.records.get(scope) ?? new Map<string, PendingRendezvousEvent>();
-    if (records.has(record.eventId)) return "exists";
-    const bytes = recordBytes(record);
+    const existing = records.get(validRecord.eventId);
+    if (existing) {
+      const merged = mergeRecordLocators(validateRecord(existing, 0), validRecord);
+      const extraBytes = recordBytes(merged) - recordBytes(existing);
+      const totalBytes = this.totalBytes.get(scope) ?? recordBytes(existing);
+      if (totalBytes + extraBytes > this.maxBytes) {
+        throw new Error("rendezvous outbox is full; completed-Mint indexing must catch up");
+      }
+      records.set(validRecord.eventId, merged);
+      this.totalBytes.set(scope, totalBytes + extraBytes);
+      return "exists";
+    }
+    const bytes = recordBytes(validRecord);
     const totalBytes = this.totalBytes.get(scope) ?? 0;
     if (totalBytes + bytes > this.maxBytes) {
-      throw new Error("rendezvous outbox is full; indexing must catch up before Send can complete");
+      throw new Error("rendezvous outbox is full; completed-Mint indexing must catch up");
     }
-    records.set(record.eventId, record);
+    records.set(validRecord.eventId, validRecord);
     this.records.set(scope, records);
     this.totalBytes.set(scope, totalBytes + bytes);
     return "added";
@@ -340,6 +550,30 @@ export class MemoryRendezvousOutbox implements RendezvousOutboxStorage {
       scope,
       Math.max(0, (this.totalBytes.get(scope) ?? recordBytes(existing)) - recordBytes(existing)),
     );
+  }
+
+  async defer(
+    scope: string,
+    eventId: string,
+    retryAttempts: number,
+    nextAttemptAt: number,
+  ): Promise<void> {
+    if (
+      !HEX_64.test(eventId) ||
+      !Number.isInteger(retryAttempts) ||
+      retryAttempts < 1 ||
+      retryAttempts > MAX_RETRY_ATTEMPTS ||
+      !Number.isFinite(nextAttemptAt) ||
+      nextAttemptAt < 0
+    ) throw new Error("invalid rendezvous retry state");
+    const records = this.records.get(scope);
+    const existing = records?.get(eventId);
+    if (!records || !existing) return;
+    records.set(eventId, {
+      ...validateRecord(existing, 0),
+      retryAttempts,
+      nextAttemptAt,
+    });
   }
 
   async list(scope: string): Promise<PendingRendezvousEvent[]> {
@@ -371,18 +605,34 @@ export async function clearRendezvousOutbox(): Promise<void> {
   });
 }
 
-/** Persist a carrying event id after the exact signed event has reached at
- * least one configured publication relay. */
+/** Persist a completed Coin genesis id after its exact signed completion pair
+ * has reached at least one configured publication relay. */
 export async function enqueueRendezvousEvent(
   event: Event,
   storage: RendezvousOutboxStorage = productionStorage(),
   now = Date.now(),
   session: RendezvousOutboxSession = captureRendezvousOutboxSession(),
+  provenRelayUrls: readonly string[] = [],
+  completionAttestation?: Event,
 ): Promise<void> {
   if (!verifyEvent(event)) {
     throw new Error("refusing to queue an invalid rendezvous event");
   }
-  await storage.add(session.scope, { eventId: event.id, queuedAt: now });
+  const relayUrls = validateRelayUrls([...provenRelayUrls], 0);
+  const validatedAttestation = validateCompletionAttestation(
+    completionAttestation,
+    event.id,
+    0,
+  );
+  if (validatedAttestation && validatedAttestation.pubkey !== event.pubkey) {
+    throw new Error("refusing to queue a completion attestation from another minter");
+  }
+  await storage.add(session.scope, {
+    eventId: event.id,
+    queuedAt: now,
+    ...(validatedAttestation ? { completionAttestation: validatedAttestation } : {}),
+    ...(relayUrls ? { relayUrls } : {}),
+  });
 }
 
 export async function removeRendezvousEvent(
@@ -400,27 +650,98 @@ export async function pendingRendezvousEvents(
   return storage.list(session.scope);
 }
 
-/** Drain independent Send-side indexing work without allowing one unavailable
- * relay or coordinate to starve later events. Per-id removal means a concurrent
- * enqueue can never be erased by an old whole-queue snapshot. */
+export interface RendezvousDrainOptions {
+  /** Tests may tighten, never widen, the production work window. */
+  maxRecords?: number;
+  maxDurationMs?: number;
+  now?: () => number;
+}
+
+function fairDueRecords(
+  records: readonly PendingRendezvousEvent[],
+  now: number,
+): PendingRendezvousEvent[] {
+  const due = records.filter((record) => (record.nextAttemptAt ?? 0) <= now)
+    .sort((left, right) => left.queuedAt - right.queuedAt || left.eventId.localeCompare(right.eventId));
+  const fair: PendingRendezvousEvent[] = [];
+  let oldest = 0;
+  let newest = due.length - 1;
+  while (oldest <= newest) {
+    fair.push(due[oldest++]!);
+    if (oldest <= newest) fair.push(due[newest--]!);
+  }
+  return fair;
+}
+
+function retryDelayMs(attempts: number): number {
+  return Math.min(RETRY_MAX_MS, RETRY_BASE_MS * (2 ** Math.max(0, attempts - 1)));
+}
+
+/** Drain independent Mint-side indexing work without allowing one unavailable
+ * relay or coordinate to starve later Coins. Each invocation owns a bounded
+ * oldest/newest slice; failed records move behind durable per-id backoff.
+ * Per-id mutation means a concurrent enqueue can never be erased by an old
+ * whole-queue snapshot. */
 export async function drainRendezvousEvents(
-  process: (eventId: string) => Promise<boolean>,
+  process: (
+    eventId: string,
+    provenRelayUrls: readonly string[],
+    completionAttestation?: Event,
+  ) => Promise<boolean>,
   storage: RendezvousOutboxStorage = productionStorage(),
   session: RendezvousOutboxSession = captureRendezvousOutboxSession(),
+  options: RendezvousDrainOptions = {},
 ): Promise<{ pending: number; completed: number }> {
   const records = await storage.list(session.scope);
+  const now = options.now ?? Date.now;
+  const startedAt = now();
+  const requestedMaxRecords = options.maxRecords === undefined ||
+    !Number.isFinite(options.maxRecords)
+    ? MAX_DRAIN_RECORDS
+    : Math.floor(options.maxRecords);
+  const requestedMaxDurationMs = options.maxDurationMs === undefined ||
+    !Number.isFinite(options.maxDurationMs)
+    ? MAX_DRAIN_WINDOW_MS
+    : options.maxDurationMs;
+  const maxRecords = Math.max(
+    1,
+    Math.min(MAX_DRAIN_RECORDS, requestedMaxRecords),
+  );
+  const maxDurationMs = Math.max(
+    1,
+    Math.min(MAX_DRAIN_WINDOW_MS, requestedMaxDurationMs),
+  );
   let completed = 0;
-  for (const record of records) {
+  let attempted = 0;
+  for (const record of fairDueRecords(records, startedAt)) {
+    if (attempted >= maxRecords || now() - startedAt >= maxDurationMs) break;
     if (!isRendezvousOutboxSessionCurrent(session)) break;
+    let terminal = false;
     try {
-      const terminal = await process(record.eventId);
-      if (!isRendezvousOutboxSessionCurrent(session)) break;
-      if (terminal) {
-        await storage.remove(session.scope, record.eventId);
-        completed++;
-      }
+      terminal = await process(
+        record.eventId,
+        record.relayUrls ?? [],
+        record.completionAttestation,
+      );
     } catch {
-      // Retryable failures remain durable for the next pass.
+      terminal = false;
+    }
+    attempted++;
+    if (!isRendezvousOutboxSessionCurrent(session)) break;
+    if (terminal) {
+      await storage.remove(session.scope, record.eventId);
+      completed++;
+    } else {
+      const retryAttempts = Math.min(
+        MAX_RETRY_ATTEMPTS,
+        (record.retryAttempts ?? 0) + 1,
+      );
+      await storage.defer(
+        session.scope,
+        record.eventId,
+        retryAttempts,
+        now() + retryDelayMs(retryAttempts),
+      );
     }
   }
   return { pending: (await storage.list(session.scope)).length, completed };

@@ -12,18 +12,6 @@ Individual writers remain the first audience; accountable teams remain the
 initial paid wedge. Managed services and global network work remain downstream
 of actual retained use.
 
-AI-assisted writing remains the product center. The defensible slice is the
-portable boundary crossing that proprietary single-editor logs cannot provide:
-cross-model handoff, cross-team review, and cross-time postmortem. The roadmap
-therefore proves one desktop writing loop first, adds one narrow
-provider-neutral handoff next, and generalizes a broader multi-AI surface only
-after those foundations hold.
-
-Mobile is outside this active sequence. It remains a later, separately
-reviewed program after the desktop writing, provenance, durability, and
-recovery gates hold; no active phase pulls its ownership, key, sync, or recovery
-design forward.
-
 ## Sequencing rule
 
 ```text
@@ -36,7 +24,7 @@ shared deterministic trace-context runtime
 one complete desktop writing loop <----> text-only comparison
                  |
                  v
-durable binding + one boundary-crossing handoff + writing outcomes
+durable binding + writing outcomes + accountable-team use
           |                              |
           v                              v
 supported operation breadth        optional paid team layer
@@ -54,13 +42,14 @@ Already built:
 
 - desktop and MCP presses;
 - signed file and folder trace chains;
-- Step, Publish, Attest, Mint, Cite, fork, merge, and replay;
+- Step, Publish (wire name Send), Attest, Mint, Cite, fork, merge, and replay;
 - mandatory replay-valid KEdit process logs and shared `FULL TRACE` /
   `SNAPSHOT ONLY` / `INVALID` reader verdicts;
 - distinct human, model, and agent voice keys with per-delta attribution;
 - local and hosted relay implementations, with a remaining hosted ACL gap;
 - raw-file Reify with an optional signed-event bundle and report;
-- Stronghold-backed desktop signing and provider secrets;
+- passphrase-gated desktop vault sessions with independent Roots, encrypted
+  webview state, relay databases, ACLs, signing keys, and provider secrets;
 - verified recursive folder/Root checkpoint causes, distinct child `advance`,
   serialized folder appends, durable operation grouping and structural retry
   journals, explicit folder/Root Step, and inspectable derived Replay collapse;
@@ -71,24 +60,17 @@ Already built:
 - a desktop adapter for the Extend (continuation) and Settle (revision)
   operations with exact current-session manual-origin authority,
   protected-output validation, and accepted-success cleanup;
-- a vault-scoped encrypted desktop Extend journal that binds the exact approved
-  request, selected context, provider profile, attempt, provisional result,
-  application intent, and crash-pad receipt; recovers without ambiguous
-  redispatch; and cancels/drains native HTTP work at the vault boundary;
-- the single Coins discovery opt-in with valid-Coin co-citation, durable
-  Publish-side indexing, hostile-relay verification, and native Kademlia
-  routing; no bootstrap network is operated;
 - a read-only trace-context Inspector presentation for prepared operations;
 - a preregistered writing-outcome study and operational scoring rubric; and
 - a preregistered narration study showing a narrow process-description effect.
 
 Not yet built as one system: task-specific evidence selection and rendering,
 cross-press manifest parity, Inspector exclusions/corrections/promotion,
-persisted directive authority, scoped memory, durable Settle and other
-operation adapters, portable signed result-to-context binding,
-writing-outcome evaluation, or complete desktop/MCP operation coverage. Fixed
-cross-runtime folder vectors and explicit crash-boundary real-relay recovery
-fixtures remain hardening work for the recursive checkpoint cut.
+persisted directive authority and durable consumption receipts, scoped memory,
+durable result-to-context binding, writing-outcome evaluation, or complete
+desktop/MCP operation coverage. Fixed cross-runtime folder vectors and explicit
+crash-boundary real-relay recovery fixtures remain hardening work for the
+recursive checkpoint cut.
 
 ## Phase 0: declare and preregister
 
@@ -152,18 +134,11 @@ oversized, Unicode, cancelled, and invalid-trace cases.
 
 ## Phase 2: one complete desktop vertical slice
 
-This phase now has one private execution-and-recovery cut for desktop Extend.
-Extend prepares through the shared syntax kernel and Prompt Inspector, then
-persists the exact approved boundary before provider I/O. Its encrypted
-vault-scoped journal supports bounded review history, explicit ambiguous retry,
-provisional result review, compare-and-set application, exact accepted receipts,
-and crash recovery without automatic provider redispatch. Native vault lock,
-reload recovery, and factory reset cancel and drain active provider requests.
-
-The broader phase is not complete. Settle still uses the syntax kernel without
-the durable execution journal, and exclusion, correction, explicit promotion,
-persisted directive authority, task-specific selection, and scoped memory
-remain open.
+This phase has an initial read-only dogfood slice: Extend and Settle prepare
+through the shared syntax kernel, and Prompt Inspector can present the frozen
+boundary. Exclusion, correction, explicit promotion, persisted authority,
+durable receipts, and crash recovery are still required before the vertical
+slice is complete.
 
 Integrate Extend and Settle first because continuation and revision expose
 different ways trace may help. Preserve today's Stir behavior through the new
@@ -183,21 +158,15 @@ grammar, but gate its generalized adapter separately.
 - Preparation, approval, provider dispatch, result review, compare-and-set
   application, consumption receipts, and cleanup are idempotent and recoverable.
 
-The current dogfood envelope is encrypted, vault-scoped, retention-bounded
-private recovery state. It must not be described as portable signed provenance,
-final protocol binding, or a generally released private-storage contract.
+Disposable local envelopes are allowed for dogfood. They must not be described
+as final protocol binding or generally released private storage.
 
-## Phase 3: portable signed binding and outcome evidence
+## Phase 3: durable binding and outcome evidence
 
 After the trust/schema review:
 
 - bind every accepted MODEL Step to the exact approved context manifest,
   prepared request, provider configuration, attempt, and result;
-- ship one explicit cross-provider Continue or Reply journey whose receiving
-  provider gets a stepped context packet rather than implied transfer of hidden
-  vendor state;
-- make that handoff portable for a later reviewer or postmortem, with provider
-  boundaries, source Steps, omissions, and acceptance visible;
 - keep private payloads local by default behind fresh salted
   selective-disclosure commitments and profile-keyed local deduplication;
 - add consented, local-first outcome capture with export and redaction;
@@ -225,10 +194,8 @@ fixtures:
 - MCP consumes the shared package, with retention and encrypted profile stores
   blocked on their own key-management review.
 
-Generalize the proven handoff into broader multi-AI correspondence here:
-additional providers, model rows, cumulative and reply-chain forms, and richer
-review workflows. It remains a family of authored writing operations, not a
-product center separate from writing and not a permanent generic chat pane.
+Multi-AI task and correspondence work belongs here as a family of trace-aware
+operations and handoffs, not as a product center separate from writing.
 
 ## Phase 5: longitudinal scoped learning
 
@@ -266,14 +233,12 @@ sampling, retention, false-positive, and false-negative behavior. The protocol
 continues to carry evidence and never promotes a model score into proof of
 humanness.
 
-Coins remain one user-facing discovery opt-in covering Mint, valid-Coin
-indexing, and rendezvous; ordinary citation remains part of core composition.
-The core package, including its under-the-hood Kademlia component, is integrated
-and exercised. Continue its security hardening without creating a second
-Kademlia product surface.
-Operating or expanding global rendezvous remains gated until real published
-citations produce organic co-citation matches, users ask to meet unknown
-co-citers, and the value outweighs privacy and abuse costs.
+Coins remain one user-facing opt-in covering minting, citation, indexing, and
+rendezvous. Complete and harden that package, including its under-the-hood
+Kademlia component, without creating a second Kademlia product surface.
+Operating or expanding global rendezvous remains gated until real completed
+Mints produce organic same-content co-Mint matches, users ask to meet unknown
+co-minters, and the value outweighs privacy and abuse costs.
 
 ## Not on the roadmap
 
@@ -283,7 +248,7 @@ co-citers, and the value outweighs privacy and abuse costs.
 - New tool authority granted by document text.
 - A separate Kademlia feature or setting; Coins own the opt-in.
 - More routing design beyond completion and security hardening before real
-  co-citation density.
+  co-Mint density.
 - A proprietary relay requirement or mandatory account for local writing.
 - Claims that timing or revision shape proves a human author.
 

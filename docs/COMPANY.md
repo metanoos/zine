@@ -131,7 +131,7 @@ proof. The daily-use thesis also fails or narrows if selected trace does not
 improve measured writing outcomes over text-only and bounded-history controls,
 or if privacy, correction burden, latency, and over-personalization outweigh
 the benefit. The network thesis fails if real corpora do not produce useful
-co-citations.
+co-Mints.
 
 The [roadmap](ROADMAP.md) sequences the work so those questions are answered
 before the expensive layers are built.

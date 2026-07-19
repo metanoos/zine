@@ -31,7 +31,11 @@ import {
  * touched only by Scan (acquire) and Reify (emit) gestures.
  */
 
-import { createFolderGenesis } from "../provenance/provenance.js";
+import {
+  assertPublicationFence,
+  createFolderGenesis,
+  type PublicationFence,
+} from "../provenance/provenance.js";
 import {
   getAuthorKey,
   secretKeyForVoice,
@@ -149,8 +153,8 @@ export async function mintRoot(): Promise<string> {
 /** The dedicated Mint folder mounted beside an install root. Mint is a real
  *  folder trace, but deliberately is not a member of Root: otherwise sending a
  *  later Root manifest could reveal the complete private Mint inventory. The
- *  pointer is local installation state; cited Mint members remain resolvable
- *  by node id if the author explicitly sends them. */
+ *  pointer is local installation state; completed Coin geneses remain public
+ *  and individually resolvable while private Mint membership stays local. */
 export function getMintFolderId(rootId: string): string | null {
   const id = localStorage.getItem(`${MINT_KEY_PREFIX}${rootId}`);
   return id && id.length > 0 ? id : null;
@@ -162,14 +166,17 @@ export function getMintFolderId(rootId: string): string | null {
 export async function getOrCreateMintFolder(
   rootId: string,
   signer?: Uint8Array,
+  publicationFence?: PublicationFence,
 ): Promise<string> {
+  assertPublicationFence(publicationFence);
   const existing = getMintFolderId(rootId);
   if (existing) return existing;
   const pending = pendingMintFolders.get(rootId);
   if (pending) return pending;
 
-  const creating = createFolderGenesis({ signer, localOnly: true })
+  const creating = createFolderGenesis({ signer, localOnly: true, publicationFence })
     .then((id) => {
+      assertPublicationFence(publicationFence);
       localStorage.setItem(`${MINT_KEY_PREFIX}${rootId}`, id);
       return id;
     })

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { validateKEditTransition, type KEdit } from "@zine/protocol";
 import type { Event } from "nostr-tools";
-import { verifyEvent } from "nostr-tools/pure";
+import { finalizeEvent, verifyEvent } from "nostr-tools/pure";
 
 function jsonToolResult(result: unknown): Record<string, unknown> {
   const content = (result as { content?: unknown }).content;
@@ -140,6 +141,66 @@ test("startup rejects a loopback publication destination", () => {
   assert.doesNotMatch(result.stderr, /could not bind source folder/);
 });
 
+test("unsupported Mint recovery leaves a corrupt journal inert beyond the watch interval", {
+  timeout: 60_000,
+}, async () => {
+  const home = mkdtempSync(join(tmpdir(), "zine-mcp-corrupt-mint-home-"));
+  const config = join(home, "profile.json");
+  const initial = await connectOfflineServer(config, home);
+  try {
+    const info = jsonToolResult(await initial.client.callTool({
+      name: "zine_workspace_info",
+      arguments: {},
+    }));
+    assert.match(String(info.rootId), /^[0-9a-f]{64}$/);
+  } finally {
+    await initial.client.close();
+    await initial.transport.close();
+  }
+
+  const corruptJournal = "{ definitely-not-a-mint-journal";
+  const stored = JSON.parse(readFileSync(config, "utf8")) as Record<string, string>;
+  stored["zine.pending-coin-mints.v1"] = corruptJournal;
+  writeFileSync(config, JSON.stringify(stored), { mode: 0o600 });
+
+  const restarted = await connectOfflineServer(config, home);
+  try {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5_500));
+    const info = jsonToolResult(await restarted.client.callTool({
+      name: "zine_workspace_info",
+      arguments: {},
+    }));
+    assert.match(String(info.rootId), /^[0-9a-f]{64}$/);
+
+    const failedMint = await restarted.client.callTool({
+      name: "zine_mint_span",
+      arguments: {
+        originPath: "result.md",
+        phrase: "unsupported",
+        originNodeId: "e".repeat(64),
+      },
+    });
+    assert.equal(failedMint.isError, true);
+    assert.match(
+      (failedMint.content as Array<{ type?: string; text?: string }>)
+        .filter((block) => block.type === "text")
+        .map((block) => block.text ?? "")
+        .join("\n"),
+      /requires a headless Kademlia indexing backend/,
+    );
+  } finally {
+    await restarted.client.close();
+    await restarted.transport.close();
+  }
+
+  const recovered = JSON.parse(readFileSync(config, "utf8")) as Record<string, string>;
+  assert.equal(
+    recovered["zine.pending-coin-mints.v1"],
+    corruptJournal,
+    "the unavailable recovery subsystem must never parse or rewrite the legacy journal",
+  );
+});
+
 test("cold headless profile mints one Root and Steps exact events while the relay is offline", {
   // Coverage instruments both server subprocesses. Under the canonical verifier
   // they also run beside the client, trace-context, Go, and Rust suites, so the
@@ -168,6 +229,35 @@ test("cold headless profile mints one Root and Steps exact events while the rela
     assert.match(rootId, /^[0-9a-f]{64}$/);
     assert.match(ownerPubkey, /^[0-9a-f]{64}$/);
     assert.equal(info.profile, "offline-test");
+
+    const filesBeforeMint = jsonToolResult(await first.client.callTool({
+      name: "zine_list_files",
+      arguments: {},
+    }));
+    const failedMint = await first.client.callTool({
+      name: "zine_mint_span",
+      arguments: {
+        originPath: "result.md",
+        phrase: "must not be minted",
+        originNodeId: "f".repeat(64),
+      },
+    });
+    assert.equal(failedMint.isError, true);
+    assert.match(
+      (failedMint.content as Array<{ type?: string; text?: string }>)
+        .filter((block) => block.type === "text")
+        .map((block) => block.text ?? "")
+        .join("\n"),
+      /requires a headless Kademlia indexing backend/,
+    );
+    assert.deepEqual(
+      jsonToolResult(await first.client.callTool({
+        name: "zine_list_files",
+        arguments: {},
+      })),
+      filesBeforeMint,
+      "the unavailable Mint tool must fail before changing inventory",
+    );
 
     for (const content of contents) {
       const stepped = jsonToolResult(await first.client.callTool({
@@ -255,6 +345,11 @@ test("cold headless profile mints one Root and Steps exact events while the rela
   }
 
   const stored = JSON.parse(readFileSync(config, "utf8")) as Record<string, string>;
+  assert.equal(
+    stored["zine.pending-coin-mints.v1"],
+    undefined,
+    "the unavailable Mint tool must not create a journal row",
+  );
   const outbox = JSON.parse(stored["zine.pending-trace-events"] ?? "[]") as Array<{
     event: Event;
   }>;
@@ -267,8 +362,93 @@ test("cold headless profile mints one Root and Steps exact events while the rela
     );
   }
 
+  // A profile from an older build may contain a valid public-pair receipt but
+  // no durable H-indexing receipt. Restart recovery must retain that journal
+  // row without admitting it to Mint inventory or silently clearing it.
+  const secretHex = stored["zine.headless.voice.secretHex"];
+  assert.match(secretHex, /^[0-9a-f]{64}$/);
+  const secret = Uint8Array.from(Buffer.from(secretHex!, "hex"));
+  const legacyPhrase = "offline signed Step";
+  const contentHash = createHash("sha256").update(legacyPhrase).digest("hex");
+  const sourceContentHash = String(
+    (JSON.parse(rawEvents[2]!.content) as { contentHash?: string }).contentHash,
+  );
+  const legacyCoin = finalizeEvent({
+    kind: 4290,
+    created_at: 1_730_000_000,
+    tags: [
+      ["z", "file"],
+      ["F", "legacy-coin.md"],
+      ["f", rootId],
+      ["x", contentHash],
+      ["action", "import"],
+      ["e", rawEvents[2]!.id, "", "extracted-from"],
+    ],
+    content: JSON.stringify({
+      snapshot: legacyPhrase,
+      contentHash,
+      coin: {
+        version: 1,
+        origin: {
+          kind: "extracted",
+          sourceNodeId: rawEvents[2]!.id,
+          sourceContentHash,
+          range: { start: 0, end: legacyPhrase.length },
+        },
+      },
+    }),
+  }, secret);
+  const legacyAttestation = finalizeEvent({
+    kind: 4294,
+    created_at: legacyCoin.created_at,
+    tags: [
+      ["e", legacyCoin.id, "", "target"],
+      ["k", "4290"],
+      ["p", ownerPubkey],
+    ],
+    content: "{}",
+  }, secret);
+  const legacyPendingMint = {
+    operationKey: "legacy-published-pair",
+    sourceFolderId: rootId,
+    mintFolderId: rootId,
+    localPath: "Mint/legacy-coin.md",
+    memberName: "legacy-coin.md",
+    phrase: legacyPhrase,
+    coin: legacyCoin,
+    publishedAttestation: legacyAttestation,
+    sourceFinalization: {
+      kind: "span",
+      relativePath: "result.md",
+      sourceNodeId: rawEvents[2]!.id,
+      sourceContentHash,
+      range: { start: 0, end: legacyPhrase.length },
+    },
+    queuedAt: 1_730_000_000_000,
+  };
+  const legacyMintJournal = JSON.stringify([
+    legacyPendingMint,
+    {
+      ...legacyPendingMint,
+      operationKey: "legacy-overlapping-pair",
+      queuedAt: 1_730_000_000_001,
+    },
+  ]);
+  stored["zine.pending-coin-mints.v1"] = legacyMintJournal;
+  writeFileSync(config, JSON.stringify(stored), { mode: 0o600 });
+
   const second = await connectOfflineServer(config, home);
   try {
+    const recoveryBarrier = await second.client.callTool({
+      name: "zine_mint_span",
+      arguments: {
+        originPath: "result.md",
+        phrase: "barrier",
+        originNodeId: "e".repeat(64),
+      },
+    });
+    assert.equal(recoveryBarrier.isError, true);
+
     const info = jsonToolResult(await second.client.callTool({
       name: "zine_workspace_info",
       arguments: {},
@@ -284,8 +464,60 @@ test("cold headless profile mints one Root and Steps exact events while the rela
     assert.deepEqual(historyRows.map((row) => row.nodeId), nodeIds);
     assert.deepEqual(historyRows.map((row) => row.event), rawEvents);
     assert.equal((history.conformance as { status?: string }).status, "full");
+
+    const blockedDelete = await second.client.callTool({
+      name: "zine_delete",
+      arguments: { relativePath: "result.md" },
+    });
+    assert.equal(blockedDelete.isError, true);
+    assert.match(
+      (blockedDelete.content as Array<{ type?: string; text?: string }>)
+        .filter((block) => block.type === "text")
+        .map((block) => block.text ?? "")
+        .join("\n"),
+      /pending Mint before deleting its source result\.md/,
+    );
+
+    const files = jsonToolResult(await second.client.callTool({
+      name: "zine_list_files",
+      arguments: {},
+    })).files as Array<{ relativePath: string }>;
+    assert.equal(
+      files.some((file) => file.relativePath === "Mint/legacy-coin.md"),
+      false,
+      "legacy pair receipt must not become Mint inventory without H-indexing",
+    );
+    assert.equal(
+      files.some((file) => file.relativePath === "result.md"),
+      true,
+      "a pending extracted Mint must retain its source file",
+    );
   } finally {
     await second.client.close();
     await second.transport.close();
   }
+
+  const recovered = JSON.parse(readFileSync(config, "utf8")) as Record<string, string>;
+  const pendingMints = JSON.parse(recovered["zine.pending-coin-mints.v1"] ?? "[]") as Array<{
+    operationKey?: string;
+    coin?: Event;
+  }>;
+  assert.equal(
+    recovered["zine.pending-coin-mints.v1"],
+    legacyMintJournal,
+    "unsupported startup recovery must leave even overlapping legacy rows byte-for-byte unchanged",
+  );
+  assert.equal(pendingMints.length, 2);
+  assert.equal(pendingMints[0]?.operationKey, "legacy-published-pair");
+  assert.equal(pendingMints[0]?.coin?.id, legacyCoin.id);
+  assert.equal(pendingMints[1]?.operationKey, "legacy-overlapping-pair");
+  assert.equal(pendingMints[1]?.coin?.id, legacyCoin.id);
+  const recoveredOutbox = JSON.parse(
+    recovered["zine.pending-trace-events"] ?? "[]",
+  ) as Array<{ event?: Event }>;
+  assert.equal(
+    recoveredOutbox.some((record) => record.event?.id === legacyCoin.id),
+    false,
+    "restart recovery must not publish a legacy Coin while indexing is unavailable",
+  );
 });

@@ -20,9 +20,38 @@ test("MCP materializes a Coin only at the completed public boundary", () => {
   assert.match(persistLocal, /coinComplete: true/);
 });
 
-test("MCP startup resumes durable Mint transactions without another tool call", () => {
+test("headless Mint fails before publication when no Kademlia indexer exists", async () => {
+  const {
+    mcpMintIndexingBackendAvailable,
+    requireMcpMintIndexingBackend,
+  } = await import("./tools.js");
+  assert.equal(mcpMintIndexingBackendAvailable(), false);
+  assert.throws(
+    () => requireMcpMintIndexingBackend(),
+    /requires a headless Kademlia indexing backend/,
+  );
+  const mint = source.slice(source.indexOf('"zine_mint_span"'), source.indexOf('"zine_delete"'));
+  assert.ok(
+    mint.indexOf("requireMcpMintIndexingBackend()") < mint.indexOf("preparePendingCoinMint("),
+  );
+  assert.match(
+    source,
+    /publishPair: async \(\) => \{[\s\S]*?requireMcpMintIndexingBackend\(\)/,
+  );
+  assert.match(
+    source,
+    /restoreAttestation: \(\) => \{[\s\S]*?requireMcpMintIndexingBackend\(\)/,
+  );
+});
+
+test("MCP installs startup Mint recovery only when an indexing backend is available", () => {
   assert.match(source, /export function mcpCoinMintCompletion/);
   assert.match(source, /export async function resumeMcpPendingCoinMints/);
+  assert.match(
+    source,
+    /export async function resumeMcpPendingCoinMints\([\s\S]*?\) \{\s*requireMcpMintIndexingBackend\(\);\s*const ref = requireFolder/,
+    "unsupported startup recovery must fail before it can read and mutate the Mint journal",
+  );
   assert.match(source, /finalizeSource: async \(record\)/);
   assert.match(source, /persistMembership: async \(record\)/);
   assert.match(source, /persistLocal: \(record\)/);
@@ -31,6 +60,10 @@ test("MCP startup resumes durable Mint transactions without another tool call", 
   const recovery = serverSource.indexOf("const syncPendingMints = async");
   assert.ok(attach >= 0 && recovery > attach, "Mint recovery must start only after workspace attach");
   assert.match(serverSource, /pendingMcpCoinMintCount\(workspace\) === 0/);
+  assert.match(
+    serverSource,
+    /const installMintRecovery = \(\) => \{[\s\S]*?if \(mcpMintIndexingBackendAvailable\(\)\) installMintRecovery\(\)/,
+  );
   assert.match(
     serverSource,
     /await runMcpMintLifecycle\([\s\S]*?resumeMcpPendingCoinMints\(workspace, voice\)/,
@@ -49,4 +82,40 @@ test("MCP startup resumes durable Mint transactions without another tool call", 
   assert.match(serverSource, /mintJournalWatch\.unref\(\)/);
   assert.doesNotMatch(serverSource, /const mintSyncTimer = setInterval/);
   assert.match(source, /runMcpMintLifecycle\(async \(\) => \{/);
+});
+
+test("every mutating MCP handler shares the Mint recovery lifecycle queue", () => {
+  for (const tool of ["zine_step", "zine_send", "zine_attest", "zine_mint_span", "zine_delete"]) {
+    const start = source.indexOf(`"${tool}"`);
+    const next = source.indexOf("server.tool(", start + 1);
+    const handler = source.slice(start, next === -1 ? undefined : next);
+    assert.match(handler, /=> runMcpMintLifecycle\(async \(\) => \{/);
+  }
+});
+
+test("a concurrent Step waits for startup Mint recovery to release the mutation queue", async () => {
+  const { runMcpMintLifecycle } = await import("./tools.js");
+  let releaseRecovery!: () => void;
+  const order: string[] = [];
+  const recovery = runMcpMintLifecycle(async () => {
+    order.push("recovery-start");
+    await new Promise<void>((resolve) => { releaseRecovery = resolve; });
+    order.push("recovery-end");
+  });
+  const step = runMcpMintLifecycle(async () => {
+    order.push("step");
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ["recovery-start"]);
+  releaseRecovery();
+  await Promise.all([recovery, step]);
+  assert.deepEqual(order, ["recovery-start", "recovery-end", "step"]);
+});
+
+test("MCP authenticates an extracted source before deriving or journaling a Mint", () => {
+  const mint = source.slice(source.indexOf('"zine_mint_span"'), source.indexOf('"zine_delete"'));
+  const verified = mint.indexOf("verifiedFileSourceSnapshot(sourceEvent, originNodeId)");
+  const hashed = mint.indexOf("sha256HexLocal(sourceSnapshot)");
+  const prepared = mint.indexOf("preparePendingCoinMint(operationKey");
+  assert.ok(verified >= 0 && verified < hashed && hashed < prepared);
 });

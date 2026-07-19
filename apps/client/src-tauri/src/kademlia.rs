@@ -1,10 +1,9 @@
-//! Native Kademlia rendezvous for globally discovering Sent coin citations.
+//! Native Kademlia rendezvous for globally discovering completed Coin Mints.
 //!
 //! The DHT is deliberately an index, never a content store or trust oracle.
 //! A record at `H` is a bounded set of `{eventId, relayUrl}` pointers. The
-//! webview verifies every pointer against the signed carrying event, its `q`
-//! edge, the cited Coin's body/`x`, and its same-minter attestation before
-//! surfacing it.
+//! webview verifies every pointer against the immutable Coin genesis, its
+//! body/`x`, and a valid same-minter TraceAttestation before surfacing it.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -52,17 +51,10 @@ const LOOKUP_COMMAND_TIMEOUT: Duration = Duration::from_secs(18);
 const PUBLISH_COMMAND_TIMEOUT: Duration = Duration::from_secs(28);
 const MAX_POINTERS_PER_COORDINATE: usize = 64;
 const MAX_OWNED_COORDINATES: usize = 2_048;
-const MAX_RELAY_URL_BYTES: usize = 256;
+const MAX_RELAY_URL_BYTES: usize = 2_048;
 const MAX_RECORD_BYTES: usize = 12 * 1024;
 const MAX_OWNED_POINTER_FILE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_STARTUP_REPUBLISH_QUERIES: usize = 4;
-/// Hard ceiling on a single republish query, after which the event loop
-/// reclaims the `republish_in_flight` slot itself. libp2p's own
-/// `QUERY_TIMEOUT` (12s) is supposed to emit a terminal event, but if it ever
-/// drops a query without one, this is the structural backstop.
-const REPUBLISH_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
-/// Cadence at which the event loop sweeps expired republish deadlines.
-const REPUBLISH_DEADLINE_TICK: Duration = Duration::from_secs(5);
 const MAX_REMOTE_RECORDS: usize = 1_024;
 const MAX_PENDING_PERSISTENCE: usize = 64;
 const MAX_PRE_CANCELLED_OPERATIONS: usize = 256;
@@ -318,17 +310,12 @@ struct EventLoop {
     pending_gets: HashMap<kad::QueryId, PendingGet>,
     pending_puts: HashMap<kad::QueryId, PendingPut>,
     pending_persists: VecDeque<PendingPersist>,
-    cancelled_operations: BTreeSet<String>,
+    pre_cancelled_operations: VecDeque<String>,
+    cancelled_persist_operations: BTreeSet<String>,
     persistence_tasks: FuturesUnordered<JoinHandle<PersistResult>>,
     republish_queue: VecDeque<String>,
     republish_pending: BTreeSet<String>,
     republish_in_flight: usize,
-    /// QueryIds of in-flight republish queries (GetRecord leg, then the
-    /// PutRecord leg that follows it), with the deadline after which the event
-    /// loop reclaims the slot itself if libp2p never emits a terminal
-    /// `OutboundQueryProgressed`. Defense-in-depth against `republish_in_flight`
-    /// leaking and background republish stalling.
-    republish_deadlines: HashMap<kad::QueryId, Instant>,
     owned: BTreeMap<String, Vec<RendezvousPointer>>,
     store_owned: Arc<RwLock<BTreeMap<String, Vec<RendezvousPointer>>>>,
     owned_path: PathBuf,
@@ -420,8 +407,6 @@ impl EventLoop {
         self.fill_republish_window();
         let mut publication_timer =
             interval_at(Instant::now() + PUBLICATION_INTERVAL, PUBLICATION_INTERVAL);
-        let mut deadline_timer =
-            interval_at(Instant::now() + REPUBLISH_DEADLINE_TICK, REPUBLISH_DEADLINE_TICK);
         let mut stop_reply = None;
         loop {
             tokio::select! {
@@ -453,7 +438,6 @@ impl EventLoop {
                     }
                 }
                 _ = publication_timer.tick() => self.enqueue_republish_cycle(),
-                _ = deadline_timer.tick() => self.sweep_republish_deadlines(),
                 event = self.swarm.select_next_some() => self.handle_swarm_event(event),
             }
         }
@@ -494,7 +478,7 @@ impl EventLoop {
         pointer: RendezvousPointer,
         reply: oneshot::Sender<Result<(), String>>,
     ) {
-        if self.cancelled_operations.remove(&operation_id) {
+        if self.take_pre_cancelled_operation(&operation_id) {
             let _ = reply.send(Err("Kademlia operation was cancelled".to_string()));
             return;
         }
@@ -539,12 +523,15 @@ impl EventLoop {
         let result = result
             .map_err(|error| format!("Kademlia persistence task failed: {error}"))
             .and_then(|result| result);
+        let was_cancelled = self
+            .cancelled_persist_operations
+            .remove(&pending.operation_id);
         match result {
             Ok(pointers) if continue_publish => {
                 if let Err(error) = self.remember_owned(&pending.coordinate, pointers) {
                     self.last_error = Some(error.clone());
                     let _ = pending.reply.send(Err(error));
-                } else if self.cancelled_operations.remove(&pending.operation_id) {
+                } else if was_cancelled {
                     let _ = pending
                         .reply
                         .send(Err("Kademlia operation was cancelled".to_string()));
@@ -610,7 +597,7 @@ impl EventLoop {
         coordinate: String,
         reply: oneshot::Sender<Result<Vec<RendezvousPointer>, String>>,
     ) {
-        if self.cancelled_operations.remove(&operation_id) {
+        if self.take_pre_cancelled_operation(&operation_id) {
             let _ = reply.send(Err("Kademlia operation was cancelled".to_string()));
             return;
         }
@@ -628,6 +615,33 @@ impl EventLoop {
                 reply,
             },
         );
+    }
+
+    fn take_pre_cancelled_operation(&mut self, operation_id: &str) -> bool {
+        let Some(index) = self
+            .pre_cancelled_operations
+            .iter()
+            .position(|candidate| candidate == operation_id)
+        else {
+            return false;
+        };
+        self.pre_cancelled_operations.remove(index);
+        true
+    }
+
+    fn remember_pre_cancelled_operation(&mut self, operation_id: &str) {
+        if self
+            .pre_cancelled_operations
+            .iter()
+            .any(|candidate| candidate == operation_id)
+        {
+            return;
+        }
+        if self.pre_cancelled_operations.len() >= MAX_PRE_CANCELLED_OPERATIONS {
+            self.pre_cancelled_operations.pop_front();
+        }
+        self.pre_cancelled_operations
+            .push_back(operation_id.to_string());
     }
 
     fn cancel_operation(&mut self, operation_id: &str) {
@@ -663,7 +677,8 @@ impl EventLoop {
             .is_some_and(|pending| pending.operation_id == operation_id)
             && !self.persistence_tasks.is_empty()
         {
-            self.cancelled_operations.insert(operation_id.to_string());
+            self.cancelled_persist_operations
+                .insert(operation_id.to_string());
             return;
         }
 
@@ -683,9 +698,7 @@ impl EventLoop {
         // IPC calls and their cancellation commands are dispatched by separate
         // tasks. Remember a bounded set so cancellation still wins if it is
         // delivered just before the operation itself.
-        if self.cancelled_operations.len() < MAX_PRE_CANCELLED_OPERATIONS {
-            self.cancelled_operations.insert(operation_id.to_string());
-        }
+        self.remember_pre_cancelled_operation(operation_id);
     }
 
     fn fill_republish_window(&mut self) {
@@ -705,51 +718,7 @@ impl EventLoop {
                     pointers: BTreeSet::new(),
                 },
             );
-            // Record a deadline so the event loop can reclaim the slot itself
-            // if libp2p never emits a terminal `OutboundQueryProgressed` for
-            // this query. `QUERY_TIMEOUT` is supposed to guarantee one; this is
-            // the structural backstop that keeps the in-flight counter honest.
-            self.republish_deadlines
-                .insert(id, Instant::now() + REPUBLISH_QUERY_TIMEOUT);
             self.republish_in_flight += 1;
-        }
-    }
-
-    fn sweep_republish_deadlines(&mut self) {
-        if self.republish_deadlines.is_empty() {
-            return;
-        }
-        let now = Instant::now();
-        let expired: Vec<kad::QueryId> = self
-            .republish_deadlines
-            .iter()
-            .filter_map(|(id, deadline)| (*deadline <= now).then_some(*id))
-            .collect();
-        for id in expired {
-            self.republish_deadlines.remove(&id);
-            // A republish's deadline may cover either leg — the GetRecord query
-            // (pending_gets) or the PutRecord query that follows it
-            // (pending_puts). Reap whichever map holds the expired id.
-            let coordinate = self
-                .pending_gets
-                .remove(&id)
-                .and_then(|pending| match pending {
-                    PendingGet::Republish { coordinate, .. } => Some(coordinate),
-                    _ => None,
-                })
-                .or_else(|| {
-                    self.pending_puts.remove(&id).and_then(|pending| match pending {
-                        PendingPut::Republish { coordinate } => Some(coordinate),
-                        _ => None,
-                    })
-                });
-            if let Some(coordinate) = coordinate {
-                self.last_error = Some(format!(
-                    "Kademlia republish query for {coordinate} did not terminate within {:?}; reclaiming the slot",
-                    REPUBLISH_QUERY_TIMEOUT,
-                ));
-                self.finish_republish(coordinate);
-            }
         }
     }
 
@@ -791,9 +760,6 @@ impl EventLoop {
                     ..
                 },
             )) if step.last || result.is_err() => {
-                // The PutRecord leg of a republish recorded its own deadline in
-                // finish_get; clear it now that the terminal event arrived.
-                self.republish_deadlines.remove(&id);
                 if let Some(pending) = self.pending_puts.remove(&id) {
                     // N(8) forces libp2p to run the complete closest-peer Put
                     // instead of returning after the first ACK. A genuinely
@@ -855,10 +821,6 @@ impl EventLoop {
     }
 
     fn finish_get(&mut self, id: kad::QueryId) {
-        // The GetRecord query has terminated (success or error), so its
-        // republish deadline is obsolete even if the matching PutRecord has
-        // not yet fired finish_republish.
-        self.republish_deadlines.remove(&id);
         let Some(mut pending) = self.pending_gets.remove(&id) else {
             return;
         };
@@ -912,12 +874,6 @@ impl EventLoop {
                     Ok(Some(query_id)) => {
                         self.pending_puts
                             .insert(query_id, PendingPut::Republish { coordinate });
-                        // The GetRecord leg's deadline was cleared at the top of
-                        // finish_get. Record a fresh deadline for the PutRecord
-                        // leg so the sweep can reclaim this slot too if libp2p
-                        // ever drops the PutRecord terminal event.
-                        self.republish_deadlines
-                            .insert(query_id, Instant::now() + REPUBLISH_QUERY_TIMEOUT);
                     }
                     Ok(None) => self.finish_republish(coordinate),
                     Err(error) => {
@@ -1206,11 +1162,11 @@ fn merged_bounded_pointers(
     pointers: BTreeSet<RendezvousPointer>,
     owned: Option<&[RendezvousPointer]>,
 ) -> Vec<RendezvousPointer> {
-    let mut result = Vec::with_capacity(MAX_POINTERS_PER_COORDINATE);
+    let mut ordered = Vec::with_capacity(MAX_POINTERS_PER_COORDINATE);
     let mut seen = BTreeSet::new();
     for pointer in owned.unwrap_or_default() {
         if seen.insert(pointer.clone()) {
-            result.push(pointer.clone());
+            ordered.push(pointer.clone());
         }
     }
     let mut ranked = pointers.into_iter().collect::<Vec<_>>();
@@ -1220,11 +1176,30 @@ fn merged_bounded_pointers(
             .then_with(|| left.cmp(right))
     });
     for pointer in ranked {
+        if seen.insert(pointer.clone()) {
+            ordered.push(pointer);
+        }
+    }
+
+    // Lookup merges can combine several individually valid 12 KiB records.
+    // Return only the deterministic owned-first/rank-ordered prefix that would
+    // itself remain a valid record instead of letting the union cross IPC or a
+    // later record-store boundary.
+    let mut result = Vec::with_capacity(MAX_POINTERS_PER_COORDINATE);
+    for pointer in ordered {
         if result.len() >= MAX_POINTERS_PER_COORDINATE {
             break;
         }
-        if seen.insert(pointer.clone()) {
-            result.push(pointer);
+        result.push(pointer);
+        let fits = serde_json::to_vec(&PointerRecord {
+            version: 1,
+            coordinate: coordinate.to_string(),
+            pointers: result.clone(),
+        })
+        .is_ok_and(|bytes| bytes.len() <= MAX_RECORD_BYTES);
+        if !fits {
+            result.pop();
+            break;
         }
     }
     result
@@ -1296,7 +1271,7 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
     let ietf_protocol_assignment = segments[0] == 0x2001 && segments[1] < 0x0200;
     let documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
     let deprecated_6to4 = segments[0] == 0x2002;
-    let documentation_v2 = (segments[0] & 0xfff0) == 0x3ff0;
+    let documentation_v2 = segments[0] & 0xfff0 == 0x3ff0;
     global_unicast
         && !ietf_protocol_assignment
         && !documentation
@@ -1307,6 +1282,26 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
         && !ip.is_unique_local()
         && !ip.is_unicast_link_local()
         && !ip.is_multicast()
+}
+
+/// Decode the deprecated IPv4-compatible IPv6 form (`::a.b.c.d`, first 96 bits
+/// zero with a non-zero trailing IPv4 tail). Unlike `to_ipv4_mapped`, this is
+/// not part of the modern spec, but some stacks still emit it, and the bare
+/// tail must be checked against the private-range gate so `::127.0.0.1` or
+/// `::192.168.1.1` cannot reach the dialer through a back door.
+fn ipv4_compatible(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    let octets = ip.octets();
+    let trailing_zero = octets[12..].iter().all(|&byte| byte == 0);
+    if octets[..12].iter().all(|&byte| byte == 0) && !trailing_zero {
+        Some(Ipv4Addr::new(
+            octets[12],
+            octets[13],
+            octets[14],
+            octets[15],
+        ))
+    } else {
+        None
+    }
 }
 
 /// Identify payloads are remote-controlled dialing hints. Admit only a public
@@ -1369,25 +1364,6 @@ fn validate_pointer(pointer: &RendezvousPointer) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// Decode the deprecated IPv4-compatible IPv6 form (`::a.b.c.d`, first 96 bits
-/// zero) as its trailing Ipv4Addr. Returns None for the mapped prefix
-/// (`::ffff:0:0/96`, handled by `to_ipv4_mapped`) and for the all-zero
-/// unspecified address `::` (so it is not silently treated as `0.0.0.0`).
-fn ipv4_compatible(ip: Ipv6Addr) -> Option<Ipv4Addr> {
-    let octets = ip.octets();
-    let trailing_zero = octets[12..].iter().all(|&byte| byte == 0);
-    if octets[..12].iter().all(|&byte| byte == 0) && !trailing_zero {
-        Some(Ipv4Addr::new(
-            octets[12],
-            octets[13],
-            octets[14],
-            octets[15],
-        ))
-    } else {
-        None
-    }
 }
 
 fn is_private_ipv4(ip: std::net::Ipv4Addr) -> bool {
@@ -1508,6 +1484,9 @@ fn persist_owned_pointers(
         records: owned.clone(),
     })
     .map_err(|error| format!("serialize owned Kademlia pointers: {error}"))?;
+    if bytes.len() > MAX_OWNED_POINTER_FILE_BYTES {
+        return Err("owned Kademlia pointer index is full".to_string());
+    }
     let temporary = path.with_extension("json.tmp");
     match fs::symlink_metadata(&temporary) {
         Ok(metadata) => {
@@ -1905,12 +1884,12 @@ async fn start_runtime(
             pending_gets: HashMap::new(),
             pending_puts: HashMap::new(),
             pending_persists: VecDeque::new(),
-            cancelled_operations: BTreeSet::new(),
+            pre_cancelled_operations: VecDeque::new(),
+            cancelled_persist_operations: BTreeSet::new(),
             persistence_tasks: FuturesUnordered::new(),
             republish_queue,
             republish_pending,
             republish_in_flight: 0,
-            republish_deadlines: HashMap::new(),
             owned,
             store_owned,
             owned_path,
@@ -2225,6 +2204,56 @@ mod tests {
     }
 
     #[test]
+    fn merged_lookup_result_preserves_priority_within_the_record_byte_limit() {
+        let required = pointer('f', "wss://owned.example/");
+        let long_relay = format!("wss://relay.example/{}", "a".repeat(220));
+        let first = (0..30)
+            .map(|index| RendezvousPointer {
+                event_id: format!("{index:064x}"),
+                relay_url: long_relay.clone(),
+            })
+            .collect::<BTreeSet<_>>();
+        let second = (30..60)
+            .map(|index| RendezvousPointer {
+                event_id: format!("{index:064x}"),
+                relay_url: long_relay.clone(),
+            })
+            .collect::<BTreeSet<_>>();
+        for batch in [&first, &second] {
+            let encoded = encode_pointer_record(H, batch.clone(), &[])
+                .expect("each remote record fits independently");
+            assert_eq!(
+                parse_pointer_record(&encoded, H)
+                    .expect("parse independent record")
+                    .pointers
+                    .len(),
+                batch.len(),
+            );
+        }
+
+        let union = first.into_iter().chain(second).collect::<BTreeSet<_>>();
+        let merged =
+            merged_bounded_pointers(H, union.clone(), Some(std::slice::from_ref(&required)));
+        let encoded = serde_json::to_vec(&PointerRecord {
+            version: 1,
+            coordinate: H.to_string(),
+            pointers: merged.clone(),
+        })
+        .expect("serialize bounded merged result");
+        assert!(encoded.len() <= MAX_RECORD_BYTES);
+        assert_eq!(merged.first(), Some(&required));
+        assert!(merged.len() < union.len());
+        assert!(merged[1..]
+            .windows(2)
+            .all(|pair| pointer_rank(H, &pair[0]) <= pointer_rank(H, &pair[1])));
+        assert_eq!(
+            merged,
+            merged_bounded_pointers(H, union, Some(std::slice::from_ref(&required))),
+            "merged truncation must be deterministic",
+        );
+    }
+
+    #[test]
     fn pointer_validation_rejects_private_onion_and_non_websocket_relays() {
         assert!(validate_pointer(&pointer('b', "ws://127.0.0.1:4869")).is_err());
         assert!(validate_pointer(&pointer('b', "wss://private.example.onion")).is_err());
@@ -2233,6 +2262,73 @@ mod tests {
         assert!(validate_pointer(&pointer('b', "ws://[::ffff:127.0.0.1]")).is_err());
         assert!(validate_pointer(&pointer('b', "ws://[::ffff:192.168.1.5]")).is_err());
         assert!(validate_pointer(&pointer('b', "wss://relay.example")).is_ok());
+    }
+
+    #[test]
+    fn pointer_validation_rejects_ipv4_compatible_and_special_purpose_ipv6() {
+        // The deprecated IPv4-compatible form (::a.b.c.d) is not unwrapped by
+        // to_ipv4_mapped; without the explicit decode these private literals
+        // bypass validate_pointer and poison the rendezvous index.
+        assert!(validate_pointer(&pointer('b', "ws://[::127.0.0.1]")).is_err());
+        assert!(validate_pointer(&pointer('b', "ws://[::192.168.1.1]")).is_err());
+        assert!(validate_pointer(&pointer('b', "ws://[::10.0.0.4]")).is_err());
+        assert!(validate_pointer(&pointer('b', "ws://[::c0a8:0101]")).is_err());
+        // Special-purpose IPv6 ranges that validate_pointer treats as private.
+        // Documentation ranges (2001:db8::/32) are not "private" per spec §2.2
+        // and are rejected only by the stricter is_public_ipv6 dialer gate,
+        // exercised in identify_address_blocks_ipv4_compatible_and_special_purpose_ipv6.
+        assert!(validate_pointer(&pointer('b', "ws://[fe80::1]")).is_err());
+        assert!(validate_pointer(&pointer('b', "ws://[fd00::1]")).is_err());
+        assert!(validate_pointer(&pointer('b', "ws://[ff02::1]")).is_err());
+        // A public IPv4-compatible address is still admissible.
+        assert!(validate_pointer(&pointer('b', "ws://[::8.8.8.8]")).is_ok());
+    }
+
+    #[test]
+    fn identify_address_blocks_ipv4_compatible_and_special_purpose_ipv6() {
+        // The dialer-facing SSRF gate must reject private IPv4-compatible and
+        // special-purpose IPv6 literals and admit a public mapped address.
+        for unsafe_address in [
+            "/ip6/::127.0.0.1/tcp/4001",
+            "/ip6/::192.168.1.1/tcp/4001",
+            "/ip6/::c0a8:0101/tcp/4001",
+            "/ip6/2001:db8::1/tcp/4001",
+            "/ip6/fd00::1/tcp/4001",
+            "/ip6/fe80::1/tcp/4001",
+            "/ip6/ff02::1/tcp/4001",
+        ] {
+            let parsed: Multiaddr = unsafe_address.parse().expect("valid test multiaddr");
+            assert!(
+                !is_safe_identify_address(&parsed),
+                "accepted {unsafe_address}"
+            );
+        }
+        let mapped: Multiaddr = "/ip6/::ffff:8.8.8.8/tcp/4001".parse().unwrap();
+        assert!(is_safe_identify_address(&mapped));
+        let compatible_public: Multiaddr = "/ip6/::8.8.8.8/tcp/4001".parse().unwrap();
+        assert!(is_safe_identify_address(&compatible_public));
+    }
+
+    #[test]
+    fn pointer_validation_uses_the_shared_long_relay_url_bound() {
+        let prefix = "wss://relay.example/";
+        let accepted = format!("{prefix}{}", "a".repeat(MAX_RELAY_URL_BYTES - prefix.len()));
+        assert_eq!(accepted.len(), MAX_RELAY_URL_BYTES);
+        assert!(validate_pointer(&RendezvousPointer {
+            event_id: "b".repeat(64),
+            relay_url: accepted,
+        })
+        .is_ok());
+
+        let rejected = format!(
+            "{prefix}{}",
+            "a".repeat(MAX_RELAY_URL_BYTES + 1 - prefix.len())
+        );
+        assert!(validate_pointer(&RendezvousPointer {
+            event_id: "b".repeat(64),
+            relay_url: rejected,
+        })
+        .is_err());
     }
 
     #[test]
@@ -2641,6 +2737,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn persistence_never_commits_an_owned_pointer_file_the_loader_will_reject() {
+        let root = temporary_test_root("oversized-new-persistence");
+        fs::create_dir_all(&root).expect("test directory");
+        let path = root.join(OWNED_POINTERS_FILENAME);
+        let mut owned = BTreeMap::new();
+        owned.insert(
+            H.to_string(),
+            vec![RendezvousPointer {
+                event_id: "b".repeat(64),
+                relay_url: format!(
+                    "wss://relay.example/{}",
+                    "a".repeat(MAX_OWNED_POINTER_FILE_BYTES)
+                ),
+            }],
+        );
+
+        assert!(persist_owned_pointers(&path, &owned)
+            .expect_err("oversized owned state must fail before commit")
+            .contains("index is full"));
+        assert!(!path.exists());
+        assert!(!path.with_extension("json.tmp").exists());
+        fs::remove_dir_all(root).expect("remove persistence test directory");
+    }
+
     async fn wait_for_status(
         client: &KademliaClient,
         predicate: impl Fn(&KademliaStatus) -> bool,
@@ -2809,6 +2930,27 @@ mod tests {
 
         client.stop().await;
         fs::remove_dir_all(root).expect("remove cancellation test directory");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn newest_pre_cancel_survives_a_full_bounded_registry() {
+        let root = temporary_test_root("full-pre-cancelled-lookup");
+        let client = start_runtime(root.clone(), local_test_config())
+            .await
+            .expect("start full cancellation registry test runtime");
+        for index in 0..MAX_PRE_CANCELLED_OPERATIONS {
+            client.cancel(format!("stale-cancel-{index}")).await;
+        }
+        let newest = "newest-pre-cancel".to_string();
+        client.cancel(newest.clone()).await;
+        let error = client
+            .lookup(newest, H.to_string())
+            .await
+            .expect_err("the newest cancellation must never be discarded");
+        assert!(error.contains("cancelled"));
+
+        client.stop().await;
+        fs::remove_dir_all(root).expect("remove full cancellation registry directory");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

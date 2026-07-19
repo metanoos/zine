@@ -25,6 +25,7 @@
  */
 
 import {
+  assertPublicationFence,
   createFolderGenesis,
   diffToDeltas,
   fetchChain,
@@ -59,6 +60,7 @@ import {
   upsertManifestEntry,
   type KEdit,
   type ManifestFileEntry,
+  type PublicationFence,
 } from "../provenance/provenance.js";
 import { createTraceOperationId } from "@zine/protocol";
 import { findAddedInlineCitations, findResolvedBrackets } from "../provenance/brackets.js";
@@ -775,8 +777,10 @@ export async function propagateLocalTreeFolderHead(
   changedHead: import("nostr-tools").Event,
   signer: Uint8Array,
   localOnly?: boolean,
+  publicationFence?: PublicationFence,
   verifyAcceptedOperation?: boolean,
 ): Promise<void> {
+  assertPublicationFence(publicationFence);
   if (!isPathInsideTree(tree, changedFolderPath)) {
     throw new Error(
       `folder ${changedFolderPath} escapes ${tree.storagePath || "Root"}`,
@@ -808,7 +812,7 @@ export async function propagateLocalTreeFolderHead(
         contentHash: folderNodeContentHash(head),
       },
       parentSigner,
-      { localOnly, operationId, monotonicFolderId: folderId },
+      { localOnly, operationId, monotonicFolderId: folderId, publicationFence },
     );
     if (verifyAcceptedOperation) {
       head = await requireAcceptedCurrentFolderCheckpoint(
@@ -818,6 +822,7 @@ export async function propagateLocalTreeFolderHead(
         { localOnly },
       );
     }
+    assertPublicationFence(publicationFence);
     operationId = operationIdFromNode(head);
     folderPath = parentPath;
     folderId = parentId;
@@ -1088,6 +1093,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     changedHead: import("nostr-tools").Event,
     signer: Uint8Array,
     localOnly?: boolean,
+    publicationFence?: PublicationFence,
     verifyAcceptedOperation?: boolean,
   ): Promise<void> {
     await propagateLocalTreeFolderHead(
@@ -1097,11 +1103,17 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       changedHead,
       signer,
       localOnly,
+      publicationFence,
       verifyAcceptedOperation,
     );
   }
 
-  async function pushToRelay(rootId: string, storagePath: string): Promise<string> {
+  async function pushToRelay(
+    rootId: string,
+    storagePath: string,
+    publicationFence?: PublicationFence,
+  ): Promise<string> {
+    assertPublicationFence(publicationFence);
     const local = loadLocalFolder(rootId);
     if (!local) return "";
     const file = local.files[storagePath];
@@ -1109,6 +1121,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     if (file.kind === "folder") return file.nodeId;
     const content = file.content;
     const contentHash = await sha256Hex(content);
+    assertPublicationFence(publicationFence);
     const operationId = file.pendingOperationId ?? createTraceOperationId();
     if (!file.pendingOperationId) {
       // Persist before the first network write so recovery reuses the same
@@ -1406,6 +1419,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       throw new Error(`cannot write through foreign folder ${folderId}; fork the folder first`);
     }
     const propagateFileNode = async (event: import("nostr-tools").Event) => {
+      assertPublicationFence(publicationFence);
       if (moveSource && fromEntry && moveSource.folderId === folderId) {
         const folderHead = await renameManifestEntry(
           folderId,
@@ -1426,6 +1440,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           folderHead,
           folderSigner,
           file.pendingLocalOnly,
+          publicationFence,
         );
         return;
       }
@@ -1435,7 +1450,11 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         relativePath,
         latestNodeId: event.id,
         contentHash,
-      }, folderSigner, { localOnly: file.pendingLocalOnly, operationId });
+      }, folderSigner, {
+        localOnly: file.pendingLocalOnly,
+        operationId,
+        publicationFence,
+      });
       await propagateFolderHead(
         rootId,
         folderPath,
@@ -1443,8 +1462,10 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         folderHead,
         folderSigner,
         file.pendingLocalOnly,
+        publicationFence,
       );
       if (moveSource && fromEntry) {
+        assertPublicationFence(publicationFence);
         const sourceOwner = await fetchFolderOwner(moveSource.folderId);
         const sourceSigner = folderWriteSigner(sourceOwner, signer);
         if (!sourceSigner) {
@@ -1470,9 +1491,11 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
             sourceHead,
             sourceSigner,
             file.pendingLocalOnly,
+            publicationFence,
           );
         }
       }
+      assertPublicationFence(publicationFence);
     };
     const finalizeFileNode = (event: import("nostr-tools").Event) => {
       saveLocalFileDurably("completed file Step", rootId, storagePath, {
@@ -1727,8 +1750,10 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       ...(file.pendingLocalOnly ? { localOnly: true } : {}),
       signer,
       operationId,
+      publicationFence,
       onSigned: persistPendingFileNode,
     }), persistPendingFileNode, propagateFileNode);
+    assertPublicationFence(publicationFence);
     // Reflect the stepped node id back into local state so the next push's
     // prevId is correct. Preserve voicePubkey so re-pushes stay correctly signed,
     // and runs so the local record keeps the per-char attribution it just stepped
@@ -1746,7 +1771,9 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
   async function flushStagedFileUnlocked(
     rootId: string,
     relativePath: string,
+    publicationFence?: PublicationFence,
   ): Promise<string> {
+    assertPublicationFence(publicationFence);
     const timerKey = pushTimerKey(rootId, relativePath);
     const timer = pushTimers.get(timerKey);
     if (timer) {
@@ -1754,9 +1781,14 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       pushTimers.delete(timerKey);
     }
     return completeStagedWrite(
-      () => pushToRelay(rootId, relativePath),
+      () => pushToRelay(rootId, relativePath, publicationFence),
       () => {
-        if (ref?.id === rootId) schedulePush(relativePath, undefined, rootId);
+        try {
+          assertPublicationFence(publicationFence);
+          if (ref?.id === rootId) schedulePush(relativePath, undefined, rootId);
+        } catch {
+          // A stale recovery lease must not schedule work into the next vault.
+        }
       },
     );
   }
@@ -1764,22 +1796,27 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
   async function flushStagedFileWithinRoot(
     rootId: string,
     relativePath: string,
+    publicationFence?: PublicationFence,
   ): Promise<string> {
     return runResourceSerialized(
       fileStepRuns,
       `${rootId}:${relativePath}`,
-      () => flushStagedFileUnlocked(rootId, relativePath),
+      () => flushStagedFileUnlocked(rootId, relativePath, publicationFence),
     );
   }
 
-  async function flushStagedFile(relativePath: string): Promise<string> {
+  async function flushStagedFile(
+    relativePath: string,
+    publicationFence?: PublicationFence,
+  ): Promise<string> {
+    assertPublicationFence(publicationFence);
     const rootId = requireId();
     const operationId = loadLocalFolder(rootId)?.files[relativePath]?.pendingOperationId ??
       createTraceOperationId();
     return runWorkspaceRootMutation(
       rootId,
       operationId,
-      () => flushStagedFileWithinRoot(rootId, relativePath),
+      () => flushStagedFileWithinRoot(rootId, relativePath, publicationFence),
     );
   }
 
@@ -2708,7 +2745,9 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       localOnly?: boolean,
       force?: boolean,
       requestedOperationId?: string,
+      publicationFence?: PublicationFence,
     ): Promise<string> {
+      assertPublicationFence(publicationFence);
       relativePath = ensureMdExt(relativePath);
       const id = requireId();
       const operationId = requestedOperationId ?? createTraceOperationId();
@@ -2718,7 +2757,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
             ?.pendingOperationId;
           return stageFileStepAfterPendingRecovery(
             pendingOperationId,
-            () => flushStagedFileUnlocked(id, relativePath),
+            () => flushStagedFileUnlocked(id, relativePath, publicationFence),
             async () => {
               // Reload after recovery: the prior exact signed Step and its
               // folder cascade may have advanced both node and trace identity.
@@ -2743,7 +2782,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
                 pendingEmptyGenesis: existing?.pendingEmptyGenesis,
                 pendingOperationId: operationId,
               });
-              return flushStagedFileUnlocked(id, relativePath);
+              return flushStagedFileUnlocked(id, relativePath, publicationFence);
             },
           );
         }),

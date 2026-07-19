@@ -1,13 +1,14 @@
 # Rendezvous, Vetting & Anteriority (draft)
 
 Status: draft, unpublished. This document specifies how strangers with no
-shared peer or relay may discover each other through matching citations, then
+shared peer or relay may discover each other by having minted the same Coin
+content, then
 evaluate process evidence before admitting the other signer's key.
 
 It introduces three things the provenance and transport protocols do not have:
 
-1. **Trace-derived content rendezvous** — a coordinate derived from a cited
-   trace's verified content, without adding a second citation primitive.
+1. **Coin-derived content rendezvous** — a coordinate derived from a completed
+   Mint's verified content. Citation remains a separate usage signal.
 2. **Optional distributed anteriority** — NIP-03/OTS timestamps attached to
    the frequent gesture (Step), not the rare one (Attest). When available,
    repeated proofs make a trace's save history impossible to backdate: a
@@ -20,14 +21,12 @@ It introduces three things the provenance and transport protocols do not have:
 **Reading guide.** Part I specifies current rules and labels unimplemented
 sketches. Part II records the rationale.
 
-**Product packaging and status.** Coins are the sole user-facing discovery
-opt-in. Ordinary citation works without it. Enabling Coins covers Mint,
-valid-Coin Send-side indexing, and mutual-peer plus global Coin rendezvous.
-Kademlia is the routing component inside that package, not a separate feature
-or setting. Its core routing path is integrated and exercised in the reference
-package. An operated bootstrap network, deployment evidence, and production
-security hardening remain future work. The normative rules below define the
-intended interoperable behavior.
+**Product packaging and status.** Coins are the sole user-facing opt-in.
+Enabling Coins covers Mint, Cite, Mint-side indexing, and mutual-peer plus
+global rendezvous. Kademlia is the routing component inside that package, not
+a separate feature or setting, and remains under implementation. The normative
+rules below define the intended interoperable behavior even where the reference
+package is incomplete.
 
 ---
 
@@ -38,9 +37,9 @@ intended interoperable behavior.
 - **Coin** — a selected or directly-authored span made into an immutable
   first-class TraceNode, published and attested by its minter in one compound
   Mint gesture. Mint gives the text a node id and `x` body hash; an extracted
-  Coin also carries source lineage. The public Coin declares supply, but does
-  not create a rendezvous pointer without a published trace citing it.
-- **`H`** — the verified content hash of a cited Coin:
+  Coin also carries source lineage. Once the completed Mint is publicly
+  fetchable, the Coin itself is eligible for rendezvous indexing.
+- **`H`** — the verified content hash of a completed Coin:
   `sha256(canonical(traceBody))`. The Coins package's **rendezvous coordinate**.
   It is an index key derived from a trace, not a citation and not a replacement
   for the trace's node id.
@@ -48,7 +47,7 @@ intended interoperable behavior.
   `q` targeting a TraceNode (§3.3). An explicit body bracket and a tacit,
   bodyless tag are presentation roles over the same edge.
 - **Rendezvous layer** — the network component inside the opt-in Coins package
-  that answers "who else Sent a cite under `H`?" A Kademlia DHT (§2). Distinct
+  that answers "who else completed a Mint under `H`?" A Kademlia DHT (§2). Distinct
   from the access-policy mesh (`transport.md` §2), which answers "who may read
   *me*?"
 - **Anteriority** — proof that a commitment existed *before* some time T.
@@ -59,42 +58,43 @@ intended interoperable behavior.
 - **Vet** — the automated machine-read of a fetched trace's process signal. A
   cost-raising admission heuristic, not a proof of author identity or humanity.
 
-## 1. Neutral citation, Coin rendezvous
+## 1. Mint and citation are separate signals
 
 There is no orphan-text citation and no uppercase `Q` tag. Text must become a
 trace before it can be cited:
 
 1. `[[text]]` is local draft syntax and emits no citation or social signal.
-2. A resolved inline bracket may cite any exact stepped source with ordinary
-   lowercase `q`. This is neutral composition: a writer may quote a source they
-   reject. A bodyless tag uses the same edge with `role: "tag"`.
-3. **Mint** is optional affirmative curation. It creates a first-class Coin
-   whose body is `text` and whose `x` tag is its content hash, Publishes that
-   exact genesis, and Attests it under the same minter key. An extracted Coin's
-   `extracted-from` edge names the source version. This public pair declares
-   Coin supply but emits no rendezvous pointer by itself.
-4. **Send** changes reachability. When the carrying trace is Sent, all of its
-   `q` edges become observable on destination relays, but only targets that
-   verify as Coins are eligible for Coins rendezvous indexing. Outside compound
-   Mint, citation does not imply Attest; Attest remains a separate commitment
-   to an already-Sent node.
+2. **Mint** Steps a first-class Coin whose body is `text` and whose `x` tag
+   is its content hash, Publishes that exact genesis, and Attests it under the
+   minter key. An extracted Coin's `extracted-from` edge names the source
+   version. Once the Coin and same-minter attestation are publicly fetchable,
+   the client publishes a rendezvous pointer for the Coin under `H`. No later
+   citation is required.
+3. The containing trace cites the minted node with ordinary lowercase `q`.
+   If part of the target appears in the body bracket, the citation is
+   **explicit** (`role: "inline"`). If the target is attached without quoted
+   body text, it is **tacit** (`role: "tag"`). Both are the same `q` edge.
+4. **Send** changes the reachability of a containing trace and its `q` edges,
+   but does not create or gate Mint rendezvous membership. A citation records
+   that its signer used or referred to a particular Coin; it is useful process
+   evidence after discovery, not a prerequisite for discovery. Outside
+   compound Mint, citation does not imply Attest; Attest remains a separate
+   commitment to an already-Sent node.
 
-This removes the ambiguous state in which bytes were socially cited without an
-object to open or verify while keeping disagreement cheap: ordinary quotation
-pins the source Step, and Mint is never an automatic consequence of copy or
-paste. Printed, oral, and otherwise external text still needs a stepped import
-before it can be cited; source/edition/locator may be ordinary provenance
-metadata on that trace.
+This removes the ambiguous state in which bytes were socially cited without
+an object to open, verify, fork, or attest. Printed, oral, and otherwise
+external text is imported/minted as a trace first; source/edition/locator may
+be ordinary provenance metadata on that trace.
 
 ### 1.1 The derived rendezvous coordinate
 
-When Coins are enabled, a client may resolve each cited `q` target. Only after
-the target verifies as a Coin — including its body, `x` tag, and same-minter
-attestation — may the client derive `H = sha256(canonical(traceBody))`.
+When Coins are enabled, a client verifies each completed Coin genesis and its
+same-minter attestation, then
+derives `H = sha256(canonical(traceBody))`.
 Independent people may mint the same bytes into different node ids; `H` lets the
-index cluster those independently minted targets without changing what
-a citation is. The carrying event remains the social statement; `H` is only a
-lookup coordinate.
+index cluster those independently minted Coins. A citation still names one
+concrete Coin id and remains a distinct social statement; `H` is only a lookup
+coordinate for matching Mints.
 
 **`H` is not the `x` tag.** `x` hashes the exact bytes (`trace-provenance.md`
 §2, no normalization); `H` hashes the canonicalized text (§1.2). Two mints
@@ -122,20 +122,27 @@ part of `H`.
 
 ## 2. The DHT rendezvous
 
-The rendezvous layer answers one question: *which signed, Sent events cite a
-valid Coin whose verified coordinate is `H`?* It returns `{eventId, relayUrl}`
+The rendezvous layer answers one question: *which completed, publicly fetchable
+Coins have verified coordinate `H`?* It returns `{eventId, relayUrl}`
 pointers, never content, a private onion, or an asserted pubkey. The querier
-fetches the carrying event, target, and minter attestation from a
-stranger-readable relay, then verifies their ids, signatures, `q` edge, Coin
-envelope, body, `x` hash, and same-minter relationship. Private contact
-details are exchanged only after vetting. Returning an ACL-protected onion
-first would make the evidence unreachable until after admission.
+fetches the Coin genesis and same-minter attestation from a stranger-readable
+relay, then verifies their ids, signatures, body/hash invariants, Full Trace
+genesis shape, and completion relationship. Private
+contact details are exchanged only after vetting. Returning an ACL-protected
+onion first would make the evidence unreachable until after admission.
+
+An extracted Coin's source event is additional provenance evidence, not a
+rendezvous-membership prerequisite. Its signed Coin envelope MUST still carry a
+well-formed source id, source-snapshot hash, and exact range, but a Mint MUST NOT
+silently publish an otherwise-private containing document merely to join `H`.
+When the source is already public, a vet SHOULD fetch and verify the exact
+signed source slice and rank that stronger evidence accordingly.
 
 ### 2.1 Why a DHT, not the mesh
 
 The access-policy mesh is deliberately not a discovery graph. It answers
 **who may read me?** Global rendezvous answers a different question:
-**who cited the same content despite sharing no peer, relay, or trust?** That
+**who minted the same content despite sharing no peer, relay, or trust?** That
 requires nodes to route keys they do not hold in O(log N) hops, which is the
 job of a Kademlia DHT.
 
@@ -144,7 +151,7 @@ The two layers compose cleanly because they carry different things:
 | Layer | Carries | Question answered |
 |---|---|---|
 | Mesh (`transport.md`) | signed traces | "who may read *me*?" |
-| DHT (this doc) | event pointers: `H → {eventId, relayUrl}` | "which Sent events cite content `H`?" |
+| DHT (this doc) | Coin pointers: `H → {eventId, relayUrl}` | "which completed Mints share `H`?" |
 
 The DHT never carries speech — only pointers to where speech lives. "Nobody
 carries speech they did not sign" still holds: DHT routing tables hold
@@ -176,28 +183,22 @@ ahead of disposable remote values when truncating, and ranks the merged remote
 set by `SHA-256(H || 0x00 || eventId || 0x00 || relayUrl)` before both count and
 byte truncation. Sequential replicas therefore converge on the same bounded
 set instead of granting lexicographically low event ids eviction priority. It
-reserves storage for up to 2,048 owned coordinates independently of its
-1,024-record remote cache.
+reserves storage for up
+to 2,048 owned coordinates independently of its 1,024-record remote cache.
 Remote-cache saturation therefore cannot evict or prevent an owned record.
 These are index-availability limits, not supply claims: Kademlia results MUST
 NOT be presented as global Coin supply, popularity, trust, or reputation.
 
-- **Put** — inspect every ordinary social `q` citation in the Sent carrying
-  node, excluding structural `scope:llm` prompt dependencies. Implementations
-  that recognize `scope:llm` `targets-v1` process the carrying node's `q` set
-  minus its complete per-target structural set. A legacy, unknown-version, or
-  malformed `scope:llm` encoding excludes every `q` edge on that node from Put
-  and Get verification; readers MUST fail closed rather than infer which prompt
-  dependencies are public social citations. Implementations MAY divide relay
-  reads and writes into bounded batches, but MUST NOT silently truncate a large
-  anthology. For each target that resolves to a valid Coin,
-  verify its body/`x`, derive `H`, and publish
-  `{eventId, relayUrl}` under `H`. `eventId` is the Sent carrying node and
-  `relayUrl` is at least one relay from which an unknown reader can fetch both
-  it and its target. Fires as a side-effect of Send. A client MUST NOT publish
+- **Put** — after a compound Mint has published both halves of its completion
+  pair, verify the Coin body/`x`, same-minter `TraceAttestation`, Full Trace
+  genesis shape, and a well-formed Coin origin envelope; derive `H`; and publish
+  `{eventId, relayUrl}` under `H`. `eventId` is the Coin genesis id and
+  `relayUrl` is at least one relay from which an unknown reader can fetch the
+  Coin and its completion attestation.
+  Fires as the final network phase of Mint. A client MUST NOT publish
   a pointer to its private ACL relay or an onion location. Before Put, the
   reference press opens a fresh unauthenticated connection and verifies that
-  both events are fetchable from `relayUrl`. Published toward the eight closest
+  both completion events are fetchable from `relayUrl`. Published toward the eight closest
   discovered nodes to `H` for redundancy (§R6). The Put requests quorum eight
   so libp2p attempts the complete discovered closest-peer set instead of
   returning after the first acknowledgment. If that full attempt finds fewer
@@ -205,16 +206,20 @@ NOT be presented as global Coin supply, popularity, trust, or reputation.
   publication; the shortfall is recorded and the application-level republish
   cycle retries it. A node with no known peer retains the record locally. A
   small network therefore does not pretend to have eight remote replicas. A DHT
-  failure does not roll back the already-successful Send. The reference press
-  durably queues the signed carrying event before asynchronous indexing,
-  retries incomplete events with bounded backoff plus startup and network
-  recovery triggers, and retains pending events until completion.
+  failure does not invalidate or roll back the already-complete public Mint.
+  The reference press durably queues Mint-side indexing before asynchronous
+  Put, retries it with durable per-Coin bounded backoff plus startup and network
+  recovery triggers, and retains pending pointers until completion. Each drain
+  pass processes a bounded oldest/newest slice so unavailable old relays cannot
+  starve later completed Mints. No later Cite or Send is needed to trigger
+  those retries.
 - **Get** — query "who published under `H`?" Returns the value list. A querier
-  computes `H` for a trace body they care about, asks the DHT, and receives
-  candidate event pointers. Each carrying event, cited Coin, and same-minter
-  attestation are fetched and verified before the signer's process enters the
-  vet (§5.3); a failed fetch/signature/`q`/Coin/attestation/target-hash check is
-  not a candidate.
+  computes `H` for Coin content they care about, asks the DHT, and receives
+  candidate Coin pointers. Each Coin and same-minter attestation are fetched and
+  verified before the minter's process enters the vet (§5.3); a failed
+  fetch/signature/Coin-hash/completion check is not a candidate. Public
+  extracted-source evidence, when available, is verified and reported as a
+  stronger provenance signal but is not required for membership in `H`.
 
 Nostr remains the signed-event format. The DHT adds global query routing to
 Nostr's existing "query relays you know" model; it does not replace Nostr.
@@ -233,7 +238,7 @@ uses at most four relay-verification workers, four-second relay queries, and a
 fifteen-second overall discovery deadline. Caller cancellation propagates to
 active subscriptions, and a WebSocket handshake that finishes after timeout is
 closed rather than cached. These are resource bounds, not a relaxation of the
-signature/`q`/Coin-hash checks above.
+signature/Coin-hash/completion checks above.
 
 ### 2.3 Bootstrap
 
@@ -318,11 +323,12 @@ Attest MAY still carry its own stamp, for a different purpose: proving *when
 the author endorsed* (a distinct claim from *when the content existed*). Both
 can coexist. Process anchors, when present, belong to Steps.
 
-## 4. Mutual-peer co-citation (v1 rendezvous)
+## 4. Mutual-peer co-Mint matching (v1 rendezvous)
 
-The first rendezvous mechanism is client-side set intersection over chains
-the introducer is already authorized to read — no DHT required. The DHT (§2)
-is the global path; mutual-peer co-citation is the trust-bounded v1 that
+The first rendezvous mechanism is client-side set intersection over completed
+Mints the introducer can verify on relays it already reads — no DHT required.
+The DHT (§2) is the global path; mutual-peer co-Mint matching is the
+trust-bounded v1 that
 works the moment two peers share a mutual, before any DHT density exists.
 
 ### 4.1 The introducer algorithm
@@ -330,12 +336,21 @@ works the moment two peers share a mutual, before any DHT density exists.
 For each pair of peers (A, B) that you — the introducer C — mutually trust:
 
 ```
-T_A = ⋃ valid Coin q targets across A's readable Sent file traces
-T_B = ⋃ valid Coin q targets across B's readable Sent file traces
-shared = T_A ∩ T_B
+M_A = { H(coin) | coin is a verified completed Mint signed by A }
+M_B = { H(coin) | coin is a verified completed Mint signed by B }
+shared = M_A ∩ M_B
 if shared ≠ ∅:
-    surface intro(A, B, shared, sample traces, A↔B reachability hints)
+    surface intro(A, B, shared, sample Coins, A↔B reachability hints)
 ```
+
+Before entering either set, a Coin MUST be fetched as a cryptographically valid
+Full Trace genesis signed by the peer, paired with a valid same-minter
+`TraceAttestation` that completes Mint. Matching is by `H`, not Coin event id, because two
+people independently minting the same content necessarily produce different
+signed ids. Ordinary `q` citations, file/folder targets, malformed Coins, bare
+pending Coin geneses, and third-party-only attestations do not participate in
+mutual-peer rendezvous. Public extracted-source evidence SHOULD be verified and
+shown during vetting, but its absence does not erase the completed Mint.
 
 C sees the coincidence because C is the one node already authorized to read
 both chains. **C brokers the introduction** — surfaces it to a human, who
@@ -346,10 +361,10 @@ private local ACL, never a published event" (`transport.md` §2).
 
 ### 4.2 Rarity weighting (open)
 
-Surface at ≥1 shared Coin target, weight by rarity. A distinctive Coin is
-signal; a ubiquitous target is noise. Tuning the threshold
+Surface at ≥1 shared Mint coordinate, weight by rarity. A distinctive Coin is
+signal; a ubiquitous coordinate is noise. Tuning the threshold
 (≥1 and let humans filter, vs ≥2/≥3 to suppress intro spam) is open —
-hard to answer without watching real co-citations. Default: surface at 1,
+hard to answer without watching real co-Mint matches. Default: surface at 1,
 bias toward recall, let the vet (§5) filter precision.
 
 ## 5. The vet — process-evidence admission policy
@@ -454,11 +469,12 @@ The pipeline has two attest-like commitments:
 | Author publish | **attest a node** | "this is my published position" — commitment stance |
 | Admission | **attest a peer** | "I vetted and trust this person" — adds to `peers.json` |
 
-Send sits between them as the **discussion stance**. It Steps pending changes,
-or reuses the current Step, then changes reachability. Its `q` edges become
-visible through Send; there is no separate "attest interest" gesture. The
-match, vet, and admit path runs on Sent content. Attest remains the rarer claim
-that a specific sent node is a position worth standing behind.
+Send remains the **discussion stance**. It Steps pending changes, or reuses the
+current Step, then changes the containing trace's reachability. Its `q` edges
+become visible through Send, but they do not gate rendezvous. The match, vet,
+and admit path begins from completed Mints indexed under `H`; there is no
+separate "attest interest" gesture. Attest remains the rarer claim that a
+specific sent node is a position worth standing behind.
 
 ---
 
@@ -544,28 +560,27 @@ who read it vs. someone who scraped it. It connects to something true about
 the domain — an attesting of interest in a quote is stronger when it
 attests to *reading the source*.
 
-## R5. The mesh and the DHT carry different things; Send is the sovereignty filter
+## R5. The mesh and the DHT carry different things; Mint is the sovereignty filter
 
-Global findability makes interests globally visible. If anyone can find Sent
-events citing `H`, anyone can learn that their signers cited `H`. That privacy
+Global findability makes Mints globally discoverable. If anyone can query `H`,
+anyone can learn which public keys completed a Mint under `H`. That privacy
 cost is inherent in enabling Coins and must be presented at that product
 boundary.
 
 The DHT limits its value to `{eventId, relayUrl}` rather than an
-asserted contact identity, but fetching and verifying the event still reveals
-the signer. Within an enabled Coins package, Send is the publication boundary.
-Step stays local; Send fans out and, once the in-progress Kademlia component is
-available, publishes the carrying pointer under each verified Coin target's `H`.
-Mint publishes the Coin and declares supply, but creates no DHT pointer on its
-own; citing stays local until the carrying trace is Sent.
-**Publishing the carrying citation signals rendezvous interest.**
+asserted contact identity, but fetching and verifying the Coin still reveals
+the minter. Within an enabled Coins package, the completed compound Mint is the
+publication boundary. Mint Steps, Publishes, minter-Attests, and indexes its Coin
+under `H`; no later citation or Send is required. A citation remains local until
+its carrying trace is Sent and may strengthen later vetting, but it neither
+creates nor gates the minter's rendezvous membership.
 
 The counter-pressure is bootstrapping: a DHT with nobody publishing is dead.
-Resolution: the *local* path (mutual-peer co-citation, §4) works from day one
-with zero DHT density — any Sent citation to a valid Coin is visible to peers
-who share your seeds. The global DHT path is the accelerator for non-mutual
-discovery. The network is alive at launch via the mesh (every Sent Coin `q`
-feeds co-citation); the DHT is what lets it outgrow the mesh.
+Resolution: the *local* path (mutual-peer co-Mint matching, §4) works from day
+one with zero DHT density whenever completed Mints are readable through shared
+seeds. The global DHT path is the accelerator for non-mutual discovery. The
+network is alive at launch via the mesh (every completed Mint can feed matching);
+the DHT is what lets it outgrow the mesh.
 
 ## R6. Sybil at the network layer is unsolvable; the vet is the filter
 
@@ -579,7 +594,7 @@ the hole. There are two sybil modes:
   it.* Defenses: redundant publish (publish to k closest, get from several,
   intersect) and PoW on node identity. This is where most real DHT sybil harm
   lives.
-- **Content-level** — flooding the value list with garbage "I also quoted H"
+- **Content-level** — flooding the value list with garbage "I also minted H"
   entries. Here content analysis could help, but the *quote* gives nothing
   (it's shared). The signal is in the *corpus* (§R4, §5.3).
 
@@ -654,17 +669,15 @@ may treat that as missing evidence, never as an invalid trace.
 
 # Open questions (deferred)
 
-**Implementation status.** The trust-bounded mutual-peer path and vet are built
-and tested. The core Kademlia component is integrated and exercised inside the
-Coins package; the remaining work is operating bootstrap peers, gathering
-deployment evidence, and completing production security hardening. Its
-implemented slices include:
+**Implementation status.** The Mint-driven rendezvous semantics above are
+implemented in the reference client. The Kademlia component remains under
+implementation inside the Coins package as an operated network; implemented
+and exercised slices include:
 - `provenance.ts` — `canonicalQuoteText`, `quoteHash` (the exact coordinate H)
 - `quote-fuzzy.ts` — MinHash signature + LSH banding (the fuzzy recall layer, §R2)
-- `co-citation.ts` — author-bound current-head resolution, completed-Coin
-  verification, and exact-target intersection for the mutual-peer path (§4)
-- `rendezvous.ts` — batched Send-side public-relay proof and bounded/cancellable read-side candidate verification (§2.2)
-- `rendezvous-outbox.ts` — durable retry queue for Send-side indexing (§2.2)
+- `co-mint.ts` — bounded peer relay fetch, same-minter completion verification, and Mint-`H` intersection (§4)
+- `rendezvous.ts` — Mint-side public-pair proof and bounded/cancellable completed-Coin discovery (§2.2)
+- `rendezvous-outbox.ts` — durable Mint-side indexing retry (§2.2)
 - `networking/kademlia.ts` — desktop configuration and Tauri command boundary
 - `src-tauri/src/kademlia.rs` — filtered bounded storage, persistent owned pointers, k=8 routing, and merge-before-Put/Get/republish
 - `vet.ts` — anteriority + timing + revision signals composed into a verdict (§5)
@@ -676,11 +689,11 @@ readers ignore uppercase `Q` tags.
 - **Doors-on-`H` (the ambitious endpoint).** `H` → HKDF → an onion address,
   reusing the `doors` primitive (`doors-store.ts`, `transport.md` §3 — doors
   derive extra onions from keychain keys). One adopter of the topic hosts a
-  door at `onion(H)` serving a tiny directory of quoters; anyone who quoted
+  door at `onion(H)` serving a tiny directory of minters; anyone who minted
   the text computes `onion(H)` and dials it. Fully content-addressed, no
   shared relay needed — the address *is* the content. Sybil caveat: a door
-  hosted by "whoever quoted `H`" is squat-able without a trust bound. The
-  honest version is trust-bounded — the door is hosted by co-quoters *in
+  hosted by "whoever minted `H`" is squat-able without a trust bound. The
+  honest version is trust-bounded — the door is hosted by co-minters *in
   your trust graph*, not a censorship-resistant public square. Defer; do not
   let the beautiful framing ("the hash is the address of the room")
   oversell what it is.
@@ -711,9 +724,10 @@ readers ignore uppercase `Q` tags.
   (§3.4, for proving *when endorsed* as distinct from *when content existed*)
   or drops it as redundant when the target already has Step anchors. Likely:
   keep, different purpose, both coexist. Decide at implementation.
-- **Co-citation density — the existential empirical question.** Every
+- **Co-Mint density — the existential empirical question.** Every
   calibration above (LSH bands, timing models, rarity thresholds) presumes
-  co-citation events occur at reachable network sizes. That is untested. The
+  independent same-content Mints occur at reachable network sizes. That is
+  untested. The
   v1 mutual-peer path (§4) needs an introducer who already reads both chains;
   at small scale that graph may produce no matches at all, and a perfectly
   tuned vet over a rendezvous layer that never fires is dead weight. Unlike

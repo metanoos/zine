@@ -163,12 +163,12 @@ A **coin** is how strangers find each other. When a phrase strikes you as
 worth keeping, you mint it: one deliberate gesture that Steps an immutable,
 single-checkpoint zine under your key, Publishes it, and Attests it. Minting
 claims salience, not authorship or agreement: *these words carry currency for
-me.* When Coins are enabled, Zine indexes published citations to valid Coins
-to answer one question — *which published traces cite these words?* — so two
-writers who share no platform, relay, or peer can surface each other, even
-when their coin bytes differ only in Unicode normalization or whitespace. The
-same valid-Coin match also works, more slowly, through a mutual peer who can
-read both chains.
+me.* When Coins are enabled, Zine indexes completed Mints under the verified
+content coordinate `H` to answer one question — *who else completed a Mint for
+these words?* — so two writers who share no platform, relay, or peer can
+surface each other even when their coin bytes differ only in Unicode
+normalization or whitespace. The same match also works, more slowly, through a
+mutual peer who can read both chains.
 
 The economics are deliberately spam-resistant. A coin everyone holds carries
 no signal, so there is no payoff in squatting the popular phrase; the signal
@@ -181,12 +181,12 @@ easy to imitate, while a timestamped revision history is costlier to fake.
 Nothing enters your peer list without that vet and your explicit choice.
 
 Coins are the single user-facing discovery opt-in: enabling them covers Mint,
-valid-Coin Publish-side indexing, and both mutual-peer and global Coin
-rendezvous. Ordinary citation remains available without Coins. Mint,
-valid-Coin mutual-peer matching, Publish-side indexing, hostile-relay
-verification, and the Kademlia routing component are integrated and exercised.
-The routing layer still needs operator-provided super-peers and deployment
-evidence; no public bootstrap network is operated. The
+Mint-side indexing, and both mutual-peer and global co-Mint rendezvous.
+Ordinary citation remains available without Coins and never creates or gates
+rendezvous membership. Mint, mutual-peer co-Mint matching, Mint-side durable
+indexing, hostile-relay verification, and the Kademlia routing component are
+integrated and exercised. The routing layer still needs operator-provided
+super-peers and deployment evidence; no public bootstrap network is operated. The
 [Protocol](PROTOCOL.md#rendezvous--vetting) carries the exact mechanics and
 limits.
 

@@ -13,7 +13,7 @@ import {
   type CoinOrigin,
 } from "./provenance.js";
 import {
-  discoverCoinCitations,
+  discoverCompletedCoinMints,
   type VerifiedRendezvousCandidate,
 } from "./rendezvous.js";
 import {
@@ -72,7 +72,7 @@ export function CoinView({ name, phrase, nodeId }: CoinViewProps) {
     let cancelled = false;
     const controller = new AbortController();
     setRendezvousState("loading");
-    void discoverCoinCitations(phrase, { signal: controller.signal })
+    void discoverCompletedCoinMints(phrase, { signal: controller.signal })
       .then((next) => {
         if (!cancelled) {
           setCandidates(next);
@@ -163,14 +163,14 @@ export function CoinView({ name, phrase, nodeId }: CoinViewProps) {
         </dl>
 
         {candidates.length > 0 && (
-          <ul className="coin-rendezvous-list" aria-label="Verified global citation candidates">
+          <ul className="coin-rendezvous-list" aria-label="Verified matching completed Mints">
             {candidates.map((candidate) => (
               <li key={candidate.eventId}>
                 <code title={candidate.signerPubkey}>{candidate.signerPubkey.slice(0, 12)}…</code>
                 <span>
-                  {candidate.targetNodeIds.includes(nodeId)
-                    ? "cited this exact Coin"
-                    : "cited matching Coin text"}
+                  {candidate.coinNodeId === nodeId
+                    ? "completed this exact Mint"
+                    : "minted matching Coin text"}
                 </span>
                 <code title={candidate.relayUrls.join("\n")}>
                   via {candidate.relayUrls.length} {candidate.relayUrls.length === 1 ? "relay" : "relays"}
@@ -282,7 +282,7 @@ export function DirectCoinComposerView({
           />
           <p id={hintId} className="coin-modal-hint">
             {enabled
-              ? "Mint, publish, and attest this exact text as a public immutable Coin signed by the active pen. The text will be public through configured publication relays. It makes no source-trace claim."
+              ? "Mint, publish, attest, and index this exact text as a public immutable Coin signed by the active pen. The text will be public through configured publication relays; no later citation or Send is required. It makes no source-trace claim."
               : "Enable Coins in Networking to mint this passage."}
           </p>
           {error && <p className="create-error" role="alert">{error}</p>}

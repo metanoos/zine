@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { finalizeEvent } from "nostr-tools/pure";
+import type { Event as NostrEvent } from "nostr-tools";
 
 import {
   captureRendezvousOutboxSession,
@@ -38,8 +39,20 @@ function event(createdAt: number) {
   return finalizeEvent({
     kind: 4290,
     created_at: createdAt,
-    tags: [["z", "file"], ["q", "a".repeat(64)]],
-    content: JSON.stringify({ snapshot: `event-${createdAt}` }),
+    tags: [["z", "file"], ["x", "a".repeat(64)]],
+    content: JSON.stringify({
+      snapshot: `coin-${createdAt}`,
+      coin: { version: 1, origin: { kind: "direct" } },
+    }),
+  }, SECRET);
+}
+
+function completionAttestation(coin: NostrEvent): NostrEvent {
+  return finalizeEvent({
+    kind: 4294,
+    created_at: coin.created_at,
+    tags: [["e", coin.id, "", "target"], ["k", "4290"], ["p", coin.pubkey]],
+    content: "{}",
   }, SECRET);
 }
 
@@ -53,6 +66,62 @@ test("rendezvous outbox preserves event ids until explicit completion", async ()
   assert.deepEqual((await pendingRendezvousEvents(store)).map((record) => record.eventId), [first.id, second.id]);
   await removeRendezvousEvent(first.id, store);
   assert.deepEqual((await pendingRendezvousEvents(store)).map((record) => record.eventId), [second.id]);
+});
+
+test("rendezvous outbox retains proven pair relays across configuration churn", async () => {
+  const store = new MemoryRendezvousOutbox();
+  const coin = event(9);
+  const oldRelay = "wss://old.example";
+  const additionalRelay = "wss://mirror.example";
+  await enqueueRendezvousEvent(
+    coin,
+    store,
+    10,
+    captureRendezvousOutboxSession(),
+    [oldRelay],
+  );
+  await enqueueRendezvousEvent(
+    coin,
+    store,
+    20,
+    captureRendezvousOutboxSession(),
+    [additionalRelay],
+  );
+  assert.deepEqual(await pendingRendezvousEvents(store), [{
+    eventId: coin.id,
+    queuedAt: 10,
+    relayUrls: [oldRelay, additionalRelay],
+  }]);
+  let observed: readonly string[] = [];
+  await drainRendezvousEvents(async (_eventId, provenRelayUrls) => {
+    observed = provenRelayUrls;
+    return false;
+  }, store);
+  assert.deepEqual(observed, [oldRelay, additionalRelay]);
+});
+
+test("rendezvous outbox durably returns the exact completion attestation to retry", async () => {
+  const store = new MemoryRendezvousOutbox();
+  const coin = event(10);
+  const attestation = completionAttestation(coin);
+  await enqueueRendezvousEvent(
+    coin,
+    store,
+    10,
+    captureRendezvousOutboxSession(),
+    ["wss://old.example"],
+    attestation,
+  );
+  assert.equal(
+    (await pendingRendezvousEvents(store))[0]?.completionAttestation?.id,
+    attestation.id,
+  );
+  let observed: NostrEvent | undefined;
+  await drainRendezvousEvents(async (_eventId, _relayUrls, storedAttestation) => {
+    observed = storedAttestation;
+    return false;
+  }, store);
+  assert.deepEqual(observed, attestation);
 });
 
 test("rendezvous outbox does not expire work that has never reached the DHT", async () => {
@@ -69,7 +138,7 @@ test("rendezvous outbox has no artificial event-count limit", async () => {
   assert.equal((await pendingRendezvousEvents(store)).length, 257);
 });
 
-test("rendezvous outbox applies byte backpressure without discarding old Sends", async () => {
+test("rendezvous outbox applies byte backpressure without discarding completed Mints", async () => {
   const first = event(1);
   const store = new MemoryRendezvousOutbox(100);
   await enqueueRendezvousEvent(first, store, 10);
@@ -108,6 +177,110 @@ test("rendezvous outbox drains terminal work and retains independent retryable f
   );
 });
 
+test("Mint-side retry completes without any later Cite or Send", async () => {
+  const store = new MemoryRendezvousOutbox();
+  const coin = event(41);
+  let now = 1_000;
+  assert.equal(coin.tags.some((tag) => tag[0] === "q"), false);
+  await enqueueRendezvousEvent(coin, store, 10);
+  assert.deepEqual(
+    await drainRendezvousEvents(
+      async () => false,
+      store,
+      captureRendezvousOutboxSession(),
+      { now: () => now },
+    ),
+    { pending: 1, completed: 0 },
+  );
+  assert.deepEqual(await pendingRendezvousEvents(store), [{
+    eventId: coin.id,
+    queuedAt: 10,
+    retryAttempts: 1,
+    nextAttemptAt: 6_000,
+  }]);
+  let attempts = 0;
+  assert.deepEqual(
+    await drainRendezvousEvents(
+      async (eventId) => {
+        attempts++;
+        return eventId === coin.id;
+      },
+      store,
+      captureRendezvousOutboxSession(),
+      { now: () => now },
+    ),
+    { pending: 1, completed: 0 },
+  );
+  assert.equal(attempts, 0, "durable backoff survives independent drain invocations");
+  now = 6_000;
+  assert.deepEqual(
+    await drainRendezvousEvents(
+      async (eventId) => eventId === coin.id,
+      store,
+      captureRendezvousOutboxSession(),
+      { now: () => now },
+    ),
+    { pending: 0, completed: 1 },
+  );
+});
+
+test("bounded drains rotate slow failures and reach later and concurrently enqueued Coins", async () => {
+  const store = new MemoryRendezvousOutbox();
+  const oldest = event(51);
+  const middle = event(52);
+  const newest = event(53);
+  const concurrent = event(54);
+  await enqueueRendezvousEvent(oldest, store, 10);
+  await enqueueRendezvousEvent(middle, store, 20);
+  await enqueueRendezvousEvent(newest, store, 30);
+
+  let now = 1_000;
+  const firstPass: string[] = [];
+  assert.deepEqual(
+    await drainRendezvousEvents(
+      async (eventId) => {
+        firstPass.push(eventId);
+        if (firstPass.length === 1) {
+          await enqueueRendezvousEvent(concurrent, store, 40);
+        }
+        now += 6;
+        return false;
+      },
+      store,
+      captureRendezvousOutboxSession(),
+      { maxRecords: 8, maxDurationMs: 10, now: () => now },
+    ),
+    { pending: 4, completed: 0 },
+  );
+  assert.deepEqual(firstPass, [oldest.id, newest.id]);
+
+  const secondPass: string[] = [];
+  assert.deepEqual(
+    await drainRendezvousEvents(
+      async (eventId) => {
+        secondPass.push(eventId);
+        return true;
+      },
+      store,
+      captureRendezvousOutboxSession(),
+      { maxRecords: 8, maxDurationMs: 10, now: () => now },
+    ),
+    { pending: 2, completed: 2 },
+  );
+  assert.deepEqual(secondPass, [middle.id, concurrent.id]);
+
+  now = 6_012;
+  assert.deepEqual(
+    await drainRendezvousEvents(
+      async () => true,
+      store,
+      captureRendezvousOutboxSession(),
+      { now: () => now },
+    ),
+    { pending: 0, completed: 2 },
+  );
+});
+
 test("a drain never erases an event enqueued while network work is in flight", async () => {
   const store = new MemoryRendezvousOutbox();
   const first = event(1);
@@ -132,6 +305,24 @@ test("a drain never erases an event enqueued while network work is in flight", a
 test("rendezvous outbox rejects corrupt records instead of dropping them", async () => {
   const store = new MemoryRendezvousOutbox();
   store.records.set("browser", new Map([["bad", { eventId: "bad", queuedAt: 1 }]]));
+  await assert.rejects(pendingRendezvousEvents(store), /invalid event id/);
+});
+
+test("rendezvous outbox rejects incomplete or unbounded retry metadata", async () => {
+  const store = new MemoryRendezvousOutbox();
+  const coin = event(55);
+  store.records.set("browser", new Map([[coin.id, {
+    eventId: coin.id,
+    queuedAt: 1,
+    retryAttempts: 1,
+  }]]));
+  await assert.rejects(pendingRendezvousEvents(store), /invalid event id/);
+  store.records.set("browser", new Map([[coin.id, {
+    eventId: coin.id,
+    queuedAt: 1,
+    retryAttempts: 33,
+    nextAttemptAt: 1,
+  }]]));
   await assert.rejects(pendingRendezvousEvents(store), /invalid event id/);
 });
 
@@ -282,24 +473,33 @@ test("a transient IndexedDB open failure is retried instead of cached forever", 
   assert.equal(opens, 2);
 });
 
-test("Send durably enqueues before relay publication", () => {
+test("completed Mint durably enqueues after the public completion pair", () => {
   const queue = provenanceSource.match(
-    /async function queueRendezvousPublication[\s\S]*?(?=function rendezvousQueueFailure)/,
+    /async function queueCompletedMintRendezvous[\s\S]*?(?=function scheduleRendezvousPublication)/,
   )?.[0];
   const send = provenanceSource.match(
     /export async function sendStep[\s\S]*?(?=\/\*\* Publish one exact historical node)/,
   )?.[0];
+  const mint = provenanceSource.match(
+    /export async function completeCoinMint[\s\S]*?(?=\/\*\* Step the immutable)/,
+  )?.[0];
   assert.ok(queue);
   assert.ok(send);
-  assert.match(queue, /await enqueueRendezvousEvent\(event\)/);
-  const enqueueAt = send.indexOf("await queueRendezvousPublication(event)");
-  const publishAt = send.indexOf("await publishToMany(relays, event)");
-  assert.ok(enqueueAt >= 0 && publishAt > enqueueAt);
-  assert.match(send, /throw rendezvousQueueFailure\(event\.id, error\)/);
-  assert.match(send, /if \(rendezvousQueued\) scheduleRendezvousPublication\(event\)/);
+  assert.ok(mint);
+  assert.match(queue, /assertRendezvousSessionCurrent\(session\)[\s\S]*?await enqueueRendezvousEvent\([\s\S]*?provenRelayUrls[\s\S]*?assertRendezvousSessionCurrent\(session\)/);
+  assert.match(
+    queue,
+    /if \(!loadKademliaConfig\(\)\.enabled\) \{[\s\S]*?throw error;/,
+    "a Coins-disable race must retain the Mint journal instead of skipping its durable index enqueue",
+  );
+  assert.doesNotMatch(send, /Rendezvous|rendezvous/);
+  const completionAt = mint.indexOf("const completion = await attestNodeToRelays");
+  const enqueueAt = mint.indexOf("await queueCompletedMintRendezvous(");
+  assert.ok(completionAt >= 0 && enqueueAt > completionAt);
+  assert.match(mint, /if \(rendezvousQueued\) scheduleRendezvousPublication\(coin\)/);
 });
 
-test("disabling Coins aborts an active Send-indexing drain and retains its outbox row", () => {
+test("disabling Coins aborts an active Mint-indexing drain and retains its outbox row", () => {
   const subscription = provenanceSource.match(
     /subscribeKademliaConfig\(\(\) => \{[\s\S]*?\n\}\);/,
   )?.[0];
@@ -310,9 +510,15 @@ test("disabling Coins aborts an active Send-indexing drain and retains its outbo
   assert.match(subscription, /Coins disabled during rendezvous indexing/);
 
   const drain = provenanceSource.match(
-    /export async function flushRendezvousPublicationOutbox[\s\S]*?(?=\/\*\* Eligible carrying events)/,
+    /export async function flushRendezvousPublicationOutbox[\s\S]*?(?=\/\*\* A completed Coin enters)/,
   )?.[0];
   assert.ok(drain);
-  assert.match(drain, /publishSentCoinCitations\(event, \{ signal: controller\.signal \}\)/);
+  assert.match(drain, /retryRelayUrls = \[\.\.\.new Set\(\[\.\.\.provenRelayUrls, \.\.\.currentRelayUrls\]\)\]/);
+  assert.match(drain, /publishCompletedCoinMint\(event, \{/);
+  assert.match(drain, /fetchLocalEventById\(eventId, controller\.signal\)/);
+  assert.doesNotMatch(drain, /fetchEventById\(eventId\)/);
   assert.match(drain, /controller\.signal\.aborted[\s\S]*?return false/);
 });
+
+// Send-side citation indexing was replaced by Mint-side Coin genesis indexing.
+// The active drain contract is covered by the co-located Mint-indexing test.

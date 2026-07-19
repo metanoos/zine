@@ -2432,7 +2432,7 @@ html[data-theme="light"] .rail-brand-wordmark {
   max-width: none;
 }
 
-/* Networking view — section content (node, seeds, peers, co-citations). The
+/* Networking view — section content (node, seeds, peers, co-Mints). The
    detail surface reuses the relay/peer list language from the other settings
    views without wrapping the whole selected category in another card. */
 .networking-section {

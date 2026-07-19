@@ -14,7 +14,7 @@
  * verifies by actual Jaccard similarity.
  *
  * Pure — no IO, no relay. This layer sits above the exact coordinate (H) and
- * below the DHT/co-citation discovery layer. The protocol coordinate is always
+ * below the DHT/co-Mint discovery layer. The protocol coordinate is always
  * exact; this is recall-maximizing client logic.
  *
  * Tunable parameters (rendezvous.md open questions — need real corpora):

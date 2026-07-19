@@ -478,6 +478,8 @@ export async function verifyFileTraceChain(
     if (carriesDeltas && !Array.isArray(parsed.deltas)) {
       addIntegrity("nonconforming-deltas", "file TraceNode deltas is not an array");
     } else if (
+      // Genesis has no prev.snapshot. Per trace-provenance §3.5, delta replay
+      // is an integrity rule only for non-genesis nodes.
       stepIndex > 0 &&
       carriesDeltas &&
       typeof parsed.snapshot === "string"

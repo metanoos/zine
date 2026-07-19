@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "A headless zine press: exposes zine's trace-provenance gestures (Step / Send / Attest / Mint / Cite) as MCP tools, so any LLM harness writes through zine and every edit becomes a signed, traced, citable kind-4290 node.",
+  "description": "A headless zine press for Step, Send, Attest, and Cite; Mint is registered fail-closed until a durable headless Kademlia indexer is available.",
   "files": [
     "dist/server.js",
     "README.md"

@@ -38,7 +38,7 @@ import {
   removeDoor,
   type DoorEntry,
 } from "./doors-store.js";
-import { detectCoCitations, type CoCitation } from "../provenance/co-citation.js";
+import { detectCoMints, type CoMintMatch } from "../provenance/co-mint.js";
 import { addFollow, loadFollows, removeFollow, type FollowEntry } from "./follows-store.js";
 import { PubkeyDisplay } from "../identity/PubkeyDisplay.js";
 import {
@@ -51,7 +51,7 @@ import {
   type KademliaStatus,
 } from "./kademlia.js";
 
-type NetworkCategory = "node" | "seeds" | "coins" | "following" | "peers" | "co-citations";
+type NetworkCategory = "node" | "seeds" | "coins" | "following" | "peers" | "co-mints";
 
 const NETWORK_CATEGORIES: Array<{
   id: NetworkCategory;
@@ -64,8 +64,8 @@ const NETWORK_CATEGORIES: Array<{
   { id: "following", label: "Following", description: "Whose work you read" },
   { id: "peers", label: "Peers", description: "Trusted access" },
   {
-    id: "co-citations",
-    label: "Co-citations",
+    id: "co-mints",
+    label: "Co-Mints",
     description: "Possible introductions",
   },
 ];
@@ -96,8 +96,8 @@ const NETWORK_CATEGORIES: Array<{
  *   - Following: a local, unilateral reader preference used by the shared
  *     Stacks/Times/Spaces query. It grants no access and publishes no ACL.
  *
- *   - Co-citations (desktop only): possible introductions between peers who
- *     quoted the same passages.
+ *   - Co-Mints (desktop only): possible introductions between peers who
+ *     independently completed Mints for matching passages.
  *
  * An onion is a *door*, not an identity: the owner key is who you are (AUTH);
  * doors are where peers find you. Adding a door opens another address into the
@@ -289,13 +289,13 @@ export function NetworkingView() {
           </div>
 
           <div
-            id="network-panel-co-citations"
+            id="network-panel-co-mints"
             role="region"
-            aria-labelledby="network-category-co-citations"
-            hidden={activeCategory !== "co-citations"}
+            aria-labelledby="network-category-co-mints"
+            hidden={activeCategory !== "co-mints"}
           >
-            {/* --- Co-citations (desktop only) -------------------------- */}
-            <CoCitationsSection />
+            {/* --- Co-Mints (desktop only) ------------------------------ */}
+            <CoMintsSection />
           </div>
         </div>
       </div>
@@ -388,10 +388,10 @@ function CoinsSection() {
     <div className="networking-section">
       <h2 className="networking-section-title">Coins</h2>
       <p className="networking-section-sub">
-        One opt-in covers Mint, Cite, Send-side indexing, and rendezvous. Mint
+        One opt-in covers Mint, Cite, Mint-side indexing, and rendezvous. Mint
         publishes the exact Coin text and a same-minter attestation through
-        configured publication relays. Sending a trace that cites a Coin can create
-        globally visible signer interest. The rendezvous index carries only
+        configured publication relays, then durably indexes that completed Coin.
+        A later citation or Send is not required. The rendezvous index carries only
         event and relay pointers, never Coin text, private onions, supply, or reputation;
         every result is verified against its relay.
       </p>
@@ -1106,9 +1106,9 @@ function PeersSection() {
 }
 
 /**
- * Co-citations section — the v1 rendezvous surface (protocol/rendezvous.md §4).
+ * Co-Mints section — the trust-bounded rendezvous surface (protocol/rendezvous.md §4).
  *
- * For each pair of peers who both cited the same completed Coin,
+ * For each pair of peers who independently completed Mints under the same H,
  * shows an introduction card: the two pubkeys, how many passages they share,
  * and a sample of the shared text. The introducer brokers but does not admit —
  * adding either peer to the other's list stays a separate human act in the
@@ -1117,15 +1117,15 @@ function PeersSection() {
  * Desktop-only (peers are desktop-only). Runs the detection sweep on mount and
  * every 5 minutes, mirroring the anchor-upgrade interval pattern. A peer's
  * chain is readable only if replicated to a seed this machine reads — the honest
- * v1 boundary noted in co-citation.ts.
+ * v1 boundary noted in co-mint.ts.
  */
-function CoCitationsSection() {
+function CoMintsSection() {
   const coinsEnabled = useSyncExternalStore(
     subscribeKademliaConfig,
     kademliaEnabledSnapshot,
     kademliaEnabledSnapshot,
   );
-  const [matches, setMatches] = useState<CoCitation[]>([]);
+  const [matches, setMatches] = useState<CoMintMatch[]>([]);
   const [status, setStatus] = useState<"idle" | "scanning" | "done" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
 
@@ -1157,7 +1157,7 @@ function CoCitationsSection() {
           }
           return;
         }
-        const results = await detectCoCitations(peers, 100, controller.signal);
+        const results = await detectCoMints(peers, 100, controller.signal);
         if (!cancelled) {
           setMatches(results);
           setStatus("done");
@@ -1177,7 +1177,7 @@ function CoCitationsSection() {
     const interval = window.setInterval(run, 5 * 60 * 1000);
     return () => {
       cancelled = true;
-      activeSweep?.abort(new Error("co-citation view closed"));
+      activeSweep?.abort(new Error("co-Mint view closed"));
       window.clearInterval(interval);
     };
   }, [coinsEnabled]);
@@ -1185,12 +1185,12 @@ function CoCitationsSection() {
   if (!isTauri()) {
     return (
       <div className="networking-section">
-        <h2 className="networking-section-title">Co-citations</h2>
+        <h2 className="networking-section-title">Co-Mints</h2>
         <p className="networking-section-sub">
-          Possible introductions between peers who cited the same completed Coins.
+          Possible introductions between peers who independently minted matching Coins.
         </p>
         <p className="networking-desktop-note">
-          Co-citations are scanned in the desktop app, where peer chains are
+          Co-Mints are scanned in the desktop app, where peer chains are
           available.
         </p>
       </div>
@@ -1199,9 +1199,9 @@ function CoCitationsSection() {
 
   return (
     <div className="networking-section">
-      <h2 className="networking-section-title">Co-citations</h2>
+      <h2 className="networking-section-title">Co-Mints</h2>
       <p className="networking-section-sub">
-        Pairs of your peers who cited the same completed Coins — a signal they might
+        Pairs of your peers who completed Mints for matching Coin text — a signal they might
         know each other. You broker the intro; adding them stays your call in
         Peers above.
       </p>
@@ -1216,7 +1216,7 @@ function CoCitationsSection() {
       )}
       {status === "done" && matches.length === 0 && (
         <p className="cocitation-empty">
-          No co-citations found among your peers yet.
+          No co-Mints found among your peers yet.
         </p>
       )}
 
@@ -1229,15 +1229,15 @@ function CoCitationsSection() {
                   {m.peerA.slice(0, 12)}…
                 </span>
                 <span className="cocitation-shared-count">
-                  {m.targetIds.length} shared {m.targetIds.length === 1 ? "Coin" : "Coins"}
+                  {m.coordinates.length} shared {m.coordinates.length === 1 ? "coordinate" : "coordinates"}
                 </span>
                 <span className="cocitation-pubkey" title={m.peerB}>
                   {m.peerB.slice(0, 12)}…
                 </span>
               </div>
               {m.samples.slice(0, 3).map((s) => (
-                <blockquote key={s.nodeId} className="cocitation-sample">
-                  {s.text ?? `Coin ${s.nodeId.slice(0, 12)}…`}
+                <blockquote key={`${s.peer}-${s.coinNodeId}`} className="cocitation-sample">
+                  {s.text ?? `Coin ${s.coinNodeId.slice(0, 12)}…`}
                 </blockquote>
               ))}
               {m.samples.length > 3 && (
