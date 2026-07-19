@@ -239,6 +239,68 @@ test("crash-pad receipt writes report persistence failure", () => {
   }
 });
 
+test("moveLocalFile rebases the crash pad so a pending receipt follows its file, not the old path", () => {
+  // Defect class surfaced in review: the crash pad is keyed by relativePath,
+  // but structural moves/renames rewrote LocalFolder.files keys without
+  // rebasing the pad. On the next boot the pad loop unconditionally
+  // resurrects every entry, so a pending MODEL-write receipt at the OLD path
+  // came back as a ghost file alongside the correctly-renamed live file.
+  // moveLocalFile now rebases the pad in lockstep per file. A structural
+  // folder move applies moveLocalFile to each descendant file in a loop, so
+  // every file-backed pad entry follows; this test exercises that per-file
+  // contract directly.
+  values.clear();
+  saveLocalFile("root", "notes/a.md", { content: "a", tags: [], nodeId: "head-a" });
+  saveLocalFile("root", "notes/sub/b.md", { content: "b", tags: [], nodeId: "head-b" });
+  // Stage pending MODEL-write buffers at both paths.
+  mirrorPad("root", "notes/a.md", { content: "a-MODEL", tags: [], nodeId: "head-a" });
+  mirrorPad("root", "notes/sub/b.md", { content: "b-MODEL", tags: [], nodeId: "head-b" });
+  // Move the leaf: its pad entry must follow to the new path.
+  assert.equal(moveLocalFile("root", "notes/a.md", "notes/a-renamed.md"), true);
+  let pad = loadPad("root");
+  assert.equal(pad?.["notes/a.md"], undefined, "old leaf pad entry cleared");
+  assert.equal(pad?.["notes/a-renamed.md"]?.content, "a-MODEL", "leaf pad entry rebased to new path");
+  assert.equal(pad?.["notes/sub/b.md"]?.content, "b-MODEL", "unrelated pad entry untouched");
+  // A structural folder move loops over descendant FILES (the folder itself
+  // has no LocalFolder.files entry), so the per-file rebase handles each
+  // descendant's pad entry as the loop moves it.
+  assert.equal(moveLocalFile("root", "notes/sub/b.md", "notes/sub-moved/b.md"), true);
+  pad = loadPad("root");
+  assert.equal(pad?.["notes/sub/b.md"], undefined, "old descendant pad entry cleared");
+  assert.equal(
+    pad?.["notes/sub-moved/b.md"]?.content,
+    "b-MODEL",
+    "descendant pad entry rebased under the new folder prefix",
+  );
+});
+
+test("deleteLocalFile and deleteLocalFiles clear the crash pad so a deleted file is not resurrected on next boot", () => {
+  // Same defect class as the move test: structural deletes removed the file
+  // key but left the pad entry, so the boot loop resurrected the deleted
+  // file's last buffer (potentially unreviewed MODEL output) as a fresh
+  // unstepped file — defeating the deletion. deleteLocalFile/deleteLocalFiles
+  // now clear the pad per path.
+  values.clear();
+  saveLocalFile("root", "a.md", { content: "a", tags: [], nodeId: "head-a" });
+  saveLocalFile("root", "b.md", { content: "b", tags: [], nodeId: "head-b" });
+  saveLocalFile("root", "c.md", { content: "c", tags: [], nodeId: "head-c" });
+  mirrorPad("root", "a.md", { content: "a-MODEL", tags: [], nodeId: "head-a" });
+  mirrorPad("root", "b.md", { content: "b-MODEL", tags: [], nodeId: "head-b" });
+  mirrorPad("root", "c.md", { content: "c-MODEL", tags: [], nodeId: "head-c" });
+  // Single delete clears its pad entry; siblings survive.
+  assert.equal(deleteLocalFile("root", "a.md"), true);
+  let pad = loadPad("root");
+  assert.equal(pad?.["a.md"], undefined, "deleted file's pad entry cleared");
+  assert.equal(pad?.["b.md"]?.content, "b-MODEL", "unrelated pad entry survives single delete");
+  // Bulk delete (relay-driven absence removal) clears every listed pad entry.
+  assert.equal(deleteLocalFiles("root", ["b.md", "c.md"]), true);
+  pad = loadPad("root");
+  // The pad is empty once every entry is cleared — and an empty pad is
+  // dropped from storage entirely (matches clearPadPath's empty-pad rule).
+  assert.equal(pad, null, "pad dropped once the last entry is cleared");
+});
+
+
 test("staged file and recursive folder operations survive reload until cleared", () => {
   values.clear();
   const operationId = "ab".repeat(32);

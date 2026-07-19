@@ -84,12 +84,14 @@ import {
   clearStructuralOperation,
   deleteLocalFile,
   deleteLocalFiles,
+  deletePadPath,
   failStructuralOperation,
   loadLocalFolder,
   loadLocalFolderTags,
   loadPad,
   mirrorPad,
   moveLocalFile,
+  movePadPath,
   pendingStructuralOperations,
   pendingFolderStepOperations,
   rememberLocalFolder,
@@ -2983,6 +2985,12 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         };
         stageStructuralOperation(id, operation);
         await completePendingStructuralOperationWithinRoot(id, operation);
+        // The structural completion deletes each descendant FILE via
+        // deleteLocalFile (which clears its own pad entry). Pad-ONLY entries
+        // (a brand-new MODEL-created file with no LocalFolder.files entry)
+        // would otherwise survive and resurrect the deleted buffer on next
+        // boot. Subtree-clear the whole deleted prefix once to catch them.
+        deletePadPath(id, relativePath, isFolder);
       });
     },
 
@@ -3030,6 +3038,13 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           };
           stageStructuralOperation(id, operation);
           await completePendingStructuralOperationWithinRoot(id, operation);
+          // The structural completion moves each descendant FILE via
+          // moveLocalFile (which rebases its own pad entry). Pad-ONLY entries
+          // (a brand-new MODEL-created file with no LocalFolder.files entry
+          // yet) would otherwise be left keyed at the old prefix and
+          // resurrected as a ghost on the next boot. Subtree-rebase the whole
+          // moved prefix once to catch them.
+          movePadPath(id, src, destPath);
           return;
         }
         const fileShieldJournal = structuralShieldJournal(
@@ -3109,6 +3124,13 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           };
           stageStructuralOperation(id, operation);
           await completePendingStructuralOperationWithinRoot(id, operation);
+          // The structural completion moves each descendant FILE via
+          // moveLocalFile (which rebases its own pad entry). Pad-ONLY entries
+          // (a brand-new MODEL-created file with no LocalFolder.files entry
+          // yet) would otherwise be left keyed at the old prefix and
+          // resurrected as a ghost on the next boot. Subtree-rebase the whole
+          // moved prefix once to catch them.
+          movePadPath(id, src, destPath);
           return;
         }
         const fileShieldJournal = structuralShieldJournal(

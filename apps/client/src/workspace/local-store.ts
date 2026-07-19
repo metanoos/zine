@@ -561,7 +561,13 @@ export function deleteLocalFile(folderId: string, relativePath: string): boolean
   const existing = loadLocalFolder(folderId);
   if (!existing) return true;
   delete existing.files[relativePath];
-  return saveLocalFolder(existing);
+  if (!saveLocalFolder(existing)) return false;
+  // Clear any pending MODEL-write receipt at this path so the next boot does
+  // not resurrect the deleted file's buffer. Leaf-clearing is sufficient here
+  // because the structural delete loop visits every descendant path; folder
+  // roots carry no pad entry of their own (only files are buffered).
+  deletePadPath(folderId, relativePath, false);
+  return true;
 }
 
 /** Remove several projection paths with one read/serialize/write transaction.
@@ -572,7 +578,14 @@ export function deleteLocalFiles(folderId: string, relativePaths: readonly strin
   const existing = loadLocalFolder(folderId);
   if (!existing) return true;
   for (const relativePath of relativePaths) delete existing.files[relativePath];
-  return saveLocalFolder(existing);
+  if (!saveLocalFolder(existing)) return false;
+  // Mirror the per-path deletePadPath loop: relay-driven absence deletions
+  // (pull reconciliation) remove real files, so their pending MODEL-write
+  // receipts must not survive to resurrect on the next boot either. Leaf
+  // clearing per path is sufficient — each path in the batch is a concrete
+  // file the remote removed.
+  for (const relativePath of relativePaths) deletePadPath(folderId, relativePath, false);
+  return true;
 }
 
 /** Move a file's path within a local folder. Synchronous. */
@@ -598,7 +611,12 @@ export function moveLocalFile(
     updatedAt: Date.now(),
   };
   if (shieldedPaths) existing.shieldedPaths = [...shieldedPaths];
-  return saveLocalFolder(existing);
+  if (!saveLocalFolder(existing)) return false;
+  // Keep the crash pad keyed in lockstep with the file map so a pending
+  // MODEL-write receipt follows its file instead of resurrecting at the old
+  // path on the next boot.
+  movePadPath(folderId, oldPath, newPath);
+  return true;
 }
 
 /** Read a folder's folder-level tags (keyed by folder relative path). `{}` if
@@ -920,5 +938,82 @@ export function clearPadPath(folderId: string, relativePath: string): void {
     }
   } catch {
     // Non-fatal — a stale pad entry just gets overwritten on the next mirror.
+  }
+}
+
+/** Rebase every crash-pad entry whose key is `oldPath` or sits beneath it
+ *  (`oldPath + "/..."`) to the corresponding key under `newPath`, preserving
+ *  each entry's buffered value. Structural moves/renames rewrite
+ *  `LocalFolder.files` keys; without this the pad is left keyed at the old
+ *  path, and the next boot (`loadPad` + `restoreCrashPadFile` loop)
+ *  unconditionally resurrects every pad entry — surfacing a ghost file at the
+ *  pre-rename path alongside the correctly-renamed live file. Best-effort:
+ *  a quota or storage failure is swallowed (the pad is a crash buffer, not a
+ *  source of truth) so the file mutation itself is not rolled back. */
+export function movePadPath(
+  folderId: string,
+  oldPath: string,
+  newPath: string,
+): void {
+  if (oldPath === newPath) return;
+  try {
+    const raw = localStorage.getItem(padKey(folderId));
+    if (!raw) return;
+    const pad = currentLocalFiles(JSON.parse(raw));
+    if (!pad) return;
+    let changed = false;
+    const prefix = oldPath + "/";
+    for (const key of Object.keys(pad)) {
+      let nextKey: string | null = null;
+      if (key === oldPath) nextKey = newPath;
+      else if (key.startsWith(prefix)) nextKey = newPath + key.slice(oldPath.length);
+      if (nextKey !== null && nextKey !== key) {
+        // Preserve insertion order: carry the value to the new key, drop the
+        // old. A pre-existing entry at nextKey (rare — a same-destination
+        // rename collision is rejected upstream) is overwritten.
+        const value = pad[key];
+        delete pad[key];
+        pad[nextKey] = value;
+        changed = true;
+      }
+    }
+    if (changed) localStorage.setItem(padKey(folderId), JSON.stringify(pad));
+  } catch {
+    // Non-fatal — see clearPadPath. The pad is best-effort crash insurance.
+  }
+}
+
+/** Clear every crash-pad entry whose key is `path` or, when `isFolder` is
+ *  true, sits beneath it (`path + "/..."`). Structural deletes remove the
+ *  file keys from `LocalFolder.files`; without this the pad is left keyed at
+ *  the deleted path, and the next boot resurrects the deleted file's last
+ *  buffer (potentially unreviewed MODEL output) as a fresh unstepped file —
+ *  defeating the deletion. Best-effort, same contract as movePadPath. */
+export function deletePadPath(
+  folderId: string,
+  path: string,
+  isFolder: boolean,
+): void {
+  try {
+    const raw = localStorage.getItem(padKey(folderId));
+    if (!raw) return;
+    const pad = currentLocalFiles(JSON.parse(raw));
+    if (!pad) return;
+    let changed = false;
+    const prefix = path + "/";
+    for (const key of Object.keys(pad)) {
+      if (key === path || (isFolder && key.startsWith(prefix))) {
+        delete pad[key];
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    if (Object.keys(pad).length === 0) {
+      localStorage.removeItem(padKey(folderId));
+    } else {
+      localStorage.setItem(padKey(folderId), JSON.stringify(pad));
+    }
+  } catch {
+    // Non-fatal — see clearPadPath.
   }
 }
