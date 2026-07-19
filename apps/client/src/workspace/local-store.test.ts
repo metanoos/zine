@@ -588,6 +588,12 @@ test("a dropped journal also clears a co-existing pendingSignedEvent bound to th
   const droppedSigned = loaded?.files["dropped-signed.md"];
   assert.equal(droppedSigned?.pendingOperationId, undefined, "dropped pendingOperationId cleared");
   assert.equal(droppedSigned?.pendingSignedEvent, undefined, "co-existing pendingSignedEvent cleared");
+  // `nodeId` is advanced to the pending event's id at the same atomic write as
+  // pendingSignedEvent, so it is dangling once those bytes are gone. The
+  // reconciliation must reset it to "" so the next push computes prevId from
+  // the folder manifest (or treats the file as genesis) instead of linking a
+  // new node to a never-published event id.
+  assert.equal(droppedSigned?.nodeId, "", "nodeId matching the cleared signed event must be reset");
   assert.deepEqual(
     droppedSigned?.pendingMove,
     { kind: "move", fromPath: "old/dropped-signed.md" },
@@ -601,7 +607,15 @@ test("a dropped journal also clears a co-existing pendingSignedEvent bound to th
     signedUnderUnrelated,
     "pendingSignedEvent bound to a live operation id must be preserved",
   );
+  // The live signed event's id still names a valid (recoverable) node, so
+  // nodeId must NOT be reset.
+  assert.equal(
+    liveSigned?.nodeId,
+    signedUnderUnrelated.id,
+    "nodeId bound to a live signed event must be preserved",
+  );
 });
+
 
 
 

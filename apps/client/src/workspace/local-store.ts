@@ -273,6 +273,17 @@ export function loadLocalFolder(folderId: string): LocalFolder | null {
             signedOperationId = null;
           }
           if (signedOperationId !== null && droppedOperationIds.has(signedOperationId)) {
+            // `nodeId` is advanced to the pending event's id at the same atomic
+            // write as `pendingSignedEvent` (see persistPendingFileNode), so it
+            // is left dangling once those bytes are gone. Clear it back to the
+            // genesis-pending sentinel so the next push computes `prevId` from
+            // the folder manifest (or null for a brand-new file) instead of
+            // linking a new node to a never-published event id — which would
+            // produce a `broken-prev` chain the relay accepts but conformance
+            // downgrades to SNAPSHOT ONLY.
+            if (file.nodeId === file.pendingSignedEvent.id) {
+              file.nodeId = "";
+            }
             delete file.pendingSignedEvent;
           }
         }
