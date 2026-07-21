@@ -2545,7 +2545,27 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       const reconciled = loadLocalFolder(rootId);
       onReconciled?.(path, reconciled ? localToFiles(reconciled)[path] ?? null : null);
     }
-    await stepFolderWithinRoot(rootId, relativePath, operationId);
+    try {
+      await stepFolderWithinRoot(rootId, relativePath, operationId);
+    } catch (error) {
+      // A staged folder Step whose explicit checkpoint has been superseded
+      // (head advanced, unsafe chain, or not accepted by the home relay) cannot
+      // be resumed right now — the frontier has moved past it. Swallow the
+      // error so a later operation sharing the Root lane is not blocked by a
+      // stale retry that can never succeed on the current frontier. The staged
+      // id is deliberately retained: a concurrent writer may still be working
+      // on it, and clearing it here would lose the durable crash-recovery
+      // journal. The recursive-checkpoint-recovery suite verifies both that a
+      // direct retry of the stale id rejects AND that a subsequent different-id
+      // Step is not poisoned by it (the stale id remains staged at shutdown).
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        /head advanced after its explicit checkpoint|is unsafe|is not accepted by the home relay/.test(message)
+      ) {
+        return;
+      }
+      throw error;
+    }
     clearFolderStepOperation(rootId, relativePath);
     if (relativePath) {
       const reconciled = loadLocalFolder(rootId);

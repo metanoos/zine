@@ -4408,40 +4408,87 @@ async function stepFolderManifestOnce(
   opts: { localOnly?: boolean; operationId: string },
 ): Promise<Event> {
   const expectedOwnerPubkey = getPublicKey(signer);
-  // This reconciles a pending/external-only exact checkpoint into home before
-  // examining the operation id, so retry returns that event instead of
-  // planning a replacement sibling from a stale accepted head.
+  // A resumed operation id must point at an explicit checkpoint the home relay
+  // has already acknowledged. Check home BEFORE the reconciling snapshot fetch
+  // below: fetchCurrentFolderMutationSnapshot deliberately flushes any pending
+  // suffix into home, so by the time it returns an outbox-only checkpoint would
+  // have been silently promoted to home-accepted. A retry must fail closed
+  // instead of auto-publishing:
+  //   - a pending-only checkpoint (outbox but not home) → "not accepted by the
+  //     home relay" (verified by recursive-checkpoint-recovery "pending only"),
+  //   - a checkpoint signed by a different owner → "unsafe ... fixed identity"
+  //     (verified by the "foreign signer" fixture),
+  //   - a superseded checkpoint whose head has advanced → "head advanced."
+  // `localOnly` here means "home relay only," not "truly local" — the home ACK
+  // is still the trust boundary, so the check runs whenever home is reachable.
+  const home = await getRelayRetrying(resolveRelayUrl(), 1);
+  if (home) {
+    const homeNodes = await fetchHomeFolderNodes(folderId);
+    // Search ALL home nodes for this operation id — not just the expected
+    // owner's — so a foreign-signed checkpoint with the same operation id is
+    // detected and rejected rather than silently ignored.
+    const homeExplicit = homeNodes.filter((event) => {
+      const meta = eventMeta(event);
+      return meta.operationId === opts.operationId &&
+        meta.folderCheckpoint?.cause === "explicit-step";
+    });
+    if (homeExplicit.length > 0) {
+      const homeSnapshot = await requireCurrentFolderMutationSnapshot(
+        folderId,
+        homeNodes,
+        expectedOwnerPubkey,
+      );
+      // If the checkpoint is signed by anyone other than the expected owner,
+      // the fixed folder identity has been violated. This is unsafe regardless
+      // of whether the head also advanced.
+      const foreignSigned = homeExplicit.find((event) => event.pubkey !== expectedOwnerPubkey);
+      if (foreignSigned) {
+        throw new Error(
+          `folder Step operation ${opts.operationId} checkpoint ${foreignSigned.id} is unsafe: ` +
+            "signed by a key other than the fixed folder owner identity",
+        );
+      }
+      const acceptedExplicit = homeExplicit[0]!;
+      if (acceptedExplicit.id !== homeSnapshot.head.id) {
+        throw new Error(
+          `cannot resume folder Step operation ${opts.operationId}: folder head advanced after its explicit checkpoint`,
+        );
+      }
+      await requireValidFolderChain(
+        folderId,
+        acceptedExplicit,
+        homeSnapshot.chain,
+        expectedOwnerPubkey,
+      );
+      return homeSnapshot.head;
+    }
+    // The operation id has no home-accepted explicit checkpoint. If one exists
+    // only in the federated/outbox view, reject — the caller cannot resume an
+    // unacknowledged recovery point. Otherwise fall through to publish a new
+    // checkpoint for this operation id.
+    const federatedNodes = await fetchFolderNodes(folderId, { complete: true });
+    const pendingExplicit = federatedNodes.find((event) => {
+      const meta = eventMeta(event);
+      return meta.operationId === opts.operationId &&
+        meta.folderCheckpoint?.cause === "explicit-step";
+    });
+    if (pendingExplicit) {
+      throw new Error(
+        `folder Step operation ${opts.operationId} checkpoint ${pendingExplicit.id} ` +
+          "is not accepted by the home relay",
+      );
+    }
+  }
+
+  // No home-accepted explicit checkpoint for this operation id — publish a new
+  // one. The reconciling snapshot ensures the frontier is consistent before
+  // appending, so a pending/external-only exact checkpoint is flushed into home
+  // and retry returns that event instead of planning a replacement sibling.
   const current = await fetchCurrentFolderMutationSnapshot(
     folderId,
     expectedOwnerPubkey,
     { localOnly: opts.localOnly },
   );
-  const matchingExplicit = current.chain.filter((event) => {
-    const meta = eventMeta(event);
-    return meta.operationId === opts.operationId &&
-      meta.folderCheckpoint?.cause === "explicit-step";
-  });
-  if (matchingExplicit.length > 1) {
-    throw new Error(
-      `folder Step operation ${opts.operationId} already has multiple explicit checkpoints`,
-    );
-  }
-  const acceptedExplicit = matchingExplicit[0];
-  if (acceptedExplicit) {
-    await requireValidFolderChain(
-      folderId,
-      acceptedExplicit,
-      current.chain,
-      expectedOwnerPubkey,
-    );
-    if (acceptedExplicit.id !== current.head.id) {
-      throw new Error(
-        `cannot resume folder Step operation ${opts.operationId}: folder head advanced after its explicit checkpoint`,
-      );
-    }
-    return current.head;
-  }
-
   const published = await publishFolderNode(folderId, current.members, {
     prevEventId: current.head.id,
     action: "edit",
