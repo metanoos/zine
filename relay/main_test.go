@@ -215,6 +215,71 @@ func TestTorPeerDoesNotBypassFilterRateLimit(t *testing.T) {
 	}
 }
 
+// TestTrustedIdentityBypassesFilterRateLimitFromNonLoopback covers the case
+// where an owner or writer connects from the machine's own non-loopback LAN
+// address — the posture of a headless press whose `--publish-relay` is its
+// eth0 IP. AUTH establishes the trusted identity; the source IP is irrelevant
+// once the policy is active. Without this, legitimate folder-mutation
+// fan-out (hundreds of `queryMany` calls during a single Step/Send) trips
+// `FilterIPRateLimiter` after the 100-event burst even though every query is
+// authed as the owner or a registered writer.
+func TestTrustedIdentityBypassesFilterRateLimitFromNonLoopback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "peers.json")
+	owner := strings.Repeat("a", 64)
+	writer := strings.Repeat("b", 64)
+	peer := strings.Repeat("c", 64)
+	raw, err := json.Marshal(PeersFile{Owner: owner, Writers: []string{writer}, Peers: []string{peer}})
+	if err != nil {
+		t.Fatalf("encode peers file: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write peers file: %v", err)
+	}
+	policy := NewAccessPolicy(path)
+
+	// A non-loopback address — the LAN IP a headless press or remote desktop
+	// would use to reach its own relay. IP alone must NOT grant the bypass
+	// (that would let any LAN host avoid the limiter), but the authenticated
+	// owner/writer identity must.
+	lanIP := "192.168.1.121"
+
+	for name, pubkey := range map[string]string{
+		"owner":  owner,
+		"writer": writer,
+	} {
+		t.Run(name, func(t *testing.T) {
+			called := false
+			reject, _ := applyTrustedFilterExemption(lanIP, pubkey, policy, func() (bool, string) {
+				called = true
+				return true, "rate-limited"
+			})
+			if called || reject {
+				t.Fatalf("trusted %s from non-loopback did not receive the identity exemption", name)
+			}
+		})
+	}
+
+	// An unauthed or peer identity from the same LAN IP is still subject to
+	// the limiter — the exemption is for trusted identities only, not for
+	// the IP itself.
+	for name, pubkey := range map[string]string{
+		"peer":     peer,
+		"unauthed": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			called := false
+			reject, message := applyTrustedFilterExemption(lanIP, pubkey, policy, func() (bool, string) {
+				called = true
+				return true, "rate-limited"
+			})
+			if !called || !reject || message != "rate-limited" {
+				t.Fatalf("%s from non-loopback decision = (called=%v, reject=%v, message=%q), want limiter rejection", name, called, reject, message)
+			}
+		})
+	}
+}
+
 func TestAuthorizeEventMatrix(t *testing.T) {
 	local, networked, owner, writer, peer, unknown := authorizationTestPolicies(t)
 

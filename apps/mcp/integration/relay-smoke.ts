@@ -585,6 +585,17 @@ async function main(): Promise<void> {
       env: serverEnv,
       stderr: "pipe",
     });
+    // Capture the headless press's stderr so a publication-relay failure can
+    // surface the press's own diagnostics (publishToMany warnings, AUTH
+    // retries, etc.) instead of just the test-side empty query result.
+    const pressStderrChunks: Buffer[] = [];
+    if (transport.stderr) {
+      transport.stderr.on("data", (chunk: Buffer) => pressStderrChunks.push(chunk));
+    }
+    const dumpPressStderr = (): string => {
+      const captured = Buffer.concat(pressStderrChunks).toString("utf8").trim();
+      return captured ? `\n--- press stderr ---\n${captured}\n--- end press stderr ---` : "";
+    };
     const client = new Client({ name: "zine-relay-contract", version: "1.0.0" });
     await client.connect(transport);
     try {
@@ -789,11 +800,27 @@ async function main(): Promise<void> {
         { ids: exactNodeIds },
         voice.secretKey,
       );
-      assert.deepEqual(
-        externallyVisible.map((event) => event.id),
-        [exactNodeIds[2]],
-        "Send leaked private ancestry to the publication relay",
-      );
+      try {
+        assert.deepEqual(
+          externallyVisible.map((event) => event.id),
+          [exactNodeIds[2]],
+          "Send leaked private ancestry to the publication relay",
+        );
+      } catch (error) {
+        // The Send tool returned sent:true, so the press's publishToMany must
+        // have reported success on at least one publication relay. An empty
+        // query result here means either the publish silently failed, the
+        // store/query raced, or the relay throttled an authed reader. Surface
+        // the press's stderr to disambiguate.
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `${message}\n` +
+            `sent.nodeId=${sent.nodeId}\n` +
+            `expectedLeaf=${exactNodeIds[2]}\n` +
+            `externalRelay=${externalRelay}${dumpPressStderr()}`,
+          { cause: error },
+        );
+      }
       assert.deepEqual(externallyVisible[0], node.event);
       const rootScoped = await queryRelay(
         externalRelay,
