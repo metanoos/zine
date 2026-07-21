@@ -343,13 +343,27 @@ func loopbackExemptFilter(policy *AccessPolicy, fn func(context.Context, nostr.F
 // trusted; once an ACL is active only the authenticated owner and writers get
 // the burst exemption. Peers still pass the AUTH gate but consume limiter
 // tokens like other remote readers.
+//
+// The exemption keys off the authenticated identity, not the source IP: an
+// owner or writer may legitimately connect from the machine's non-loopback
+// LAN address (e.g. a headless press whose `--publish-relay` is its own eth0
+// IP, or a desktop on a dual-stack host), and AUTH is the trust boundary that
+// distinguishes them from anonymous peers. Loopback without an owner/writer
+// identity still gets the local-mode pass so an unauthed first-run desktop
+// keeps working before peers.json is written.
 func applyTrustedFilterExemption(
 	ip string,
 	authed string,
 	policy *AccessPolicy,
 	reject func() (bool, string),
 ) (bool, string) {
-	if isLoopback(ip) && (!policy.Active() || policy.IsOwner(authed) || policy.IsWriter(authed)) {
+	if !policy.Active() {
+		if isLoopback(ip) {
+			return false, ""
+		}
+		return reject()
+	}
+	if policy.IsOwner(authed) || policy.IsWriter(authed) {
 		return false, ""
 	}
 	return reject()
