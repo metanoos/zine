@@ -11,18 +11,104 @@ import {
 import {
   coinMintOperationKey,
   completePendingCoinMint,
+  createCoinMintRecoverySessionRegistry,
+  createCoinMintSourceReservationRegistry,
   finalizedCoinMintSourceText,
+  finalizedCoinMintSourceStepKEdits,
   pendingCoinMints,
   pendingCoinMint,
+  pendingCoinMintBlockingSourceMutation,
   preparePendingCoinMint,
+  rebasedFinalizedCoinMintSourceText,
+  resolvedFinalizedCoinMintSourceText,
+  rebaseFinalizedCoinMintSourceFile,
+  retryCoinMintRecovery,
   resumePendingCoinMints,
 } from "./coin-mint-journal.js";
 import { resolvedBracketMarkup } from "./brackets.js";
+import {
+  applyKEditTransaction,
+  flattenRuns,
+  keditLogFromArray,
+  keditLogToArray,
+  validateKEditTransition,
+} from "../workspace/workspace-core.js";
 
 const SECRET = Uint8Array.from([...new Uint8Array(31), 1]);
 const VAULT_KEY_A = new Uint8Array(32).fill(0x51);
 const VAULT_KEY_B = new Uint8Array(32).fill(0x52);
 const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+
+test("StrictMode replay reuses recovery while a real opt-out aborts it", async () => {
+  const registry = createCoinMintRecoverySessionRegistry();
+  let starts = 0;
+  let finish!: () => void;
+  const first = registry.acquire("strict-session", async () => {
+    starts++;
+    await new Promise<void>((resolve) => { finish = resolve; });
+  });
+  first.release();
+  const replay = registry.acquire("strict-session", async () => {
+    starts++;
+  });
+  await Promise.resolve();
+  assert.equal(starts, 1);
+  assert.equal(replay.signal.aborted, false);
+  finish();
+  await replay.promise;
+  replay.release();
+
+  const disabled = registry.acquire("disabled-session", async (signal) => {
+    await new Promise<void>((resolve) => {
+      if (signal.aborted) resolve();
+      else signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+  });
+  disabled.release();
+  await disabled.promise;
+  assert.equal(disabled.signal.aborted, true);
+  assert.equal(disabled.signal.reason?.name, "AbortError");
+
+  let restartCount = 0;
+  const initiallyEmpty = registry.acquire("restartable-session", async () => {
+    restartCount++;
+  });
+  await initiallyEmpty.promise;
+  initiallyEmpty.release();
+  const laterWork = registry.acquire("restartable-session", async () => {
+    restartCount++;
+  });
+  await laterWork.promise;
+  laterWork.release();
+  assert.equal(restartCount, 2, "a settled empty pass must not suppress later foreground work");
+});
+
+test("failed Mint recovery retries with bounded exponential backoff until empty", async () => {
+  const controller = new AbortController();
+  const delays: number[] = [];
+  let attempts = 0;
+  await retryCoinMintRecovery(
+    async () => ({ remaining: ++attempts < 3 ? 1 : 0 }),
+    async (delayMs) => { delays.push(delayMs); },
+    controller.signal,
+  );
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [5_000, 10_000]);
+});
+
+test("aborting a Mint recovery wait prevents another vault-scoped attempt", async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  await retryCoinMintRecovery(
+    async () => ({ remaining: ++attempts }),
+    async (_delayMs, signal) => {
+      controller.abort(new Error("vault changed"));
+      throw signal.reason;
+    },
+    controller.signal,
+  );
+  assert.equal(attempts, 1);
+});
 
 class FakeStorage implements Storage {
   private values = new Map<string, string>();
@@ -330,6 +416,24 @@ test("a durable public-pair receipt prevents network republication after source 
     pendingCoinMint("durable-public-pair", store)?.publishedAttestation,
     "published-attestation",
   );
+  assert.equal(
+    pendingCoinMintBlockingSourceMutation("source", "source.md", false, store)?.operationKey,
+    "durable-public-pair",
+    "a public pair must keep its exact unfinished source path mutation-locked",
+  );
+  assert.equal(
+    pendingCoinMintBlockingSourceMutation("source", "", true, store)?.operationKey,
+    "durable-public-pair",
+    "moving a containing folder must not strand source finalization",
+  );
+  assert.equal(
+    pendingCoinMintBlockingSourceMutation("source", "sibling.md", false, store),
+    null,
+  );
+  assert.equal(
+    pendingCoinMintBlockingSourceMutation("another-root", "source.md", false, store),
+    null,
+  );
 
   const receipt = await completePendingCoinMint(pending, completion(false), store);
   assert.equal(publications, 1, "source retries must reuse the durable public pair");
@@ -337,6 +441,11 @@ test("a durable public-pair receipt prevents network republication after source 
     attestation: "published-attestation",
     sourceNodeId: "3".repeat(64),
   });
+  assert.equal(
+    pendingCoinMintBlockingSourceMutation("source", "source.md", false, store),
+    null,
+    "the source path unlocks after the durable transaction clears",
+  );
 });
 
 test("source finalization is idempotent only at its recorded bracket target", async () => {
@@ -364,6 +473,159 @@ test("source finalization is idempotent only at its recorded bracket target", as
     finalizedCoinMintSourceText(pending, resolvedElsewhere),
     `[[ phrase | ${pending.coin.id} ]] and [[ phrase | ${pending.coin.id} ]]`,
   );
+});
+
+test("an in-flight extracted Mint reserves its source before a journal row exists", () => {
+  const reservations = createCoinMintSourceReservationRegistry();
+  const releaseFirst = reservations.reserve("source", "notes/source.md");
+  const releaseSecond = reservations.reserve("source", "notes/source.md");
+
+  assert.equal(reservations.blocks("source", "notes/source.md", false), true);
+  assert.equal(reservations.blocks("source", "notes", true), true);
+  assert.equal(reservations.blocks("source", "sibling.md", false), false);
+  assert.equal(reservations.blocks("another-root", "notes", true), false);
+
+  releaseFirst();
+  assert.equal(
+    reservations.blocks("source", "notes/source.md", false),
+    true,
+    "one completed gesture must not release another gesture's reservation",
+  );
+  releaseSecond();
+  assert.equal(reservations.blocks("source", "notes/source.md", false), false);
+});
+
+test("a delayed source citation Step preserves and rebases newer editor text", async () => {
+  const store = storage();
+  const pending = await preparePendingCoinMint("delayed-source-step", async () => ({
+    sourceFolderId: "source",
+    mintFolderId: "mint",
+    localPath: "Mint/phrase.md",
+    memberName: "phrase.md",
+    phrase: "phrase",
+    coin: coin(31),
+    sourceFinalization: {
+      kind: "pending-bracket" as const,
+      relativePath: "source.md",
+      sourceNodeId: "d".repeat(64),
+      sourceContentHash: "e".repeat(64),
+      range: { start: 3, end: 9 },
+      bracketRange: { start: 0, end: "[[ phrase ]]".length },
+    },
+  }), store, 1);
+  const steppedText = finalizedCoinMintSourceText(pending, "[[ phrase ]]");
+  const concurrentVoice = "b".repeat(64);
+  const prefix = "typed before ";
+  const suffix = " typed after";
+  const concurrentKEdits = [
+    {
+      op: "ins" as const,
+      from: 0,
+      to: 0,
+      text: prefix,
+      voice: concurrentVoice,
+      t: 1_001,
+      tx: 7,
+    },
+    {
+      op: "ins" as const,
+      from: prefix.length + "[[ phrase ]]".length,
+      to: prefix.length + "[[ phrase ]]".length,
+      text: suffix,
+      voice: concurrentVoice,
+      t: 1_002,
+      tx: 8,
+      intent: "redo" as const,
+    },
+  ];
+  const rebased = rebaseFinalizedCoinMintSourceFile(
+    pending,
+    {
+      runs: [
+        { voice: concurrentVoice, text: prefix },
+        { voice: pending.coin.pubkey, text: "[[ phrase ]]" },
+        { voice: concurrentVoice, text: suffix },
+      ],
+      nodeId: pending.sourceFinalization!.sourceNodeId,
+      tags: ["draft"],
+      citationIds: ["c".repeat(64)],
+    },
+    "[[ phrase ]]",
+    steppedText,
+    "f".repeat(64),
+    pending.coin.pubkey,
+    concurrentKEdits,
+  );
+  const expected = `${prefix}${steppedText}${suffix}`;
+  assert.equal(flattenRuns(rebased.runs), expected);
+  assert.equal(rebased.nodeId, "f".repeat(64));
+  assert.deepEqual(rebased.tags, ["draft"]);
+  assert.deepEqual(rebased.citationIds, ["c".repeat(64)]);
+  assert.deepEqual(keditLogToArray(rebased.kedits), [
+    concurrentKEdits[0],
+    {
+      ...concurrentKEdits[1],
+      from: prefix.length + steppedText.length,
+      to: prefix.length + steppedText.length,
+    },
+  ]);
+  assert.equal(
+    flattenRuns(applyKEditTransaction(
+      [{ voice: pending.coin.pubkey, text: steppedText }],
+      keditLogToArray(rebased.kedits),
+    )),
+    expected,
+  );
+});
+
+test("source recovery Steps preserve pending KEdit metadata before the citation transaction", async () => {
+  const store = storage();
+  const pending = await preparePendingCoinMint("recovery-kedits", async () => ({
+    sourceFolderId: "source",
+    mintFolderId: "mint",
+    localPath: "Mint/phrase.md",
+    memberName: "phrase.md",
+    phrase: "phrase",
+    coin: coin(32),
+    sourceFinalization: {
+      kind: "pending-bracket" as const,
+      relativePath: "source.md",
+      sourceNodeId: "d".repeat(64),
+      sourceContentHash: "e".repeat(64),
+      range: { start: 10, end: 16 },
+      bracketRange: { start: 7, end: 19 },
+    },
+  }), store, 1);
+  const priorText = "before [[ phrase ]]";
+  const currentText = "typed before [[ phrase ]]";
+  const captured = [{
+    op: "repl" as const,
+    from: 0,
+    to: "before".length,
+    text: "typed before",
+    voice: "b".repeat(64),
+    t: 5_001,
+    tx: 9,
+    intent: "redo" as const,
+  }];
+  const finalizedText = rebasedFinalizedCoinMintSourceText(
+    pending,
+    priorText,
+    currentText,
+  );
+  const composed = finalizedCoinMintSourceStepKEdits(
+    currentText,
+    finalizedText,
+    keditLogFromArray(captured),
+    pending.coin.pubkey,
+    5_002,
+  );
+
+  assert.deepEqual(composed[0], captured[0]);
+  assert.equal(composed[1]?.tx, 10);
+  assert.equal(composed[1]?.t, 5_002);
+  assert.equal(composed[1]?.voice, pending.coin.pubkey);
+  assert.equal(validateKEditTransition(priorText, finalizedText, composed).valid, true);
 });
 
 test("headless span finalization replaces only its recorded UTF-16 source range", async () => {
@@ -406,6 +668,59 @@ test("same-source Mints rebase a later range after the earlier citation resolves
   );
   assert.deepEqual(published, [earlier.coin.id, later.coin.id]);
   assert.deepEqual(pendingCoinMints(store), []);
+});
+
+test("desktop finalize uses live space after an earlier same-source Mint rebases ranges", async () => {
+  const store = storage();
+  const captured = "[[ alpha ]] middle [[ omega ]]";
+  let live = captured;
+  const sourceNodeId = "b".repeat(64);
+  const sourceContentHash = "c".repeat(64);
+  const makePending = async (operationKey: string, phrase: string, createdAt: number) => {
+    const bracket = `[[ ${phrase} ]]`;
+    const matchStart = captured.indexOf(bracket);
+    const phraseStart = matchStart + "[[ ".length;
+    return preparePendingCoinMint(operationKey, async () => ({
+      sourceFolderId: "source",
+      mintFolderId: "mint",
+      localPath: `Mint/${phrase}.md`,
+      memberName: `${phrase}.md`,
+      phrase,
+      coin: coin(createdAt),
+      sourceFinalization: {
+        kind: "pending-bracket" as const,
+        relativePath: "source.md",
+        sourceNodeId,
+        sourceContentHash,
+        range: { start: phraseStart, end: phraseStart + phrase.length },
+        bracketRange: { start: matchStart, end: matchStart + bracket.length },
+      },
+    }), store, createdAt);
+  };
+  const earlier = await makePending("earlier", "alpha", 20_101);
+  const later = await makePending("later", "omega", 20_102);
+
+  await completePendingCoinMint(earlier, {
+    publishPair: async (event) => event.id,
+    finalizeSource: async (record) => {
+      live = finalizedCoinMintSourceText(record, live);
+      return record.coin.id;
+    },
+    persistMembership: async () => undefined,
+    persistLocal: () => undefined,
+  }, store);
+
+  const rebasedLater = pendingCoinMint("later", store);
+  assert.ok(rebasedLater?.sourceFinalization);
+  assert.throws(
+    () => rebasedFinalizedCoinMintSourceText(rebasedLater!, captured, live),
+    /pending bracket is missing/,
+  );
+  assert.equal(
+    resolvedFinalizedCoinMintSourceText(rebasedLater!, captured, live),
+    `${resolvedBracketMarkup("alpha", earlier.coin.id)} middle ` +
+      resolvedBracketMarkup("omega", later.coin.id),
+  );
 });
 
 test("same-source Mints preserve an earlier range after the later citation resolves", async () => {
@@ -1105,4 +1420,96 @@ test("Mint journal refuses to persist a record whose coin is not cryptographical
     /refusing to journal an invalid pending Mint/,
   );
   assert.equal(pendingCoinMint("invalid-coin"), null);
+});
+
+// Negative paths for the KEdit rebase. The happy-path test above covers clean
+// prefix/suffix concurrent edits; these exercise the three fail-closed guards
+// inside rebaseCoinMintSourceKEdits (reached via rebaseFinalizedCoinMintSourceFile
+// when concurrentKEdits.length > 0). Each must throw instead of silently
+// producing a corrupted source Step.
+
+async function pendingBracketMint(operationKey: string) {
+  const store = storage();
+  return preparePendingCoinMint(operationKey, async () => ({
+    sourceFolderId: "source",
+    mintFolderId: "mint",
+    localPath: `Mint/${operationKey}.md`,
+    memberName: `${operationKey}.md`,
+    phrase: "phrase",
+    coin: coin(101),
+    sourceFinalization: {
+      kind: "pending-bracket" as const,
+      relativePath: "source.md",
+      sourceNodeId: "d".repeat(64),
+      sourceContentHash: "e".repeat(64),
+      range: { start: 3, end: 9 },
+      bracketRange: { start: 0, end: "[[ phrase ]]".length },
+    },
+  }), store, 1);
+}
+
+test("rebase rejects concurrent KEdits that do not reconstruct currentText", async () => {
+  const pending = await pendingBracketMint("rebase-invalid-kedit");
+  const sourceText = "[[ phrase ]]";
+  const steppedText = finalizedCoinMintSourceText(pending, sourceText);
+  const current = {
+    runs: [{ voice: pending.coin.pubkey, text: sourceText }],
+    nodeId: pending.sourceFinalization!.sourceNodeId,
+    tags: [],
+    citationIds: [],
+  };
+  // KEdit claims to insert at [0,0) but the resulting text would not equal
+  // currentText (it would have the prefix). validateKEditTransition fails.
+  const bogusKEdits = [
+    { op: "ins" as const, from: 0, to: 0, text: "typed before ", voice: "b".repeat(64), t: 1, tx: 1 },
+  ];
+  assert.throws(
+    () => rebaseFinalizedCoinMintSourceFile(
+      pending,
+      current,
+      sourceText,
+      steppedText,
+      "f".repeat(64),
+      pending.coin.pubkey,
+      bogusKEdits,
+    ),
+    /invalid concurrent KEdit log/,
+  );
+});
+
+test("rebase rejects a concurrent KEdit that overlaps the citation range", async () => {
+  const pending = await pendingBracketMint("rebase-overlap");
+  const sourceText = "[[ phrase ]]";
+  const steppedText = finalizedCoinMintSourceText(pending, sourceText);
+  // minimalTextChange(sourceText, steppedText) returns a citation envelope
+  // bounded by the divergence of "[[ phrase ]]" from "[[ phrase | <id> ]]" —
+  // roughly {from=10, to=9} (the closing "]]" is shared, so the inner edit
+  // boundary inverts). A concurrent KEdit whose [from, to] straddles that
+  // envelope (from < citationTo AND to > citationFrom) must fail closed
+  // instead of letting the citation rewrite and the editor transaction both
+  // claim the same bytes.
+  const overlappingFrom = 8;
+  const overlappingTo = 11;
+  const replacedSlice = sourceText.slice(overlappingFrom, overlappingTo);
+  const current = {
+    runs: [{ voice: pending.coin.pubkey, text: sourceText }],
+    nodeId: pending.sourceFinalization!.sourceNodeId,
+    tags: [],
+    citationIds: [],
+  };
+  const overlappingKEdits = [
+    { op: "repl" as const, from: overlappingFrom, to: overlappingTo, text: replacedSlice, voice: "b".repeat(64), t: 1, tx: 1 },
+  ];
+  assert.throws(
+    () => rebaseFinalizedCoinMintSourceFile(
+      pending,
+      current,
+      sourceText,
+      steppedText,
+      "f".repeat(64),
+      pending.coin.pubkey,
+      overlappingKEdits,
+    ),
+    /overlaps a concurrent editor transaction/,
+  );
 });

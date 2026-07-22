@@ -52,6 +52,13 @@ import {
   pendingRendezvousEvents,
   type RendezvousOutboxSession,
 } from "./rendezvous-outbox.js";
+import {
+  MAX_RENDEZVOUS_CONTENT_LENGTH,
+  MAX_RENDEZVOUS_EVENT_BYTES,
+  MAX_RENDEZVOUS_TAGS,
+  MAX_RENDEZVOUS_TAG_VALUE_LENGTH,
+  MAX_RENDEZVOUS_TAG_VALUES,
+} from "./rendezvous.js";
 
 /**
  * Bridge between the editor and the local relay. Publishes and fetches the
@@ -552,6 +559,8 @@ export interface PublishEditInput {
    *  configuration produced the response. Serialized as a top-level `llm` field
    *  in the node content. Absent on every non-LLM write. */
   llm?: { model: string; temperature: number | null; maxTokens: number; provider: string };
+  /** Caller-owned cancellation/consent boundary for a multi-phase write. */
+  publicationFence?: PublicationFence;
 }
 
 export interface ResolvedInlineCitation {
@@ -779,15 +788,38 @@ export async function getPublicationRelays(): Promise<Relay[]> {
 }
 
 /** Connect to every read-enabled relay. Order matches the user's list. */
-export async function getReadRelays(): Promise<Relay[]> {
-  const urls = readRelays().map((e) => e.url);
-  const out: Relay[] = [];
-  for (const url of urls) {
-    if (out.some((r) => r.url === url)) continue;
-    const r = await getRelayRetrying(url);
-    if (r) out.push(r);
-  }
-  return out;
+export async function connectRelaysBounded<T>(
+  urls: readonly string[],
+  connect: (url: string) => Promise<T | null>,
+  signal?: AbortSignal,
+  concurrency = 4,
+): Promise<T[]> {
+  const unique = [...new Set(urls)];
+  const results = new Array<T | null>(unique.length).fill(null);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < unique.length) {
+      if (signal?.aborted) throw abortReason(signal);
+      const index = cursor++;
+      results[index] = await withAbortSignal(connect(unique[index]!), signal);
+    }
+  };
+  const workerCount = Math.min(
+    unique.length,
+    Math.max(1, Number.isFinite(concurrency) ? Math.floor(concurrency) : 1),
+  );
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return results.filter((relay): relay is T => relay !== null);
+}
+
+/** Connect to every read-enabled relay with one caller-owned deadline. Relay
+ * order stays deterministic, while connection fan-out remains bounded. */
+export async function getReadRelays(signal?: AbortSignal): Promise<Relay[]> {
+  return connectRelaysBounded(
+    readRelays().map((entry) => entry.url),
+    (url) => getRelayRetrying(url),
+    signal,
+  );
 }
 
 /**
@@ -814,6 +846,23 @@ async function publishWithAuth(relay: Relay, event: Event): Promise<string> {
   }
 }
 
+export interface PublicationFence {
+  /** Stops a caller-owned multi-phase gesture before its next relay write. */
+  signal?: AbortSignal;
+  /** Live consent predicate checked at the relay-write boundary. */
+  enabled?: () => boolean;
+}
+
+export function assertPublicationFence(fence?: PublicationFence): void {
+  if (!fence?.signal?.aborted && (fence?.enabled?.() ?? true)) return;
+  const reason = fence?.signal?.reason;
+  const error = reason instanceof Error
+    ? reason
+    : new Error("publication disabled before relay write");
+  error.name = "AbortError";
+  throw error;
+}
+
 /**
  * Publish to every relay in parallel. A single relay failing is collected but
  * does not fail the call — one dead external relay shouldn't block a save, and
@@ -821,10 +870,18 @@ async function publishWithAuth(relay: Relay, event: Event): Promise<string> {
  * than any other. The call rejects only when *every* relay failed (or when the
  * set was empty to begin with), so a save is never a silent no-op.
  */
-export async function publishToMany(relays: Relay[], event: Event): Promise<Relay[]> {
+export async function publishToMany(
+  relays: Relay[],
+  event: Event,
+  fence?: PublicationFence,
+): Promise<Relay[]> {
   if (relays.length === 0) {
     throw new Error("no relays available to publish to");
   }
+  // This is the last synchronous boundary before relay.publish starts. A
+  // network write already accepted by a relay cannot be revoked, but a live
+  // opt-out prevents every phase that has not begun yet.
+  assertPublicationFence(fence);
   const results = await Promise.allSettled(relays.map((r) => publishWithAuth(r, event)));
   const publishedRelays = relays.filter((_, index) => results[index]?.status === "fulfilled");
   if (publishedRelays.length === 0) {
@@ -837,6 +894,40 @@ export async function publishToMany(relays: Relay[], event: Event): Promise<Rela
     throw new Error(`publish failed on every relay${msgs ? ` (${msgs})` : ""}`);
   }
   return publishedRelays;
+}
+
+/** Restore one exact signed Mint pair onto named public relays. Retry uses the
+ * durable attestation rather than re-signing, so event identity is stable
+ * across restart and relay-configuration churn. */
+export async function republishExactMintPairToRelays(
+  urls: readonly string[],
+  coin: Event,
+  attestation: Event,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  if (!verifyEvent(coin) || !verifyEvent(attestation)) {
+    throw new Error("refusing to republish an invalid Mint pair");
+  }
+  const fence: PublicationFence = {
+    signal,
+    enabled: () => !signal?.aborted,
+  };
+  const relays = await connectRelaysBounded(
+    [...new Set(urls)],
+    (url) => getRelayRetrying(url, 2),
+    signal,
+  );
+  const results = await Promise.allSettled(relays.map(async (relay) => {
+    assertPublicationFence(fence);
+    await publishWithAuth(relay, coin);
+    assertPublicationFence(fence);
+    await publishWithAuth(relay, attestation);
+    assertPublicationFence(fence);
+    return relay.url;
+  }));
+  return results.flatMap((result) =>
+    result.status === "fulfilled" ? [result.value] : []
+  );
 }
 
 // --- Voice identity declarations (kind 34292) ----------------------------
@@ -966,18 +1057,27 @@ export function applyPendingLlmMeta(input: PublishEditInput): void {
 /** Record one already-signed immutable event as an exact local Step. The local
  * outbox is written before the home relay is touched, so callers can retry the
  * same bytes after an offline or partial attempt. */
-async function stepSignedEventLocally(event: Event): Promise<Relay[]> {
+async function stepSignedEventLocally(
+  event: Event,
+  publicationFence?: PublicationFence,
+): Promise<Relay[]> {
+  assertPublicationFence(publicationFence);
   if (!verifyEvent(event)) {
     throw new Error(`cannot Step invalid signed event ${event.id}`);
   }
   enqueueLocalEvent(event);
-  const homeRelay = await getRelayRetrying(resolveRelayUrl(), 1);
+  const homeRelay = await withAbortSignal(
+    getRelayRetrying(resolveRelayUrl(), 1),
+    publicationFence?.signal,
+  );
+  assertPublicationFence(publicationFence);
   if (!homeRelay) return [];
-  await flushLocalEventOutboxThrough(homeRelay);
+  await flushLocalEventOutboxThrough(homeRelay, publicationFence);
   return pendingLocalEventById(event.id) ? [] : [homeRelay];
 }
 
 export async function publishEdit(input: PublishEditInput): Promise<Event> {
+  assertPublicationFence(input.publicationFence);
   if (!Array.isArray(input.kedits)) {
     throw new Error("cannot publish a file Step without its required KEdit array");
   }
@@ -1205,10 +1305,10 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   // node instead of creating another checkpoint.
   let publishedRelays: Relay[];
   if (input.localOnly) {
-    publishedRelays = await stepSignedEventLocally(signed);
+    publishedRelays = await stepSignedEventLocally(signed, input.publicationFence);
   } else {
     const relays = await getWriteRelays();
-    await publishToMany(relays, signed);
+    await publishToMany(relays, signed, input.publicationFence);
     publishedRelays = relays;
   }
 
@@ -1223,7 +1323,13 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
   // and is mutable, so it still receives TraceHead normally.
   if (traceIdentity && !input.coinOrigin && publishedRelays.length > 0) {
     try {
-      await publishTraceHead(traceIdentity, signed.id, signer, publishedRelays);
+      await publishTraceHead(
+        traceIdentity,
+        signed.id,
+        signer,
+        publishedRelays,
+        input.publicationFence,
+      );
     } catch (error) {
       console.warn(`[provenance] TraceHead publish failed for ${traceIdentity}:`, error);
     }
@@ -1291,24 +1397,40 @@ export function coinOriginFromEvent(event: Event): CoinOrigin | null {
     const origin = parsed.coin?.origin;
     if (parsed.coin?.version === 1 && origin && typeof origin === "object") {
       const candidate = origin as Record<string, unknown>;
-      if (candidate.kind === "direct" && extractedFrom.length === 0) {
+      const candidateKeys = Object.keys(candidate).sort();
+      if (
+        candidate.kind === "direct" &&
+        extractedFrom.length === 0 &&
+        candidateKeys.length === 1 &&
+        candidateKeys[0] === "kind"
+      ) {
         return { kind: "direct" };
       }
       const range = candidate.range && typeof candidate.range === "object"
         ? candidate.range as Record<string, unknown>
         : null;
+      const rangeKeys = range ? Object.keys(range).sort() : [];
       if (
         candidate.kind === "extracted" &&
+        candidateKeys.length === 4 &&
+        candidateKeys[0] === "kind" &&
+        candidateKeys[1] === "range" &&
+        candidateKeys[2] === "sourceContentHash" &&
+        candidateKeys[3] === "sourceNodeId" &&
         typeof candidate.sourceNodeId === "string" && HEX_64.test(candidate.sourceNodeId) &&
         typeof candidate.sourceContentHash === "string" &&
         HEX_64.test(candidate.sourceContentHash) &&
         extractedFrom.length === 1 &&
         extractedFrom[0]?.[1] === candidate.sourceNodeId &&
         range &&
+        rangeKeys.length === 2 &&
+        rangeKeys[0] === "end" &&
+        rangeKeys[1] === "start" &&
         Number.isInteger(range.start) &&
         Number.isInteger(range.end) &&
         (range.start as number) >= 0 &&
-        (range.end as number) >= (range.start as number)
+        (range.end as number) >= (range.start as number) &&
+        (range.end as number) - (range.start as number) === parsed.snapshot.length
       ) {
         return {
           kind: "extracted",
@@ -1322,6 +1444,36 @@ export function coinOriginFromEvent(event: Event): CoinOrigin | null {
     // Invalid or non-JSON content is not a Coin.
   }
   return null;
+}
+
+/** Authenticate one exact file nucleus before trusting its signed snapshot.
+ * Extracted Coin writers and readers share this boundary so a relay cannot
+ * make the writer publish an object that compliant rendezvous readers reject. */
+export async function verifiedFileSourceSnapshot(
+  event: Event | null | undefined,
+  expectedId: string,
+): Promise<string | null> {
+  if (
+    !event ||
+    event.id !== expectedId ||
+    event.kind !== TRACE_NODE_KIND ||
+    !verifyEvent(event) ||
+    !event.tags.some((tag) => tag[0] === "z" && tag[1] === "file")
+  ) return null;
+  try {
+    const parsed = JSON.parse(event.content) as {
+      snapshot?: unknown;
+      contentHash?: unknown;
+    };
+    if (typeof parsed.snapshot !== "string" || typeof parsed.contentHash !== "string") {
+      return null;
+    }
+    return await sha256HexLocal(parsed.snapshot) === parsed.contentHash
+      ? parsed.snapshot
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** True only when the event carries a valid current Coin envelope. */
@@ -1401,7 +1553,7 @@ subscribeKademliaConfig(() => {
   for (const controller of rendezvousFlushControllers) controller.abort(reason);
 });
 
-/** Retry durable Send-side indexing without allowing one event's unavailable
+/** Retry durable Mint-side indexing without allowing one Coin's unavailable
  * relay to starve independent work. Disabled presses retain queued work until
  * the next enabled startup/network-recovery pass completes the indexing. */
 export async function flushRendezvousPublicationOutbox(): Promise<{
@@ -1426,8 +1578,12 @@ export async function flushRendezvousPublicationOutbox(): Promise<{
     const controller = new AbortController();
     rendezvousFlushControllers.add(controller);
     try {
-      const { publishSentCoinCitations } = await import("./rendezvous.js");
-      const result = await drainRendezvousEvents(async (eventId) => {
+      const { publishCompletedCoinMint } = await import("./rendezvous.js");
+      const result = await drainRendezvousEvents(async (
+        eventId,
+        provenRelayUrls,
+        completionAttestation,
+      ) => {
         // Configuration or vault authority can change while an earlier event is
         // in flight. Never let the old task remove or reschedule another vault's
         // durable work.
@@ -1438,33 +1594,48 @@ export async function flushRendezvousPublicationOutbox(): Promise<{
           !loadKademliaConfig().enabled
         ) return false;
         try {
-          const event = await fetchEventById(eventId);
+          const event = await fetchLocalEventById(eventId, controller.signal);
           if (!event) {
             console.warn(
-              `[rendezvous] Send ${eventId} remains queued because its carrying event is not fetchable`,
+              `[rendezvous] Coin ${eventId} remains queued because its genesis is not fetchable`,
             );
             return false;
           }
           if (controller.signal.aborted || !isRendezvousOutboxSessionCurrent(session)) {
             return false;
           }
-          const report = await publishSentCoinCitations(event, { signal: controller.signal });
+          const currentRelayUrls = publicationRelays().map((entry) => entry.url);
+          const retryRelayUrls = [...new Set([...provenRelayUrls, ...currentRelayUrls])];
+          const report = await publishCompletedCoinMint(event, {
+            signal: controller.signal,
+            ...(completionAttestation ? { completionAttestation } : {}),
+            ...(retryRelayUrls.length > 0 ? {
+              adapters: { publicationRelayUrls: () => retryRelayUrls },
+            } : {}),
+          });
           if (
             controller.signal.aborted ||
             !isRendezvousOutboxSessionCurrent(session) ||
             !isTauri() ||
             !loadKademliaConfig().enabled
           ) return false;
-          if (!report.complete) {
+          if (report.complete && report.pointersPublished === 0) {
+            // Terminal abandon: corrupt genesis or durable pair can never index.
+            // Still remove the outbox row, but never do so silently.
             console.warn(
-              `[rendezvous] Send ${event.id} remains queued for indexing:`,
+              `[rendezvous] Coin ${event.id} abandoned indexing (terminal):`,
+              report.failures,
+            );
+          } else if (!report.complete) {
+            console.warn(
+              `[rendezvous] Coin ${event.id} remains queued for indexing:`,
               report.failures,
             );
           }
           return report.complete;
         } catch (error) {
           if (!controller.signal.aborted && isRendezvousOutboxSessionCurrent(session)) {
-            console.warn(`[rendezvous] Send ${eventId} remains queued for indexing:`, error);
+            console.warn(`[rendezvous] Coin ${eventId} remains queued for indexing:`, error);
           }
           throw error;
         }
@@ -1482,31 +1653,52 @@ export async function flushRendezvousPublicationOutbox(): Promise<{
   return task;
 }
 
-/** Eligible carrying events enter a durable outbox before relay publication; a
- * fresh verifier must prove strangers can fetch the carrying node and cited
- * Coin before the event leaves that queue. A crash before publication simply
- * leaves an unresolvable record for a later Send/recovery pass to retry. */
-async function queueRendezvousPublication(event: Event): Promise<boolean> {
-  if (
-    eventMeta(event).citationTargets.length === 0 ||
-    !isTauri() ||
-    !loadKademliaConfig().enabled
-  ) return false;
-  await enqueueRendezvousEvent(event);
+/** A completed Coin enters the durable outbox after its public genesis and
+ * same-minter attestation both succeed. A fresh verifier must prove strangers
+ * can fetch that pair before the Coin leaves the queue. */
+function assertRendezvousSessionCurrent(session: RendezvousOutboxSession): void {
+  if (isRendezvousOutboxSessionCurrent(session)) return;
+  const error = new Error("vault session changed during completed-Mint indexing enqueue");
+  error.name = "AbortError";
+  throw error;
+}
+
+async function queueCompletedMintRendezvous(
+  event: Event,
+  completionAttestation: Event,
+  provenRelayUrls: readonly string[],
+  session: RendezvousOutboxSession,
+): Promise<boolean> {
+  if (!isCoinEvent(event) || !isTauri()) return false;
+  assertRendezvousSessionCurrent(session);
+  if (!loadKademliaConfig().enabled) {
+    const error = new Error("Coins disabled during completed-Mint indexing enqueue");
+    error.name = "AbortError";
+    throw error;
+  }
+  await enqueueRendezvousEvent(
+    event,
+    undefined,
+    Date.now(),
+    session,
+    provenRelayUrls,
+    completionAttestation,
+  );
+  assertRendezvousSessionCurrent(session);
   return true;
 }
 
 function scheduleRendezvousPublication(event: Event): void {
   void flushRendezvousPublicationOutbox().catch((error) => {
-    console.warn(`[rendezvous] indexing flush failed for Send ${event.id}:`, error);
+    console.warn(`[rendezvous] indexing flush failed for Coin ${event.id}:`, error);
     scheduleRendezvousOutboxRetry();
   });
 }
 
-function rendezvousQueueFailure(eventId: string, error: unknown): Error {
+function mintRendezvousQueueFailure(eventId: string, error: unknown): Error {
   return new Error(
-    `Send ${eventId} was not published because its Coin rendezvous indexing ` +
-      `could not be queued durably. Free local storage and retry Send: ` +
+    `Mint completed its public Coin pair for ${eventId}, but rendezvous indexing ` +
+      `could not be queued durably. Free local storage and retry Mint recovery: ` +
       `${error instanceof Error ? error.message : String(error)}`,
   );
 }
@@ -1516,21 +1708,18 @@ function rendezvousQueueFailure(eventId: string, error: unknown): Error {
  *  the node was stepped locally (by a Step), and now the author chooses to make
  *  it reachable by others. Idempotent: re-sending a node that's already on a
  *  relay is a no-op (the relay dedupes by event id). */
-export async function sendStep(event: Event, signer?: Uint8Array): Promise<Relay[]> {
+export async function sendStep(
+  event: Event,
+  signer?: Uint8Array,
+  publicationFence?: PublicationFence,
+): Promise<Relay[]> {
   const relays = await getPublicationRelays();
   if (relays.length === 0) {
     throw new Error(
       "no publication relays available — configure a non-loopback write relay before Send",
     );
   }
-  let rendezvousQueued = false;
-  try {
-    rendezvousQueued = await queueRendezvousPublication(event);
-  } catch (error) {
-    throw rendezvousQueueFailure(event.id, error);
-  }
-  const publishedRelays = await publishToMany(relays, event);
-  if (rendezvousQueued) scheduleRendezvousPublication(event);
+  const publishedRelays = await publishToMany(relays, event, publicationFence);
   if (!isCoinEvent(event)) {
     try {
       const traceId = await resolveTraceIdentity(event.id);
@@ -1562,14 +1751,7 @@ export async function sendHistoricalStep(event: Event): Promise<void> {
       "no publication relays available — configure a non-loopback write relay before Send",
     );
   }
-  let rendezvousQueued = false;
-  try {
-    rendezvousQueued = await queueRendezvousPublication(event);
-  } catch (error) {
-    throw rendezvousQueueFailure(event.id, error);
-  }
   await publishToMany(relays, event);
-  if (rendezvousQueued) scheduleRendezvousPublication(event);
 }
 
 /** Publish the ordered local signed-event outbox to the current home relay.
@@ -1591,7 +1773,10 @@ let localOutboxFlushQueue: Promise<unknown> = Promise.resolve();
 
 /** Serialize every outbox drain, including foreground Steps and the MCP
  * background timer, so concurrent tool calls cannot overtake older events. */
-function flushLocalEventOutboxThrough(relay: Relay): Promise<{
+function flushLocalEventOutboxThrough(
+  relay: Relay,
+  publicationFence?: PublicationFence,
+): Promise<{
   pending: number;
   published: number;
 }> {
@@ -1600,10 +1785,13 @@ function flushLocalEventOutboxThrough(relay: Relay): Promise<{
     let published = 0;
     for (const record of records) {
       try {
+        assertPublicationFence(publicationFence);
         await publishWithAuth(relay, record.event);
+        assertPublicationFence(publicationFence);
         removeLocalEvent(record.event.id);
         published++;
       } catch (error) {
+        assertPublicationFence(publicationFence);
         console.warn(`[provenance] outbox sync stopped at ${record.event.id}:`, error);
         break;
       }
@@ -1713,7 +1901,8 @@ async function attestNodeToRelays(
     createdAtSec?: number;
   },
   publicationRelays?: Relay[],
-): Promise<Event> {
+  publicationFence?: PublicationFence,
+): Promise<{ event: Event; publishedRelays: Relay[] }> {
   const target = await fetchSentTraceNode(citedNodeId);
   if (!target) {
     throw new Error(
@@ -1738,14 +1927,14 @@ async function attestNodeToRelays(
       "no publication relays available — configure a non-loopback write relay before Attest",
     );
   }
-  await publishToMany(relays, signed);
+  const publishedRelays = await publishToMany(relays, signed, publicationFence);
   // §R11.22: Attest no longer stamps on its own behalf. The load-bearing
   // anteriority has moved to Step (the frequent gesture builds distributed
   // anteriority — see protocol/rendezvous.md §3); the attest node's
   // anteriority is inherited transitively from the cited node, which was
   // stepped by a Step that stamps. Attest MAY carry its own stamp later for a
   // distinct "when endorsed" claim, but that is not wired here.
-  return signed;
+  return { event: signed, publishedRelays };
 }
 
 export async function attestNode(
@@ -1759,7 +1948,7 @@ export async function attestNode(
     createdAtSec?: number;
   },
 ): Promise<Event> {
-  return attestNodeToRelays(citedNodeId, citedOwnerPubkey, input);
+  return (await attestNodeToRelays(citedNodeId, citedOwnerPubkey, input)).event;
 }
 
 /** Complete the public phases of Mint for one already-durable Coin genesis.
@@ -1772,7 +1961,10 @@ export async function attestNode(
 export async function completeCoinMint(
   coin: Event,
   signer?: Uint8Array,
+  publicationFence?: PublicationFence,
 ): Promise<Event> {
+  const rendezvousSession = captureRendezvousOutboxSession();
+  assertPublicationFence(publicationFence);
   if (!verifyEvent(coin) || !isCoinEvent(coin)) {
     throw new Error("cannot complete Mint for an invalid or non-Coin event");
   }
@@ -1782,7 +1974,7 @@ export async function completeCoinMint(
   }
   let coinRelays: Relay[];
   try {
-    await stepSignedEventLocally(coin);
+    await stepSignedEventLocally(coin, publicationFence);
   } catch (error) {
     throw new Error(
       `Mint could not Step Coin ${coin.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1793,22 +1985,40 @@ export async function completeCoinMint(
     // attestation is restricted to this set, so success proves that at least
     // one public relay contains both halves of the Mint pair even when relay
     // failures differ by event.
-    coinRelays = await sendStep(coin, mintSigner);
+    coinRelays = await sendStep(coin, mintSigner, publicationFence);
   } catch (error) {
     throw new Error(
       `Mint could not publish Coin ${coin.id}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  let attestation: Event;
+  let completedPairRelayUrls: string[];
   try {
-    return await attestNodeToRelays(coin.id, coin.pubkey, {
+    const completion = await attestNodeToRelays(coin.id, coin.pubkey, {
       signer: mintSigner,
       createdAtSec: coin.created_at,
-    }, coinRelays);
+    }, coinRelays, publicationFence);
+    attestation = completion.event;
+    completedPairRelayUrls = completion.publishedRelays.map((relay) => relay.url);
   } catch (error) {
     throw new Error(
       `Mint published Coin ${coin.id} but could not publish its minter attestation: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  assertPublicationFence(publicationFence);
+  let rendezvousQueued = false;
+  try {
+    rendezvousQueued = await queueCompletedMintRendezvous(
+      coin,
+      attestation,
+      completedPairRelayUrls,
+      rendezvousSession,
+    );
+  } catch (error) {
+    throw mintRendezvousQueueFailure(coin.id, error);
+  }
+  if (rendezvousQueued) scheduleRendezvousPublication(coin);
+  return attestation;
 }
 
 /** Step the immutable kind-4290 genesis used by the compound Mint gesture
@@ -2044,6 +2254,100 @@ export async function getOrCreateRuleTrace(
   return event.id;
 }
 
+/** Return a canonical `prev` id, null for genesis, and undefined for a
+ * malformed/ambiguous lineage surface. Keeping this parser shared prevents a
+ * permissive relay scan from disagreeing with the exact-id resolvers. */
+function canonicalPrevId(event: Pick<Event, "tags">): string | null | undefined {
+  const previousTags = event.tags.filter(
+    (tag) => tag[0] === "e" && tag[3] === "prev",
+  );
+  if (previousTags.length === 0) return null;
+  const previous = previousTags[0];
+  return previousTags.length === 1 &&
+      previous?.length === 4 &&
+      previous[2] === "" &&
+      HEX_64.test(previous[1] ?? "")
+    ? previous[1]!
+    : undefined;
+}
+
+/** Resolve one complete, single-owner chain from an untrusted relay set. A
+ * foreign signer may fork explicitly but can never extend another trace's
+ * `prev`; ambiguous owner branches fail closed instead of trusting relay order.
+ *
+ * This entry point verifies every event itself; production callers that have
+ * already pre-verified their set (e.g. `fetchChain`, `fetchFolderNodes`) should
+ * call `chainFromVerifiedSet` instead to avoid redundant schnorr verification. */
+export function ownerPinnedChainFromSet(
+  traceId: string,
+  events: readonly Event[],
+  discriminator: "file" | "folder",
+): Event[] {
+  const verified = events.filter((event) =>
+    event.kind === TRACE_NODE_KIND &&
+    event.tags.some((tag) => tag[0] === "z" && tag[1] === discriminator) &&
+    verifyEvent(event)
+  );
+  return chainFromVerifiedSet(traceId, verified, discriminator);
+}
+
+/** Internal chain resolver for pre-verified, discriminator-filtered events.
+ * Caller contract: every event in `events` is kind `TRACE_NODE_KIND`, carries
+ * the matching discriminator, and has passed `verifyEvent`. `traceId` MUST
+ * resolve to a genesis (no `prev`) within the set; otherwise the function
+ * fails closed by returning `[]`. */
+function chainFromVerifiedSet(
+  traceId: string,
+  events: readonly Event[],
+  discriminator: "file" | "folder",
+): Event[] {
+  const genesis = events.find((event) =>
+    event.id === traceId &&
+    event.kind === TRACE_NODE_KIND &&
+    event.tags.some((tag) => tag[0] === "z" && tag[1] === discriminator)
+  );
+  if (!genesis) return [];
+  const owner = genesis.pubkey;
+  // Cache `canonicalPrevId` per event — the prev-chain walk re-reads it on
+  // every step, and re-scanning tags each time is wasteful on long chains.
+  const admitted: Event[] = [];
+  const prevById = new Map<string, string | null>();
+  for (const event of events) {
+    if (event.pubkey !== owner) continue;
+    const previous = canonicalPrevId(event);
+    if (previous === undefined) continue;
+    if (event.id === traceId && previous !== null) continue;
+    admitted.push(event);
+    prevById.set(event.id, previous);
+  }
+  const byId = new Map(admitted.map((event) => [event.id, event]));
+  const historical = new Set<string>();
+  for (const previous of prevById.values()) {
+    if (previous) historical.add(previous);
+  }
+  const heads = admitted.filter((event) => !historical.has(event.id));
+  if (heads.length !== 1) return [];
+  const newestFirst: Event[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined = heads[0]!.id;
+  while (cursor) {
+    if (seen.has(cursor)) return [];
+    seen.add(cursor);
+    const event = byId.get(cursor);
+    if (!event) return [];
+    newestFirst.push(event);
+    const previous = prevById.get(event.id);
+    if (previous === undefined) return [];
+    if (event.id === traceId) {
+      if (previous !== null) return [];
+      return newestFirst.reverse();
+    }
+    if (previous === null) return [];
+    cursor = previous;
+  }
+  return [];
+}
+
 /** Fetches the full prev-chain for a file, ordered genesis→latest. Mirrors
  *  store.ts:fetchChain — never trusts created_at; walks `e...prev` links.
  *  Queries every enabled read relay and merges by event id (dedup), so a chain
@@ -2058,23 +2362,22 @@ export async function fetchChain(folderId: string, relativePath: string): Promis
     limit: TRACE_TRAVERSAL_MAX_EVENTS + 1,
   };
   const all = await queryMany(relays, filter);
-  assertTraceTraversalBudget([...new Map(all.map((event) => [event.id, event])).values()]);
-  const byId = new Map(all.map((e) => [e.id, e]));
-
-  const head = resolveHead(all);
-  if (!head) return [];
-
-  const chain: Event[] = [];
-  let cursor: string | undefined = head.id;
-  const guard = new Set<string>();
-  while (cursor && !guard.has(cursor)) {
-    guard.add(cursor);
-    const event = byId.get(cursor);
-    if (!event) break;
-    chain.push(event);
-    cursor = event.tags.find((t) => t[0] === "e" && t[3] === "prev")?.[1];
-  }
-  return chain.reverse();
+  const unique = [...new Map(all.map((event) => [event.id, event])).values()];
+  assertTraceTraversalBudget(unique);
+  const valid = unique.filter((event) =>
+    event.kind === TRACE_NODE_KIND &&
+    event.tags.some((tag) => tag[0] === "z" && tag[1] === "file") &&
+    event.tags.some((tag) => tag[0] === "F" && tag[1] === relativePath) &&
+    event.tags.some((tag) => tag[0] === "f" && tag[1] === folderId) &&
+    verifyEvent(event)
+  );
+  const genesisIds = valid.flatMap((event) =>
+    event.tags.some((tag) => tag[0] === "e" && tag[3] === "prev") ? [] : [event.id]
+  );
+  const chains = genesisIds
+    .map((traceId) => ownerPinnedChainFromSet(traceId, valid, "file"))
+    .filter((chain) => chain.length > 0);
+  return chains.length === 1 ? chains[0]! : [];
 }
 
 /** Result of resolving a mutable file trace by its stable genesis identity.
@@ -2095,7 +2398,7 @@ async function loadTraceEventsByIds(ids: readonly string[]): Promise<Event[]> {
     kinds: [TRACE_NODE_KIND],
     ids: [...new Set(ids)],
   });
-  return out.filter(isFileNode);
+  return out.filter((event) => isFileNode(event) && verifyEvent(event));
 }
 
 /** Pure-with-injected-loader resolver used by the relay path and unit tests.
@@ -2162,39 +2465,44 @@ export async function resolveTraceChainCandidates(
       }
       walk.seen.add(cursor);
       const event = byId.get(cursor);
-      if (!event || !isFileNode(event)) {
+      if (!event || !isFileNode(event) || !verifyEvent(event)) {
         walk.broken = true;
         continue;
       }
       walk.newestFirst.push(event);
+      const previous = canonicalPrevId(event);
       if (event.id === traceId) {
         // A stable identity is a genesis. Accepting a non-genesis as identity
         // would let a malformed TraceHead silently truncate history.
-        const prev = event.tags.find((tag) => tag[0] === "e" && tag[3] === "prev")?.[1];
-        if (prev) walk.broken = true;
+        if (previous !== null) walk.broken = true;
         else walk.complete = true;
         walk.cursor = null;
         continue;
       }
-      const prev = event.tags.find((tag) => tag[0] === "e" && tag[3] === "prev")?.[1];
-      if (!prev) {
+      if (previous === undefined || previous === null) {
         walk.broken = true;
         walk.cursor = null;
       } else {
-        walk.cursor = prev;
+        walk.cursor = previous;
       }
     }
   }
 
   const valid = walks
     .filter((walk) => walk.complete && !walk.broken)
-    .map((walk) => ({ headId: walk.headId, chain: [...walk.newestFirst].reverse() }));
+    .map((walk) => ({ headId: walk.headId, chain: [...walk.newestFirst].reverse() }))
+    // A trace has one fixed owner: the genesis signer. A foreign signer may
+    // fork or merge through explicit lineage edges, but cannot extend `prev`.
+    .filter(({ chain }) => {
+      const owner = chain[0]?.pubkey;
+      return owner !== undefined && chain.every((event) => event.pubkey === owner);
+    });
   if (valid.length === 0) {
     return { status: "broken", traceId, chain: [], candidateHeadIds: heads };
   }
 
-  // A stale TraceHead from another signer/relay is harmless when its head is
-  // an ancestor of another valid candidate. Only incomparable maxima conflict.
+  // A stale owner-signed TraceHead is harmless when its head is an ancestor of
+  // another valid candidate. Only incomparable maxima conflict.
   const maximal = valid.filter(
     (candidate) =>
       !valid.some(
@@ -2248,7 +2556,7 @@ export async function resolveTraceIdentity(
     seen.add(cursor);
     const loaded: Event[] = await loadEvents([cursor]);
     const event: Event | undefined = loaded.find((candidate: Event) => candidate.id === cursor);
-    if (!event || !isFileNode(event)) return null;
+    if (!event || !isFileNode(event) || !verifyEvent(event)) return null;
     if (newestFirst.length >= TRACE_TRAVERSAL_MAX_EVENTS) {
       throw new Error(`trace history exceeds ${TRACE_TRAVERSAL_MAX_EVENTS} signed events`);
     }
@@ -2257,16 +2565,17 @@ export async function resolveTraceIdentity(
     if (signedBytes > TRACE_TRAVERSAL_MAX_SIGNED_BYTES) {
       throw new Error(`trace history exceeds ${TRACE_TRAVERSAL_MAX_SIGNED_BYTES} signed bytes`);
     }
-    const prev: string | null =
-      event.tags.find((tag: string[]) => tag[0] === "e" && tag[3] === "prev")?.[1] ?? null;
-    if (!prev) {
+    const previous = canonicalPrevId(event);
+    if (previous === null) {
       const traceId = event.id;
+      if (newestFirst.some((member) => member.pubkey !== event.pubkey)) return null;
       if (loadEvents === loadTraceEventsByIds) {
         for (const member of newestFirst) traceIdentityByNode.set(member.id, traceId);
       }
       return traceId;
     }
-    cursor = prev;
+    if (previous === undefined) return null;
+    cursor = previous;
   }
   if (cursor) {
     throw new Error(`trace history exceeds ${TRACE_TRAVERSAL_MAX_EVENTS} signed events`);
@@ -2276,8 +2585,12 @@ export async function resolveTraceIdentity(
 
 async function traceHeadCandidateIds(traceId: string): Promise<string[]> {
   const relays = await getReadRelays();
+  const [genesis] = await loadTraceEventsByIds([traceId]);
+  if (!genesis || genesis.id !== traceId || !verifyEvent(genesis)) return [];
+  const ownerPubkey = genesis.pubkey;
   const heads = await queryMany(relays, {
     kinds: [TRACE_HEAD_KIND],
+    authors: [ownerPubkey],
     "#d": [traceId],
     limit: TRACE_TRAVERSAL_MAX_EVENTS + 1,
   });
@@ -2287,6 +2600,7 @@ async function traceHeadCandidateIds(traceId: string): Promise<string[]> {
   const ids = new Set<string>();
   for (const event of heads) {
     try {
+      if (event.pubkey !== ownerPubkey || !verifyEvent(event)) continue;
       const parsed = JSON.parse(event.content) as { head?: unknown };
       if (typeof parsed.head === "string" && parsed.head) ids.add(parsed.head);
     } catch {
@@ -2302,6 +2616,18 @@ export async function resolveTraceChain(
   traceId: string,
   exactHeadId?: string,
 ): Promise<TraceChainResolution> {
+  if (exactHeadId) {
+    try {
+      return await resolveTraceChainAtHead(traceId, exactHeadId);
+    } catch {
+      return {
+        status: "broken",
+        traceId,
+        chain: [],
+        candidateHeadIds: [exactHeadId],
+      };
+    }
+  }
   let candidates: string[] = [];
   try {
     candidates = await traceHeadCandidateIds(traceId);
@@ -2310,15 +2636,7 @@ export async function resolveTraceChain(
       if (resolved.status === "resolved" || resolved.status === "conflict") return resolved;
     }
   } catch {
-    // An exact folder-member head may still resolve the signed chain.
-  }
-  if (exactHeadId) {
-    try {
-      const resolved = await resolveTraceChainAtHead(traceId, exactHeadId);
-      if (resolved.status === "resolved") return resolved;
-    } catch {
-      // Fall through to a typed missing/broken result.
-    }
+    // Fall through to a typed missing/broken result.
   }
   return {
     status: candidates.length > 0 ? "broken" : "missing",
@@ -3752,8 +4070,10 @@ async function publishFolderNode(
     /** Step the folder manifest only to the home relay. Used when a local
      *  file Step changes membership but has not been Sent. */
     localOnly?: boolean;
+    publicationFence?: PublicationFence;
   },
 ): Promise<Event> {
+  assertPublicationFence(opts.publicationFence);
   const key = opts.signer ?? authoringVoice().secretKey;
   const steppedAt = Date.now();
   const operationId = opts.operationId ?? createTraceOperationId();
@@ -3792,6 +4112,7 @@ async function publishFolderNode(
   try {
     const parsed = JSON.parse(template.content) as { contentHash?: string };
     parsed.contentHash = await hashFolderSnapshot(members);
+    assertPublicationFence(opts.publicationFence);
     template.content = JSON.stringify(parsed);
     template.tags.push(["x", parsed.contentHash!]);
 
@@ -3808,25 +4129,33 @@ async function publishFolderNode(
     );
     let relays: Relay[] = [];
     if (opts.localOnly) {
-      const home = await getRelayRetrying(resolveRelayUrl(), 1);
+      const home = await withAbortSignal(
+        getRelayRetrying(resolveRelayUrl(), 1),
+        opts.publicationFence?.signal,
+      );
+      assertPublicationFence(opts.publicationFence);
       if (home) {
-        await flushLocalEventOutboxThrough(home);
+        await flushLocalEventOutboxThrough(home, opts.publicationFence);
         if (!pendingLocalEventById(signed.id)) relays = [home];
       }
     } else {
       relays = await getWriteRelays();
-      await publishToMany(relays, signed);
+      await publishToMany(relays, signed, opts.publicationFence);
       // Clear the recovery record only after home has acknowledged it. A
       // write-only external success is not enough to authorize a new append.
-      const home = await getRelayRetrying(resolveRelayUrl(), 1);
-      if (home) await flushLocalEventOutboxThrough(home);
+      const home = await withAbortSignal(
+        getRelayRetrying(resolveRelayUrl(), 1),
+        opts.publicationFence?.signal,
+      );
+      assertPublicationFence(opts.publicationFence);
+      if (home) await flushLocalEventOutboxThrough(home, opts.publicationFence);
     }
     // Spec §4: also publish a TraceHead (kind 34290) head-pointer cache so the
     // folder's head resolves as one bounded fetch for O(1) consumers. `d` = trace
     // identity. Genesis (folderId null) IS the identity — nothing to point at yet,
     // so no TraceHead. The first non-genesis step caches it.
     if (folderId && relays.length > 0) {
-      await publishTraceHead(folderId, signed.id, key, relays);
+      await publishTraceHead(folderId, signed.id, key, relays, opts.publicationFence);
     }
     return signed;
   } catch (error) {
@@ -3856,11 +4185,13 @@ async function publishTraceHead(
   headEventId: string,
   signer: Uint8Array,
   relays: Relay[],
+  publicationFence?: PublicationFence,
 ): Promise<void> {
   const signerPubkey = getPublicKey(signer);
   const key = `${signerPubkey}:${traceIdentity}`;
   const previous = traceHeadPublishQueue.get(key) ?? Promise.resolve();
   const pending = previous.catch(() => {}).then(async () => {
+    assertPublicationFence(publicationFence);
     let priorCreatedAt = traceHeadCreatedAt.get(key);
     if (priorCreatedAt == null) {
       try {
@@ -3889,7 +4220,7 @@ async function publishTraceHead(
       content: JSON.stringify({ head: headEventId }),
     };
     const signed = finalizeEvent(template, signer);
-    await publishToMany(relays, signed);
+    await publishToMany(relays, signed, publicationFence);
   });
   traceHeadPublishQueue.set(key, pending);
   try {
@@ -3978,8 +4309,8 @@ export async function fetchPinsByGeohash(cells: string[]): Promise<ZinePin[]> {
   }
   const cellSet = new Set(cells);
   const pins: ZinePin[] = [];
-  for (const [fid, evs] of byFolder) {
-    const head = resolveHead(evs);
+  for (const fid of byFolder.keys()) {
+    const head = await fetchLatestFolderNode(fid);
     if (!head) continue;
     for (const h of geohashesFromNode(head)) {
       if (cellSet.has(h)) pins.push({ folderId: fid, geohash: h });
@@ -4003,6 +4334,7 @@ export async function createFolderGenesis(opts?: {
   /** Keep the new folder identity on the home relay until an explicit Send. */
   localOnly?: boolean;
   onSigned?: (event: Event) => void | Promise<void>;
+  publicationFence?: PublicationFence;
 }): Promise<string> {
   const event = await publishFolderNode(null, opts?.members ?? [], {
     prevEventId: null,
@@ -4013,6 +4345,7 @@ export async function createFolderGenesis(opts?: {
     localOnly: opts?.localOnly,
     operationId: opts?.operationId,
     onSigned: opts?.onSigned,
+    publicationFence: opts?.publicationFence,
     folderCheckpoint: { version: 1, cause: "genesis" },
   });
   return event.id;
@@ -4162,8 +4495,10 @@ export async function upsertManifestEntry(
     localOnly?: boolean;
     operationId?: string;
     monotonicFolderId?: string;
+    publicationFence?: PublicationFence;
   },
 ): Promise<Event> {
+  assertPublicationFence(opts?.publicationFence);
   const key = signer ?? authoringVoice().secretKey;
   const expectedOwnerPubkey = getPublicKey(key);
   return mutateFolder(folderId, async () => {
@@ -4172,6 +4507,7 @@ export async function upsertManifestEntry(
       expectedOwnerPubkey,
       { localOnly: opts?.localOnly },
     );
+    assertPublicationFence(opts?.publicationFence);
     const current = currentFolder.members;
     const existing = current.find(
       (member) => member.relativePath === entry.relativePath,
@@ -4200,6 +4536,7 @@ export async function upsertManifestEntry(
       signer: key,
       localOnly: opts?.localOnly,
       operationId: opts?.operationId,
+      publicationFence: opts?.publicationFence,
       folderCheckpoint: plan.folderCheckpoint,
     });
     return requireAcceptedCurrentFolderCheckpoint(
@@ -4657,6 +4994,36 @@ export async function fetchEventById(nodeId: string): Promise<Event | null> {
     }
   }
   return null;
+}
+
+/** Fetch one exact event only from the active vault's home relay. Durable
+ * rendezvous recovery uses this path because the Coin was locally Stepped
+ * before publication; unrelated external read relays must not delay or outlive
+ * a vault-scoped drain. */
+async function fetchLocalEventById(
+  nodeId: string,
+  signal: AbortSignal,
+): Promise<Event | null> {
+  const pending = pendingLocalEventById(nodeId);
+  if (pending) return pending;
+  if (signal.aborted) throw abortReason(signal);
+  const homeUrl = resolveRelayUrl();
+  const relay = await withAbortSignal(getRelayRetrying(homeUrl, 1), signal);
+  if (!relay) return null;
+    const events = await queryOnce(relay, { ids: [nodeId], limit: 1 }, 4_000, {
+      requestedIds: [nodeId],
+      maxUniqueEvents: 1,
+      // Single-id fetch stays tighter than MAX_RENDEZVOUS_SAMPLE_BYTES: we
+      // expect at most one event and want to reject any oversized response.
+      maxTotalBytes: MAX_RENDEZVOUS_EVENT_BYTES,
+      maxEventBytes: MAX_RENDEZVOUS_EVENT_BYTES,
+      maxContentLength: MAX_RENDEZVOUS_CONTENT_LENGTH,
+      maxTags: MAX_RENDEZVOUS_TAGS,
+      maxTagValues: MAX_RENDEZVOUS_TAG_VALUES,
+      maxTagValueLength: MAX_RENDEZVOUS_TAG_VALUE_LENGTH,
+      signal,
+    });
+  return events.find((event) => event.id === nodeId) ?? null;
 }
 
 /** Returns the owner (signer pubkey) of a node, or null if the node can't be
@@ -6269,17 +6636,33 @@ export async function queryMany(
   // MUST share this posture — previously it rethrew the timeout, which
   // surfaced as Unhandled Promise Rejection from auto-beginReplay on folder
   // load when the sidecar was slow/unreachable.
-  await Promise.all(
-    relays.map(async (relay) => {
+  const relayEvents = await Promise.all(
+    relays.map(async (relay): Promise<Event[]> => {
       try {
-        const events = await queryOnce(relay, filter, perRelayMs, bounds);
-        for (const event of events) add(event);
+        return await queryOnce(relay, filter, perRelayMs, bounds);
       } catch {
         // best-effort: a down relay just contributes no events
+        return [];
       }
     }),
   );
+  for (const event of relayFairEventOrder(relayEvents)) add(event);
   return collector?.events() ?? [...byId.values()];
+}
+
+/** Interleave relay samples by configured relay order. A fast hostile relay
+ * cannot consume the entire global collector before a slower honest relay's
+ * first result is considered. */
+export function relayFairEventOrder(groups: readonly (readonly Event[])[]): Event[] {
+  const ordered: Event[] = [];
+  const longest = groups.reduce((max, group) => Math.max(max, group.length), 0);
+  for (let index = 0; index < longest; index++) {
+    for (const group of groups) {
+      const event = group[index];
+      if (event) ordered.push(event);
+    }
+  }
+  return ordered;
 }
 
 // --- sampler: federated read across a set of relays ---------------------
@@ -6368,6 +6751,19 @@ function withTimeoutAndSignal<T>(
     signal.addEventListener("abort", abort, { once: true });
   });
   return Promise.race([withTimeout(promise, ms, message), aborted]).finally(() => {
+    if (abort) signal.removeEventListener("abort", abort);
+  });
+}
+
+function withAbortSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  let abort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    abort = () => reject(abortReason(signal));
+    signal.addEventListener("abort", abort, { once: true });
+  });
+  return Promise.race([promise, aborted]).finally(() => {
     if (abort) signal.removeEventListener("abort", abort);
   });
 }

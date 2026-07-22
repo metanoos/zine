@@ -1,5 +1,6 @@
 import type { Event } from "nostr-tools";
 import { verifyEvent } from "nostr-tools/pure";
+import { diffChars } from "diff";
 import {
   findPendingBrackets,
   findResolvedBrackets,
@@ -12,8 +13,23 @@ import {
   vaultStorageGeneration,
   vaultStorageSessionAcceptsWork,
 } from "../storage/vault-storage.js";
+import {
+  flattenRuns,
+  keditLogFromArray,
+  keditLogToArray,
+  minimalTextChange,
+  nextKEditTx,
+  reconcileRunsText,
+  synthesizeKEditTransition,
+  validateKEditTransition,
+  type FileState,
+  type KEditLog,
+} from "../workspace/workspace-core.js";
+import type { KEdit } from "@zine/protocol";
 
 const STORAGE_KEY = "zine.pending-coin-mints.v1";
+// Bounds localStorage write amplification and the recovery sweep cost each
+// gesture re-runs; raising this loosens both, not just the visible queue depth.
 const MAX_PENDING_COIN_MINTS = 32;
 
 type JournalStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
@@ -73,6 +89,246 @@ export type CoinMintSourceFinalization = CoinMintSourceFinalizationBase & (
     }
   | { kind: "span" }
 );
+
+function translateUsingParts(
+  parts: ReturnType<typeof diffChars>,
+  baseText: string,
+  currentText: string,
+  from: number,
+  to: number,
+): { from: number; to: number } | null {
+  let baseOffset = 0;
+  let deltaBeforeStart = 0;
+  let deltaBeforeEnd = 0;
+  for (const part of parts) {
+    const length = part.value.length;
+    if (part.added) {
+      if (baseOffset > from && baseOffset < to) return null;
+      if (baseOffset <= from) deltaBeforeStart += length;
+      if (baseOffset < to) deltaBeforeEnd += length;
+    } else if (part.removed) {
+      const removedEnd = baseOffset + length;
+      if (baseOffset < to && removedEnd > from) return null;
+      if (removedEnd <= from) deltaBeforeStart -= length;
+      if (removedEnd <= to) deltaBeforeEnd -= length;
+      baseOffset = removedEnd;
+    } else {
+      baseOffset += length;
+    }
+  }
+  const translated = {
+    from: from + deltaBeforeStart,
+    to: to + deltaBeforeEnd,
+  };
+  return currentText.slice(translated.from, translated.to) === baseText.slice(from, to)
+    ? translated
+    : null;
+}
+
+function translateUnchangedRange(
+  baseText: string,
+  currentText: string,
+  from: number,
+  to: number,
+): { from: number; to: number } | null {
+  return translateUsingParts(diffChars(baseText, currentText), baseText, currentText, from, to);
+}
+
+/** Resolve the captured citation after disjoint live edits have shifted it.
+ * A citation already resolved by an earlier retry is also accepted; edits
+ * overlapping either the pending or resolved envelope fail closed.
+ *
+ * The two translations use different base texts (`sourceText` for the pending
+ * envelope, `steppedText` for the resolved envelope), so their `diffChars`
+ * outputs cannot be shared — each call computes its own diff. The first call
+ * short-circuits the second via the early return when the pending envelope
+ * survived, so the second diff only runs in the already-failing path. */
+export function rebasedFinalizedCoinMintSourceText(
+  record: PendingCoinMint,
+  sourceText: string,
+  currentText: string,
+): string {
+  const steppedText = finalizedCoinMintSourceText(record, sourceText);
+  const sourceChange = minimalTextChange(sourceText, steppedText);
+  if (!sourceChange) return currentText;
+  const pendingRange = translateUnchangedRange(
+    sourceText,
+    currentText,
+    sourceChange.from,
+    sourceChange.to,
+  );
+  if (pendingRange) {
+    return currentText.slice(0, pendingRange.from) +
+      sourceChange.insert +
+      currentText.slice(pendingRange.to);
+  }
+  const resolvedRange = translateUnchangedRange(
+    steppedText,
+    currentText,
+    sourceChange.from,
+    sourceChange.from + sourceChange.insert.length,
+  );
+  if (resolvedRange) return currentText;
+  throw new Error("Mint source citation changed while its Step was in flight");
+}
+
+/** Finalize an extracted Mint citation against the correct UTF-16 space.
+ *
+ * Journal ranges start in the captured-source snapshot. After an earlier
+ * same-source Mint completes, `rebasePendingSourceAfter` shifts later rows
+ * into post-citation live space while leaving `sourceNodeId` /
+ * `sourceContentHash` pointed at the original capture. Applying those
+ * rebased ranges against the capture strands a public Coin; applying
+ * still-original ranges only against live text drops concurrent-edit
+ * translation. Detect which space the durable ranges occupy, then either
+ * translate from the capture or apply directly to the live document. */
+export function resolvedFinalizedCoinMintSourceText(
+  record: PendingCoinMint,
+  capturedSourceText: string,
+  currentText: string,
+): string {
+  try {
+    finalizedCoinMintSourceText(record, capturedSourceText);
+  } catch {
+    return finalizedCoinMintSourceText(record, currentText);
+  }
+  return rebasedFinalizedCoinMintSourceText(record, capturedSourceText, currentText);
+}
+
+/** Preserve every editor transaction already pending on the source and append
+ * the citation resolution as one later transaction. The workspace validates
+ * this complete log against the prior signed Step before publication. */
+export function finalizedCoinMintSourceStepKEdits(
+  currentText: string,
+  finalizedText: string,
+  captured: KEditLog,
+  signerPubkey: string,
+  timestamp = Date.now(),
+): KEdit[] {
+  return [
+    ...keditLogToArray(captured),
+    ...synthesizeKEditTransition(
+      currentText,
+      finalizedText,
+      signerPubkey,
+      timestamp,
+      nextKEditTx(captured),
+    ),
+  ];
+}
+
+function applyKEditGroup(text: string, edits: readonly KEdit[]): string {
+  const ordered = edits.map((edit, index) => ({ edit, index })).sort(
+    (left, right) =>
+      right.edit.from - left.edit.from ||
+      right.edit.to - left.edit.to ||
+      right.index - left.index,
+  );
+  let current = text;
+  for (const { edit } of ordered) {
+    current = current.slice(0, edit.from) + edit.text + current.slice(edit.to);
+  }
+  return current;
+}
+
+/** Operationally move real editor transactions around the citation metadata
+ * rewrite. Only offsets change; voice, timestamp, transaction id, and intent
+ * remain exact. */
+function rebaseCoinMintSourceKEdits(
+  sourceText: string,
+  steppedText: string,
+  currentText: string,
+  expectedRebasedText: string,
+  edits: readonly KEdit[],
+): KEdit[] {
+  if (!validateKEditTransition(sourceText, currentText, edits).valid) {
+    throw new Error("Mint source contains an invalid concurrent KEdit log");
+  }
+  const sourceChange = minimalTextChange(sourceText, steppedText);
+  if (!sourceChange) return [...edits];
+  const replacementDelta = sourceChange.insert.length -
+    (sourceChange.to - sourceChange.from);
+  let citationFrom = sourceChange.from;
+  let citationTo = sourceChange.to;
+  let original = sourceText;
+  let rebased = steppedText;
+  const transformed: KEdit[] = [];
+  let cursor = 0;
+  while (cursor < edits.length) {
+    const tx = edits[cursor]!.tx;
+    const group: KEdit[] = [];
+    while (cursor < edits.length && edits[cursor]!.tx === tx) {
+      group.push(edits[cursor++]!);
+    }
+    let shiftBeforeCitation = 0;
+    const transformedGroup = group.map((edit) => {
+      const before = edit.to <= citationFrom;
+      const after = edit.from >= citationTo;
+      if (!before && !after) {
+        throw new Error("Mint source citation overlaps a concurrent editor transaction");
+      }
+      if (before) {
+        shiftBeforeCitation += edit.text.length - (edit.to - edit.from);
+        return { ...edit };
+      }
+      return {
+        ...edit,
+        from: edit.from + replacementDelta,
+        to: edit.to + replacementDelta,
+      };
+    });
+    original = applyKEditGroup(original, group);
+    rebased = applyKEditGroup(rebased, transformedGroup);
+    citationFrom += shiftBeforeCitation;
+    citationTo += shiftBeforeCitation;
+    transformed.push(...transformedGroup);
+  }
+  if (
+    original !== currentText ||
+    rebased !== expectedRebasedText ||
+    !validateKEditTransition(steppedText, rebased, transformed).valid
+  ) {
+    throw new Error("Mint source concurrent KEdits could not be rebased truthfully");
+  }
+  return transformed;
+}
+
+/** Advance a delayed source-citation Step without overwriting edits made while
+ * its relay barrier was in flight. The citation replacement is translated
+ * from the captured source, and real concurrent KEdits retain their authorship
+ * and transaction metadata on top of the Step that actually landed. */
+export function rebaseFinalizedCoinMintSourceFile(
+  record: PendingCoinMint,
+  current: FileState,
+  sourceText: string,
+  steppedText: string,
+  steppedNodeId: string,
+  signerPubkey: string,
+  concurrentKEdits: readonly KEdit[] = [],
+): FileState {
+  const currentText = flattenRuns(current.runs);
+  if (finalizedCoinMintSourceText(record, sourceText) !== steppedText) {
+    throw new Error("Mint source Step does not match its captured citation target");
+  }
+  const rebasedText = rebasedFinalizedCoinMintSourceText(record, sourceText, currentText);
+  const runs = reconcileRunsText(current.runs, rebasedText, signerPubkey);
+  const pending = concurrentKEdits.length > 0
+    ? rebaseCoinMintSourceKEdits(
+        sourceText,
+        steppedText,
+        currentText,
+        rebasedText,
+        concurrentKEdits,
+      )
+    : synthesizeKEditTransition(steppedText, rebasedText, signerPubkey);
+  const { kedits: _priorKedits, ...rest } = current;
+  return {
+    ...rest,
+    runs,
+    nodeId: steppedNodeId,
+    ...(pending.length > 0 ? { kedits: keditLogFromArray(pending) } : {}),
+  };
+}
 
 export interface CoinMintCompletion<TAttestation> {
   publishPair: (coin: Event) => Promise<TAttestation>;
@@ -581,6 +837,64 @@ export function pendingCoinMints(
   );
 }
 
+interface CoinMintSourceReservation {
+  sourceFolderId: string;
+  relativePath: string;
+}
+
+export function coinMintSourcePathBlocksMutation(
+  sourcePath: string,
+  path: string,
+  isFolder: boolean,
+): boolean {
+  return sourcePath === path ||
+    (isFolder && (path === "" || sourcePath.startsWith(`${path}/`)));
+}
+
+/** Hold an extracted source path synchronously, before the first async Mint
+ * preparation step can yield. The reservation overlaps the durable journal
+ * row and is released only when the foreground gesture settles. */
+export function createCoinMintSourceReservationRegistry(): {
+  reserve: (sourceFolderId: string, relativePath: string) => () => void;
+  blocks: (sourceFolderId: string, path: string, isFolder: boolean) => boolean;
+} {
+  const active = new Map<symbol, CoinMintSourceReservation>();
+  return {
+    reserve(sourceFolderId, relativePath) {
+      const token = Symbol("pending Mint source");
+      active.set(token, { sourceFolderId, relativePath });
+      return () => active.delete(token);
+    },
+    blocks(sourceFolderId, path, isFolder) {
+      return [...active.values()].some((reservation) =>
+        reservation.sourceFolderId === sourceFolderId &&
+        coinMintSourcePathBlocksMutation(reservation.relativePath, path, isFolder)
+      );
+    },
+  };
+}
+
+/** Return the unfinished extracted Mint whose source citation would be
+ * stranded by moving, renaming, or deleting `path`. Once the citation Step is
+ * durable, the remaining membership/inventory phases no longer depend on the
+ * source path and ordinary workspace mutations may proceed. */
+export function pendingCoinMintBlockingSourceMutation(
+  sourceFolderId: string,
+  path: string,
+  isFolder: boolean,
+  storage: JournalStorage = vaultStorage,
+): PendingCoinMint | null {
+  return pendingCoinMints(storage).find((pending) => {
+    const source = pending.sourceFinalization;
+    if (
+      pending.sourceFolderId !== sourceFolderId ||
+      !source ||
+      source.completedNodeId
+    ) return false;
+    return coinMintSourcePathBlocksMutation(source.relativePath, path, isFolder);
+  }) ?? null;
+}
+
 /** Create and durably remember the exact signed Coin before any public phase. */
 export async function preparePendingCoinMint(
   operationKey: string,
@@ -747,6 +1061,103 @@ export interface CoinMintRecoveryFailure {
   operationKey: string;
   coinId: string;
   error: string;
+}
+
+export interface CoinMintRecoverySessionLease {
+  readonly signal: AbortSignal;
+  readonly promise: Promise<void>;
+  release(): void;
+}
+
+export const COIN_MINT_RECOVERY_RETRY_MIN_MS = 5_000;
+export const COIN_MINT_RECOVERY_RETRY_MAX_MS = 5 * 60_000;
+
+/** Keep retrying a durable Mint journal until it is empty or its vault-scoped
+ * signal is aborted. The caller owns the wait primitive so the desktop can
+ * combine bounded timers with an immediate browser-online wakeup. */
+export async function retryCoinMintRecovery(
+  attempt: () => Promise<{ remaining: number }>,
+  waitForRetry: (delayMs: number, signal: AbortSignal) => Promise<void>,
+  signal: AbortSignal,
+  onAttemptError: (error: unknown) => void = () => undefined,
+): Promise<void> {
+  let retryDelayMs = COIN_MINT_RECOVERY_RETRY_MIN_MS;
+  while (!signal.aborted) {
+    try {
+      const result = await attempt();
+      if (signal.aborted || result.remaining === 0) return;
+    } catch (error) {
+      if (signal.aborted) return;
+      onAttemptError(error);
+    }
+    try {
+      await waitForRetry(retryDelayMs, signal);
+    } catch (error) {
+      if (signal.aborted) return;
+      throw error;
+    }
+    retryDelayMs = Math.min(
+      COIN_MINT_RECOVERY_RETRY_MAX_MS,
+      retryDelayMs * 2,
+    );
+  }
+}
+
+/** Share one startup-recovery pass across React's setup → cleanup → setup
+ * StrictMode replay. Cleanup aborts on the next microtask only when no replay
+ * has reattached, so a real opt-out still fences the pending public phase. */
+export function createCoinMintRecoverySessionRegistry(): {
+  acquire(
+    session: string,
+    start: (signal: AbortSignal) => Promise<void>,
+  ): CoinMintRecoverySessionLease;
+} {
+  type SessionState = {
+    controller: AbortController;
+    promise: Promise<void>;
+    subscribers: number;
+    settled: boolean;
+  };
+  const active = new Map<string, SessionState>();
+  return {
+    acquire(session, start) {
+      let state = active.get(session);
+      if (!state) {
+        const controller = new AbortController();
+        state = {
+          controller,
+          promise: Promise.resolve(),
+          subscribers: 0,
+          settled: false,
+        };
+        active.set(session, state);
+        const ownedState = state;
+        ownedState.promise = start(controller.signal).finally(() => {
+          ownedState.settled = true;
+          if (active.get(session) === ownedState) active.delete(session);
+        });
+      }
+      state.subscribers++;
+      let released = false;
+      const ownedState = state;
+      return {
+        signal: ownedState.controller.signal,
+        promise: ownedState.promise,
+        release() {
+          if (released) return;
+          released = true;
+          ownedState.subscribers = Math.max(0, ownedState.subscribers - 1);
+          queueMicrotask(() => {
+            if (ownedState.settled || ownedState.subscribers > 0) return;
+            if (active.get(session) === ownedState) active.delete(session);
+            const reason = new Error("Coins disabled during Mint recovery");
+            reason.name = "AbortError";
+            ownedState.controller.abort(reason);
+          });
+        },
+      };
+    },
+  };
 }
 
 /** Resume every durable record without requiring the original source gesture

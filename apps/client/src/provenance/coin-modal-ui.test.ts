@@ -103,22 +103,24 @@ test("an open Coin tab reacts immediately when the Coins opt-in changes", () => 
 });
 
 test("Mint consent copy discloses publication and rendezvous distinguishes exact identity", () => {
-  assert.match(modalSource, /Mint, publish, and attest this exact text/);
+  assert.match(modalSource, /Mint, publish, attest, and index this exact text/);
   assert.match(modalSource, /text will be public through configured publication relays/);
-  assert.match(modalSource, /candidate\.targetNodeIds\.includes\(nodeId\)/);
-  assert.match(modalSource, /cited this exact Coin/);
-  assert.match(modalSource, /cited matching Coin text/);
+  assert.match(modalSource, /candidate\.coinNodeId === nodeId/);
+  assert.match(modalSource, /completed this exact Mint/);
+  assert.match(modalSource, /minted matching Coin text/);
   assert.match(modalSource, /candidate\.relayUrls\.length/);
   assert.match(networkingSource, /Mint\s+publishes the exact Coin text and a same-minter attestation/);
-  assert.match(networkingSource, /globally visible signer interest/);
+  assert.match(networkingSource, /A later citation or Send is not required/);
   assert.match(appSource, /function MintConsentModal/);
   assert.match(appSource, /This exact selected text will be public through configured publication relays/);
+  assert.match(appSource, /no later[\s\S]*?citation or Send is required/);
+  assert.match(appSource, /Mint does not publish the containing trace/);
   assert.match(appSource, /await requestMintConsent\(mintTarget\.phrase\)/);
   assert.match(appSource, /confirmedTarget\.phrase !== mintTarget\.phrase/);
 });
 
-test("scheduled co-citation sweeps honor the live Coins opt-in, serialize, and abort", () => {
-  const start = networkingSource.indexOf("function CoCitationsSection()");
+test("scheduled co-Mint sweeps honor the live Coins opt-in, serialize, and abort", () => {
+  const start = networkingSource.indexOf("function CoMintsSection()");
   const end = networkingSource.indexOf("\n  if (!isTauri())", start);
   assert.ok(start >= 0 && end > start);
   const section = networkingSource.slice(start, end);
@@ -132,9 +134,30 @@ test("scheduled co-citation sweeps honor the live Coins opt-in, serialize, and a
     "disabled Coins must return before reading peers",
   );
   assert.match(section, /if \(running \|\| cancelled\) return/);
-  assert.match(section, /detectCoCitations\(peers, 100, controller\.signal\)/);
-  assert.match(section, /activeSweep\?\.abort\(new Error\("co-citation view closed"\)\)/);
+  assert.match(section, /detectCoMints\(peers, 100, controller\.signal\)/);
+  assert.match(section, /activeSweep\?\.abort\(new Error\("co-Mint view closed"\)\)/);
   assert.match(section, /\}, \[coinsEnabled\]\);/);
+});
+
+test("foreground Mint is fenced to its captured vault through completion", () => {
+  const capture = appSource.match(
+    /function captureForegroundMintLease\([\s\S]*?(?=async function mintCoinTrace)/,
+  )?.[0];
+  const mint = appSource.match(
+    /async function mintCoinTrace\([\s\S]*?(?=\/\*\* Mint the text entered)/,
+  )?.[0];
+  assert.ok(capture);
+  assert.ok(mint);
+  assert.match(capture, /const generation = vaultStorageGeneration\(\)/);
+  assert.match(capture, /const workspace = backendRef\.current/);
+  assert.match(capture, /subscribeVaultStorage\(abortIfInvalid\)/);
+  assert.match(capture, /subscribeKademliaConfig\(abortIfInvalid\)/);
+  assert.match(capture, /controller\.abort\(error\)/);
+  assert.match(mint, /capturedLease \?\? captureForegroundMintLease\(folder\.id\)/);
+  assert.match(mint, /recoverPendingCoinMints\(operationKey, publicationController\.signal\)/);
+  assert.match(mint, /getOrCreateMintFolder\([\s\S]*?foregroundPublicationFence/);
+  assert.match(mint, /coinMintCompletionFor\([\s\S]*?publicationController\.signal/);
+  assert.match(mint, /finally \{[\s\S]*?mintLease\.release\(\)/);
 });
 
 test("the Coins opt-in gates Mint and discovery without gating ordinary Cite", () => {
@@ -196,9 +219,13 @@ test("Mint completes Step, Publish, and minter-Attest before success", () => {
   assert.match(mint, /publishHardenedSpan\([\s\S]*?operationId/);
   assert.match(
     mint,
-    /const receipt = await completePendingCoinMintTransaction\([\s\S]*?pending,[\s\S]*?coinMintCompletionFor\(mintSigner, sourceCompletion\?\.finalize\)/,
+    /const receipt = await completePendingCoinMintTransaction\([\s\S]*?pending,[\s\S]*?coinMintCompletionFor\([\s\S]*?mintSigner,[\s\S]*?sourceCompletion\?\.finalize,[\s\S]*?publicationController\.signal/,
   );
-  assert.match(completion, /publishPair: \(coin: Event\) => completeCoinMint\(coin, signer\)/);
+  assert.match(
+    completion,
+    /publishPair: \(coin: Event\) => completeCoinMint\(coin, signer, publicationFence\)/,
+  );
+  assert.match(completion, /vaultStorageSessionAcceptsWork\(\)[\s\S]*?kademliaEnabledSnapshot\(\)/);
   assert.match(completion, /coinComplete: true/);
   assert.match(mint, /attestationId: receipt\.attestation\.id/);
   assert.ok(
@@ -227,11 +254,83 @@ test("Mint completes Step, Publish, and minter-Attest before success", () => {
   );
   assert.match(completion, /filesRef\.current = \{ \.\.\.filesRef\.current, \[record\.localPath\]: nextFile \}/);
   assert.match(completion, /finalizeSource/);
+  assert.match(
+    appSource,
+    /finalizeStoredMintSource\(record, signer, \{[\s\S]*?generation,[\s\S]*?folderId: sourceFolderId,[\s\S]*?signal: publicationSignal/,
+    "startup recovery must carry its captured vault lease into source finalization",
+  );
+  assert.match(
+    appSource,
+    /lease\.workspace\.writeFile\([\s\S]*?\{ signal: lease\.signal, enabled:/,
+    "the source Step itself must share the recovery cancellation fence",
+  );
+  assert.match(
+    appSource,
+    /const sourceStepKedits = finalizedCoinMintSourceStepKEdits\([\s\S]*?lease\.workspace\.writeFile\([\s\S]*?sourceStepKedits/,
+    "source recovery must publish the exact pending editor log plus its citation transaction",
+  );
+  assert.match(appSource, /rebaseFinalizedCoinMintSourceFile\(/);
   assert.match(appSource, /resumePendingCoinMints\([\s\S]*?vaultStorage/);
   assert.match(
     appSource,
-    /useEffect\(\(\) => \{[\s\S]*?bootState !== "ready"[\s\S]*?recoverPendingCoinMints\(\)/,
+    /useEffect\(\(\) => \{[\s\S]*?bootState !== "ready"[\s\S]*?activeMintRecoveriesRef\.current\.acquire\(session, async \(signal\)/,
     "pending Mints recover as soon as the active vault workspace is ready",
+  );
+  assert.match(
+    appSource,
+    /activeMintRecoveriesRef\.current\.acquire\(session, async \(signal\)[\s\S]*?recoverPendingCoinMints\(undefined, signal\)[\s\S]*?return recovery\.release/,
+    "disabling Coins must fence every recovery phase that has not begun publishing",
+  );
+  const recoveryEffect = appSource.match(
+    /const session = `\$\{generation\}:\$\{folder\.id\}:\$\{keyFingerprint\}`[\s\S]*?\}, \[bootState, coinsEnabled, folder\?\.id, keys, mintRecoveryEpoch\]\);/,
+  )?.[0];
+  assert.ok(recoveryEffect);
+  assert.doesNotMatch(recoveryEffect, /recoveredMintSessionsRef/);
+  assert.match(recoveryEffect, /retryCoinMintRecovery\(/);
+  assert.match(recoveryEffect, /waitForMintRecoveryRetry/);
+  assert.match(recoveryEffect, /mintRecoveryEpoch/);
+  assert.match(
+    appSource,
+    /pendingCoinMints\(\)\.some\(\(record\) => record\.operationKey === operationKey\)[\s\S]*?setMintRecoveryEpoch/,
+    "a failed foreground Mint must restart recovery after an initially empty startup",
+  );
+  assert.match(
+    appSource,
+    /function moveNodes[\s\S]*?blocksPendingMintSourceMutation\([\s\S]*?function stepFolderPath/,
+    "moving an unfinished extracted-Mint source must be blocked before optimistic state changes",
+  );
+  assert.match(
+    appSource,
+    /function deleteNodes[\s\S]*?blocksPendingMintSourceMutation\([\s\S]*?function hardDelete[\s\S]*?blocksPendingMintSourceMutation\(/,
+    "both recycle-bin and permanent deletes must retain unfinished Mint sources",
+  );
+  assert.match(
+    appSource,
+    /function renameNode[\s\S]*?blocksPendingMintSourceMutation\(/,
+    "renaming an unfinished extracted-Mint source must fail before rebasing UI paths",
+  );
+  const extractedMintGesture = appSource.match(
+    /async function zinePhrase\([\s\S]*?(?=\/\*\* Copy can carry)/,
+  )?.[0];
+  assert.ok(extractedMintGesture);
+  assert.ok(
+    extractedMintGesture.indexOf("mintSourceReservations.reserve") <
+      extractedMintGesture.indexOf("sha256HexLocal(sourceSnapshot)"),
+    "the extracted source must be reserved synchronously before the first Mint awaitable starts",
+  );
+  assert.match(
+    extractedMintGesture,
+    /flushEditorLocally\([\s\S]*?mintLease\.fence[\s\S]*?mintCoinTrace\([\s\S]*?mintLease/,
+    "the source Step and compound Mint must share one captured lease",
+  );
+  assert.match(
+    extractedMintGesture,
+    /finally \{\s*mintLease\.release\(\);\s*releaseSourceReservation\(\);\s*\}/,
+  );
+  assert.match(
+    appSource,
+    /waitForMintRecoveryRetry[\s\S]*?window\.addEventListener\("online", onOnline/,
+    "network recovery must wake a failed Mint transaction before its next timer",
   );
   assert.match(appSource, /className="mint-recovery-alert" role="alert"/);
   assert.match(
@@ -251,7 +350,10 @@ test("Mint completes Step, Publish, and minter-Attest before success", () => {
   )?.[0];
   assert.ok(phraseMint);
   assert.match(phraseMint, /sourceFinalization|metadata:[\s\S]*?kind: "pending-bracket"/);
-  assert.match(phraseMint, /finalizedCoinMintSourceText\(record, afterWrite\)/);
+  assert.match(
+    phraseMint,
+    /resolvedFinalizedCoinMintSourceText\(\s*record,\s*sourceSnapshot,\s*afterWrite/,
+  );
   assert.ok(
     phraseMint.indexOf("await mintCoinTrace(") <
       phraseMint.indexOf("activateLiveTab(coin.path"),

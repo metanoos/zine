@@ -4,7 +4,7 @@
  * Tests the three process-signal functions (anteriority, timing, revision)
  * and the composed verdict. All pure — no relay, no IO. The relay-bound
  * chain-walker that extracts CheckpointMeta from real events is excluded by
- * the codebase convention (see co-citation.test.ts / provenance.inbound.test.ts).
+ * the codebase convention (see co-mint.test.ts / provenance.inbound.test.ts).
  *
  * The load-bearing properties tested:
  *   - An instant sybil (all unstamped) scores near-zero on anteriority

@@ -170,6 +170,7 @@ async function main(): Promise<void> {
     registerTools,
     agentVoice,
     initializeMcpKeySession,
+    mcpMintIndexingBackendAvailable,
     pendingMcpCoinMintCount,
     resumeMcpPendingCoinMints,
     runMcpMintLifecycle,
@@ -283,68 +284,71 @@ async function main(): Promise<void> {
   }, 5_000);
   syncTimer.unref();
 
-  // A Mint is a durable multi-phase transaction. Resume it independently of
-  // tool traffic so a restart after public Coin/attestation publication still
-  // completes the source citation, Mint membership, and local inventory.
-  const MINT_RECOVERY_MIN_MS = 5_000;
-  const MINT_RECOVERY_MAX_MS = 5 * 60_000;
-  let mintSyncing = false;
-  let mintRetryDelayMs = MINT_RECOVERY_MIN_MS;
-  let mintRetryTimer: ReturnType<typeof setTimeout> | undefined;
-  const syncPendingMints = async (): Promise<number> => {
-    if (mintSyncing) return pendingMcpCoinMintCount(workspace);
-    if (pendingMcpCoinMintCount(workspace) === 0) return 0;
-    mintSyncing = true;
-    try {
-      const result = await runMcpMintLifecycle(
-        () => resumeMcpPendingCoinMints(workspace, voice),
-      );
-      if (result.completed > 0) {
-        process.stderr.write(
-          `zine-mcp: recovered ${result.completed} pending Mint(s); ${result.remaining} pending.\n`,
+  // Install durable Mint recovery only when this press has a real H-indexing
+  // backend. The current headless build does not: it must not even parse a
+  // legacy Mint journal before the explicit Mint tool fails closed.
+  const installMintRecovery = () => {
+    const MINT_RECOVERY_MIN_MS = 5_000;
+    const MINT_RECOVERY_MAX_MS = 5 * 60_000;
+    let mintSyncing = false;
+    let mintRetryDelayMs = MINT_RECOVERY_MIN_MS;
+    let mintRetryTimer: ReturnType<typeof setTimeout> | undefined;
+    const syncPendingMints = async (): Promise<number> => {
+      if (mintSyncing) return pendingMcpCoinMintCount(workspace);
+      if (pendingMcpCoinMintCount(workspace) === 0) return 0;
+      mintSyncing = true;
+      try {
+        const result = await runMcpMintLifecycle(
+          () => resumeMcpPendingCoinMints(workspace, voice),
         );
+        if (result.completed > 0) {
+          process.stderr.write(
+            `zine-mcp: recovered ${result.completed} pending Mint(s); ${result.remaining} pending.\n`,
+          );
+        }
+        if (result.failures.length > 0) {
+          process.stderr.write(
+            `zine-mcp: ${result.failures.length} pending Mint recovery attempt(s) remain incomplete.\n`,
+          );
+        }
+        return result.remaining;
+      } finally {
+        mintSyncing = false;
       }
-      if (result.failures.length > 0) {
-        process.stderr.write(
-          `zine-mcp: ${result.failures.length} pending Mint recovery attempt(s) remain incomplete.\n`,
-        );
+    };
+    const scheduleMintRecovery = () => {
+      if (mintRetryTimer) return;
+      const delayMs = mintRetryDelayMs;
+      mintRetryDelayMs = Math.min(MINT_RECOVERY_MAX_MS, mintRetryDelayMs * 2);
+      mintRetryTimer = setTimeout(() => {
+        mintRetryTimer = undefined;
+        void runMintRecovery("scheduled");
+      }, delayMs);
+      mintRetryTimer.unref();
+    };
+    const runMintRecovery = async (phase: "initial" | "scheduled") => {
+      try {
+        const remaining = await syncPendingMints();
+        if (remaining === 0) {
+          mintRetryDelayMs = MINT_RECOVERY_MIN_MS;
+          return;
+        }
+      } catch (error) {
+        process.stderr.write(`zine-mcp: ${phase} Mint recovery failed: ${String(error)}\n`);
       }
-      return result.remaining;
-    } finally {
-      mintSyncing = false;
-    }
-  };
-  const scheduleMintRecovery = () => {
-    if (mintRetryTimer) return;
-    const delayMs = mintRetryDelayMs;
-    mintRetryDelayMs = Math.min(MINT_RECOVERY_MAX_MS, mintRetryDelayMs * 2);
-    mintRetryTimer = setTimeout(() => {
-      mintRetryTimer = undefined;
+      scheduleMintRecovery();
+    };
+    void runMintRecovery("initial");
+    // Keep a cheap local journal watch alive after an initially clean startup so
+    // a Mint that becomes pending later is still recovered. An existing retry
+    // timer owns failed work and prevents this watch from bypassing its backoff.
+    const mintJournalWatch = setInterval(() => {
+      if (mintSyncing || mintRetryTimer || pendingMcpCoinMintCount(workspace) === 0) return;
       void runMintRecovery("scheduled");
-    }, delayMs);
-    mintRetryTimer.unref();
+    }, MINT_RECOVERY_MIN_MS);
+    mintJournalWatch.unref();
   };
-  const runMintRecovery = async (phase: "initial" | "scheduled") => {
-    try {
-      const remaining = await syncPendingMints();
-      if (remaining === 0) {
-        mintRetryDelayMs = MINT_RECOVERY_MIN_MS;
-        return;
-      }
-    } catch (error) {
-      process.stderr.write(`zine-mcp: ${phase} Mint recovery failed: ${String(error)}\n`);
-    }
-    scheduleMintRecovery();
-  };
-  void runMintRecovery("initial");
-  // Keep a cheap local journal watch alive after an initially clean startup so
-  // a Mint that becomes pending later is still recovered. An existing retry
-  // timer owns failed work and prevents this watch from bypassing its backoff.
-  const mintJournalWatch = setInterval(() => {
-    if (mintSyncing || mintRetryTimer || pendingMcpCoinMintCount(workspace) === 0) return;
-    void runMintRecovery("scheduled");
-  }, MINT_RECOVERY_MIN_MS);
-  mintJournalWatch.unref();
+  if (mcpMintIndexingBackendAvailable()) installMintRecovery();
   // The transport keeps the process alive; no explicit run loop needed.
 }
 

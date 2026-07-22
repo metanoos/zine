@@ -1,12 +1,44 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Event } from "nostr-tools";
+import { finalizeEvent, generateSecretKey } from "nostr-tools/pure";
 
-import { coinOriginFromEvent, isCoinEvent } from "./provenance.js";
+import {
+  coinOriginFromEvent,
+  isCoinEvent,
+  sha256HexLocal,
+  verifiedFileSourceSnapshot,
+} from "./provenance.js";
 
 const ROOT = "f".repeat(64);
 const HASH = "a".repeat(64);
 const SOURCE = "b".repeat(64);
+
+test("extracted source authentication rejects invalid signatures and signed hash lies", async () => {
+  const secret = generateSecretKey();
+  const snapshot = "source words";
+  const contentHash = await sha256HexLocal(snapshot);
+  const valid = finalizeEvent({
+    kind: 4290,
+    created_at: 1,
+    tags: [["z", "file"]],
+    content: JSON.stringify({ snapshot, contentHash }),
+  }, secret);
+  assert.equal(await verifiedFileSourceSnapshot(valid, valid.id), snapshot);
+
+  const invalidSignature = JSON.parse(JSON.stringify(valid)) as Event;
+  invalidSignature.sig = "0".repeat(128);
+  assert.equal(await verifiedFileSourceSnapshot(invalidSignature, valid.id), null);
+
+  const wrongHash = finalizeEvent({
+    kind: 4290,
+    created_at: 1,
+    tags: [["z", "file"]],
+    content: JSON.stringify({ snapshot, contentHash: "0".repeat(64) }),
+  }, secret);
+  assert.equal(await verifiedFileSourceSnapshot(wrongHash, wrongHash.id), null);
+  assert.equal(await verifiedFileSourceSnapshot(valid, SOURCE), null);
+});
 
 function event(content: unknown, extraTags: string[][] = []): Event {
   return {
@@ -62,6 +94,45 @@ test("extracted Coin envelopes retain the exact source receipt", () => {
     sourceContentHash: HASH,
     range: { start: 8, end: 20 },
   });
+});
+
+test("Coin origin envelopes reject impossible ranges and unknown fields", () => {
+  const impossible = event({
+    snapshot: "tiny",
+    contentHash: HASH,
+    coin: {
+      version: 1,
+      origin: {
+        kind: "extracted",
+        sourceNodeId: SOURCE,
+        sourceContentHash: HASH,
+        range: { start: 0, end: 1_000 },
+      },
+    },
+  }, [["e", SOURCE, "", "extracted-from"]]);
+  const extraOriginField = event({
+    snapshot: "tiny",
+    contentHash: HASH,
+    coin: { version: 1, origin: { kind: "direct", discussion: true } },
+  });
+  const extraRangeField = event({
+    snapshot: "tiny",
+    contentHash: HASH,
+    coin: {
+      version: 1,
+      origin: {
+        kind: "extracted",
+        sourceNodeId: SOURCE,
+        sourceContentHash: HASH,
+        range: { start: 7, end: 11, unit: "utf16" },
+      },
+    },
+  }, [["e", SOURCE, "", "extracted-from"]]);
+
+  for (const malformed of [impossible, extraOriginField, extraRangeField]) {
+    assert.equal(coinOriginFromEvent(malformed), null);
+    assert.equal(isCoinEvent(malformed), false);
+  }
 });
 
 test("extracted-from tags without a Coin envelope remain ordinary files", () => {

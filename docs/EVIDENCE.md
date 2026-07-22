@@ -13,17 +13,17 @@ hypotheses. Last updated 2026-07-18.
 | Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
 | Step, Publish (wire name Send), Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
-| Desktop Stronghold storage for signing and provider secrets | Implemented on desktop; browser remains read-only | `secret-store.test.ts`, `secret-migration.test.ts`, key/model store tests, and the Tauri Stronghold shell |
-| Headless MCP press with its own voice key and permanent profile Root | Implemented | Offline stdio smoke proves zero-folder cold start, exact signed-event outbox, raw node reads, and Root/key reuse; isolated real-relay integration flushes a queued event unchanged, preserves optional source forks, and exercises external Publish |
-| Prepared desktop MODEL operations and approval gating | Direct gestures are prepared; Extend also has a durable private execution path | `prepared-operation.test.ts`, `context-snapshot.test.ts`, `model-operation-executor.test.ts`, and `llm-prepared.test.ts` cover preparation. `desktop-operation-runtime.test.ts`, `desktop-operation-review.test.ts`, and the native journal/proxy tests cover persist-before-provider ordering, bounded recovery, ambiguous no-redispatch, explicit duplicate-risk retry, provisional review, compare-and-set application, exact receipts, and vault-bound cancellation. The separate agent loop shares the cancellable native transport but remains outside the durable operation journal; `preparedRequestHash` is not yet signed into Step metadata |
-| Current text plus structured trace context in desktop prompts | Implemented as a client-local compatibility baseline; privately exact-bound for durable Extend | Direct operations gather current file/folder text and a chronological process log through `context-block.ts`, `context-snapshot.ts`, and `prepared-operation.ts`. The Extend journal self-consistency-checks the exact selected context and approved request, but there is no shared task-specific selector, scoped memory, cross-press fixture contract, or portable signed context/result binding yet |
-| Shared authoring-syntax kernel and desktop adapters for Extend (continuation) and Settle (revision) | Initial deterministic slice implemented; authority is current-editor-session-only | `packages/trace-context` pins UTF-16 parsing, protected precedence, exact operation clipping, authority failures, directive markers, local excerpts, malformed syntax, and generated 0/100/1,000/10,000-candidate scale fixtures. Desktop tests cover manual versus paste/drop/MODEL/undo/reload authority, exact prepared identity, protected-output rejection, and inert legacy behavior. Extend additionally records the exact directive deletion plan and durable accepted-application receipt so crash recovery can converge without restoring authority or redispatching provider work. Persisted authority, explicit promotion, Inspector correction/exclusion, durable Settle, other operations, and MCP parity remain deferred |
+| Passphrase-gated desktop vault sessions with independent Roots, encrypted webview workspaces, relay databases, ACLs, signing keys, and provider secrets | Implemented on desktop; browser remains read-only | Vault lifecycle and encrypted-storage tests, registry recovery tests, key/model store tests, and the Tauri Stronghold shell |
+| Headless MCP press with its own voice key and permanent profile Root | Implemented | Offline stdio smoke proves zero-folder cold start, exact signed-event outbox, raw node reads, and Root/key reuse; isolated real-relay integration flushes a queued event unchanged, preserves optional source forks, and exercises external Send |
+| Prepared desktop MODEL operations and approval gating | Implemented for direct single-shot gestures; not yet enforced on every live model call | `prepared-operation.test.ts`, `context-snapshot.test.ts`, `model-operation-executor.test.ts`, and `llm-prepared.test.ts`; the separate agent loop still uses its own transport, and `preparedRequestHash` is not yet stored in Step metadata |
+| Current text plus structured trace context in desktop prompts | Implemented as a client-local compatibility baseline | Direct operations gather current file/folder text and a chronological process log through `context-block.ts`, `context-snapshot.ts`, and `prepared-operation.ts`; there is no shared task-specific selector, scoped memory, cross-press fixture contract, or durable context binding yet |
+| Shared authoring-syntax kernel and a desktop adapter for the Extend (continuation) and Settle (revision) operations | Initial deterministic slice implemented; authority is current-editor-session-only | `packages/trace-context` pins UTF-16 parsing, protected precedence, exact operation clipping, authority failures, directive markers, local excerpts, malformed syntax, and generated 0/100/1,000/10,000-candidate scale fixtures. Desktop tests cover manual versus paste/drop/MODEL/undo/reload authority, exact prepared identity, protected-output rejection, atomic accepted-success cleanup, and inert legacy behavior. Persisted authority, promotion, durable consumption receipts, crash recovery, other operations, and MCP parity remain deferred |
 | Per-delta human/model attribution | Implemented | Attribution regression suite; trust status remains asserted unless corroborated through a signed seam |
 | Fork and merge | Implemented for owned recursive destinations and current top-level foreign flows | Nested Scan/adoption/fork tests plus merge and ownership tests; recursive fork-on-write through an already-foreign folder remains deferred |
-| Valid-Coin mutual-peer co-citation and process vet | Implemented and tested | Signed TraceHeads are author-bound and resolved through verified chains; only cryptographically completed Coins survive intersection. `vet.ts`, `vet-walker.ts`, and their tests cover the process vet |
+| Mutual-peer co-Mint matching and process vet | Implemented and tested | `co-mint.ts`, `vet.ts`, `vet-walker.ts`, and their tests |
 | Exact and fuzzy quote matching | Implemented with uncalibrated defaults | SHA-256 coordinate plus MinHash/LSH client layer |
 | Raw-file Reify with optional trace bundle and report | Implemented on desktop | `reify.ts` materializes signed snapshots and keeps raw events under `.zine/` |
-| Coins package: Publish-side indexing and Kademlia rendezvous | Integrated and exercised inside the single Coins discovery opt-in | Ordinary Cite is core composition outside the opt-in. Native tests cover bounded records, strict peer compatibility, deterministic replica ranking, reserved owned capacity, merge-before-republish, cancellation, listener readiness, and persistent owned pointers. Client tests cover valid-Coin gating, hostile-relay verification, the durable outbox, transactional configuration, recovery, and privacy fences. There is no operated bootstrap network, eight-node deployment result, or density evidence |
+| Coins package: Mint-side indexing and Kademlia rendezvous | Under implementation inside the single Coins opt-in | Mint, Cite, completed-Mint `H` matching, Mint-side durable indexing, and the process vet are exercised above. Native tests cover bounded records, reserved owned capacity, full-attempt peer selection, merge-before-republish, listener readiness, and persistent owned pointers; connection limits are enforced by the native runtime but do not yet have a dedicated regression. Client tests cover hostile-relay verification, direct and extracted completed Mints, same-minter completion proofs, ordinary-citation exclusion, the durable outbox, and transactional configuration. A two-node test exercises the wire, but there is no operated bootstrap network, eight-node deployment result, or density evidence |
 | No-install public verifier | Not implemented | On the [roadmap](ROADMAP.md) |
 | Managed organization service | Not implemented | Hosted relay code exists; no paid service or SLA is claimed |
 
@@ -31,7 +31,12 @@ Desktop vault caveat: Stronghold's password and snapshot KDFs are
 intentionally expensive. A fully unoptimized development build can appear to
 stall for minutes; the current development profile optimizes only the
 cryptographic hot paths. Release KDF parameters and the application security
-contract are unchanged.
+contract are unchanged. New vaults use independent KDF salts, authenticated
+encrypted webview state, relay databases, and ACLs. Relay databases are
+physically partitioned and bound only after unlock, but canonical signed
+protocol events are not additionally encrypted by the vault passphrase at
+rest. The adopted legacy vault keeps its existing Stronghold and `~/.tracer`
+paths so its passphrase and relay history continue to work.
 
 Reify writes each chosen Step's authoritative `snapshot` to its ordinary file
 path. It never substitutes the live unstepped editor buffer and never embeds
@@ -45,7 +50,7 @@ Nothing above needs to be taken on faith. From a repository checkout:
 ```sh
 npm run check          # client, MCP, relay, and Rust tests
 npm run verify         # check + client build + isolated relay smoke
-npm run verify:relay   # real Step/Publish/Attest/Mint/Cite flow
+npm run verify:relay   # real Step/Send/Attest/Mint/Cite flow
 ```
 
 ## Foundational product bet
@@ -114,7 +119,7 @@ market demand, longitudinal memory value, or a general model-independent effect.
 | Cross-author seam plus signed source node | The attributed text is corroborated by a node under the source key | Consent, originality, or copyright ownership |
 | Completed OpenTimestamps proof | The committed event id existed no later than the Bitcoin attestation | The truth of `created_at`, author identity, or uninterrupted human work |
 | Timing and revision-graph signals | A declared admission policy found the process more or less consistent with its reference model | Proof of a human author; a patient generator can reproduce the signals |
-| Content-hash co-citation | Two reachable traces cite identical or canonical-equivalent content | Shared intent, agreement, or a meaningful social relationship |
+| Content-hash co-Mint | Two signers independently completed Mints for canonical-equivalent Coin content | Shared intent, agreement, or a meaningful social relationship |
 
 The normative trust posture is in
 [`protocol/trace-provenance.md`](../protocol/trace-provenance.md) and
@@ -144,7 +149,7 @@ The normative trust posture is in
   corpus affinity after controlling for topic and popularity.
 - Longitudinal coherence or conditional-compression features adding calibrated
   vetting value without being mistaken for proof of humanity or identity.
-- Organic co-citation density sufficient to justify global rendezvous work.
+- Organic same-content co-Mint density sufficient to justify global rendezvous work.
 - Clean-machine release installation on every supported desktop platform.
 
 These gaps are roadmap gates, not details to hide. A claim moves off this

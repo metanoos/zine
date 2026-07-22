@@ -103,6 +103,23 @@ test("Mint cannot accept disjoint Coin and attestation relay successes", async (
   assert.deepEqual(calls, ["a:coin", "b:coin", "a:attestation"]);
   assert.match(
     provenanceSource,
-    /coinRelays = await sendStep\(coin, mintSigner\)[\s\S]*?attestNodeToRelays\([\s\S]*?coinRelays\)/,
+    /stepSignedEventLocally\(coin, publicationFence\)[\s\S]*?coinRelays = await sendStep\(coin, mintSigner, publicationFence\)[\s\S]*?attestNodeToRelays\([\s\S]*?coinRelays, publicationFence\)/,
   );
+});
+
+test("a disabled publication fence stops a Mint phase before relay I/O", async () => {
+  let publications = 0;
+  const relay = {
+    url: "wss://relay.example",
+    publish: async () => {
+      publications++;
+      return "ok";
+    },
+  } as unknown as Relay;
+
+  await assert.rejects(
+    publishToMany([relay], event("coin", 4290, []), { enabled: () => false }),
+    { name: "AbortError" },
+  );
+  assert.equal(publications, 0);
 });

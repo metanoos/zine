@@ -6,7 +6,7 @@
  * text: the signals are statistical (timing distributions) or cryptographic
  * (anteriority chain). This module implements the pure analysis layer.
  *
- * Two layers, split for testability (same convention as co-citation.ts):
+ * Two layers, split for testability (same convention as co-mint.ts):
  *   - Pure signal functions: take arrays of timestamps / edit-graph data,
  *     produce scores. Fully unit-testable, no IO.
  *   - The relay-bound fetcher (walks a peer's chain, extracts the data) is NOT

@@ -6,6 +6,8 @@ import {
   vaultStorage,
   vaultStorage as localStorage,
   vaultStorageGeneration,
+  vaultStorageSessionAcceptsWork,
+  subscribeVaultStorage,
 } from "../storage/vault-storage.js";
 import {
   Compartment,
@@ -42,6 +44,7 @@ import {
   fetchEventById,
   diffToDeltas,
   completeCoinMint,
+  assertPublicationFence,
   publishEdit,
   publishDirectCoin,
   publishHardenedSpan,
@@ -72,6 +75,7 @@ import {
   type MergeCandidate,
   type KEdit,
   type CoinOrigin,
+  type PublicationFence,
   type LlmStepMeta,
   excludeInboundSources,
   findInboundSnapshot,
@@ -86,6 +90,7 @@ import {
   attestNode,
   fetchAttestationCounts,
   isTraceNodeSent,
+  verifiedFileSourceSnapshot,
   type TraceInbound,
 } from "../provenance/provenance.js";
 import { MergePanel } from "../workspace/MergePanel.js";
@@ -96,9 +101,15 @@ import { CoinView, DirectCoinComposerView, IncompleteMintView } from "../provena
 import {
   coinMintOperationKey,
   completePendingCoinMint as completePendingCoinMintTransaction,
-  finalizedCoinMintSourceText,
+  createCoinMintRecoverySessionRegistry,
+  createCoinMintSourceReservationRegistry,
+  finalizedCoinMintSourceStepKEdits,
+  retryCoinMintRecovery,
+  resolvedFinalizedCoinMintSourceText,
   pendingCoinMints,
+  pendingCoinMintBlockingSourceMutation,
   preparePendingCoinMint,
+  rebaseFinalizedCoinMintSourceFile,
   resumePendingCoinMints,
   storedCoinMintAttestation,
   type CoinMintSourceFinalization,
@@ -589,6 +600,43 @@ interface MintRecoveryNotice {
   pending: number;
   failures: string[];
   startError?: string;
+}
+
+interface ForegroundMintLease {
+  sourceFolderId: string;
+  generation: number;
+  workspace: Workspace;
+  controller: AbortController;
+  fence: PublicationFence;
+  release(): void;
+}
+
+/** Wake a failed Mint recovery either at its bounded backoff deadline or as
+ * soon as the browser reports network recovery. Every listener belongs to the
+ * captured vault/session signal and is removed before the next attempt. */
+function waitForMintRecoveryRetry(
+  delayMs: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      window.removeEventListener("online", onOnline);
+      signal.removeEventListener("abort", onAbort);
+      if (error !== undefined) reject(error);
+      else resolve();
+    };
+    const onOnline = () => finish();
+    const onAbort = () => finish(signal.reason);
+    const timer = window.setTimeout(() => finish(), delayMs);
+    window.addEventListener("online", onOnline, { once: true });
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
 }
 
 const emptyDirectCoinDraft = (): DirectCoinDraft => ({
@@ -8193,8 +8241,8 @@ function MintConsentModal({
         <p id="mint-consent-description" className="confirm-message mint-consent-message">
           This exact selected text will be public through configured publication relays.
           Mint also publishes a same-minter attestation, making the result an immutable Coin.
-          If you later Send a trace that cites it, the signer&apos;s interest can become globally
-          discoverable through rendezvous.
+          The completed Coin is automatically indexed for content rendezvous; no later
+          citation or Send is required. Mint does not publish the containing trace.
         </p>
         <div className="confirm-actions">
           <button type="button" className="confirm-cancel" onClick={onCancel}>Cancel</button>
@@ -8887,6 +8935,7 @@ function App() {
     unsteppedPathSet,
     unsteppedEditCounts,
   } = useProvenance(folder, files, replayActiveRef);
+  const mintSourceReservations = useRef(createCoinMintSourceReservationRegistry()).current;
   const unsteppedPathSetRef = useRef(unsteppedPathSet);
   unsteppedPathSetRef.current = unsteppedPathSet;
   const modelOperationControllerRef = useRef<ModelOperationController | null>(null);
@@ -9517,7 +9566,8 @@ function App() {
   const mintConsentRequestRef = useRef<MintConsentRequest | null>(null);
   const [mintRecoveryNotice, setMintRecoveryNotice] = useState<MintRecoveryNotice | null>(null);
   const [mintRecoveryBusy, setMintRecoveryBusy] = useState(false);
-  const recoveredMintSessionsRef = useRef(new Set<string>());
+  const [mintRecoveryEpoch, setMintRecoveryEpoch] = useState(0);
+  const activeMintRecoveriesRef = useRef(createCoinMintRecoverySessionRegistry());
 
   function finishMintConsent(confirmed: boolean): void {
     const request = mintConsentRequestRef.current;
@@ -9691,7 +9741,9 @@ function App() {
     view: EditorView,
     signer?: Uint8Array,
     operationId?: string,
+    publicationFence?: PublicationFence,
   ): Promise<string> {
+    assertPublicationFence(publicationFence);
     const file = filesRef.current[path] ?? files[path];
     if (!file) throw new Error(`Cannot step missing source trace ${path}.`);
     const content = view.state.doc.toString();
@@ -9728,7 +9780,9 @@ function App() {
       true,
       undefined,
       operationId,
+      publicationFence,
     );
+    assertPublicationFence(publicationFence);
     if (!nodeId) throw new Error(`The local source trace ${path} did not produce a node id.`);
     const traceId = await resolvePostWriteTraceId({
       nodeId,
@@ -9738,6 +9792,7 @@ function App() {
         : null,
       resolveTraceIdentity,
     });
+    assertPublicationFence(publicationFence);
     seedSteppedRef.current({
       [path]: { ...file, runs, nodeId, ...(traceId ? { traceId } : {}) },
     });
@@ -9791,7 +9846,34 @@ function App() {
   async function finalizeStoredMintSource(
     record: PendingCoinMint,
     signer: Uint8Array,
+    lease: {
+      generation: number;
+      folderId: string | null;
+      workspace: Workspace;
+      signal?: AbortSignal;
+    } = {
+      generation: vaultStorageGeneration(),
+      folderId: folderIdRef.current,
+      workspace: backendRef.current,
+    },
   ): Promise<string> {
+    const assertLease = () => {
+      if (
+        lease.signal?.aborted ||
+        vaultStorageGeneration() !== lease.generation ||
+        folderIdRef.current !== lease.folderId ||
+        backendRef.current !== lease.workspace ||
+        record.sourceFolderId !== lease.folderId
+      ) {
+        const reason = lease.signal?.reason;
+        const error = reason instanceof Error
+          ? reason
+          : new Error("Mint source recovery no longer owns the active vault workspace");
+        error.name = "AbortError";
+        throw error;
+      }
+    };
+    assertLease();
     const source = record.sourceFinalization;
     if (!source) throw new Error("cannot finalize a direct Mint source");
     if (folderIdRef.current !== record.sourceFolderId) {
@@ -9803,10 +9885,32 @@ function App() {
     if (currentText === undefined) {
       throw new Error(`cannot finalize missing Mint source ${source.relativePath}`);
     }
-    const nextText = finalizedCoinMintSourceText(record, currentText);
+    const capturedSourceEvent = await fetchEventById(source.sourceNodeId);
+    assertLease();
+    const capturedSourceText = capturedSourceEvent
+      ? await verifiedFileSourceSnapshot(capturedSourceEvent, source.sourceNodeId)
+      : null;
+    assertLease();
+    if (
+      capturedSourceText === null ||
+      await sha256HexLocal(capturedSourceText) !== source.sourceContentHash
+    ) {
+      throw new Error(`cannot verify captured Mint source ${source.relativePath}`);
+    }
+    assertLease();
+    // Journal ranges may already sit in post-rebase live space after an
+    // earlier same-source Mint completed. Prefer that space when the capture
+    // no longer hosts the recorded bracket; otherwise translate concurrent
+    // edits from the verified capture.
+    const nextText = resolvedFinalizedCoinMintSourceText(
+      record,
+      capturedSourceText,
+      currentText,
+    );
     const currentNodeId = liveFile?.nodeId ?? localFile?.nodeId ?? "";
     if (nextText === currentText && currentNodeId) {
       const currentNode = await fetchEventById(currentNodeId);
+      assertLease();
       if (currentNode && eventMeta(currentNode).citationTargets.includes(record.coin.id)) {
         return currentNode.id;
       }
@@ -9819,7 +9923,15 @@ function App() {
     const nextRuns = reconcileRunsText(sourceRuns, nextText, getPublicKey(signer));
     const sourceTags = liveFile?.tags ?? localFile?.tags ?? [];
     const citationIds = liveFile?.citationIds ?? localFile?.citationIds;
-    const nodeId = await backendRef.current.writeFile(
+    const steppedKedits = liveFile?.kedits ?? EMPTY_KEDIT_LOG;
+    const sourceStepKedits = finalizedCoinMintSourceStepKEdits(
+      currentText,
+      nextText,
+      steppedKedits,
+      getPublicKey(signer),
+    );
+    assertLease();
+    const nodeId = await lease.workspace.writeFile(
       source.relativePath,
       nextText,
       sourceTags,
@@ -9827,20 +9939,57 @@ function App() {
       nextRuns,
       undefined,
       citationIds,
-      undefined,
+      sourceStepKedits,
       true,
       nextText === currentText,
       operationIdFromNode(record.coin),
+      { signal: lease.signal, enabled: () => {
+        try {
+          assertLease();
+          return true;
+        } catch {
+          return false;
+        }
+      } },
     );
+    assertLease();
     if (!nodeId) throw new Error(`Mint source ${source.relativePath} did not produce a citation Step`);
-    const nextFile = {
-      ...(liveFile ?? { tags: sourceTags }),
+    const currentFile = filesRef.current[source.relativePath] ?? liveFile ?? {
       runs: nextRuns,
       nodeId,
       tags: sourceTags,
       ...(citationIds ? { citationIds } : {}),
     };
+    const concurrentKedits = dropKEditLogPrefix(
+      currentFile.kedits ?? EMPTY_KEDIT_LOG,
+      steppedKedits,
+    );
+    const nextFile = rebaseFinalizedCoinMintSourceFile(
+      record,
+      currentFile,
+      currentText,
+      nextText,
+      nodeId,
+      getPublicKey(signer),
+      keditLogToArray(concurrentKedits),
+    );
+    assertLease();
+    if (nextFile.kedits && nextFile.kedits.length > 0) {
+      mirrorPad(record.sourceFolderId, source.relativePath, {
+        content: flatten(nextFile.runs),
+        tags: nextFile.tags,
+        nodeId,
+        ...(nextFile.traceId ? { traceId: nextFile.traceId } : {}),
+        runs: nextFile.runs,
+        citationIds: nextFile.citationIds,
+        kedits: keditLogToArray(nextFile.kedits),
+      });
+    } else {
+      clearPadPath(record.sourceFolderId, source.relativePath);
+    }
+    assertLease();
     filesRef.current = { ...filesRef.current, [source.relativePath]: nextFile };
+    assertLease();
     setFiles((prev) => ({ ...prev, [source.relativePath]: nextFile }));
     return nodeId;
   }
@@ -9849,14 +9998,50 @@ function App() {
    * that resolves and Steps the source citation before the journal can clear. */
   function coinMintCompletionFor(
     signer: Uint8Array,
-    finalizeSource: (record: PendingCoinMint) => Promise<string> =
-      (record) => finalizeStoredMintSource(record, signer),
+    finalizeSource?: (
+      record: PendingCoinMint,
+      publicationFence: PublicationFence,
+    ) => Promise<string>,
+    publicationSignal?: AbortSignal,
   ) {
+    const generation = vaultStorageGeneration();
+    const folderId = folderIdRef.current;
+    const workspace = backendRef.current;
+    const assertLease = () => {
+      if (
+        vaultStorageSessionAcceptsWork() &&
+        vaultStorageGeneration() === generation &&
+        folderIdRef.current === folderId &&
+        backendRef.current === workspace
+      ) return;
+      const error = new Error("vault session changed during Mint completion");
+      error.name = "AbortError";
+      throw error;
+    };
+    const publicationFence: PublicationFence = {
+      signal: publicationSignal,
+      enabled: () => {
+        try {
+          assertLease();
+          return kademliaEnabledSnapshot();
+        } catch {
+          return false;
+        }
+      },
+    };
+    const finalize = finalizeSource ?? ((record: PendingCoinMint) =>
+      finalizeStoredMintSource(record, signer, {
+        generation,
+        folderId,
+        workspace,
+        signal: publicationSignal,
+      }));
     return {
-      publishPair: (coin: Event) => completeCoinMint(coin, signer),
+      publishPair: (coin: Event) => completeCoinMint(coin, signer, publicationFence),
       serializeAttestation: (attestation: Event) => attestation,
       restoreAttestation: storedCoinMintAttestation,
       persistMembership: async (record: PendingCoinMint) => {
+        assertPublicationFence(publicationFence);
         const parsed = JSON.parse(record.coin.content) as { contentHash?: string };
         await upsertManifestEntry(
           record.mintFolderId,
@@ -9867,10 +10052,16 @@ function App() {
             contentHash: parsed.contentHash ?? "",
           },
           signer,
-          { localOnly: true, operationId: operationIdFromNode(record.coin) },
+          {
+            localOnly: true,
+            operationId: operationIdFromNode(record.coin),
+            publicationFence,
+          },
         );
+        assertPublicationFence(publicationFence);
       },
       persistLocal: (record: PendingCoinMint) => {
+        assertPublicationFence(publicationFence);
         const runs: Run[] = [{ voice: record.coin.pubkey, text: record.phrase }];
         const persisted = saveLocalFile(record.sourceFolderId, record.localPath, {
           content: record.phrase,
@@ -9883,10 +10074,12 @@ function App() {
         if (!persisted) {
           throw new Error("Mint is public but its local inventory could not be persisted");
         }
+        assertPublicationFence(publicationFence);
         seedSteppedRef.current({
           [record.localPath]: { runs, nodeId: record.coin.id, tags: [], coinComplete: true },
         });
         if (folderIdRef.current === record.sourceFolderId) {
+          assertPublicationFence(publicationFence);
           const nextFile = { runs, nodeId: record.coin.id, tags: [], coinComplete: true };
           // Keep the allocator's imperative snapshot authoritative immediately;
           // React commits on a later turn and cannot be the reservation barrier.
@@ -9894,7 +10087,12 @@ function App() {
           setFiles((prev) => ({ ...prev, [record.localPath]: nextFile }));
         }
       },
-      finalizeSource,
+      finalizeSource: async (record: PendingCoinMint) => {
+        assertPublicationFence(publicationFence);
+        const nodeId = await finalize(record, publicationFence);
+        assertPublicationFence(publicationFence);
+        return nodeId;
+      },
     };
   }
 
@@ -9917,21 +10115,51 @@ function App() {
   /** Retry every durable Mint whose signing key remains in this press. Stored
    * path/source metadata makes recovery independent of the editor selection
    * that originally created the Coin. */
-  async function recoverPendingCoinMints(exceptOperationKey?: string): Promise<void> {
+  async function recoverPendingCoinMints(
+    exceptOperationKey?: string,
+    publicationSignal?: AbortSignal,
+  ) {
+    const generation = vaultStorageGeneration();
+    const sourceFolderId = folderIdRef.current;
+    const workspace = backendRef.current;
     const result = await resumePendingCoinMints((pending) => {
       const signer = secretKeyForVoice(pending.coin.pubkey);
       if (!signer) {
         throw new Error(`the Coin signer ${formatPubkey(pending.coin.pubkey)} is unavailable`);
       }
-      return coinMintCompletionFor(signer);
+      return coinMintCompletionFor(
+        signer,
+        (record) => finalizeStoredMintSource(record, signer, {
+          generation,
+          folderId: sourceFolderId,
+          workspace,
+          signal: publicationSignal,
+        }),
+        publicationSignal,
+      );
     }, vaultStorage, (pending) =>
-      pending.sourceFolderId === folderIdRef.current &&
+      pending.sourceFolderId === sourceFolderId &&
       (!exceptOperationKey || pending.operationKey !== exceptOperationKey),
     );
+    if (publicationSignal?.aborted) {
+      refreshMintRecoveryNotice();
+      return {
+        ...result,
+        remaining: pendingCoinMints().filter(
+          (pending) => pending.sourceFolderId === sourceFolderId,
+        ).length,
+      };
+    }
     if (result.failures.length > 0) {
       console.warn("[mint] pending Mint recovery remains incomplete:", result.failures);
     }
     refreshMintRecoveryNotice(result.failures.map((failure) => failure.error));
+    return {
+      ...result,
+      remaining: pendingCoinMints().filter(
+        (pending) => pending.sourceFolderId === sourceFolderId,
+      ).length,
+    };
   }
 
   // Recovery is a workspace-start phase, not a side effect of the next Mint.
@@ -9951,22 +10179,78 @@ function App() {
     const generation = vaultStorageGeneration();
     const keyFingerprint = keys.map((key) => key.pubkey).sort().join(",");
     const session = `${generation}:${folder.id}:${keyFingerprint}`;
-    if (recoveredMintSessionsRef.current.has(session)) return;
-    recoveredMintSessionsRef.current.add(session);
-    setMintRecoveryBusy(true);
-    void recoverPendingCoinMints()
-      .catch((error) => {
-        if (vaultStorageGeneration() !== generation || folderIdRef.current !== folder.id) return;
-        const message = error instanceof Error ? error.message : String(error);
-        console.warn("[mint] startup recovery failed:", error);
-        refreshMintRecoveryNotice([], message);
-      })
-      .finally(() => {
-        if (vaultStorageGeneration() === generation && folderIdRef.current === folder.id) {
-          setMintRecoveryBusy(false);
-        }
-      });
-  }, [bootState, coinsEnabled, folder?.id, keys]);
+    const recovery = activeMintRecoveriesRef.current.acquire(session, async (signal) => {
+      await retryCoinMintRecovery(
+        async () => {
+          if (vaultStorageGeneration() === generation && folderIdRef.current === folder.id) {
+            setMintRecoveryBusy(true);
+          }
+          try {
+            return await recoverPendingCoinMints(undefined, signal);
+          } finally {
+            if (vaultStorageGeneration() === generation && folderIdRef.current === folder.id) {
+              setMintRecoveryBusy(false);
+            }
+          }
+        },
+        waitForMintRecoveryRetry,
+        signal,
+        (error) => {
+          if (vaultStorageGeneration() !== generation || folderIdRef.current !== folder.id) return;
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn("[mint] startup recovery failed:", error);
+          refreshMintRecoveryNotice([], message);
+        },
+      );
+    });
+    void recovery.promise;
+    return recovery.release;
+  }, [bootState, coinsEnabled, folder?.id, keys, mintRecoveryEpoch]);
+
+  function captureForegroundMintLease(sourceFolderId: string): ForegroundMintLease {
+    const generation = vaultStorageGeneration();
+    const workspace = backendRef.current;
+    const controller = new AbortController();
+    const abortIfInvalid = () => {
+      if (
+        vaultStorageSessionAcceptsWork() &&
+        vaultStorageGeneration() === generation &&
+        folderIdRef.current === sourceFolderId &&
+        backendRef.current === workspace &&
+        kademliaEnabledSnapshot()
+      ) return;
+      const error = new Error("vault session or Coins configuration changed during foreground Mint");
+      error.name = "AbortError";
+      controller.abort(error);
+    };
+    const unsubscribeVault = subscribeVaultStorage(abortIfInvalid);
+    const unsubscribeConfig = subscribeKademliaConfig(abortIfInvalid);
+    abortIfInvalid();
+    const fence: PublicationFence = {
+      signal: controller.signal,
+      enabled: () =>
+        !controller.signal.aborted &&
+        vaultStorageSessionAcceptsWork() &&
+        vaultStorageGeneration() === generation &&
+        folderIdRef.current === sourceFolderId &&
+        backendRef.current === workspace &&
+        kademliaEnabledSnapshot(),
+    };
+    let released = false;
+    return {
+      sourceFolderId,
+      generation,
+      workspace,
+      controller,
+      fence,
+      release() {
+        if (released) return;
+        released = true;
+        unsubscribeVault();
+        unsubscribeConfig();
+      },
+    };
+  }
 
   async function mintCoinTrace(
     phrase: string,
@@ -9975,131 +10259,164 @@ function App() {
     kedits?: KEdit[],
     sourceCompletion?: {
       metadata: CoinMintSourceFinalization;
-      finalize: (record: PendingCoinMint) => Promise<string>;
+      finalize: (
+        record: PendingCoinMint,
+        publicationFence: PublicationFence,
+      ) => Promise<string>;
     },
+    capturedLease?: ForegroundMintLease,
   ): Promise<{ path: string; nodeId: string; attestationId: string; runs: Run[] }> {
     if (!kademliaEnabledSnapshot()) {
       throw new Error("Enable Coins in Networking before minting a Coin.");
     }
     if (!folder) throw new Error("Cannot mint a coin without an attached press.");
-    const sourceFolderId = folder.id;
-    const coinVoice = signer ? getPublicKey(signer) : authorPubkey;
-    const mintSigner = signer ?? secretKeyForVoice(coinVoice);
-    if (!mintSigner) throw new Error(`no key for voice ${formatPubkey(coinVoice)}`);
-    const operationKey = coinMintOperationKey({
-      sourceFolderId,
-      signerPubkey: coinVoice,
-      phrase,
-      origin,
-    });
-    // Complete abandoned gestures directly from their stored records before a
-    // new one consumes journal capacity. Exclude this gesture so its retry
-    // returns the original exact Coin to the caller instead of completing it
-    // invisibly and then creating a sibling.
-    await recoverPendingCoinMints(operationKey);
-    if (sourceCompletion) {
-      // Recovery may itself Step this source and shift every later UTF-16
-      // range. Revalidate the exact node, bytes, and target after recovery and
-      // before signing or publishing a new Coin pair.
-      const source = sourceCompletion.metadata;
-      const localFile = loadLocalFolder(sourceFolderId)?.files[source.relativePath];
-      const liveFile = filesRef.current[source.relativePath];
-      const currentText = liveFile ? flatten(liveFile.runs) : localFile?.content;
-      const currentNodeId = liveFile?.nodeId ?? localFile?.nodeId ?? "";
-      if (currentText === undefined || currentNodeId !== source.sourceNodeId) {
-        throw new Error(
-          `Mint source ${source.relativePath} changed while pending Mints were recovered; select it again`,
-        );
-      }
-      if (await sha256HexLocal(currentText) !== source.sourceContentHash) {
-        throw new Error(
-          `Mint source ${source.relativePath} no longer matches its captured snapshot; select it again`,
-        );
-      }
-      const targetStillMatches = source.kind === "pending-bracket"
-        ? findPendingBrackets(currentText).some((bracket) =>
-            bracket.matchStart === source.bracketRange.start &&
-            bracket.matchEnd === source.bracketRange.end &&
-            bracket.phraseStart === source.range.start &&
-            bracket.phraseEnd === source.range.end &&
-            bracket.phrase === phrase
-          )
-        : currentText.slice(source.range.start, source.range.end) === phrase;
-      if (!targetStillMatches) {
-        throw new Error(
-          `Mint source ${source.relativePath} selection moved while pending Mints were recovered; select it again`,
-        );
-      }
+    const ownsLease = capturedLease === undefined;
+    const mintLease = capturedLease ?? captureForegroundMintLease(folder.id);
+    const sourceFolderId = mintLease.sourceFolderId;
+    const publicationController = mintLease.controller;
+    const foregroundPublicationFence = mintLease.fence;
+    if (sourceFolderId !== folder.id || publicationController.signal.aborted) {
+      if (ownsLease) mintLease.release();
+      throw publicationController.signal.reason ?? new Error("foreground Mint lease is stale");
     }
-    const pending = await preparePendingCoinMint(operationKey, async () => {
-      const operationId = createTraceOperationId();
-      const taken = new Set([
-        ...Object.keys(filesRef.current),
-        ...Object.keys(loadLocalFolder(sourceFolderId)?.files ?? {}),
-        ...pendingPaths.current,
-        ...pendingCoinMints()
-          .filter((record) => record.sourceFolderId === sourceFolderId)
-          .map((record) => record.localPath),
-      ]);
-      const localPath = mintedPath(phrase, new Date(), taken, operationId);
-      const mintFolderId = await getOrCreateMintFolder(sourceFolderId, mintSigner);
-      const memberName = localPath.slice(`${MINT}/`.length);
-      const coin = origin.kind === "direct"
-        ? await publishDirectCoin({
-            folderId: mintFolderId,
-            relativePath: memberName,
-            phrase,
-            signer: mintSigner,
-            kedits,
-            prepareOnly: true,
-            operationId,
-          })
-        : await publishHardenedSpan({
-            folderId: mintFolderId,
-            relativePath: memberName,
-            phrase,
-            originNodeId: origin.sourceNodeId,
-            sourceContentHash: origin.sourceContentHash,
-            sourceRange: origin.range,
-            signer: mintSigner,
-            prepareOnly: true,
-            operationId,
-          });
-      return {
-        sourceFolderId,
-        mintFolderId,
-        localPath,
-        memberName,
-        phrase,
-        coin,
-        ...(sourceCompletion ? { sourceFinalization: sourceCompletion.metadata } : {}),
-      };
-    });
-    pendingPaths.current.add(pending.localPath);
     try {
-      // The transaction journal retains this exact signed Coin through every
-      // public and local phase. A retry resumes it instead of minting a sibling.
-      const receipt = await completePendingCoinMintTransaction(
-        pending,
-        coinMintCompletionFor(mintSigner, sourceCompletion?.finalize),
-      );
-      const runs: Run[] = [{ voice: pending.coin.pubkey, text: pending.phrase }];
-      return {
-        path: pending.localPath,
-        nodeId: pending.coin.id,
-        attestationId: receipt.attestation.id,
-        runs,
-      };
-    } catch (error) {
-      refreshMintRecoveryNotice([
-        error instanceof Error ? error.message : String(error),
-      ]);
-      throw error;
-    } finally {
-      pendingPaths.current.delete(pending.localPath);
-      if (!pendingCoinMints().some((record) => record.operationKey === operationKey)) {
-        refreshMintRecoveryNotice();
+      const coinVoice = signer ? getPublicKey(signer) : authorPubkey;
+      const mintSigner = signer ?? secretKeyForVoice(coinVoice);
+      if (!mintSigner) throw new Error(`no key for voice ${formatPubkey(coinVoice)}`);
+      const operationKey = coinMintOperationKey({
+        sourceFolderId,
+        signerPubkey: coinVoice,
+        phrase,
+        origin,
+      });
+      // Complete abandoned gestures directly from their stored records before a
+      // new one consumes journal capacity. Exclude this gesture so its retry
+      // returns the original exact Coin to the caller instead of completing it
+      // invisibly and then creating a sibling.
+      await recoverPendingCoinMints(operationKey, publicationController.signal);
+      assertPublicationFence(foregroundPublicationFence);
+      if (sourceCompletion) {
+        // Recovery may itself Step this source and shift every later UTF-16
+        // range. Revalidate the exact node, bytes, and target after recovery and
+        // before signing or publishing a new Coin pair.
+        const source = sourceCompletion.metadata;
+        const localFile = loadLocalFolder(sourceFolderId)?.files[source.relativePath];
+        const liveFile = filesRef.current[source.relativePath];
+        const currentText = liveFile ? flatten(liveFile.runs) : localFile?.content;
+        const currentNodeId = liveFile?.nodeId ?? localFile?.nodeId ?? "";
+        if (currentText === undefined || currentNodeId !== source.sourceNodeId) {
+          throw new Error(
+            `Mint source ${source.relativePath} changed while pending Mints were recovered; select it again`,
+          );
+        }
+        if (await sha256HexLocal(currentText) !== source.sourceContentHash) {
+          throw new Error(
+            `Mint source ${source.relativePath} no longer matches its captured snapshot; select it again`,
+          );
+        }
+        const targetStillMatches = source.kind === "pending-bracket"
+          ? findPendingBrackets(currentText).some((bracket) =>
+              bracket.matchStart === source.bracketRange.start &&
+              bracket.matchEnd === source.bracketRange.end &&
+              bracket.phraseStart === source.range.start &&
+              bracket.phraseEnd === source.range.end &&
+              bracket.phrase === phrase
+            )
+          : currentText.slice(source.range.start, source.range.end) === phrase;
+        if (!targetStillMatches) {
+          throw new Error(
+            `Mint source ${source.relativePath} selection moved while pending Mints were recovered; select it again`,
+          );
+        }
       }
+      const pending = await preparePendingCoinMint(operationKey, async () => {
+        assertPublicationFence(foregroundPublicationFence);
+        const operationId = createTraceOperationId();
+        const taken = new Set([
+          ...Object.keys(filesRef.current),
+          ...Object.keys(loadLocalFolder(sourceFolderId)?.files ?? {}),
+          ...pendingPaths.current,
+          ...pendingCoinMints()
+            .filter((record) => record.sourceFolderId === sourceFolderId)
+            .map((record) => record.localPath),
+        ]);
+        const localPath = mintedPath(phrase, new Date(), taken, operationId);
+        const mintFolderId = await getOrCreateMintFolder(
+          sourceFolderId,
+          mintSigner,
+          foregroundPublicationFence,
+        );
+        assertPublicationFence(foregroundPublicationFence);
+        const memberName = localPath.slice(`${MINT}/`.length);
+        const coin = origin.kind === "direct"
+          ? await publishDirectCoin({
+              folderId: mintFolderId,
+              relativePath: memberName,
+              phrase,
+              signer: mintSigner,
+              kedits,
+              prepareOnly: true,
+              operationId,
+            })
+          : await publishHardenedSpan({
+              folderId: mintFolderId,
+              relativePath: memberName,
+              phrase,
+              originNodeId: origin.sourceNodeId,
+              sourceContentHash: origin.sourceContentHash,
+              sourceRange: origin.range,
+              signer: mintSigner,
+              prepareOnly: true,
+              operationId,
+            });
+        return {
+          sourceFolderId,
+          mintFolderId,
+          localPath,
+          memberName,
+          phrase,
+          coin,
+          ...(sourceCompletion ? { sourceFinalization: sourceCompletion.metadata } : {}),
+        };
+      });
+      pendingPaths.current.add(pending.localPath);
+      try {
+        // The transaction journal retains this exact signed Coin through every
+        // public and local phase. A retry resumes it instead of minting a sibling.
+        const receipt = await completePendingCoinMintTransaction(
+          pending,
+          coinMintCompletionFor(
+            mintSigner,
+            sourceCompletion?.finalize,
+            publicationController.signal,
+          ),
+        );
+        const runs: Run[] = [{ voice: pending.coin.pubkey, text: pending.phrase }];
+        return {
+          path: pending.localPath,
+          nodeId: pending.coin.id,
+          attestationId: receipt.attestation.id,
+          runs,
+        };
+      } catch (error) {
+        refreshMintRecoveryNotice([
+          error instanceof Error ? error.message : String(error),
+        ]);
+        if (pendingCoinMints().some((record) => record.operationKey === operationKey)) {
+          // Startup may have found an empty journal and settled already. Wake a
+          // fresh vault/folder-scoped supervisor for work created by this failed
+          // foreground gesture; its timer and online trigger own later retries.
+          setMintRecoveryEpoch((epoch) => epoch + 1);
+        }
+        throw error;
+      } finally {
+        pendingPaths.current.delete(pending.localPath);
+        if (!pendingCoinMints().some((record) => record.operationKey === operationKey)) {
+          refreshMintRecoveryNotice();
+        }
+      }
+    } finally {
+      if (ownsLease) mintLease.release();
     }
   }
 
@@ -10169,13 +10486,23 @@ function App() {
     );
     if (!sourceBracket) return false;
     phrase = sourceSnapshot.slice(sourceBracket.phraseStart, sourceBracket.phraseEnd);
-    const sourceContentHashPromise = sha256HexLocal(sourceSnapshot);
-
-    const signer = stepSigner ?? secretKeyForVoice(authorPubkey) ?? undefined;
+    // Reserve the source synchronously, before hashing, flushing, recovery, or
+    // signing can yield. Once Mint has journalled the Coin, the durable source
+    // lock overlaps this one until the whole foreground gesture settles.
+    const releaseSourceReservation = mintSourceReservations.reserve(folder.id, path);
+    const mintLease = captureForegroundMintLease(folder.id);
     try {
+      const sourceContentHashPromise = sha256HexLocal(sourceSnapshot);
+      const signer = stepSigner ?? secretKeyForVoice(authorPubkey) ?? undefined;
       // Pin extraction to the exact source version that contains the selected
       // phrase. This flush is a no-op when the source is already current.
-      const originNodeId = await flushEditorLocally(path, view, signer);
+      const originNodeId = await flushEditorLocally(
+        path,
+        view,
+        signer,
+        undefined,
+        mintLease.fence,
+      );
       const sourceContentHash = await sourceContentHashPromise;
       const coin = await mintCoinTrace(
         phrase,
@@ -10196,9 +10523,17 @@ function App() {
             range: { start: sourceBracket.phraseStart, end: sourceBracket.phraseEnd },
             bracketRange: { start: sourceBracket.matchStart, end: sourceBracket.matchEnd },
           },
-          finalize: async (record) => {
+          finalize: async (record, publicationFence) => {
+            assertPublicationFence(publicationFence);
             const afterWrite = view.state.doc.toString();
-            const resolved = finalizedCoinMintSourceText(record, afterWrite);
+            // Same-source completions may have rebased this row into live
+            // UTF-16 space while this gesture still holds the original
+            // snapshot. resolvedFinalized picks the matching coordinate model.
+            const resolved = resolvedFinalizedCoinMintSourceText(
+              record,
+              sourceSnapshot,
+              afterWrite,
+            );
             const change = minimalTextChange(afterWrite, resolved);
             if (change) view.dispatch({ changes: change });
             return flushEditorLocally(
@@ -10206,9 +10541,11 @@ function App() {
               view,
               signer,
               operationIdFromNode(record.coin),
+              publicationFence,
             );
           },
         },
+        mintLease,
       );
       // Coins use the normal tab lifecycle but render a dedicated read-only
       // surface instead of mounting CodeMirror.
@@ -10227,6 +10564,9 @@ function App() {
       setOpStatus(originPanel === -1 ? activePanel : originPanel, "error", e instanceof Error ? e.message : String(e), "mint");
       // Leave the bracket pending — the user can retry.
       return false;
+    } finally {
+      mintLease.release();
+      releaseSourceReservation();
     }
   }
 
@@ -16918,6 +17258,14 @@ function App() {
     return true;
   }
 
+  function blocksPendingMintSourceMutation(path: string, isFolder: boolean): boolean {
+    if (!folder) return false;
+    return Boolean(
+      pendingCoinMintBlockingSourceMutation(folder.id, path, isFolder) ||
+      mintSourceReservations.blocks(folder.id, path, isFolder),
+    );
+  }
+
   // Move `src` (file or folder path) into `destFolder` ("" = root). Rewrites
   // every file and empty-folder path under src, plus any open panels and
   // collapsed-folder state, so nothing dangles. Guards against illegal moves
@@ -16957,6 +17305,19 @@ function App() {
     const tops = srcs.filter(
       (p) => !srcs.some((q) => q !== p && isDescendantOrSelf(q, p)),
     );
+    const blockedSource = tops.find((src) => {
+      const isFolderMove = folderSet.has(src) || hasChild(fileSet, folderSet, src);
+      return blocksPendingMintSourceMutation(src, isFolderMove);
+    });
+    if (blockedSource) {
+      setOpStatus(
+        activePanel,
+        "error",
+        `Finish or retry the pending Mint before moving its source ${blockedSource}.`,
+        "mint",
+      );
+      return;
+    }
     const movable: string[] = [];
     const takenDest = new Set<string>();
     for (const src of tops) {
@@ -17225,6 +17586,18 @@ function App() {
           : null,
       }] as const;
     }));
+    const blockedSource = deleteTargets.find((target) =>
+      blocksPendingMintSourceMutation(target.path, target.isFolder),
+    );
+    if (blockedSource) {
+      setOpStatus(
+        activePanel,
+        "error",
+        `Finish or retry the pending Mint before deleting its source ${blockedSource.path}.`,
+        "mint",
+      );
+      return;
+    }
     const nextPanels = closeDeletedTabs(panels, deleteTargets, (tab) =>
       isFolderTab(tab) ? folderTabPath(tab) : tab,
     );
@@ -17280,6 +17653,19 @@ function App() {
       operationFolderId,
       removeDeletedShieldedPaths(shieldedRef.current, tops),
     );
+    const blockedSource = tops.find((path) => {
+      const isFolderDelete = folderSet.has(path) || hasChild(fileSet, folderSet, path);
+      return blocksPendingMintSourceMutation(path, isFolderDelete);
+    });
+    if (blockedSource) {
+      setOpStatus(
+        activePanel,
+        "error",
+        `Finish or retry the pending Mint before deleting its source ${blockedSource}.`,
+        "mint",
+      );
+      return;
+    }
     // A path is removed iff it is a deleted top-level path itself or a
     // descendant of a deleted folder.
     const under = (p: string) =>
@@ -17454,6 +17840,9 @@ function App() {
     const folderSet = new Set(emptyFolders);
     const isFolderRename = files[path]?.kind === "folder" ||
       folderSet.has(path) || hasChild(fileSet, folderSet, path);
+    if (blocksPendingMintSourceMutation(path, isFolderRename)) {
+      return "Finish or retry the pending Mint before renaming its source.";
+    }
     // Folder names become nostr tags, so the same tag-token rule as createCommit.
     if (isFolderRename && !isValidTagToken(cleanName))
       return `"${cleanName}" isn't a valid folder name. Use letters, digits, _ and - only (no spaces).`;

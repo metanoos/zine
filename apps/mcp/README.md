@@ -49,7 +49,7 @@ trace-provenance layer:
 | `zine_step` | **Step** §8 | Step a node locally (hasn't left the machine) |
 | `zine_send` | **Send** §8 | Step pending changes, otherwise reuse the latest Step, then publish it |
 | `zine_attest` | **Attest** §5A/§8 | Append an endorsement of one sent node |
-| `zine_mint_span` | **Mint** §3.8 | Step, Publish, and minter-Attest an extracted immutable Coin from an exact source span (`sourceStart` disambiguates repeated text) |
+| `zine_mint_span` | **Mint** §3.8 | Registered fail-closed: rejects before creating or publishing a Coin until the headless package has a durable Kademlia indexing backend |
 | `zine_delete` | §3.3 | Remove a file from the manifest (history retained) |
 
 Step records the supplied state locally. Send steps the supplied present state
@@ -63,8 +63,10 @@ immediately before Send. A Step first persists as an exact signed event in the
 profile's local state. When the loopback home relay is reachable the press
 synchronizes that outbox in order; an unavailable relay does not make Step
 fail. Publication destinations remain separate: Send deliberately publishes
-one selected file node outside the machine. Mint is the compound exception: it
-returns only after both its Coin genesis and minter attestation are published.
+one selected file node outside the machine. Mint additionally requires durable
+`H` indexing. The current headless package has no Kademlia runtime, so
+`zine_mint_span` rejects before creating or publishing a Coin; use the desktop
+Coins interface for the complete Mint transaction.
 
 ## Storage and relays
 

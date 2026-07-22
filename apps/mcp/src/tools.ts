@@ -32,7 +32,6 @@ import { verifyEvent } from "nostr-tools/pure";
 
 import {
   attestNode,
-  completeCoinMint,
   eventMeta,
   fetchChain,
   fetchEventById,
@@ -44,6 +43,7 @@ import {
   sendHistoricalStep,
   sha256HexLocal,
   upsertManifestEntry,
+  verifiedFileSourceSnapshot,
 } from "../../client/src/provenance/provenance.js";
 import { createLocalWorkspace } from "../../client/src/workspace/workspace-local.js";
 import { loadOrCreateVoice, type Voice } from "../../client/src/identity/identity.js";
@@ -74,9 +74,9 @@ import {
   completePendingCoinMint as completePendingCoinMintTransaction,
   finalizedCoinMintSourceText,
   pendingCoinMints,
+  pendingCoinMintBlockingSourceMutation,
   preparePendingCoinMint,
   resumePendingCoinMints,
-  storedCoinMintAttestation,
   type CoinMintCompletion,
 } from "../../client/src/provenance/coin-mint-journal.js";
 
@@ -85,6 +85,44 @@ import {
  *  manual key by design — the agent is its own attributable author. */
 export function agentVoice() {
   return loadOrCreateVoice();
+}
+
+/** The headless package has no libp2p/Kademlia runtime. Fail before creating or
+ * publishing a Coin instead of clearing a completed Mint that can never enter
+ * the required durable H-indexing path. */
+export function mcpMintIndexingBackendAvailable(): boolean {
+  return false;
+}
+
+export function requireMcpMintIndexingBackend(): void {
+  if (mcpMintIndexingBackendAvailable()) return;
+  throw new Error(
+    "zine_mint_span requires a headless Kademlia indexing backend; use the desktop Coins interface until that backend is available",
+  );
+}
+
+/** Headless Mint cannot finish H-indexing, so reserved sources must stay
+ * frozen until the operator finishes on desktop or clears the journal. */
+function assertMcpSourceNotReservedByPendingMint(
+  folderId: string,
+  relativePath: string,
+  action: "step" | "send" | "delete",
+  isFolder = false,
+): void {
+  if (!pendingCoinMintBlockingSourceMutation(
+    folderId,
+    relativePath,
+    isFolder,
+    localStorage,
+  )) {
+    return;
+  }
+  throw new Error(
+    `cannot ${action} ${relativePath}: a pending Mint journal still reserves ` +
+      "its source citation, and zine-mcp cannot complete Mint indexing " +
+      "without a headless Kademlia backend; finish the Mint in the desktop " +
+      "Coins interface or clear the profile's pending-Mint journal",
+  );
 }
 
 /** Bridge the owner-only MCP profile key into the shared session-only signing
@@ -193,9 +231,17 @@ export function mcpCoinMintCompletion(
 ): CoinMintCompletion<Event> {
   const ref = requireFolder(workspace);
   return {
-    publishPair: (coin) => completeCoinMint(coin, voice.secretKey),
+    publishPair: async () => {
+      requireMcpMintIndexingBackend();
+      throw new Error("headless Mint indexing preflight returned unexpectedly");
+    },
     serializeAttestation: (attestation) => attestation,
-    restoreAttestation: storedCoinMintAttestation,
+    restoreAttestation: () => {
+      // Older profiles may already contain a public-pair receipt. It still
+      // cannot authorize journal cleanup without durable H-indexing.
+      requireMcpMintIndexingBackend();
+      return null;
+    },
     persistMembership: async (record) => {
       const parsed = JSON.parse(record.coin.content) as { contentHash?: string };
       await upsertManifestEntry(
@@ -270,9 +316,9 @@ export function pendingMcpCoinMintCount(workspace: Workspace): number {
 
 let mcpMintLifecycleQueue: Promise<unknown> = Promise.resolve();
 
-/** Serialize the whole headless Mint gesture with background recovery. The
- * journal's phase queues protect individual records, but this wider boundary
- * also covers the final journal removal → next preparation transition. */
+/** Serialize every mutating headless gesture with background Mint recovery.
+ * Workspace writes otherwise snapshot the same head concurrently and can
+ * publish siblings before the last local completion overwrites its peer. */
 export function runMcpMintLifecycle<T>(operation: () => Promise<T>): Promise<T> {
   const task = mcpMintLifecycleQueue.catch(() => undefined).then(operation);
   mcpMintLifecycleQueue = task.then(() => undefined, () => undefined);
@@ -286,6 +332,7 @@ export async function resumeMcpPendingCoinMints(
   voice: Voice,
   exceptOperationKey?: string,
 ) {
+  requireMcpMintIndexingBackend();
   const ref = requireFolder(workspace);
   const completion = mcpCoinMintCompletion(workspace, voice);
   return resumePendingCoinMints(
@@ -535,8 +582,9 @@ export function registerTools(
         .optional()
         .describe("node ids tagged onto this file without an inline quote (cite role: tag)"),
     },
-    async ({ relativePath, content, tags, replyingTo, citationIds }) => {
+    async ({ relativePath, content, tags, replyingTo, citationIds }) => runMcpMintLifecycle(async () => {
       const ref = requireFolder(workspace);
+      assertMcpSourceNotReservedByPendingMint(ref.id, relativePath, "step");
       const signer = agentVoice().secretKey;
       // Step steps locally (localOnly=true); Send is a separate, deliberate act.
       const nodeId = await workspace.writeFile(
@@ -562,7 +610,7 @@ export function registerTools(
         sent: false,
         pendingLocalEvents: pendingLocalEventCount(),
       });
-    },
+    }),
   );
 
   server.tool(
@@ -577,8 +625,9 @@ export function registerTools(
       replyingTo: z.string().optional().describe("node id this write replies to"),
       citationIds: z.array(z.string()).optional().describe("node ids tagged onto this file"),
     },
-    async ({ relativePath, content, tags, replyingTo, citationIds }) => {
+    async ({ relativePath, content, tags, replyingTo, citationIds }) => runMcpMintLifecycle(async () => {
       const ref = requireFolder(workspace);
+      assertMcpSourceNotReservedByPendingMint(ref.id, relativePath, "send");
       const signer = agentVoice().secretKey;
       const nodeId = await workspace.writeFile(
         relativePath,
@@ -610,7 +659,7 @@ export function registerTools(
         pendingLocalEvents: pendingLocalEventCount(),
         ...handoff,
       });
-    },
+    }),
   );
 
   server.tool(
@@ -625,7 +674,7 @@ export function registerTools(
       message: z.string().optional().describe("optional note attached to the endorsement"),
       geohash: z.string().optional().describe("optional location for spatial discovery"),
     },
-    async ({ citedNodeId, message, geohash }) => {
+    async ({ citedNodeId, message, geohash }) => runMcpMintLifecycle(async () => {
       requireFolder(workspace);
       const signer = agentVoice().secretKey;
 
@@ -637,18 +686,14 @@ export function registerTools(
         ...(geohash ? { geohash } : {}),
       });
       return jsonResult({ attestationId: attest.id, attestedNode: citedNodeId });
-    },
+    }),
   );
 
   server.tool(
     "zine_mint_span",
-    "Mint (spec §3.8): Step, Publish, and Attest an immutable, addressable " +
-      "kind-4290 Coin from a span of text, frozen at exactly this version. " +
-      "Minted spans are the " +
-      "protocol's addressable unit for citations — 'quote this passage' first " +
-      "mints it, then cites the minted id. The tool succeeds only after the " +
-      "Coin and its minter attestation are public and originPath has Stepped " +
-      "the resolved citation. Returns all three event ids and the Coin's synthetic path.",
+    "Mint (spec §3.8) is currently unavailable in the headless package because " +
+      "it has no durable Kademlia indexing backend. The tool fails before " +
+      "creating or publishing a Coin; use the desktop Coins interface.",
     {
       originPath: z.string().describe("relative path of the document the span came from"),
       phrase: z.string().describe("the exact span text to freeze as an immutable trace"),
@@ -663,17 +708,14 @@ export function registerTools(
         .describe("UTF-16 start offset when the phrase occurs more than once in the source snapshot"),
     },
     async ({ originPath, phrase, originNodeId, sourceStart }) => runMcpMintLifecycle(async () => {
+      requireMcpMintIndexingBackend();
       const ref = requireFolder(workspace);
       const voice = agentVoice();
       const sourceEvent = await fetchEventById(originNodeId);
       if (!sourceEvent) throw new Error("the source node is unavailable");
-      let sourceSnapshot: string;
-      try {
-        const parsed = JSON.parse(sourceEvent.content) as { snapshot?: unknown };
-        if (typeof parsed.snapshot !== "string") throw new Error("missing snapshot");
-        sourceSnapshot = parsed.snapshot;
-      } catch {
-        throw new Error("the source node does not carry a readable text snapshot");
+      const sourceSnapshot = await verifiedFileSourceSnapshot(sourceEvent, originNodeId);
+      if (sourceSnapshot === null) {
+        throw new Error("the source node is not a valid signed file snapshot");
       }
       const resolvedStart = sourceStart ?? sourceSnapshot.indexOf(phrase);
       if (resolvedStart < 0 || sourceSnapshot.slice(resolvedStart, resolvedStart + phrase.length) !== phrase) {
@@ -779,10 +821,17 @@ export function registerTools(
       relativePath: z.string(),
       isFolder: z.boolean().optional().describe("true to delete a folder member (default false)"),
     },
-    async ({ relativePath, isFolder }) => {
-      requireFolder(workspace);
-      await workspace.deletePath(relativePath, isFolder ?? false);
-      return jsonResult({ deleted: relativePath, isFolder: isFolder ?? false });
-    },
+    async ({ relativePath, isFolder }) => runMcpMintLifecycle(async () => {
+      const ref = requireFolder(workspace);
+      const deletingFolder = isFolder ?? false;
+      assertMcpSourceNotReservedByPendingMint(
+        ref.id,
+        relativePath,
+        "delete",
+        deletingFolder,
+      );
+      await workspace.deletePath(relativePath, deletingFolder);
+      return jsonResult({ deleted: relativePath, isFolder: deletingFolder });
+    }),
   );
 }

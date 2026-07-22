@@ -318,7 +318,7 @@ reader's declared local corpus policy.
 
 Popular coin matches carry little information; several independently shared,
 moderately rare coins among vetted keys are more discriminating. Coins are one
-user-facing discovery opt-in covering Mint, valid-Coin indexing, and
+user-facing discovery opt-in covering Mint, Mint-side indexing, and
 rendezvous; ordinary citation remains available without it.
 Kademlia is the under-the-hood routing component, not a separate opt-in, and
 remains under implementation. Its results may return candidate pointers, but

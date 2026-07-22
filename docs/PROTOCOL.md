@@ -55,14 +55,15 @@ The model writes into the same files you do, so its work enters the record as
 well. Fonts and colors distinguish interleaved voices. The result shows who
 wrote what and how the text came to be.
 
-`Ctrl/Cmd+S` places a **Step** in the selected zine's trace. A file Step
-batches the editor-action log into one signed checkpoint. A folder Step — up
-to the topmost Root — pins an exact recursive frontier after dirty
-descendants are durably checkpointed. Automatic child-head roll-ups are
-signed derived checkpoints, not extra author Steps. No event fires per
-keystroke. Publish — wire name `Send` until the coordinated schema cut —
-later makes one exact checkpoint reachable, including its high-resolution
-action log, for playback and process vetting.
+`Ctrl/Cmd+S` places a **Step** in the selected zine's trace. A file Step batches
+the editor-action log into one signed checkpoint. A folder Step — up to the
+topmost Root — pins an exact recursive frontier after dirty descendants are
+durably checkpointed.
+Automatic child-head roll-ups are signed derived checkpoints, not extra author
+Steps. No event fires per keystroke. Publish — still named Send on the wire
+and in the current implementation until the schema cut — later makes one
+exact checkpoint reachable, including its high-resolution action log, for
+playback and process vetting.
 
 Zine is to authorship provenance what Git is to source history. The protocol
 and local press are open; each author can keep a private home relay, add a
@@ -94,11 +95,11 @@ peers, but local authoring never requires them.
 
 Underneath, Zine uses Nostr events over local and configured remote WebSocket
 relays: SHA-256 ids, Schnorr signatures, and the seven NIP-01 fields. Tor can
-expose a private relay. Coins are the user-facing discovery opt-in for Mint,
-valid-Coin indexing, and rendezvous; ordinary citation is part of core
-composition. Kademlia is the internal routing component, not a separate opt-in,
-and is integrated and exercised; global discovery still needs operator-provided
-super-peers and real citation density.
+expose a private relay. Coins are the user-facing opt-in for Mint, Mint-side
+indexing, and rendezvous together. Ordinary citation remains available without
+Coins. Kademlia is the internal routing component,
+not a separate opt-in, and remains under implementation; global discovery also
+needs operator-provided super-peers and real co-Mint density.
 
 ---
 
@@ -222,19 +223,16 @@ A trace has one owner: the key that signs its nodes. Five moves connect traces:
 mint, cite, tag, fork, and merge.
 
 **Minting.** You select a passage of text and strike it into its own trace.
-`[[ a phrase ]]` is rewrite protection, not yet a citation — it shields the
-span from silent drift across AI rounds. One explicit Mint Steps a new
-immutable file trace whose snapshot *is* that text, Publishes it, Attests it
-under the same minter key, and rewrites the bracket to
-`[[ a phrase | nodeId ]]`. Only then is it a Coin, addressable forever.
-Minting captures what's there now; it doesn't invent a pre-mint history.
+`[[ a phrase ]]` is rewrite protection, not yet a trace — it shields the span
+from silent drift across LLM rounds. One explicit Mint Steps a new immutable
+file trace whose snapshot *is* that text, Publishes it, Attests it under the
+minter key, and rewrites the bracket to `[[ a phrase | nodeId ]]`. Only then
+is it a Coin, addressable forever. Minting captures what's there now; it
+doesn't invent a pre-mint history. Copying never mints, and nothing cites
+without first being minted.
 
-**Citing.** Citation is neutral composition, not endorsement. Any exact stepped
-source may be cited through one delta type with four roles. Provenance-aware
-copy can put plain text plus a private source envelope on the clipboard; paste
-may then install an auto-bracketed citation to that source Step without
-minting. If the envelope is unavailable or invalid, paste degrades to ordinary
-text and asserts no provenance.
+**Citing.** Once minted, a trace can be cited through one delta type with four
+roles:
 
 | role | what it is |
 |---|---|
@@ -246,8 +244,7 @@ text and asserts no provenance.
 Every cite uses a lowercase `q` tag, the NIP-18-shaped composition edge from
 your nucleus to the cited one. It pins the source version at the moment of
 citing, even if that trace later changes. Citation needs no cooperation from
-the source. Readers derive whether the target is an ordinary Step or a Coin
-from the target event and, for a Coin, its same-minter attestation.
+the source.
 
 **Tagging.** A tag and a resolved bracket are the same `q` edge with different
 presentation. A bracket appears in the body; a tag is discoverable but
@@ -385,9 +382,8 @@ trade is always reachability or privacy, never identity.
 A **super-peer** is an always-online relay holding a replica of *your published corpus*.
 It keeps cited traces reachable while your laptop is closed; it is not a
 discovery platform. Any NIP-01+NIP-33 relay suffices. OTS calendar hosting
-remains planned. The Coins package validates Kademlia bootstrap protocol
-compatibility and commits configuration transactionally, but no bootstrap
-network is operated.
+remains planned. Bootstrap configuration for the Coins package's Kademlia
+component is under implementation, and no bootstrap network is operated.
 
 Any NIP-01 relay that also implements parameterized-replaceable handling
 (NIP-33) is sufficient. There is no special relay class. For removal, the
@@ -402,31 +398,35 @@ the spec keeps non-normative on purpose.
 ## Rendezvous & vetting
 
 Two people who have never met, share no peer, and share no relay may find each
-other because their published traces cite coins with the same content. The
+other because they independently completed Mints for Coin content with the same
+verified coordinate. The
 recipient then evaluates the other signer's process evidence before deciding
 whether to admit that key.
 
-Coins are the only product opt-in in this discovery flow. Ordinary citation
-works without Coins. Enabling Coins adds Mint, valid-Coin indexing, and both
-mutual-peer and global Coin rendezvous. The Kademlia details below explain the
-routing component inside that package, not a separately enabled feature.
+Coins are the only product opt-in in this flow. Enabling them covers Mint,
+Mint-side indexing, and both mutual-peer and global rendezvous. Ordinary
+citation remains available without Coins. The
+Kademlia details below explain the routing component inside that package, not
+a separately enabled feature.
 
-**A citation is always a trace edge.** `[[text]]` is local draft syntax. A
-resolved bracket cites an ordinary stepped source or a Coin with lowercase
-`q`. Inline brackets are explicit and bodyless tags are tacit, but both use the
-same edge. Global discovery ignores ordinary Step targets and derives
-`H = sha256(canonical(targetBody))` only from a Coin whose envelope, body hash,
-and same-minter attestation verify. `H` clusters independent mints; it is an
-index coordinate, not another citation type.
+**A citation is always a trace edge.** `[[text]]` is local draft syntax. Mint
+first creates a trace; lowercase `q` then cites it. Inline brackets are
+explicit and bodyless tags are tacit, but both use the same edge. Global
+discovery derives `H = sha256(canonical(coinBody))` from a verified completed
+Mint. `H` clusters independent mints; it is an index coordinate, not another
+citation type. A citation remains separate usage evidence and never creates or
+gates rendezvous membership.
 
 **The DHT carries event pointers, not content or private addresses.** The
 Kademlia component is being implemented to answer one question: *which
-published events cite content `H`?* Each value is `{eventId, relayUrl}` for a
-signed carrying node on a stranger-readable relay. A querier fetches and
-verifies the carrying event, its `q`, the Coin target, and the same-minter
-attestation before evaluating the candidate. Private admission details are
-exchanged only after vetting. The in-progress implementation still needs
-operator-provided super-peer bootstrap addresses.
+completed Mints share content coordinate `H`?*
+Each value is `{eventId, relayUrl}` for a Coin genesis on a
+stranger-readable relay. A querier fetches and verifies the Coin's Full Trace
+genesis, body/`x`, and valid same-minter completion attestation before evaluating
+the candidate. An extracted source strengthens vetting when public, but its
+absence never excludes the Mint or causes publication of a private container.
+Private admission details are exchanged only after vetting. The in-progress
+implementation still needs operator-provided super-peer bootstrap addresses.
 Its current configuration path is transactional: an unusable replacement is
 never left persisted with the prior node stopped.
 
@@ -440,22 +440,20 @@ every discovered peer was attempted. Startup and twelve-hour republishing
 first Get and merge valid replicas; stale libp2p auto-publication is disabled.
 
 Two paths can produce a match. In the trust-bounded v1, a mutual peer who can
-read both chains sees the shared valid-Coin citation and brokers an
-introduction. With Coins enabled, the in-progress Kademlia path accelerates
-non-mutual discovery: publishing a carrying node to a stranger-readable relay
-places its pointer under each verified Coin target's `H`. Every ordinary
-social `q` is inspected in bounded batches rather than a fixed first-N slice;
-non-Coin targets are not indexed. The signed carrying event stays in a
-durable retry outbox until all valid Coin citations are indexed, with retry
-backoff plus startup and network-recovery triggers. Citation records the
-relation; Publish controls its reachability, and an indexing failure never
-rolls Publish back.
+read both chains intersects their verified completed-Mint `H` coordinates and
+brokers an introduction. With Coins enabled, the in-progress Kademlia path
+accelerates non-mutual discovery: completing a Mint queues its Coin genesis and
+places `{eventId: coinGenesisId, relayUrl}` under verified `H`. The Coin stays
+in a durable retry outbox until indexing succeeds, with retry backoff plus
+startup and network-recovery triggers. A DHT failure never invalidates or rolls
+back the completed public Mint, and no later citation or Send is required.
 
 Relay verification is also bounded because a DHT pointer chooses an untrusted
 host. The in-progress reader requests exact ids, rejects unsolicited and
 oversized events, caps parallelism and total bytes, closes subscriptions and
 late WebSocket handshakes, and obeys caller cancellation plus a hard discovery
-deadline. Only events that still pass signature, citation, and Coin-hash
+deadline. Only events that still pass signature, Full Trace Coin, body/hash,
+and same-minter completion
 verification become candidates.
 
 **The vet — process, not prose.** Fluent prose is easy to imitate, so the vet

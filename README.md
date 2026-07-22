@@ -117,21 +117,20 @@ home relay. A folder Step pins an exact recursive frontier. Automatic ancestor
 roll-ups remain signed derived checkpoints, not extra author Steps. Most Steps
 remain private working history.
 
-**Publish** makes one exact stepped version reachable for discussion. (The
-wire and today's implementation still spell this gesture `Send` until the
-coordinated schema cut.)
+**Publish** makes one exact stepped version reachable for discussion. On the
+wire and in the current implementation this gesture is still named Send; the
+product term is Publish until the schema cut renames both.
 
 **Attest** is an optional, later endorsement of one published version.
 Discussion is common; commitment is rare.
 
-Copied passages can cite any exact stepped source without minting or endorsing
-it. A separate explicit Mint creates an immutable **coin** through one genesis
-Step, Publish, and same-minter Attest. Forking starts a proposal under a new
-owner's key; merging accepts chosen work into the receiving owner's chain.
-Coins are one user-facing discovery opt-in covering Mint, Coin indexing, and
-rendezvous; ordinary citation remains available without it.
+Copied passages can be minted as immutable **coins** and cited by exact node
+id. Forking starts a proposal under a new owner's key; merging accepts chosen
+work into the receiving owner's chain. Coins are one user-facing opt-in:
+enabling them covers Mint, Mint-side indexing, and rendezvous together.
+Ordinary citation remains available without Coins.
 
-## Sovereign by key, connected by citation
+## Sovereign by key, connected by coins
 
 Zine is peer-to-peer in the plainest sense: no platform sits between writers.
 Every press holds its own keys: separate keys own the relay, sign the
@@ -148,12 +147,11 @@ claims salience, not authorship or agreement: *these words carry currency for
 me.* There is no unpublished Coin; an interrupted gesture is only a pending
 Mint attempt until its public minter attestation exists. Each coin's `x` key
 hashes its exact bytes. When Coins are enabled, Zine also derives the
-canonicalized `H` rendezvous coordinate and indexes published citations to
-valid Coins to answer one question — *which published traces cite these
-words?* — so two writers who share no platform, relay, or peer can surface
-each other even when their coin bytes differ only in Unicode normalization or
-whitespace. The same valid-Coin match also works, more slowly, through a
-mutual peer who can read both chains.
+canonicalized `H` rendezvous coordinate and indexes the completed Mint to
+answer one question — *who else completed a Mint for these words?* — so two
+writers who share no platform, relay, or peer can surface each other even when
+their coin bytes differ only in Unicode normalization or whitespace. The same
+match also works, more slowly, through a mutual peer who can read both chains.
 
 The economics are deliberately spam-resistant. A coin everyone holds carries
 no signal, so there is no payoff in squatting the popular phrase; the signal
@@ -164,16 +162,17 @@ behind it — and decide whether the resonance is real. If it isn't, swipe
 left; nothing enters your `peers.json` without the process-evidence vet and
 your explicit choice.
 
-Mint, ordinary Cite, valid-Coin mutual-peer matching, and process vetting are
-implemented and tested. Publish-side indexing and the Kademlia routing
-component are integrated and exercised as part of the same Coins discovery
-package; Kademlia is not a separate opt-in. The code filters bounded records,
-reserves owned capacity, merges replicas before publication and republish,
-verifies hostile relays under deadlines and cancellation, inspects every
-ordinary `q` citation while indexing only valid Coins, and persists incomplete
-indexing in a durable outbox. It still needs operator-provided super-peers and
-real deployment evidence; this repository does not claim an operated public
-network or meaningful citation density. The [transport](protocol/transport.md) and
+Mint, Cite, Mint-driven mutual-peer matching, Mint-side indexing, and process
+vetting are implemented and tested. The Kademlia routing component remains
+under implementation as an operated network inside the same Coins package;
+Kademlia is not a separate
+opt-in. The current code already filters bounded records, reserves owned
+capacity, merges replicas before publication and republish, verifies hostile
+relays under deadlines and cancellation, and
+persists incomplete indexing in a durable outbox. It still needs complete
+package integration and operator-provided super-peers; this repository does
+not claim an operated public network or meaningful co-Mint density. The
+[transport](protocol/transport.md) and
 [rendezvous](protocol/rendezvous.md) specifications carry the exact rules.
 
 ## What exists today
@@ -187,13 +186,13 @@ network or meaningful citation density. The [transport](protocol/transport.md) a
 | Step, Publish (wire name Send), Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
 | Recursive folder checkpoint propagation | Implemented with verified checkpoint causes, distinct `advance` deltas, serialized folder appends, explicit folder/Root Step, durable operation ids, durable move/delete journals, and inspectable collapsed roll-ups in Replay |
 | Top-level foreign-file fork-on-write | Implemented; recursive nested-folder fork-on-write is deferred |
-| Valid-Coin mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
+| Mutual-peer co-Mint matching and process-evidence vet | Implemented and tested over verified completed-Mint `H` coordinates; calibration needs real corpora |
 | Raw-file Reify export with an optional signed-event bundle | Implemented on desktop |
-| Stronghold storage for signing and provider secrets | Implemented on desktop; the browser remains read-only |
+| Multiple desktop vaults with independent passphrases, Roots, encrypted webview state, Stronghold secrets, relay databases, ACLs, and KDF salts | Implemented on desktop; the browser remains read-only |
 | Shared trace-context authoring-syntax kernel | Initial deterministic `[[…]]` / `((…))` scanner and compiler implemented with golden and generated scale corpora; task-specific evidence selection and cross-press rendering are not yet implemented |
-| Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures. Extend additionally persists the exact approved request, selected context, provider profile, attempt, result, and local application intent in a bounded encrypted vault journal before side effects; recovery never redispatches an ambiguous provider call, accepted application uses an exact crash-pad receipt and compare-and-set target check, and vault teardown cancels and drains native HTTP work. Settle uses the shared syntax kernel but not yet this durable execution path. Portable signed binding and the other operation adapters remain deferred |
+| Prepared desktop MODEL operations with explicit approval | Implemented for direct single-shot gestures; Extend (continuation) and Settle (revision) now use the shared syntax kernel, exact current-session authority spans, protected-output validation, and accepted-success directive cleanup, while the other operations, durable receipts, and context binding remain deferred |
 | Hosted relay | Implemented; an operator ACL equivalent to the local relay policy remains a gap |
-| Coins package: Mint, Coin indexing, and rendezvous | Integrated and exercised as one user-facing discovery opt-in. Ordinary Cite remains core composition outside it. No bootstrap network is operated, and deployment/density evidence remains absent |
+| Coins package: Mint, indexing, and rendezvous | Under implementation as one user-facing opt-in. Mint-side indexing and `H`-based mutual-peer matching are implemented and tested; ordinary Cite stays outside the opt-in. No bootstrap network is operated |
 | Managed remote, organization control plane, and no-install public verifier | Commercial product hypotheses, not shipping services |
 
 The complete evidence and limitation record lives in
@@ -306,7 +305,7 @@ enough for provenance, storage, or networking changes.
 npm run doctor         # prerequisites and local artifact diagnostics
 npm run check          # dev scripts, client types/tests, MCP, relay, and Rust
 npm run verify         # check + client build + isolated real-relay smoke
-npm run verify:relay   # Step/Publish/Attest/Mint/Cite against temporary relays
+npm run verify:relay   # Step/Send/Attest/Mint/Cite against temporary relays
 ```
 
 `verify:relay` uses temporary ACL-protected relay databases and random ports.

@@ -369,6 +369,48 @@ test("snapshot playback preserves the Step's reconstructed voice runs", () => {
   assert.deepEqual(savedFrame?.runs, mixedRuns);
 });
 
+test("replay preserves the authors-map voice when kedits are synthesized as the signer", () => {
+  // Mirrors the onboarding starter prose shape: the body Step is AUTHOR-signed
+  // and carries a spare-voice `authors` map, but its synthesized KEdit carries
+  // the signer's voice. Without the per-Step attribution guard, both the
+  // animation frames AND the settled boundary collapse to the signer and the
+  // spare-voice color flashes during Play.
+  const author = VOICE;
+  const seed = "seed-voice";
+  const node = event("seed-body", "hello-world.md", "hello", []);
+  node.content = JSON.stringify({
+    snapshot: "hello",
+    kedits: [{ op: "ins", from: 0, to: 0, text: "hello", voice: author, t: 500, tx: 0 }],
+    authors: [{ v: seed, len: 5 }],
+  });
+  const seedRuns = reconstructRunsFromChain([node]);
+  assert.deepEqual(seedRuns, [{ voice: seed, text: "hello" }]);
+
+  const timeline = buildReplayTimeline(
+    [
+      {
+        event: node,
+        relativePath: "hello-world.md",
+        meta: { steppedAtMs: 1_000 },
+        runsUpToHere: seedRuns,
+      },
+    ],
+    { "hello-world.md": [node] },
+  );
+
+  assert.ok(timeline);
+  // Every file frame in this Step — animation and settled — must voice the
+  // spare voice, never the signer.
+  for (const frame of timeline) {
+    if (frame.kind !== "file" || frame.runs.length === 0) continue;
+    assert.deepEqual(
+      frame.runs,
+      [{ voice: seed, text: "hello" }],
+      `frame at ${frame.at} flashed the signer color`,
+    );
+  }
+});
+
 test("replay discards KEdits without a valid transaction id", () => {
   const node = event("invalid-kedit", "draft.md", "signed snapshot", []);
   node.content = JSON.stringify({

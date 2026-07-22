@@ -6,7 +6,7 @@
 //! `SocketAddr` itself, and then performs the TLS/WebSocket handshake using the
 //! original URL so Host and SNI remain correct.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
@@ -66,7 +66,7 @@ pub struct RendezvousRelayRuntime {
 #[derive(Default)]
 struct RelayCancellationState {
     active: HashMap<RelayOperationKey, Option<oneshot::Sender<()>>>,
-    pre_cancelled: BTreeSet<RelayOperationKey>,
+    pre_cancelled: VecDeque<RelayOperationKey>,
 }
 
 impl RendezvousRelayRuntime {
@@ -84,7 +84,12 @@ impl RendezvousRelayRuntime {
     ) -> Result<oneshot::Receiver<()>, String> {
         let key = Self::operation_key(binding, operation_id);
         let mut state = self.state.lock().await;
-        if state.pre_cancelled.remove(&key) {
+        if let Some(index) = state
+            .pre_cancelled
+            .iter()
+            .position(|candidate| candidate == &key)
+        {
+            state.pre_cancelled.remove(index);
             return Err("rendezvous relay sample was cancelled".to_string());
         }
         if state.active.contains_key(&key) {
@@ -110,14 +115,27 @@ impl RendezvousRelayRuntime {
             }
             return;
         }
-        if state.pre_cancelled.len() < MAX_PRE_CANCELLED_OPERATIONS {
-            state.pre_cancelled.insert(key);
+        if state
+            .pre_cancelled
+            .iter()
+            .any(|candidate| candidate == &key)
+        {
+            return;
         }
+        if state.pre_cancelled.len() >= MAX_PRE_CANCELLED_OPERATIONS {
+            state.pre_cancelled.pop_front();
+        }
+        state.pre_cancelled.push_back(key);
     }
 
     pub async fn cancel_for_vault_transition(&self, binding: &VaultRuntimeBinding) {
         loop {
             let changed = self.changed.notified();
+            tokio::pin!(changed);
+            // Register this waiter before releasing the state lock. Otherwise
+            // `complete` can notify between the active-state check and the
+            // first poll of `changed`, leaving the transition asleep forever.
+            changed.as_mut().enable();
             let active = {
                 let mut state = self.state.lock().await;
                 state.pre_cancelled.retain(|key| key.binding != *binding);
@@ -647,12 +665,16 @@ mod tests {
             .await
             .expect("register vault A sample");
 
-        let drain = runtime.cancel_for_vault_transition(&vault_a);
-        let complete = async {
-            cancelled_a.await.expect("vault A sample is cancelled");
-            runtime.complete(&vault_a, operation_id).await;
-        };
-        tokio::join!(drain, complete);
+        timeout(Duration::from_secs(1), async {
+            let drain = runtime.cancel_for_vault_transition(&vault_a);
+            let complete = async {
+                cancelled_a.await.expect("vault A sample is cancelled");
+                runtime.complete(&vault_a, operation_id).await;
+            };
+            tokio::join!(drain, complete);
+        })
+        .await
+        .expect("vault transition must not lose its completion notification");
 
         let mut cancelled_b = runtime
             .register(&vault_b, operation_id)
@@ -667,5 +689,23 @@ mod tests {
             .await
             .expect("vault B cancellation remains usable");
         runtime.complete(&vault_b, operation_id).await;
+    }
+
+    #[tokio::test]
+    async fn newest_pre_cancel_survives_a_full_bounded_registry() {
+        let runtime = RendezvousRelayRuntime::default();
+        let binding = test_binding("vault-a", 1);
+        for index in 0..MAX_PRE_CANCELLED_OPERATIONS {
+            runtime
+                .cancel(&binding, &format!("stale-cancel-{index}"))
+                .await;
+        }
+        let newest = "newest-pre-cancel";
+        runtime.cancel(&binding, newest).await;
+        let error = runtime
+            .register(&binding, newest)
+            .await
+            .expect_err("the newest cancellation must never be discarded");
+        assert!(error.contains("cancelled"));
     }
 }

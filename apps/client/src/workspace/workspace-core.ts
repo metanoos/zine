@@ -36,7 +36,7 @@ import {
   validateKEditTransition,
   type KEdit,
 } from "@zine/protocol";
-import type { SampleEventMeta } from "../provenance/provenance.js";
+import type { PublicationFence, SampleEventMeta } from "../provenance/provenance.js";
 
 export { synthesizeKEditTransition, validateKEditTransition } from "@zine/protocol";
 export type { KEditTransitionValidation } from "@zine/protocol";
@@ -580,6 +580,9 @@ export interface Workspace {
     /** Optional causal id supplied by a containing folder/Root Step so the
      * file checkpoint and every derived roll-up form one inspectable gesture. */
     operationId?: string,
+    /** Optional caller-owned lease/cancellation boundary for a multi-phase
+     * recovery write. Ordinary interactive writes omit it. */
+    publicationFence?: PublicationFence,
   ): Promise<string>;
 
   /** Append one merge node from an exact local head, repoint folder
