@@ -9,9 +9,9 @@ import {
 
 test("directory regions stay in their product-defined order", () => {
   const tree = buildDirectoryTree([], "my root");
-  assert.deepEqual(tree.map((node) => node.name), ["my root", "mint", "scan", "oblivion"]);
-  assert.deepEqual(tree.map(treeNodeDisplayName), ["my root", "mint", "scan", "oblivion"]);
-  assert.deepEqual(tree.map((node) => node.path), ["", "mint", "scan", "oblivion"]);
+  assert.deepEqual(tree.map((node) => node.name), ["my root", "scan", "mint", "oblivion"]);
+  assert.deepEqual(tree.map(treeNodeDisplayName), ["my root", "scan", "mint", "oblivion"]);
+  assert.deepEqual(tree.map((node) => node.path), ["", "scan", "mint", "oblivion"]);
 });
 
 test("root stays folder-first and alphabetic", () => {
@@ -29,7 +29,7 @@ test("root stays folder-first and alphabetic", () => {
 });
 
 test("mint contents can use their generated timestamp as activity", () => {
-  const [, mint] = buildDirectoryTree([
+  const [, , mint] = buildDirectoryTree([
     { path: "mint/2026-07-15_100000-zeta.md", type: "file" },
     { path: "mint/2026-07-15_120000-alpha.md", type: "file" },
     { path: "mint/2026-07-15_110000-middle.md", type: "file" },
@@ -48,7 +48,7 @@ test("mint contents can use their generated timestamp as activity", () => {
 });
 
 test("Mint paths become Coin rows only after transaction completion", () => {
-  const [, mint] = buildDirectoryTree([
+  const [, , mint] = buildDirectoryTree([
     { path: "mint/2026-07-15_120000-complete.md", type: "file", coinComplete: true },
     { path: "mint/2026-07-15_110000-legacy.md", type: "file" },
   ], "root");
@@ -90,7 +90,7 @@ test("oblivion does not merge same-named items from different timestamp buckets"
 });
 
 test("Scan preserves imported folder wrappers above Mint and Oblivion", () => {
-  const [, , scan, oblivion] = buildDirectoryTree([
+  const [, scan, , oblivion] = buildDirectoryTree([
     { path: "scan/project/readme.md", type: "file" },
     { path: "scan/project/src/index.ts", type: "file" },
     { path: "oblivion/2026-07-15_090000/old.md", type: "file" },
@@ -106,7 +106,7 @@ test("Scan preserves imported folder wrappers above Mint and Oblivion", () => {
 });
 
 test("system-region sorting supports oldest and natural filename order", () => {
-  const [, mint] = buildDirectoryTree([
+  const [, , mint] = buildDirectoryTree([
     { path: "mint/2026-07-15_120000-item-10.md", type: "file" },
     { path: "mint/2026-07-15_100000-item-2.md", type: "file" },
     { path: "mint/2026-07-15_110000-item-1.md", type: "file" },

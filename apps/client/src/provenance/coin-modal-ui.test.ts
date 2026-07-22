@@ -21,14 +21,21 @@ test("Coin composing and inspection render as tab surfaces", () => {
   assert.doesNotMatch(modalSource, /CoinDialogFrame|createPortal/);
 });
 
-test("the Mint region renders its tree icon and Coins open as non-editor tabs", () => {
+test("the Mint header exposes direct minting and Coins open as non-editor tabs", () => {
+  const mintHeader = appSource.match(
+    /isRoot && node\.systemKind === "mint"[\s\S]*?<\/span>/,
+  )?.[0];
+  assert.ok(mintHeader);
+  assert.match(mintHeader, /className="tree-row-actions"/);
+  assert.match(mintHeader, /aria-label="Mint a direct Coin"/);
+  assert.match(mintHeader, /<CircleDollarSign size=\{14\}/);
   assert.match(
     appSource,
     /node\.systemKind === "mint" \? \([\s\S]*?<Leaf size=\{13\} className="tree-icon tree-icon-mint"/,
   );
   assert.match(appSource, /<DirectCoinComposerView/);
-  assert.doesNotMatch(appSource, /aria-label="Mint a direct Coin"/);
-  assert.doesNotMatch(appSource, /onMintCoin=\{openDirectCoinComposer\}/);
+  assert.match(appSource, /function openDirectCoinComposer\(\)/);
+  assert.match(appSource, /onMintCoin=\{openDirectCoinComposer\}/);
   const selectCoin = appSource.match(
     /function selectCoin\(path: string\)[\s\S]*?(?=\n  function selectOblivion)/,
   )?.[0];
@@ -163,6 +170,10 @@ test("the Coins opt-in gates Mint and discovery without gating ordinary Cite", (
   )?.[0];
   assert.ok(mint);
   assert.match(mint, /if \(!kademliaEnabledSnapshot\(\)\)[\s\S]*?Enable Coins in Networking/);
+  assert.match(
+    appSource,
+    /isRoot && node\.systemKind === "mint"[\s\S]*?disabled=\{!coinsEnabled\}/,
+  );
   assert.match(
     appSource,
     /const enabled =[\s\S]*?\(!hasMintablePassage \|\| coinsEnabled\)/,

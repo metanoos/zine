@@ -252,10 +252,16 @@ test("an empty model catalog keeps the model selector visible", () => {
   assert.equal(BUILTIN_AI_PALETTE_REGISTRY[0].label.storageKey, "zine.modelLabel");
   assert.match(appSource, /localStorage\.setItem\(AI_PALETTE_ROW\.label\.storageKey, next\)/);
   // With no provider configured, op buttons stay clickable and route the click
-  // to Models (the user's chosen way to add a model). The chevron stays disabled
-  // — there is no prompt to inspect until a provider exists.
+  // to Models only when provider configuration is the sole blocker. Invalid
+  // targets and concurrent operations remain disabled. The chevron also needs
+  // a provider, valid target, and idle operation lane.
   assert.match(appSource, /No model configured — click to open Models/);
   assert.match(appSource, /onRouteToModels=/);
+  assert.match(appSource, /const missingProvider = !runningOp && !hasProviders && baseGate/);
+  assert.match(
+    appSource,
+    /const chevronDisabled = !!runningOp \|\| !hasProviders \|\| !baseGate/,
+  );
   assert.doesNotMatch(appSource, /onOpenModels|onAddModel|Add a model…|NO MODEL/);
   assert.doesNotMatch(cssSource, /action-palette-model-empty/);
 });

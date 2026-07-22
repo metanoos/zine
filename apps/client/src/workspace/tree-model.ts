@@ -241,20 +241,20 @@ export function buildDirectoryTree(
       children: buildTree(rootEntries, "", false, order),
     },
     {
-      name: MINT,
-      path: MINT,
-      type: "folder",
-      isRoot: true,
-      systemKind: "mint",
-      children: buildMintTree(mintEntries, order),
-    },
-    {
       name: SCAN,
       path: SCAN,
       type: "folder",
       isRoot: true,
       systemKind: "scan",
       children: buildTree(scanEntries, SCAN, false, order),
+    },
+    {
+      name: MINT,
+      path: MINT,
+      type: "folder",
+      isRoot: true,
+      systemKind: "mint",
+      children: buildMintTree(mintEntries, order),
     },
     {
       name: OBLIVION,

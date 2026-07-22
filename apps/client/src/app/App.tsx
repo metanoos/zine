@@ -1419,6 +1419,7 @@ function TreeItem({
   onRenameCancel,
   onRowActivate,
   onCreateStart,
+  onMintCoin,
   coinsEnabled,
   onScan,
   creating,
@@ -1466,6 +1467,8 @@ function TreeItem({
   onRenameCancel: () => void;
   /** New file / New folder from the root row. Parent follows tree selection. */
   onCreateStart: (kind: "file" | "folder") => void;
+  /** Open the direct-Coin composer from the Mint region header. */
+  onMintCoin: () => void;
   coinsEnabled: boolean;
   /** Acquire a filesystem snapshot from the Scan region header. */
   onScan: (kind: "file" | "folder") => void;
@@ -1708,6 +1711,24 @@ function TreeItem({
               </button>
             </span>
           )}
+          {isRoot && node.systemKind === "mint" && (
+            <span
+              className="tree-row-actions"
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <button
+                className="icon-btn"
+                type="button"
+                title={coinsEnabled ? "Mint a direct Coin" : "Enable Coins in Networking to Mint"}
+                aria-label="Mint a direct Coin"
+                disabled={!coinsEnabled}
+                onClick={onMintCoin}
+              >
+                <CircleDollarSign size={14} aria-hidden="true" />
+              </button>
+            </span>
+          )}
           {isRoot && node.systemKind === "scan" && (
             <span
               className="tree-row-actions"
@@ -1774,6 +1795,7 @@ function TreeItem({
                 onRenameCancel={onRenameCancel}
                 onRowActivate={onRowActivate}
                 onCreateStart={onCreateStart}
+                onMintCoin={onMintCoin}
                 coinsEnabled={coinsEnabled}
                 onScan={onScan}
                 creating={creating}
@@ -1944,6 +1966,7 @@ function Sidebar({
   onActivateOblivion,
   onActivateFolder,
   onOpenFolder,
+  onMintCoin,
   coinsEnabled,
   onScan,
   onReify,
@@ -1999,6 +2022,8 @@ function Sidebar({
   onActivateFolder: (path: string) => void;
   /** Open a folder tab in the active panel from its context menu. */
   onOpenFolder: (path: string) => void;
+  /** Open the direct-Coin composer from the Mint region header. */
+  onMintCoin: () => void;
   coinsEnabled: boolean;
   /** Acquire a file or folder from the Scan region header. */
   onScan: (kind: "file" | "folder") => void;
@@ -2464,6 +2489,7 @@ function Sidebar({
               onRenameCancel={cancelRename}
               onRowActivate={onRowActivate}
               onCreateStart={(kind) => onCreateStart(kind, createParent())}
+              onMintCoin={onMintCoin}
               coinsEnabled={coinsEnabled}
               onScan={onScan}
               creating={creating}
@@ -2600,6 +2626,7 @@ function Sidebar({
             if (
               menu.newFile ||
               menu.newFolder ||
+              menu.mintCoin ||
               menu.scanFolder ||
               menu.scanFile
             ) {
@@ -2627,6 +2654,20 @@ function Sidebar({
                       }}
                     >
                       New Folder
+                    </button>
+                  )}
+                  {menu.mintCoin && (
+                    <button
+                      type="button"
+                      className="ctx-menu-item"
+                      disabled={!coinsEnabled}
+                      title={coinsEnabled ? "Mint a direct Coin" : "Enable Coins in Networking to Mint"}
+                      onClick={() => {
+                        setCtxMenu(null);
+                        onMintCoin();
+                      }}
+                    >
+                      Mint New Coin
                     </button>
                   )}
                   {menu.scanFolder && (
@@ -6482,13 +6523,13 @@ function ActionPalette({
             // disabled) so the click routes the user to Models to add one.
             // Anything else blocking the op (scope/kind) needs editor action,
             // not a Models redirect, so those stay genuinely disabled.
-            const missingProvider = !isRunning && !hasProviders;
+            const missingProvider = !runningOp && !hasProviders && baseGate;
             const mainDisabled = !canFire && !missingProvider;
             // The chevron opens the Inspector focused on this op. It needs a
-            // provider to prepare a request against, so it stays disabled when
-            // none is configured or while the op is in flight.
+            // provider and a valid target to prepare a request against, so it
+            // stays disabled when either is absent or any op is in flight.
             const isOperation = action.kind === "operation";
-            const chevronDisabled = isRunning || !hasProviders;
+            const chevronDisabled = !!runningOp || !hasProviders || !baseGate;
             const main = (
               <button
                 key={action.id}
@@ -14251,6 +14292,36 @@ function App() {
     commitUiFocus(trace ? locateFocus(trace, targetPanel, path) : null);
   }
 
+  /** Open the one session-owned direct-Coin draft. Repeated activation focuses
+   * the existing tab so switching away and back never discards typed bytes. */
+  function openDirectCoinComposer() {
+    if (!kademliaEnabledSnapshot()) return;
+    const current = panelsRef.current;
+    const existingPanel = current.findIndex((panel) =>
+      panel.tabs.includes(DIRECT_COIN_COMPOSER_TAB),
+    );
+    const targetPanel = existingPanel >= 0
+      ? existingPanel
+      : Math.min(activePanel, current.length - 1);
+    const next = mapPanel(current, targetPanel, (panel) => ({
+      ...panel,
+      tabs: panel.tabs.includes(DIRECT_COIN_COMPOSER_TAB)
+        ? panel.tabs
+        : [...panel.tabs, DIRECT_COIN_COMPOSER_TAB],
+      active: DIRECT_COIN_COMPOSER_TAB,
+    }));
+    if (existingPanel < 0) {
+      setDirectCoinDraft(emptyDirectCoinDraft());
+      setDirectCoinError(null);
+    }
+    panelsRef.current = next;
+    setPanels(next);
+    setActivePanel(targetPanel);
+    setEditorSelection(null);
+    chooseDirectorySelection([]);
+    commitUiFocus(null);
+  }
+
   /** Keep direct-Coin KEdits in App state so the draft survives ordinary tab
    * switches even though Panel only mounts its active surface. */
   function editDirectCoinDraft(phrase: string) {
@@ -18063,6 +18134,7 @@ function App() {
                 onActivateOblivion={selectOblivion}
                 onActivateFolder={selectFolder}
                 onOpenFolder={openFolder}
+                onMintCoin={openDirectCoinComposer}
                 coinsEnabled={coinsEnabled}
                 onScan={(kind) => void onScan(kind)}
                 onReify={(target) => setReifyPrompt({ includeTrace: false, target })}
