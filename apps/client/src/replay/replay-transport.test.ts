@@ -36,7 +36,10 @@ import {
   type ReplayTimelineStep,
 } from "./replay-timeline.js";
 
-const source = readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8");
+const source = [
+  readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
+].join("\n");
 const styles = readFileSync(new URL("../app/App.css", import.meta.url), "utf8");
 const timelineSource = readFileSync(
   new URL("./replay-timeline.ts", import.meta.url),

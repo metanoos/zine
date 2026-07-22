@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const appSource = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+const appSource = [
+  readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("./App.tsx", import.meta.url), "utf8"),
+].join("\n");
 const bootstrapSource = readFileSync(new URL("./SecurityBootstrap.tsx", import.meta.url), "utf8");
 const viewSource = readFileSync(new URL("./VaultsView.tsx", import.meta.url), "utf8");
 

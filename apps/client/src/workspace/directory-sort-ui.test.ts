@@ -2,7 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const appSource = readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8");
+const appSource = [
+  readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
+].join("\n");
 const styles = readFileSync(new URL("../app/App.css", import.meta.url), "utf8");
 
 test("directory sorting sits left of onboarding and factory reset", () => {

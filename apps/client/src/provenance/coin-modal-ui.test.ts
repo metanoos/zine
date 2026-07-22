@@ -3,7 +3,10 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 
 const modalSource = readFileSync(new URL("./CoinModal.tsx", import.meta.url), "utf8");
-const appSource = readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8");
+const appSource = [
+  readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
+].join("\n");
 const cssSource = readFileSync(new URL("../app/App.css", import.meta.url), "utf8");
 const networkingSource = readFileSync(new URL("../networking/Networking.tsx", import.meta.url), "utf8");
 

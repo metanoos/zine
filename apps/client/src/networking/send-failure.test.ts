@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { describeSendFailure } from "./send-failure.js";
 
-const appSource = readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8");
+const appSource = [
+  readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
+].join("\n");
 const modalSource = readFileSync(new URL("./SendFailureModal.tsx", import.meta.url), "utf8");
 
 test("relay publication failures point Send recovery to Networks", () => {

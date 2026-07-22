@@ -10,7 +10,10 @@ import {
   type AiPaletteActionDescription,
 } from "./palette-registry.js";
 
-const appSource = readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8");
+const appSource = [
+  readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
+].join("\n");
 
 function mutableBuiltinCopy(): Array<Record<string, unknown>> {
   return JSON.parse(JSON.stringify(BUILTIN_AI_PALETTE_REGISTRY)) as Array<Record<string, unknown>>;

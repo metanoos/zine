@@ -2,7 +2,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const appSource = readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8");
+const appSource = [
+  readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
+].join("\n");
 
 function functionSource(name: string, nextMarker: string): string {
   const start = appSource.indexOf(`function ${name}`);

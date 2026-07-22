@@ -16,7 +16,7 @@ test("all standalone pubkey surfaces use the shared display", () => {
     "./VoiceLegend.tsx": 1,
     "../networking/Networking.tsx": 4,
     "../networking/OperatorView.tsx": 3,
-    "../app/App.tsx": 1,
+    "../app/AppShell.tsx": 1,
   };
 
   for (const [path, expected] of Object.entries(expectedUses)) {
@@ -30,7 +30,10 @@ test("all standalone pubkey surfaces use the shared display", () => {
 });
 
 test("palette selectors and file voice bars reuse the canonical voice chip", () => {
-  const appSource = readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8");
+  const appSource = [
+    readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
+    readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
+  ].join("\n");
   const legendSource = readFileSync(new URL("./VoiceLegend.tsx", import.meta.url), "utf8");
   const chipSource = readFileSync(new URL("./VoiceChip.tsx", import.meta.url), "utf8");
 
