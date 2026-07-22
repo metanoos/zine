@@ -123,11 +123,99 @@ export function OnboardingWelcome({
         </div>
         <div className="onboarding-curriculum-foot">
           <p>No account required. Drafts stay on this computer until you Send them.</p>
-          <button type="button" className="onboarding-text-button" onClick={onDismiss}>
-            Close guide
-          </button>
+          <div className="onboarding-curriculum-links">
+            <a className="onboarding-text-link" href="#onboarding-writing-guide">
+              How to write Zines ↓
+            </a>
+            <button type="button" className="onboarding-text-button" onClick={onDismiss}>
+              Close guide
+            </button>
+          </div>
         </div>
       </div>
+
+      <article
+        id="onboarding-writing-guide"
+        className="onboarding-writing-guide"
+        aria-labelledby="onboarding-writing-guide-title"
+      >
+        <header className="onboarding-writing-guide-head">
+          <div>
+            <p className="onboarding-kicker">HOW TO WRITE ZINES · A FIELD GUIDE</p>
+            <h2 id="onboarding-writing-guide-title">Keep the route inside the prose.</h2>
+          </div>
+          <p>
+            A zine is its Markdown plus an exact, replayable trace. The text is
+            one snapshot—a useful but lossy compression of the writing process.
+          </p>
+        </header>
+
+        <div className="onboarding-writing-rules">
+          <section>
+            <p className="onboarding-writing-rule-number">01 · TRACE ≈ TEXT</p>
+            <h3>Hit newline, not backspace.</h3>
+            <p>
+              When a line is complete, press Return. Do not backspace into it;
+              do not edit it. Continue the thought on the next line. This keeps
+              the trace and text nearly identical—the best way to use Zine is
+              to make the distance between them small.
+            </p>
+            <p className="onboarding-writing-aside">
+              Newline preserves the thought in both forms. Backspace widens the
+              gap. Replay should reveal the route through files and tabs—not
+              reduce writing to a player piano performing every keystroke.
+            </p>
+          </section>
+
+          <section>
+            <p className="onboarding-writing-rule-number">02 · THE EM DASH</p>
+            <h3>Name the bridge.</h3>
+            <blockquote>
+              If you can name the transition an em dash replaces, the dash is
+              doing real work. If you cannot, use a comma.
+            </blockquote>
+            <p>
+              Try <em>but</em>, <em>because</em>, <em>therefore</em>, or
+              {" "}<em>meanwhile</em>. An em dash is not an emphasis mark. It
+              creates a rest and a light bridge while keeping both clauses at
+              equal weight.
+            </p>
+          </section>
+
+          <section>
+            <p className="onboarding-writing-rule-number">03 · SIDE THOUGHTS</p>
+            <h3>Subordinate on purpose.</h3>
+            <p>
+              Parentheses lower a thought beneath the main line. Use them when
+              that hierarchy is intentional; use an em dash when an interjection
+              should meet its surrounding clauses as an equal.
+            </p>
+            <dl className="onboarding-punctuation-key">
+              <div>
+                <dt>—</dt>
+                <dd>rest or named transition</dd>
+              </div>
+              <div>
+                <dt>( )</dt>
+                <dd>deliberate subordination</dd>
+              </div>
+              <div>
+                <dt>–</dt>
+                <dd>range or relationship</dd>
+              </div>
+            </dl>
+          </section>
+        </div>
+
+        <footer className="onboarding-writing-guide-foot">
+          <strong>Evaluate the writer, not just the writing.</strong>
+          <span>
+            The finished sentence shows the result. Its trace reveals what the
+            writer noticed, resisted, revised, and valued—the richer signal a
+            reader or AI can actually learn from.
+          </span>
+        </footer>
+      </article>
     </section>
   );
 }
