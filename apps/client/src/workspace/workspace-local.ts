@@ -2529,6 +2529,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         head,
         folderSigner,
         true,
+        undefined,
         true,
       );
     }

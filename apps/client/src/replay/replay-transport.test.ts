@@ -73,7 +73,10 @@ test("folder checkpoints enter the exact-event outbox before every relay write",
   assert.ok(start >= 0 && end > start);
   assert.match(publish, /await opts\.onSigned\?\.\(signed\);[\s\S]*enqueueLocalEvent\(signed\)/);
   assert.ok(publish.indexOf("enqueueLocalEvent(signed)") < publish.indexOf("if (opts.localOnly)"));
-  assert.match(publish, /await flushLocalEventOutboxThrough\(home\)/);
+  assert.match(
+    publish,
+    /await flushLocalEventOutboxThrough\(home, opts\.publicationFence\)/,
+  );
   assert.match(workspaceSource, /action: "delete",[\s\S]*operationId,[\s\S]*onSigned: persistDelete/);
   assert.match(workspaceSource, /republishSignedEdit\(landedDelete, true\)/);
 });
@@ -1147,7 +1150,10 @@ test("the active folder Step path uses the shared Root lane and verified propaga
   assert.match(stepFolder, /runWorkspaceRootMutation\(rootId, operationId/);
   assert.match(stepFolder, /recursiveFolderStepFlights/);
   assert.match(stepFolder, /stepFolderWithinRoot\(rootId, relativePath, operationId/);
-  assert.match(stepFolderWithinRoot, /await propagateFolderHead\([\s\S]*?true,\s*true,/);
+  assert.match(
+    stepFolderWithinRoot,
+    /await propagateFolderHead\([\s\S]*?true,\s*undefined,\s*true,/,
+  );
   assert.doesNotMatch(stepFolder, /completeExplicitFolderStep/);
 });
 
