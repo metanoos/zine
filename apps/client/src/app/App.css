@@ -3189,7 +3189,7 @@ html[data-theme="light"] .rail-brand-wordmark {
 /* Sidebar / file tree */
 
 .sidebar {
-  flex: 0 0 var(--sidebar-width, 300px);
+  flex: 0 0 var(--sidebar-width, 220px);
   display: flex;
   flex-direction: column;
   min-width: 0;

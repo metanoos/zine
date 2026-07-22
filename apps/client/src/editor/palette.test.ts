@@ -228,6 +228,13 @@ test("single-shot MODEL actions fire directly, with a chevron opening the Inspec
   assert.match(appSource, /onInspect=\{\(operation\) => void openInspector\(operation\)\}/);
 });
 
+test("the MODEL command extension affordance has an accessible name", () => {
+  assert.match(
+    appSource,
+    /className="action-palette-action action-palette-add"[\s\S]*?aria-label="Add an AI command"/,
+  );
+});
+
 test("the MODEL row does not inject directory-mount controls", () => {
   const modelStart = appSource.indexOf('<div className="action-palette-group action-palette-model-row">');
   const modelEnd = appSource.indexOf('<div className="action-palette-group">', modelStart + 1);

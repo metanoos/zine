@@ -747,11 +747,11 @@ function readTheme(): Theme {
 // Horizontal resize of the press: how wide the directory sidebar is.
 // Persisted per-browser (zine.press.sidebarWidth); clamped to MIN..MAX on read.
 const SIDEBAR_WIDTH_KEY = "zine.press.sidebarWidth";
-const SIDEBAR_WIDTH_DEFAULT = 300;
-// Floor is the tightest width at which the replay stepper row (⏮ ◀ [n / total]
-// ▶ ⏭ plus padding) still renders without clipping (~200px). The default sits
-// above it; double-click the resizer to snap back to the default.
-const SIDEBAR_WIDTH_MIN = 200;
+const SIDEBAR_WIDTH_DEFAULT = 220;
+// Floor matches the default: the replay stepper row (⏮ ◀ [n / total] ▶ ⏭ plus
+// padding) needs ~200px to render without clipping, so 220 is the smallest width
+// at which the whole transport stays visible.
+const SIDEBAR_WIDTH_MIN = 220;
 const SIDEBAR_WIDTH_MAX = 520;
 function readSidebarWidth(): number {
   const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
@@ -6585,6 +6585,7 @@ function ActionPalette({
               type="button"
               className="action-palette-action action-palette-add"
               onClick={() => setAddCmdOpen((v) => !v)}
+              aria-label="Add an AI command"
               aria-haspopup="menu"
               aria-expanded={addCmdOpen}
               title="Add a command — the commands list is extensible"
