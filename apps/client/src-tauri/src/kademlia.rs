@@ -1271,21 +1271,70 @@ fn merged_bounded_pointers(
     // Return only the deterministic owned-first/rank-ordered prefix that would
     // itself remain a valid record instead of letting the union cross IPC or a
     // later record-store boundary.
+    //
+    // Byte accounting: serialize each pointer once (capturing exact escaping),
+    // then compare a running byte count against MAX_RECORD_BYTES. The framing
+    // is the serialized record with an empty pointers array; each accepted
+    // pointer adds its own bytes plus one comma separator. The final
+    // serialization below confirms the estimate — provably exact and O(n)
+    // instead of the previous O(n²) re-serialization per push.
+    let empty_framing_len = serde_json::to_vec(&PointerRecord {
+        version: 1,
+        coordinate: coordinate.to_string(),
+        pointers: Vec::new(),
+    })
+    .map(|bytes| bytes.len())
+    .unwrap_or(0);
+    // The empty framing is `...,"pointers":[]`. Each accepted pointer replaces
+    // a zero-length slot and adds a leading comma when the array is non-empty.
+    // framing_len already accounts for the `[]`; for n>=1 the array contains
+    // `ptr0` (no leading comma) + `,ptr1` + `,ptr2` + ... so we subtract the
+    // empty-array brackets `[]` (2 bytes) once the first pointer is added.
+    const EMPTY_ARRAY_BRACKETS: usize = 2;
     let mut result = Vec::with_capacity(MAX_POINTERS_PER_COORDINATE);
+    let mut running = empty_framing_len;
     for pointer in ordered {
         if result.len() >= MAX_POINTERS_PER_COORDINATE {
             break;
         }
-        result.push(pointer);
-        let fits = serde_json::to_vec(&PointerRecord {
-            version: 1,
-            coordinate: coordinate.to_string(),
-            pointers: result.clone(),
-        })
-        .is_ok_and(|bytes| bytes.len() <= MAX_RECORD_BYTES);
-        if !fits {
-            result.pop();
+        let pointer_bytes = match serde_json::to_vec(&pointer) {
+            Ok(bytes) => bytes.len(),
+            Err(_) => break,
+        };
+        // First pointer: framing loses `[]` (2 bytes) and gains the pointer.
+        // Later pointers: framing gains `,` (1 byte) and the pointer.
+        let added = if result.is_empty() {
+            pointer_bytes.saturating_sub(EMPTY_ARRAY_BRACKETS)
+        } else {
+            pointer_bytes + 1
+        };
+        if running + added > MAX_RECORD_BYTES {
             break;
+        }
+        running += added;
+        result.push(pointer);
+    }
+    // Final confirmation: the running estimate is exact for serde_json's output
+    // shape, but re-serialize once to guard against any future serializer
+    // change (pretty-printing, key ordering, etc.) silently breaking the cap.
+    if serde_json::to_vec(&PointerRecord {
+        version: 1,
+        coordinate: coordinate.to_string(),
+        pointers: result.clone(),
+    })
+    .is_ok_and(|bytes| bytes.len() > MAX_RECORD_BYTES)
+    {
+        // Estimate drifted from the actual serialization. Pop entries until it
+        // fits — preserves the cap invariant at the cost of one extra pass.
+        while !result.is_empty()
+            && serde_json::to_vec(&PointerRecord {
+                version: 1,
+                coordinate: coordinate.to_string(),
+                pointers: result.clone(),
+            })
+            .is_ok_and(|bytes| bytes.len() > MAX_RECORD_BYTES)
+        {
+            result.pop();
         }
     }
     result
