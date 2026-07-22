@@ -430,6 +430,70 @@ function charCount(text: string): number {
   return [...text].length;
 }
 
+/** Revoice a kedit-derived run list to match the authoritative per-Step
+ *  attribution. KEdits are synthesized from the signer's voice, so an
+ *  AUTHOR-signed-but-spare-voice-attributed Step (the onboarding starter
+ *  prose) would otherwise flash the signer's color mid-animation before
+ *  settling back to the correct voice at the Step boundary.
+ *
+ *  Strategy: when the animation frame's text has a single contiguous
+ *  sub-region present in the final attribution, adopt the final voice for
+ *  that region. We do this by walking both runs character-by-character and
+ *  adopting the authoritative voice at every position the frame shares with
+ *  the final text; inserted text that isn't in the final snapshot yet (a
+ *  later-deleted region) keeps its kedit voice. Returns the original runs
+ *  unchanged when texts don't share a prefix the helper can align. */
+function revoiceRunsToFinal(runs: Run[], finalRuns: Run[]): Run[] {
+  const frameText = flattenRuns(runs);
+  const finalText = flattenRuns(finalRuns);
+  if (frameText.length === 0 || finalRuns.length === 0) return runs;
+  // Common, fast path: the whole frame is a prefix of the final text (the
+  // onboarding insert, or any append-only edit). Adopt final voices verbatim
+  // for the prefix and keep any trailing frame-only tail voiced by the kedit.
+  const prefixLen = commonPrefixLen(frameText, finalText);
+  if (prefixLen === frameText.length) {
+    return sliceRuns(finalRuns, 0, prefixLen);
+  }
+  if (prefixLen === 0) return runs;
+  // Mixed case (kedit deleted/rewrote region): adopt final voices for the
+  // shared prefix and leave the divergent suffix on its kedit voices. This
+  // keeps the visible region correct without guessing mid-document.
+  return [
+    ...sliceRuns(finalRuns, 0, prefixLen),
+    ...sliceRuns(runs, prefixLen, frameText.length),
+  ];
+}
+
+function commonPrefixLen(a: string, b: string): number {
+  const max = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < max && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+  return i;
+}
+
+/** Slice a run list by UTF-16 code-unit offsets, mirroring spliceRuns but as a
+ *  pure read. Returns runs whose concatenated text equals the input slice. */
+function sliceRuns(runs: Run[], start: number, end: number): Run[] {
+  const out: Run[] = [];
+  let cursor = 0;
+  const lo = Math.max(0, start);
+  const hi = Math.max(lo, end);
+  for (const r of runs) {
+    const rStart = cursor;
+    const rEnd = cursor + r.text.length;
+    cursor = rEnd;
+    if (rEnd <= lo || rStart >= hi) continue;
+    const sliceFrom = Math.max(0, lo - rStart);
+    const sliceTo = Math.min(r.text.length, hi - rStart);
+    const text = r.text.slice(sliceFrom, sliceTo);
+    if (text.length === 0) continue;
+    const last = out[out.length - 1];
+    if (last && last.voice === r.voice) last.text += text;
+    else out.push({ voice: r.voice, text });
+  }
+  return out;
+}
+
 /** Describe a transaction against the pre-transaction document. KEdit offsets
  * share that coordinate space, including multi-range edits. */
 function keditAction(
@@ -1259,6 +1323,14 @@ export function buildReplayTimeline(
       const process = traceProcessFromEvent(event, flattenRuns(runs));
       let stepDelta: ReplayActionDelta | undefined;
       if (process.status === "complete" && kedits.length > 0) {
+        // Final per-Step attribution (reads the node's `authors` map). Used to
+        // revoice the kedit-synthesized animation frames so an
+        // AUTHOR-signed-but-spare-voice-attributed Step doesn't flash the
+        // signer's color mid-Play. Falls back to no revoicing when the map is
+        // absent or its text disagrees with the snapshot (parseAuthors's
+        // integrity check already handled inside reconstructRunsUpTo).
+        const finalRuns = step?.runsUpToHere ?? [];
+        const finalText = flattenRuns(finalRuns);
         let replayRuns = runs;
         let replayDelta: ReplayActionDelta | undefined;
         const replayFrames: PlayFrame[] = [];
@@ -1274,11 +1346,18 @@ export function buildReplayTimeline(
           }
           replayRuns = applyKEditTransaction(replayRuns, transaction);
           const recordedAt = transaction.find((edit) => Number.isFinite(edit.t))?.t;
+          // Revoice only against a final attribution that reproduces the
+          // Step's snapshot; otherwise the kedit voice is the honest best
+          // effort (and the settled frame below also keeps it).
+          const voiced =
+            finalText.length > 0 && finalText === parsed.snapshot
+              ? revoiceRunsToFinal(replayRuns, finalRuns)
+              : replayRuns;
           replayFrames.push({
             kind: "file",
             path: eventPath,
             stepIndex,
-            runs: replayRuns,
+            runs: voiced,
             at: recordedAt === undefined ? stepAt : Math.min(recordedAt, stepAt),
             action,
             ...(delta ? { delta } : {}),
@@ -1317,19 +1396,33 @@ export function buildReplayTimeline(
           ...(stepDelta ? { delta: stepDelta } : {}),
         });
       }
+      // At the Step's settled boundary, prefer the per-Step `authors`
+      // attribution (read by reconstructRunsUpTo, surfaced as
+      // step.runsUpToHere) over the kedit-derived runs. KEdits are synthesized
+      // from the signer's voice, so they cannot carry a non-signer attribution:
+      // the onboarding starter prose, for example, is AUTHOR-signed but
+      // spare-voice-attributed, and would otherwise re-color to the user's
+      // voice during replay. Match on text so a stale/mismatched map degrades
+      // to the kedit runs instead of corrupting the frame. Intermediate
+      // animation frames keep their best-effort kedit attribution.
+      const stepRuns =
+        step && flattenRuns(step.runsUpToHere) === flattenRuns(runs)
+          ? step.runsUpToHere
+          : runs;
       const lastFrame = frames[frames.length - 1];
       if (!lastFrame || lastFrame.stepIndex !== stepIndex || lastFrame.at !== stepAt) {
         frames.push({
           kind: "file",
           path: eventPath,
           stepIndex,
-          runs,
+          runs: stepRuns,
           at: stepAt,
           reachesStep: true,
           ...(stepDelta ? { delta: stepDelta } : {}),
         });
       } else {
         lastFrame.reachesStep = true;
+        lastFrame.runs = stepRuns;
         // When the last edit and Step share a timestamp, that frame is both the
         // final transaction and the savepoint. Show the whole Step footprint.
         if (stepDelta) lastFrame.delta = stepDelta;
