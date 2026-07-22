@@ -239,6 +239,54 @@ test("the guide explains why process is richer AI writing context", () => {
   assert.match(onboardingSource, /help an AI infer[\s\S]*style and values/);
 });
 
+test("the onboarding field guide teaches trace-shaped writing", () => {
+  assert.match(onboardingSource, /How to write Zines/);
+  assert.match(onboardingSource, /Markdown plus an exact, replayable trace/);
+  assert.match(onboardingSource, /lossy compression of the writing process/);
+  assert.match(onboardingSource, /opening the files and tabs[\s\S]*not a player piano/);
+  assert.match(onboardingSource, /If you can name the transition an em dash replaces/);
+  assert.match(onboardingSource, /An em dash is not an emphasis mark/);
+  assert.match(onboardingSource, /Parentheses lower a thought beneath the main line/);
+  assert.match(onboardingSource, /Evaluate the writer, not just the writing/);
+  assert.match(styles, /\.onboarding-writing-guide/);
+  assert.match(styles, /\.onboarding-punctuation-key/);
+});
+
+test("the writing guide link, semantics, theme, and responsive layouts stay connected", () => {
+  assert.match(
+    onboardingSource,
+    /href="#onboarding-writing-guide"[\s\S]*id="onboarding-writing-guide"/,
+  );
+  assert.match(
+    onboardingSource,
+    /aria-labelledby="onboarding-writing-guide-title"[\s\S]*id="onboarding-writing-guide-title"/,
+  );
+  assert.match(
+    onboardingSource,
+    /className="onboarding-text-button" onClick=\{onDismiss\}[\s\S]*Close guide/,
+  );
+  assert.match(
+    styles,
+    /\.onboarding-text-link:hover,[\s\S]*\.onboarding-text-link:focus-visible/,
+  );
+  assert.match(
+    styles,
+    /\.onboarding-writing-guide\s*\{[^}]*color: var\(--ink\);[^}]*background: var\(--surface-raised\);/s,
+  );
+  assert.match(
+    styles,
+    /\.onboarding-writing-rules\s*\{[^}]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\);/s,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 960px\)[\s\S]*\.onboarding-writing-rules\s*\{[^}]*grid-template-columns: 1fr;/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 800px\)[\s\S]*\.onboarding-writing-guide-head,[\s\S]*\.onboarding-writing-guide-foot\s*\{[^}]*grid-template-columns: 1fr;/,
+  );
+});
+
 test("Scan completion is recorded only after a file is imported", () => {
   const scan = appSource.slice(
     appSource.indexOf('async function onScan(kind: "file" | "folder")'),

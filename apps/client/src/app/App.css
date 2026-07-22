@@ -7831,6 +7831,171 @@ html[data-theme="light"] .editor-host {
   padding-block: 0.35rem;
 }
 
+.onboarding-curriculum-links {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.onboarding-text-link {
+  padding: 0.5rem 0.65rem;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-decoration: none;
+}
+
+.onboarding-text-link:hover,
+.onboarding-text-link:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.onboarding-writing-guide {
+  grid-column: 1 / -1;
+  width: 100%;
+  scroll-margin-top: 1.5rem;
+  color: var(--ink);
+  background: var(--surface-raised);
+  border-top: 3px solid var(--accent);
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.onboarding-writing-guide-head {
+  display: grid;
+  grid-template-columns: minmax(15rem, 0.8fr) minmax(20rem, 1.2fr);
+  gap: clamp(1rem, 4vw, 4rem);
+  align-items: end;
+  padding: clamp(1.2rem, 2.5vw, 2rem);
+}
+
+.onboarding-writing-guide-head .onboarding-kicker {
+  margin-bottom: 0.45rem;
+}
+
+.onboarding-writing-guide h2 {
+  max-width: 13ch;
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: clamp(2rem, 3.5vw, 3.5rem);
+  font-weight: 500;
+  line-height: 0.96;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+}
+
+.onboarding-writing-guide-head > p {
+  max-width: 40rem;
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 1rem;
+  line-height: 1.55;
+}
+
+.onboarding-writing-rules {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.onboarding-writing-rules > section {
+  min-width: 0;
+  padding: clamp(1rem, 2.2vw, 1.6rem);
+}
+
+.onboarding-writing-rules > section + section {
+  border-left: 1px solid var(--rule-strong);
+}
+
+.onboarding-writing-rule-number {
+  margin: 0 0 1.1rem;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.08em;
+}
+
+.onboarding-writing-rules h3 {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 1.3rem;
+  font-weight: 500;
+}
+
+.onboarding-writing-rules section > p:not(.onboarding-writing-rule-number),
+.onboarding-writing-rules blockquote {
+  margin: 0.75rem 0 0;
+  color: var(--ink-dim);
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+.onboarding-writing-rules blockquote {
+  padding: 0.8rem 0 0.8rem 0.9rem;
+  color: var(--ink);
+  border-left: 2px solid var(--accent);
+  font-family: var(--font-body);
+  font-size: 1rem;
+}
+
+.onboarding-writing-rules .onboarding-writing-aside {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--rule);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+
+.onboarding-punctuation-key {
+  margin: 1rem 0 0;
+  border-top: 1px solid var(--rule);
+}
+
+.onboarding-punctuation-key > div {
+  display: grid;
+  grid-template-columns: 2.7rem 1fr;
+  gap: 0.6rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.onboarding-punctuation-key dt {
+  color: var(--accent);
+  font-family: var(--font-body);
+  font-size: 1rem;
+}
+
+.onboarding-punctuation-key dd {
+  margin: 0;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.67rem;
+  line-height: 1.5;
+}
+
+.onboarding-writing-guide-foot {
+  display: grid;
+  grid-template-columns: minmax(14rem, 0.8fr) minmax(20rem, 1.2fr);
+  gap: clamp(1rem, 4vw, 4rem);
+  padding: 1rem clamp(1.2rem, 2.5vw, 2rem);
+}
+
+.onboarding-writing-guide-foot strong {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.onboarding-writing-guide-foot span {
+  color: var(--ink-dim);
+  font-size: 1rem;
+  line-height: 1.45;
+}
+
 .onboarding-welcome-actions,
 .onboarding-complete-actions {
   display: flex;
@@ -8105,6 +8270,19 @@ html[data-theme="light"] .editor-host {
     max-width: 13ch;
     font-size: clamp(2.5rem, 7vw, 3.9rem);
   }
+
+  .onboarding-writing-guide {
+    grid-column: 1;
+  }
+
+  .onboarding-writing-rules {
+    grid-template-columns: 1fr;
+  }
+
+  .onboarding-writing-rules > section + section {
+    border-top: 1px solid var(--rule-strong);
+    border-left: 0;
+  }
 }
 
 @media (max-width: 800px) {
@@ -8123,6 +8301,17 @@ html[data-theme="light"] .editor-host {
   .onboarding-curriculum-foot {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .onboarding-curriculum-links {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .onboarding-writing-guide-head,
+  .onboarding-writing-guide-foot {
+    grid-template-columns: 1fr;
+    gap: 0.9rem;
   }
 
   .onboarding-gestures {
