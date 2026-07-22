@@ -256,3 +256,66 @@ test("relay scans ignore foreign file and folder prev extensions", () => {
     }
   }
 });
+
+test("ownerPinnedChainFromSet fails closed on an ambiguous same-owner fork", () => {
+  // Genesis g has two same-owner descendants (left, right) that are both heads
+  // — neither reachable from the other via prev. The relay set is ambiguous, so
+  // the resolver returns [] rather than trusting either branch.
+  const g = node("g");
+  const left = node("l", g.id);
+  const right = node("r", g.id);
+  assert.deepEqual(
+    ownerPinnedChainFromSet(g.id, [g, left, right], "file").map((event) => event.id),
+    [],
+  );
+});
+
+test("ownerPinnedChainFromSet fails closed when an owner head never reaches the traceId", () => {
+  // A relay-crafted set where the head's backward walk lands on a traceId event
+  // that is not a genesis (its prev is non-null). The genesis gate excludes it
+  // from admitted, so the walk cannot complete and returns [].
+  const aSeed = finalizeEvent({
+    created_at: 1,
+    kind: 4290,
+    tags: [["z", "file"], ["e", "0".repeat(64), "", "prev"]],
+    content: JSON.stringify({ snapshot: "a" }),
+  }, OWNER_SECRET);
+  const b = node("b", aSeed.id);
+  // a claims to be descended from b, forming a -> b -> (aSeed, not in set).
+  // The walk starts at b (the only head), reaches a, then aSeed which is
+  // missing — fail closed.
+  const a = finalizeEvent({
+    created_at: 1,
+    kind: 4290,
+    tags: [["z", "file"], ["e", b.id, "", "prev"]],
+    content: JSON.stringify({ snapshot: "a" }),
+  }, OWNER_SECRET);
+  assert.deepEqual(
+    ownerPinnedChainFromSet(a.id, [a, b], "file"),
+    [],
+  );
+});
+
+test("ownerPinnedChainFromSet fails closed when an owner head's prev is missing", () => {
+  // Owner-signed head references an event id that is not in the set. The walk
+  // cannot reach the trace id, so the resolver returns [].
+  const g = node("g");
+  const orphan = node("orphan", "e".repeat(64));
+  assert.deepEqual(
+    ownerPinnedChainFromSet(orphan.id, [g, orphan], "file").map((event) => event.id),
+    [],
+  );
+});
+
+test("ownerPinnedChainFromSet fails closed when the head descends from a different genesis", () => {
+  // The set contains a valid chain, but it descends from a genesis other than
+  // the requested traceId. The walk reaches a non-traceId genesis (prev=null)
+  // and returns [].
+  const requestedGenesis = node("requested");
+  const otherGenesis = node("other");
+  const head = node("head", otherGenesis.id);
+  assert.deepEqual(
+    ownerPinnedChainFromSet(requestedGenesis.id, [otherGenesis, head], "file").map((event) => event.id),
+    [],
+  );
+});

@@ -37,12 +37,12 @@ const POINTER_PUT_TIMEOUT_MS = 4_000;
 const PUBLICATION_DEADLINE_MS = 20_000;
 const LOOKUP_TIMEOUT_MS = 8_000;
 const DISCOVERY_DEADLINE_MS = 15_000;
-const MAX_RENDEZVOUS_EVENT_BYTES = 2 * 1024 * 1024;
+export const MAX_RENDEZVOUS_EVENT_BYTES = 2 * 1024 * 1024;
 const MAX_RENDEZVOUS_SAMPLE_BYTES = 4 * 1024 * 1024;
-const MAX_RENDEZVOUS_CONTENT_LENGTH = 1024 * 1024;
-const MAX_RENDEZVOUS_TAGS = 4_096;
-const MAX_RENDEZVOUS_TAG_VALUES = 32;
-const MAX_RENDEZVOUS_TAG_VALUE_LENGTH = 16_384;
+export const MAX_RENDEZVOUS_CONTENT_LENGTH = 1024 * 1024;
+export const MAX_RENDEZVOUS_TAGS = 4_096;
+export const MAX_RENDEZVOUS_TAG_VALUES = 32;
+export const MAX_RENDEZVOUS_TAG_VALUE_LENGTH = 16_384;
 
 export interface VerifiedRendezvousCandidate extends RendezvousPointer {
   signerPubkey: string;
@@ -496,7 +496,7 @@ async function fetchMinterAttestations(
         limit: MAX_ATTESTATIONS_PER_COIN,
       },
       RELAY_QUERY_TIMEOUT_MS,
-      attestationSampleBounds(signal, MAX_ATTESTATIONS_PER_COIN),
+      attestationSampleBounds(signal),
     );
     if (result.errors.length > 0) continue;
     for (const hit of result.hits) {

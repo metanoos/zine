@@ -1421,3 +1421,95 @@ test("Mint journal refuses to persist a record whose coin is not cryptographical
   );
   assert.equal(pendingCoinMint("invalid-coin"), null);
 });
+
+// Negative paths for the KEdit rebase. The happy-path test above covers clean
+// prefix/suffix concurrent edits; these exercise the three fail-closed guards
+// inside rebaseCoinMintSourceKEdits (reached via rebaseFinalizedCoinMintSourceFile
+// when concurrentKEdits.length > 0). Each must throw instead of silently
+// producing a corrupted source Step.
+
+async function pendingBracketMint(operationKey: string) {
+  const store = storage();
+  return preparePendingCoinMint(operationKey, async () => ({
+    sourceFolderId: "source",
+    mintFolderId: "mint",
+    localPath: `Mint/${operationKey}.md`,
+    memberName: `${operationKey}.md`,
+    phrase: "phrase",
+    coin: coin(101),
+    sourceFinalization: {
+      kind: "pending-bracket" as const,
+      relativePath: "source.md",
+      sourceNodeId: "d".repeat(64),
+      sourceContentHash: "e".repeat(64),
+      range: { start: 3, end: 9 },
+      bracketRange: { start: 0, end: "[[ phrase ]]".length },
+    },
+  }), store, 1);
+}
+
+test("rebase rejects concurrent KEdits that do not reconstruct currentText", async () => {
+  const pending = await pendingBracketMint("rebase-invalid-kedit");
+  const sourceText = "[[ phrase ]]";
+  const steppedText = finalizedCoinMintSourceText(pending, sourceText);
+  const current = {
+    runs: [{ voice: pending.coin.pubkey, text: sourceText }],
+    nodeId: pending.sourceFinalization!.sourceNodeId,
+    tags: [],
+    citationIds: [],
+  };
+  // KEdit claims to insert at [0,0) but the resulting text would not equal
+  // currentText (it would have the prefix). validateKEditTransition fails.
+  const bogusKEdits = [
+    { op: "ins" as const, from: 0, to: 0, text: "typed before ", voice: "b".repeat(64), t: 1, tx: 1 },
+  ];
+  assert.throws(
+    () => rebaseFinalizedCoinMintSourceFile(
+      pending,
+      current,
+      sourceText,
+      steppedText,
+      "f".repeat(64),
+      pending.coin.pubkey,
+      bogusKEdits,
+    ),
+    /invalid concurrent KEdit log/,
+  );
+});
+
+test("rebase rejects a concurrent KEdit that overlaps the citation range", async () => {
+  const pending = await pendingBracketMint("rebase-overlap");
+  const sourceText = "[[ phrase ]]";
+  const steppedText = finalizedCoinMintSourceText(pending, sourceText);
+  // minimalTextChange(sourceText, steppedText) returns a citation envelope
+  // bounded by the divergence of "[[ phrase ]]" from "[[ phrase | <id> ]]" —
+  // roughly {from=10, to=9} (the closing "]]" is shared, so the inner edit
+  // boundary inverts). A concurrent KEdit whose [from, to] straddles that
+  // envelope (from < citationTo AND to > citationFrom) must fail closed
+  // instead of letting the citation rewrite and the editor transaction both
+  // claim the same bytes.
+  const overlappingFrom = 8;
+  const overlappingTo = 11;
+  const replacedSlice = sourceText.slice(overlappingFrom, overlappingTo);
+  const current = {
+    runs: [{ voice: pending.coin.pubkey, text: sourceText }],
+    nodeId: pending.sourceFinalization!.sourceNodeId,
+    tags: [],
+    citationIds: [],
+  };
+  const overlappingKEdits = [
+    { op: "repl" as const, from: overlappingFrom, to: overlappingTo, text: replacedSlice, voice: "b".repeat(64), t: 1, tx: 1 },
+  ];
+  assert.throws(
+    () => rebaseFinalizedCoinMintSourceFile(
+      pending,
+      current,
+      sourceText,
+      steppedText,
+      "f".repeat(64),
+      pending.coin.pubkey,
+      overlappingKEdits,
+    ),
+    /overlaps a concurrent editor transaction/,
+  );
+});

@@ -28,6 +28,8 @@ import {
 import type { KEdit } from "@zine/protocol";
 
 const STORAGE_KEY = "zine.pending-coin-mints.v1";
+// Bounds localStorage write amplification and the recovery sweep cost each
+// gesture re-runs; raising this loosens both, not just the visible queue depth.
 const MAX_PENDING_COIN_MINTS = 32;
 
 type JournalStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
@@ -88,7 +90,8 @@ export type CoinMintSourceFinalization = CoinMintSourceFinalizationBase & (
   | { kind: "span" }
 );
 
-function translateUnchangedRange(
+function translateUsingParts(
+  parts: ReturnType<typeof diffChars>,
   baseText: string,
   currentText: string,
   from: number,
@@ -97,7 +100,7 @@ function translateUnchangedRange(
   let baseOffset = 0;
   let deltaBeforeStart = 0;
   let deltaBeforeEnd = 0;
-  for (const part of diffChars(baseText, currentText)) {
+  for (const part of parts) {
     const length = part.value.length;
     if (part.added) {
       if (baseOffset > from && baseOffset < to) return null;
@@ -122,9 +125,24 @@ function translateUnchangedRange(
     : null;
 }
 
+function translateUnchangedRange(
+  baseText: string,
+  currentText: string,
+  from: number,
+  to: number,
+): { from: number; to: number } | null {
+  return translateUsingParts(diffChars(baseText, currentText), baseText, currentText, from, to);
+}
+
 /** Resolve the captured citation after disjoint live edits have shifted it.
  * A citation already resolved by an earlier retry is also accepted; edits
- * overlapping either the pending or resolved envelope fail closed. */
+ * overlapping either the pending or resolved envelope fail closed.
+ *
+ * The two translations use different base texts (`sourceText` for the pending
+ * envelope, `steppedText` for the resolved envelope), so their `diffChars`
+ * outputs cannot be shared — each call computes its own diff. The first call
+ * short-circuits the second via the early return when the pending envelope
+ * survived, so the second diff only runs in the already-failing path. */
 export function rebasedFinalizedCoinMintSourceText(
   record: PendingCoinMint,
   sourceText: string,

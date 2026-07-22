@@ -52,6 +52,13 @@ import {
   pendingRendezvousEvents,
   type RendezvousOutboxSession,
 } from "./rendezvous-outbox.js";
+import {
+  MAX_RENDEZVOUS_CONTENT_LENGTH,
+  MAX_RENDEZVOUS_EVENT_BYTES,
+  MAX_RENDEZVOUS_TAGS,
+  MAX_RENDEZVOUS_TAG_VALUE_LENGTH,
+  MAX_RENDEZVOUS_TAG_VALUES,
+} from "./rendezvous.js";
 
 /**
  * Bridge between the editor and the local relay. Publishes and fetches the
@@ -2266,8 +2273,30 @@ function canonicalPrevId(event: Pick<Event, "tags">): string | null | undefined 
 
 /** Resolve one complete, single-owner chain from an untrusted relay set. A
  * foreign signer may fork explicitly but can never extend another trace's
- * `prev`; ambiguous owner branches fail closed instead of trusting relay order. */
+ * `prev`; ambiguous owner branches fail closed instead of trusting relay order.
+ *
+ * This entry point verifies every event itself; production callers that have
+ * already pre-verified their set (e.g. `fetchChain`, `fetchFolderNodes`) should
+ * call `chainFromVerifiedSet` instead to avoid redundant schnorr verification. */
 export function ownerPinnedChainFromSet(
+  traceId: string,
+  events: readonly Event[],
+  discriminator: "file" | "folder",
+): Event[] {
+  const verified = events.filter((event) =>
+    event.kind === TRACE_NODE_KIND &&
+    event.tags.some((tag) => tag[0] === "z" && tag[1] === discriminator) &&
+    verifyEvent(event)
+  );
+  return chainFromVerifiedSet(traceId, verified, discriminator);
+}
+
+/** Internal chain resolver for pre-verified, discriminator-filtered events.
+ * Caller contract: every event in `events` is kind `TRACE_NODE_KIND`, carries
+ * the matching discriminator, and has passed `verifyEvent`. `traceId` MUST
+ * resolve to a genesis (no `prev`) within the set; otherwise the function
+ * fails closed by returning `[]`. */
+function chainFromVerifiedSet(
   traceId: string,
   events: readonly Event[],
   discriminator: "file" | "folder",
@@ -2275,26 +2304,27 @@ export function ownerPinnedChainFromSet(
   const genesis = events.find((event) =>
     event.id === traceId &&
     event.kind === TRACE_NODE_KIND &&
-    event.tags.some((tag) => tag[0] === "z" && tag[1] === discriminator) &&
-    verifyEvent(event)
+    event.tags.some((tag) => tag[0] === "z" && tag[1] === discriminator)
   );
   if (!genesis) return [];
   const owner = genesis.pubkey;
-  const admitted = events.filter((event) => {
-    if (
-      event.kind !== TRACE_NODE_KIND ||
-      event.pubkey !== owner ||
-      !event.tags.some((tag) => tag[0] === "z" && tag[1] === discriminator) ||
-      !verifyEvent(event)
-    ) return false;
+  // Cache `canonicalPrevId` per event — the prev-chain walk re-reads it on
+  // every step, and re-scanning tags each time is wasteful on long chains.
+  const admitted: Event[] = [];
+  const prevById = new Map<string, string | null>();
+  for (const event of events) {
+    if (event.pubkey !== owner) continue;
     const previous = canonicalPrevId(event);
-    return previous !== undefined && (event.id !== traceId || previous === null);
-  });
+    if (previous === undefined) continue;
+    if (event.id === traceId && previous !== null) continue;
+    admitted.push(event);
+    prevById.set(event.id, previous);
+  }
   const byId = new Map(admitted.map((event) => [event.id, event]));
-  const historical = new Set(admitted.flatMap((event) => {
-    const previous = canonicalPrevId(event);
-    return previous ? [previous] : [];
-  }));
+  const historical = new Set<string>();
+  for (const previous of prevById.values()) {
+    if (previous) historical.add(previous);
+  }
   const heads = admitted.filter((event) => !historical.has(event.id));
   if (heads.length !== 1) return [];
   const newestFirst: Event[] = [];
@@ -2306,7 +2336,7 @@ export function ownerPinnedChainFromSet(
     const event = byId.get(cursor);
     if (!event) return [];
     newestFirst.push(event);
-    const previous = canonicalPrevId(event);
+    const previous = prevById.get(event.id);
     if (previous === undefined) return [];
     if (event.id === traceId) {
       if (previous !== null) return [];
@@ -4980,17 +5010,19 @@ async function fetchLocalEventById(
   const homeUrl = resolveRelayUrl();
   const relay = await withAbortSignal(getRelayRetrying(homeUrl, 1), signal);
   if (!relay) return null;
-  const events = await queryOnce(relay, { ids: [nodeId], limit: 1 }, 4_000, {
-    requestedIds: [nodeId],
-    maxUniqueEvents: 1,
-    maxTotalBytes: 2 * 1024 * 1024,
-    maxEventBytes: 2 * 1024 * 1024,
-    maxContentLength: 1024 * 1024,
-    maxTags: 4_096,
-    maxTagValues: 32,
-    maxTagValueLength: 16_384,
-    signal,
-  });
+    const events = await queryOnce(relay, { ids: [nodeId], limit: 1 }, 4_000, {
+      requestedIds: [nodeId],
+      maxUniqueEvents: 1,
+      // Single-id fetch stays tighter than MAX_RENDEZVOUS_SAMPLE_BYTES: we
+      // expect at most one event and want to reject any oversized response.
+      maxTotalBytes: MAX_RENDEZVOUS_EVENT_BYTES,
+      maxEventBytes: MAX_RENDEZVOUS_EVENT_BYTES,
+      maxContentLength: MAX_RENDEZVOUS_CONTENT_LENGTH,
+      maxTags: MAX_RENDEZVOUS_TAGS,
+      maxTagValues: MAX_RENDEZVOUS_TAG_VALUES,
+      maxTagValueLength: MAX_RENDEZVOUS_TAG_VALUE_LENGTH,
+      signal,
+    });
   return events.find((event) => event.id === nodeId) ?? null;
 }
 

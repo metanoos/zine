@@ -326,6 +326,126 @@ test("rendezvous outbox rejects incomplete or unbounded retry metadata", async (
   await assert.rejects(pendingRendezvousEvents(store), /invalid event id/);
 });
 
+// Forgery vectors for the durable completion attestation. Each case mutates
+// exactly one field of a valid same-minter attestation and asserts the outbox
+// rejects it — at enqueue time (signature/structure-aware) or at load time
+// (via pendingRendezvousEvents -> validateRecord). The cross-minter case is
+// covered by the explicit pubkey-binding check at enqueue.
+test("rendezvous outbox rejects forged completion attestations at enqueue", async () => {
+  const baseCoin = event(71);
+  const cloneTags = (attestation: NostrEvent) =>
+    attestation.tags.map((tag) => [...tag] as string[]);
+
+  const vectors: Array<[string, (attestation: NostrEvent) => NostrEvent]> = [
+    // Re-sign with the same key after mutating a structural field, so the
+    // signature is valid and only validateCompletionAttestation's structural
+    // checks can catch the forgery.
+    ["wrong kind", (a) => reSigned(a, { kind: 4293 })],
+    ["two e targets", (a) => reSigned(a, { tags: [...cloneTags(a), ["e", "1".repeat(64), "", "target"]] })],
+    ["wrong target id", (a) => reSigned(a, { tags: [["e", "e".repeat(64), "", "target"], ...cloneTags(a).slice(1)] })],
+    ["non-empty relay hint", (a) => reSigned(a, { tags: [["e", baseCoin.id, "wss://x.example", "target"], ...cloneTags(a).slice(1)] })],
+    ["non-target marker", (a) => reSigned(a, { tags: [["e", baseCoin.id, "", "reply"], ...cloneTags(a).slice(1)] })],
+    ["wrong k value", (a) => reSigned(a, { tags: [cloneTags(a)[0]!, ["k", "1"], ...cloneTags(a).slice(2)] })],
+    ["second p tag", (a) => reSigned(a, { tags: [...cloneTags(a), ["p", "e".repeat(64)]] })],
+    ["p tag mismatched from pubkey", (a) => reSigned(a, { tags: [cloneTags(a)[0]!, cloneTags(a)[1]!, ["p", "e".repeat(64)]] })],
+    ["two g tags", (a) => reSigned(a, { tags: [...cloneTags(a), ["g", "x"], ["g", "y"]] })],
+    ["unknown tag", (a) => reSigned(a, { tags: [...cloneTags(a), ["surprise", "x"]] })],
+    ["array content", (a) => reSigned(a, { content: "[1,2]" })],
+    ["object content with unknown key", (a) => reSigned(a, { content: JSON.stringify({ a: 1 }) })],
+  ];
+
+  for (const [label, mutate] of vectors) {
+    const store = new MemoryRendezvousOutbox();
+    const forged = mutate(completionAttestation(baseCoin));
+    await assert.rejects(
+      enqueueRendezvousEvent(baseCoin, store, 10, undefined, [], forged),
+      /invalid completion attestation at index 0|refusing to queue a completion attestation/,
+      `forgery vector "${label}" must be rejected`,
+    );
+    assert.equal((await pendingRendezvousEvents(store)).length, 0, `"${label}" must not be persisted`);
+  }
+});
+
+test("rendezvous outbox rejects a completion attestation signed by another minter", async () => {
+  const coin = event(72);
+  const foreignSecret = Uint8Array.from([...new Uint8Array(31), 9]);
+  // The attestation is validly signed by the foreign key, with a p tag matching
+  // the foreign pubkey (so validateCompletionAttestation's self-consistency
+  // check passes). It targets the coin id with the right shape. Only the
+  // cross-minter check (attestation.pubkey !== coin.pubkey) catches the forgery.
+  const { getPublicKey } = await import("nostr-tools/pure");
+  const foreignPubkey = getPublicKey(foreignSecret);
+  const foreignAttestation = finalizeEvent({
+    kind: 4294,
+    created_at: coin.created_at,
+    tags: [["e", coin.id, "", "target"], ["k", "4290"], ["p", foreignPubkey]],
+    content: "{}",
+  }, foreignSecret);
+  const store = new MemoryRendezvousOutbox();
+  await assert.rejects(
+    enqueueRendezvousEvent(coin, store, 10, undefined, [], foreignAttestation),
+    /refusing to queue a completion attestation from another minter/,
+  );
+  assert.equal((await pendingRendezvousEvents(store)).length, 0);
+});
+
+// Helper for the forgery vectors: re-sign an event after mutating one field.
+// Re-signing keeps the signature valid so the structural validators (kind, tag
+// shape, content shape) are the only thing that can catch each forgery.
+function reSigned(
+  original: NostrEvent,
+  patch: Partial<{ kind: number; tags: string[][]; content: string }>,
+): NostrEvent {
+  return finalizeEvent({
+    kind: patch.kind ?? original.kind,
+    created_at: original.created_at,
+    tags: (patch.tags ?? original.tags.map((tag) => [...tag])) as never,
+    content: patch.content ?? original.content,
+  }, SECRET);
+}
+
+test("rendezvous outbox rejects invalid relay locators on load", async () => {
+  const coin = event(81);
+  const vectors: Array<[string, unknown]> = [
+    ["non-array relayUrls", "not-an-array"],
+    ["too many entries", Array(33).fill("wss://relay.example")],
+    ["oversized entry", [`wss://relay.example/${"a".repeat(2_100)}`]],
+    ["non-websocket protocol", ["ftp://relay.example"]],
+    ["http protocol", ["http://relay.example"]],
+    ["userinfo credentials", ["wss://user:pass@relay.example"]],
+    ["malformed url", ["wss://[::1"]],
+    ["loopback literal", ["ws://127.0.0.1:4869"]],
+    ["private ip literal", ["ws://192.168.1.1:4869"]],
+    ["onion hostname", ["ws://abc.onion"]],
+    ["empty string", [""]],
+  ];
+  for (const [label, relayUrls] of vectors) {
+    const store = new MemoryRendezvousOutbox();
+    store.records.set("browser", new Map([[coin.id, {
+      eventId: coin.id,
+      queuedAt: 1,
+      relayUrls: relayUrls as never,
+    }]]));
+    await assert.rejects(
+      pendingRendezvousEvents(store),
+      /relay locator/,
+      `corrupt-row vector "${label}" must be rejected`,
+    );
+  }
+});
+
+test("rendezvous outbox rejects invalid proven relay URLs at enqueue before writing", async () => {
+  const coin = event(82);
+  for (const url of ["ftp://relay.example", "wss://user:pass@relay.example", "ws://127.0.0.1:4869", "ws://abc.onion"]) {
+    const store = new MemoryRendezvousOutbox();
+    await assert.rejects(
+      enqueueRendezvousEvent(coin, store, 10, undefined, [url]),
+      /relay locator/,
+    );
+    assert.equal((await pendingRendezvousEvents(store)).length, 0, `${url} must not be persisted`);
+  }
+});
+
 test("vaults independently enqueue and drain even when they Send the same event id", async () => {
   const previousStorage = (globalThis as { localStorage?: Storage }).localStorage;
   Object.defineProperty(globalThis, "localStorage", {

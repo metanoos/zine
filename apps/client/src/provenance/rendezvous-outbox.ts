@@ -7,6 +7,7 @@ import {
   vaultStorageGeneration,
   vaultStorageSessionAcceptsWork,
 } from "../storage/vault-storage.js";
+import { isPublicRendezvousRelayUrl } from "./rendezvous.js";
 
 const DB_NAME = "zine-rendezvous-outbox";
 const DB_VERSION = 2;
@@ -161,21 +162,24 @@ function validateRelayUrls(value: unknown, index: number): string[] | undefined 
     throw new Error(`the rendezvous publication outbox contains invalid relay locators at index ${index}`);
   }
   const urls: string[] = [];
+  const seen = new Set<string>();
   for (const entry of value) {
     if (typeof entry !== "string" || entry.length === 0 || entry.length > MAX_RELAY_URL_LENGTH) {
       throw new Error(`the rendezvous publication outbox contains an invalid relay locator at index ${index}`);
     }
-    try {
-      const parsed = new URL(entry);
-      if (
-        (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") ||
-        parsed.username ||
-        parsed.password
-      ) throw new Error("invalid relay URL");
-    } catch {
+    // Apply the same SSRF allowlist the publish path uses (isPublicRendezvousRelayUrl
+    // rejects loopback, private IP literals, .onion, and non-ws/wss schemes). A
+    // tampered IDB row that smuggles in an internal hostname would otherwise
+    // survive load and only be filtered at the dial boundary; persisting only
+    // allowlisted hosts keeps the durable locator set aligned with what the
+    // publication path can actually use.
+    if (!isPublicRendezvousRelayUrl(entry)) {
       throw new Error(`the rendezvous publication outbox contains an invalid relay locator at index ${index}`);
     }
-    if (!urls.includes(entry)) urls.push(entry);
+    if (!seen.has(entry)) {
+      seen.add(entry);
+      urls.push(entry);
+    }
   }
   return urls.length > 0 ? urls : undefined;
 }
@@ -438,19 +442,48 @@ export class IndexedDbRendezvousOutbox implements RendezvousOutboxStorage {
     ) throw new Error("invalid rendezvous retry state");
     const db = await this.open();
     await this.migrateLegacyIfAuthorized(db, scope);
-    const transaction = db.transaction(EVENTS_STORE, "readwrite");
+    const transaction = db.transaction([EVENTS_STORE, META_STORE], "readwrite");
     const done = transactionDone(transaction);
     const events = transaction.objectStore(EVENTS_STORE);
+    const meta = transaction.objectStore(META_STORE);
     const eventKey: [string, string] = [scope, eventId];
+    const usageKey: [string, typeof USAGE_KEY] = [scope, USAGE_KEY];
     const existing = await requestResult(events.get(eventKey)) as StoredRendezvousEvent | undefined;
     if (existing) {
       const current = validateRecord(existing, 0);
-      events.put({
+      // `recordBytes` excludes retryAttempts/nextAttemptAt, so this update is
+      // byte-neutral today. Mirror the add()/remove() byte accounting anyway so
+      // the META cap stays honest if defer() ever grows to mutate fields that
+      // do count toward recordBytes.
+      const next = {
         scope,
         ...current,
         retryAttempts,
         nextAttemptAt,
-      } satisfies StoredRendezvousEvent);
+      } satisfies StoredRendezvousEvent;
+      const extraBytes = recordBytes(next) - recordBytes(existing);
+      if (extraBytes !== 0) {
+        const usage = (await requestResult(meta.get(usageKey)) as OutboxUsage | undefined) ?? {
+          scope,
+          key: USAGE_KEY,
+          totalBytes: 0,
+          count: 0,
+        };
+        if (usage.totalBytes + extraBytes > MAX_RENDEZVOUS_OUTBOX_BYTES) {
+          transaction.abort();
+          await done.catch(() => undefined);
+          throw new Error(
+            `rendezvous outbox is full (${usage.totalBytes} of ${MAX_RENDEZVOUS_OUTBOX_BYTES} bytes); completed-Mint indexing must catch up`,
+          );
+        }
+        meta.put({
+          scope,
+          key: USAGE_KEY,
+          totalBytes: usage.totalBytes + extraBytes,
+          count: usage.count,
+        } satisfies OutboxUsage);
+      }
+      events.put(next);
     }
     await done;
   }
@@ -569,11 +602,22 @@ export class MemoryRendezvousOutbox implements RendezvousOutboxStorage {
     const records = this.records.get(scope);
     const existing = records?.get(eventId);
     if (!records || !existing) return;
-    records.set(eventId, {
+    const next = {
       ...validateRecord(existing, 0),
       retryAttempts,
       nextAttemptAt,
-    });
+    };
+    // Byte-neutral today (recordBytes excludes retry fields); mirror the cap
+    // accounting so a future field addition cannot silently drift the counter.
+    const extraBytes = recordBytes(next) - recordBytes(existing);
+    const totalBytes = this.totalBytes.get(scope) ?? recordBytes(existing);
+    if (extraBytes !== 0) {
+      if (totalBytes + extraBytes > this.maxBytes) {
+        throw new Error("rendezvous outbox is full; completed-Mint indexing must catch up");
+      }
+      this.totalBytes.set(scope, totalBytes + extraBytes);
+    }
+    records.set(eventId, next);
   }
 
   async list(scope: string): Promise<PendingRendezvousEvent[]> {
