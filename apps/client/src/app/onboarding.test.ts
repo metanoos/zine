@@ -243,7 +243,11 @@ test("the onboarding field guide teaches trace-shaped writing", () => {
   assert.match(onboardingSource, /How to write Zines/);
   assert.match(onboardingSource, /Markdown plus an exact, replayable trace/);
   assert.match(onboardingSource, /lossy compression of the writing process/);
-  assert.match(onboardingSource, /opening the files and tabs[\s\S]*not a player piano/);
+  assert.match(onboardingSource, /Hit newline, not backspace/);
+  assert.match(onboardingSource, /Do not backspace into it;[\s\S]*do not edit it/);
+  assert.match(onboardingSource, /trace and text nearly identical/);
+  assert.match(onboardingSource, /make the distance between them small/);
+  assert.match(onboardingSource, /route through files and tabs[\s\S]*player piano/);
   assert.match(onboardingSource, /If you can name the transition an em dash replaces/);
   assert.match(onboardingSource, /An em dash is not an emphasis mark/);
   assert.match(onboardingSource, /Parentheses lower a thought beneath the main line/);

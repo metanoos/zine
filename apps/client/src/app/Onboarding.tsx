@@ -152,17 +152,18 @@ export function OnboardingWelcome({
 
         <div className="onboarding-writing-rules">
           <section>
-            <p className="onboarding-writing-rule-number">01 · RICHER TEXT</p>
-            <h3>Let the choices remain visible.</h3>
+            <p className="onboarding-writing-rule-number">01 · TRACE ≈ TEXT</p>
+            <h3>Hit newline, not backspace.</h3>
             <p>
-              Make small, legible edits. Keep the turns in thought as bridges,
-              clauses, and deliberate side-lines instead of polishing every sign
-              of decision away. The trace will preserve what you tried, removed,
-              restored, and kept.
+              When a line is complete, press Return. Do not backspace into it;
+              do not edit it. Continue the thought on the next line. This keeps
+              the trace and text nearly identical—the best way to use Zine is
+              to make the distance between them small.
             </p>
             <p className="onboarding-writing-aside">
-              Replay should feel like the Press opening the files and tabs that
-              shaped a sentence—not a player piano performing every keystroke.
+              Newline preserves the thought in both forms. Backspace widens the
+              gap. Replay should reveal the route through files and tabs—not
+              reduce writing to a player piano performing every keystroke.
             </p>
           </section>
 
