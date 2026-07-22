@@ -184,8 +184,8 @@ network or meaningful citation density. The [transport](protocol/transport.md) a
 | Headless MCP press with a distinct agent voice | Implemented |
 | Mandatory replay-valid KEdit process log on every file Step | Implemented for editor, AI, import/fork, and MCP write paths |
 | Shared `FULL TRACE` / `SNAPSHOT ONLY` / `INVALID` reader verdict | Implemented in Replay, Analyze, handoff, Reify, and MCP inspection |
-| Step, Publish, Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
-| Recursive folder checkpoint propagation | Implemented with verified checkpoint causes, distinct `advance` deltas, explicit folder/Root Step, durable operation ids, and collapsed derived roll-ups in Replay |
+| Step, Publish (wire name Send), Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
+| Recursive folder checkpoint propagation | Implemented with verified checkpoint causes, distinct `advance` deltas, serialized folder appends, explicit folder/Root Step, durable operation ids, durable move/delete journals, and inspectable collapsed roll-ups in Replay |
 | Top-level foreign-file fork-on-write | Implemented; recursive nested-folder fork-on-write is deferred |
 | Valid-Coin mutual-peer co-citation and process-evidence vet | Implemented and tested; calibration needs real corpora |
 | Raw-file Reify export with an optional signed-event bundle | Implemented on desktop |

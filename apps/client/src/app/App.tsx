@@ -37,7 +37,6 @@ import {
   resolveTagCandidates,
   browseTag,
   fetchChain,
-  fetchFolderActivity,
   fetchFolderNodes,
   fetchFolderOwner,
   fetchEventById,
@@ -51,8 +50,7 @@ import {
   sendHistoricalStep,
   sendStep,
   flushRendezvousPublicationOutbox,
-  reconstructUpTo,
-  reconstructRunsUpTo,
+  reconstructRunsTimeline,
   auditAttribution,
   stepDeltaRange,
   parseAuthors,
@@ -65,9 +63,7 @@ import {
   setPendingLlmMeta,
   fetchManifest,
   findMergeCandidates,
-  incorporateMergeCandidate,
   loadMergeSides,
-  mergeFile,
   type TagCandidate,
   type EventMeta,
   type FocusSelection,
@@ -80,7 +76,12 @@ import {
   excludeInboundSources,
   findInboundSnapshot,
   resolveTraceChain,
+  resolveTraceChainAtHead,
   resolveTraceIdentity,
+  resolveVerifiedFolderTraceIdentityAtHead,
+  TRACE_TRAVERSAL_MAX_EVENTS,
+  TRACE_TRAVERSAL_MAX_SIGNED_BYTES,
+  traceSignedEventBytes,
   revokeTrace,
   attestNode,
   fetchAttestationCounts,
@@ -138,7 +139,7 @@ import {
 } from "../workspace/ui-focus.js";
 import { activateTreeItem, type ActivatableTreeItem } from "../workspace/tree-routing.js";
 import type { Event } from "nostr-tools";
-import { diffLines } from "diff";
+import { diffChars, diffLines } from "diff";
 import {
   bracketExtensions,
   bracketVoiceResolverFacet,
@@ -304,22 +305,29 @@ import {
   createLocalWorkspace,
   ensureLocalTreeFolderPath,
   forkFileIntoLocalTree,
+  folderTraceIdentityFromNode,
   folderWriteSigner,
+  localToFiles,
   localTreeFolderCoordinate,
   propagateLocalTreeFolderHead,
   type LocalFolderTree,
+  type PullResult,
   type StagedMerge,
 } from "../workspace/workspace-local.js";
 import {
+  clearStructuralConflict,
   clearFolderStepOperation,
   clearPadPath,
   createDesktopOperationCrashPadReceiptV1,
+  failStructuralOperation,
+  hasPendingStructuralPathMutation,
   isExactDesktopOperationCrashPadReceipt,
   loadLocalFolder,
   loadLocalShielded,
   loadPad,
   mirrorPad,
   pendingFolderStepOperation,
+  pendingStructuralOperations,
   saveLocalFile,
   saveLocalShielded,
   stageFolderStepOperation,
@@ -380,11 +388,18 @@ import {
   contextMountState,
   pathInEffectiveScope,
   rebaseContextMountAfterMove,
+  rebaseContextMountAfterRename,
+  rebaseShieldedAfterMove,
+  rebaseShieldedPath,
   rebaseTraceRefsAfterMove,
+  removeDeletedShieldedPaths,
+  revertShieldedPathChange,
   selectionForGroupAction,
+  shieldedPathChange,
   topLevelSelectedPaths,
   traceRefsKey,
   type ContextMounts,
+  type ShieldedPathChange,
   type ScopeRef,
   type TraceRef,
 } from "../ai/scope-model.js";
@@ -415,18 +430,29 @@ import {
 } from "../replay/replay-timing.js";
 import {
   buildReplayTimeline,
+  admitReplayFolderOccurrence,
   collapseDerivedFolderCheckpoints,
+  derivedFolderCheckpointDetails,
   emptyReplayDisplay,
   folderReplayState,
+  historicalReplayMembers,
+  memoizedReplayFolderNodeLoad,
+  REPLAY_MAX_FOLDER_OCCURRENCES,
   replayFrameIndexAtOrBefore,
-  selectedReplayPaths,
   orderReplayTraceChain,
+  orderReplayTraceChainAtHead,
+  orderReplayTimelineSteps,
+  recursiveReplaySources,
+  replayPathOccurrenceActiveAt,
   replayDisplayAt,
   replayDisplayThroughFrame,
+  replayTimelineEventIds,
   replayDisplayWithFrame,
   type PlayFrame,
   type ReplayDisplay,
   type ReplayFolderState,
+  type RecursiveReplayFileSource,
+  type RecursiveReplayFolderSource,
 } from "../replay/replay-timeline.js";
 import {
   combineTraceConformance,
@@ -626,6 +652,10 @@ interface ReplayStep {
   /** Signed folder membership plus buffered focus observations. Structural
    *  replay state only: folders never become panel tabs. */
   folder?: ReplayFolderState;
+  /** Verified automatic ancestor roll-ups grouped under their source gesture. */
+  derivedFolderCheckpoints?: ReplayStep[];
+  /** Other mounted paths for the same signed immutable event. */
+  occurrenceProjections?: ReplayStep[];
 }
 
 /** Latest content Step for one replay tab at a global cursor. */
@@ -1082,27 +1112,6 @@ function folderReplayStep(
   };
 }
 
-/** Folder trace identity is still its genesis id, but the shared file resolver
- * deliberately rejects folder-reified nodes. Walk the exact folder head here
- * so nested selected folders can replay their own chain too. */
-async function resolveFolderTraceIdentity(nodeId: string): Promise<string | null> {
-  const seen = new Set<string>();
-  let cursor: string | undefined = nodeId;
-  while (cursor && !seen.has(cursor)) {
-    seen.add(cursor);
-    const event = await fetchEventById(cursor);
-    if (!event || !event.tags.some((tag) => tag[0] === "z" && tag[1] === "folder")) {
-      return null;
-    }
-    const prev = event.tags.find(
-      (tag) => tag[0] === "e" && tag[3] === "prev",
-    )?.[1];
-    if (!prev) return event.id;
-    cursor = prev;
-  }
-  return null;
-}
-
 /** Rebase a folder-tab sentinel when the underlying folder moves/renames.
  *  Applies the same path rebase to the inner relpath; returns the sentinel
  *  unchanged if it doesn't refer to `src` or a descendant. */
@@ -1121,6 +1130,49 @@ function rebaseFolderTab(tab: string, src: string, destFolder: string): string {
 // hand-rolled spread at each site. MAX_PANELS is only a runaway-layout guard,
 // not a real UX limit.
 const MAX_PANELS = 64;
+const REPLAY_LOAD_CONCURRENCY = 4;
+
+function replayLoadFailure(
+  code: string,
+  message: string,
+  nodeId?: string,
+): TraceConformanceVerdict {
+  return {
+    status: "invalid",
+    issues: [{ kind: "integrity", code, message, stepIndex: 0, ...(nodeId ? { nodeId } : {}) }],
+    steps: [],
+  };
+}
+
+function replayNodeContentHash(event: Event | null | undefined): string | null {
+  if (!event) return null;
+  try {
+    const parsed = JSON.parse(event.content) as { contentHash?: unknown };
+    return typeof parsed.contentHash === "string" ? parsed.contentHash : null;
+  } catch {
+    return null;
+  }
+}
+
+async function mapReplayBounded<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const runners = Array.from(
+    { length: Math.min(Math.max(1, concurrency), items.length) },
+    async () => {
+      while (next < items.length) {
+        const index = next++;
+        results[index] = await worker(items[index]!);
+      }
+    },
+  );
+  await Promise.all(runners);
+  return results;
+}
 
 function mapPanel(
   panels: PanelState[],
@@ -3349,6 +3401,7 @@ function ReplayTransport({
   loading,
   latestActionOutput,
   conformance,
+  derivedCheckpoints,
 }: {
   /** The one focused tree/tab trace that supplies this timeline. */
   targets: readonly {
@@ -3398,6 +3451,8 @@ function ReplayTransport({
   latestActionOutput?: string;
   /** Persistent reader verdict for every file chain in this replay scope. */
   conformance?: TraceConformanceVerdict | null;
+  /** Verified signed automatic roll-ups grouped under the visible gesture. */
+  derivedCheckpoints?: ReturnType<typeof derivedFolderCheckpointDetails>;
 }) {
   const [rowLabel, setRowLabel] = useState<TraceRowLabel>(() => {
     const stored = localStorage.getItem(TRACE_ROW_LABEL_KEY);
@@ -3738,7 +3793,7 @@ function ReplayTransport({
             />
           )}
           </div>
-          <span
+          <div
             className="action-palette-replay-status"
             title={[
               conformance ? traceConformanceLabel(conformance.status) : "",
@@ -3765,7 +3820,30 @@ function ReplayTransport({
                 {latestActionOutput}
               </span>
             ) : null}
-          </span>
+            {derivedCheckpoints && derivedCheckpoints.length > 0 ? (
+              <details className="action-palette-replay-derived">
+                <summary>{derivedCheckpoints.length} derived roll-up{derivedCheckpoints.length === 1 ? "" : "s"}</summary>
+                <ul>
+                  {derivedCheckpoints.map((checkpoint) => (
+                    <li key={checkpoint.nodeId}>
+                      <details>
+                        <summary>{`${checkpoint.path || "Root"} · ${checkpoint.cause}`}</summary>
+                        <div>Node <code>{checkpoint.nodeId}</code></div>
+                        {checkpoint.operationId ? (
+                          <div>Operation <code>{checkpoint.operationId}</code></div>
+                        ) : null}
+                        <div>Signer <code>{checkpoint.signerPubkey}</code></div>
+                        <details>
+                          <summary>Signed event</summary>
+                          <pre>{checkpoint.signedEventJson}</pre>
+                        </details>
+                      </details>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
+          </div>
         </div>
       </div>
     </div>
@@ -8345,13 +8423,31 @@ function App() {
   const [stagedMergeBusy, setStagedMergeBusy] = useState(false);
   const [stagedMergeError, setStagedMergeError] = useState<string | null>(null);
   const [stagedMergeView, setStagedMergeView] = useState<StagedMerge | null>(null);
+  // Structural move/delete retry and terminal-conflict status must remain
+  // visible after the editor is ready (bootError renders only placeholders).
+  const [structuralError, setStructuralError] = useState<string | null>(null);
+  const [structuralConflictId, setStructuralConflictId] = useState<string | null>(null);
+  // Latest Root identity. Async pull and mutation completions must prove they
+  // still belong to this workspace before touching global React state.
+  const folderIdRef = useRef<string | null>(folder?.id ?? null);
+  folderIdRef.current = folder?.id ?? null;
   // Storage backend. The root is always pathless (relay + localStorage crash
   // pad; disk is touched only by Scan/Reify), so both desktop and webapp use
   // the local/relay arm — it boots from localStorage instantly and
   // background-pulls the relay, exactly the pathless-root contract. Held in a
   // ref so mutation call sites have a stable handle; it closes over the
   // attached folder, so callers drop the `folder` arg.
-  const backendRef = useRef<Workspace>(createLocalWorkspace());
+  const backendRef = useRef<Workspace>(createLocalWorkspace({
+    onPullResult: (result: PullResult) => {
+      if (folderIdRef.current !== result.rootId) return;
+      setStagedMerges(result.staged);
+      if (result.conflicts.size > 0) {
+        setMergeError(
+          `Remote changes conflict with local work at ${[...result.conflicts].sort().join(", ")}`,
+        );
+      }
+    },
+  }));
   // Opaque clipboard tickets live only in this press session. The system
   // clipboard carries the ticket alongside ordinary text; paste resolves it
   // here to a signed coin. Unknown/expired tickets degrade to native text.
@@ -8360,9 +8456,7 @@ function App() {
   // can detect a folder switch that happened during their `await` and bail
   // before writing stale state. Without this, a rescan started under folder A
   // that resolves after a switch to B would clobber B's `files` with A's scan.
-  const folderIdRef = useRef<string | null>(folder?.id ?? null);
   const prevFolderIdRef = useRef<string | null>(folderIdRef.current);
-  folderIdRef.current = folder?.id ?? null;
   // Dedupe key for the last focus delta published to the folder chain, so the
   // debounced focus effect (below the selection mirror effect) doesn't emit a
   // node for a no-op re-selection. JSON of {focusSel, panelIndex}. Reset on
@@ -8374,6 +8468,13 @@ function App() {
     prevFolderIdRef.current = folderIdRef.current;
     lastFocusKeyRef.current = null;
   }
+  useEffect(() => {
+    setStagedMerges([]);
+    setStagedMergeView(null);
+    setStagedMergeError(null);
+    setMergeError(null);
+    setStructuralError(null);
+  }, [folder?.id]);
   // Destructive local-app reset (opened from the directory tree's corner
   // control). Clears browser state plus the desktop sidecar.
   const [factoryResetOpen, setFactoryResetOpen] = useState(false);
@@ -8836,15 +8937,23 @@ function App() {
   // so nothing changes here. Runs O(files) on every content tick but the async
   // fetchEventById fires only when a nodeId is genuinely new to the timeline.
   useEffect(() => {
-    if (!replay) return;
+    if (!replay || !folder) return;
     if (replayDisplay) return;
     const last = replay.steps.length - 1;
     if (replay.index !== last) return;
-    const knownIds = new Set(replay.steps.map((s) => s.event.id));
+    const knownIds = replayTimelineEventIds(replay.steps);
     // Discover only heads inside the focused replay subject. Directory
     // operation selection must never move this counter or slider.
     const target = focusReplayTarget(uiFocusRef.current);
     const selected = target ? [target] : [];
+    const sourceByPath = new Map(
+      recursiveReplaySources(
+        folder.id,
+        files,
+        selected,
+        loadLocalFolder(folder.id)?.nodeId,
+      ).files.map((source) => [source.path, source]),
+    );
     const fresh = freshSelectedReplayHeads(
       files,
       knownIds,
@@ -8858,10 +8967,15 @@ function App() {
       for (const { path, nodeId } of fresh) {
         if (cancelled) return;
         try {
+          const source = sourceByPath.get(path);
+          if (!source) continue;
           const event = await fetchEventById(nodeId);
           if (!event) continue;
           const meta = eventMeta(event);
-          if (meta.relativePath !== path) continue; // id resolved to a different file; skip
+          if (
+            meta.folderId !== source.folderId ||
+            meta.relativePath !== source.relativePath
+          ) continue;
           appended.push({
             event,
             relativePath: path,
@@ -8883,9 +8997,10 @@ function App() {
       if (cancelled || appended.length === 0) return;
       setReplay((prev) => {
         if (!prev) return prev;
+        const representedIds = replayTimelineEventIds(prev.steps);
         const next = appendReplayStepsAtLiveEnd(
           prev,
-          appended,
+          appended.filter((step) => !representedIds.has(step.event.id)),
           (step) => step.event.id,
           (step) => step.meta.steppedAtMs,
         );
@@ -12869,25 +12984,36 @@ function App() {
     // stepped state) and show a count until Stepped. A file only in the pad
     // (not scanned) is never seeded → unstepped → correct.
     const pad = loadPad(folderId);
+    let recoveryVoice: Awaited<ReturnType<typeof getReconcilerVoice>> | null = null;
     if (pad && Object.keys(pad).length > 0) {
-      const recoveryVoice = await getReconcilerVoice();
-      const merged = { ...scanned };
-      for (const [path, lf] of Object.entries(pad)) {
+      recoveryVoice = await getReconcilerVoice();
+    }
+    // Re-read after the optional async key lookup: background attach pull may
+    // already have advanced localStorage. Hydrate from that durable projection,
+    // then overlay the crash pad, so the pre-pull `scanned` snapshot can never
+    // erase a fast reconciliation that completed while this function awaited.
+    const latestLocal = loadLocalFolder(folderId);
+    const latestScanned = latestLocal ? localToFiles(latestLocal) : scanned;
+    const merged = { ...latestScanned };
+    const latestPad = recoveryVoice ? loadPad(folderId) ?? pad : pad;
+    if (latestPad && recoveryVoice) {
+      for (const [path, lf] of Object.entries(latestPad)) {
         merged[path] = restoreCrashPadFile(
-          scanned[path],
+          latestScanned[path],
           lf,
           authorVoice(),
           recoveryVoice.publicKey,
         );
       }
-      setFiles(merged);
     }
+    if (folderIdRef.current !== folderId) return;
+    setFiles(merged);
     // Mark every scanned file as already-stepped so the first debounce tick
     // doesn't re-publish the whole folder (these files came from disk/relay
     // already published — their nodeId proves it). This is what stops the boot
     // fanout from tripping the relay rate-limit. Seeded from `scanned` (disk
     // truth) deliberately — see the pad-restore note above.
-    seedSteppedRef.current(scanned);
+    seedSteppedRef.current(latestScanned);
     ready.current = true; // allow the debounce effect to publish subsequent edits
   }
 
@@ -12970,50 +13096,131 @@ function App() {
     }
   }
 
-  /** Apply a stepped merge into editor + local store. Shared by no-conflict
-   *  incorporate and the three-way panel's Step merge. */
-  async function applyMergedToWorkspace(
-    path: string,
-    event: Event,
-    snapshot: string,
-    candidate: MergeCandidate,
-  ) {
+  /** Compare the local staged side, publish exactly one merge node through the
+   * workspace's per-file mutation lane, and adopt that same node locally.
+   * Newer typing that happens while the relay accepts the merge keeps its live
+   * runs and becomes an unstepped draft rooted at the landed merge. */
+  async function acceptMergeToWorkspace(input: {
+    path: string;
+    expectedNodeId: string;
+    expectedContent: string;
+    snapshot: string;
+    parentId: string;
+    parentPubkey: string;
+    parentSnapshot: string;
+    baseSnapshot?: string;
+    summary?: string;
+    runs?: Run[];
+  }) {
+    const before = filesRef.current[input.path];
+    if (
+      !before ||
+      before.nodeId !== input.expectedNodeId ||
+      flatten(before.runs) !== input.expectedContent
+    ) {
+      throw new Error(
+        `Cannot accept merge for ${input.path}: local work changed after it was staged.`,
+      );
+    }
+    const requestedRuns = input.runs ?? (() => {
+      const out: Run[] = [];
+      const append = (run: Run) => {
+        if (!run.text) return;
+        const last = out[out.length - 1];
+        if (last && last.voice === run.voice && last.src === run.src) last.text += run.text;
+        else out.push(run);
+      };
+      const appendOurs = (from: number, to: number) => {
+        let cursor = 0;
+        for (const run of before.runs) {
+          const end = cursor + run.text.length;
+          const left = Math.max(from, cursor);
+          const right = Math.min(to, end);
+          if (right > left) append({ ...run, text: run.text.slice(left - cursor, right - cursor) });
+          cursor = end;
+          if (cursor >= to) break;
+        }
+      };
+      const parentMask: boolean[] = [];
+      if (input.snapshot === input.parentSnapshot) {
+        parentMask.push(...Array.from({ length: input.snapshot.length }, () => true));
+      } else if (input.baseSnapshot !== undefined) {
+        const merge = threeWayMerge(
+          input.baseSnapshot,
+          input.expectedContent,
+          input.parentSnapshot,
+        );
+        if (autoMergedText(merge) === input.snapshot) {
+          let firstLine = true;
+          for (const chunk of merge.chunks) {
+            if (chunk.type === "conflict") continue;
+            for (const line of chunk.lines) {
+              if (!firstLine) parentMask.push(chunk.type === "theirs");
+              parentMask.push(...Array.from({ length: line.length }, () => chunk.type === "theirs"));
+              firstLine = false;
+            }
+          }
+        }
+      }
+      let oursCursor = 0;
+      let mergedCursor = 0;
+      for (const part of diffChars(input.expectedContent, input.snapshot)) {
+        if (part.removed) {
+          oursCursor += part.value.length;
+        } else if (part.added) {
+          const exactParentSpan = parentMask.length === input.snapshot.length &&
+            parentMask.slice(mergedCursor, mergedCursor + part.value.length).every(Boolean);
+          append(exactParentSpan
+            ? { voice: input.parentPubkey, text: part.value, src: input.parentId }
+            : { voice: authorVoice(), text: part.value });
+          mergedCursor += part.value.length;
+        } else {
+          appendOurs(oursCursor, oursCursor + part.value.length);
+          oursCursor += part.value.length;
+          mergedCursor += part.value.length;
+        }
+      }
+      return out;
+    })();
+    const event = await backendRef.current.acceptMerge({
+      relativePath: input.path,
+      expectedNodeId: input.expectedNodeId,
+      expectedContent: input.expectedContent,
+      mergeParentId: input.parentId,
+      mergeParentPubkey: input.parentPubkey,
+      snapshot: input.snapshot,
+      tags: before.tags,
+      runs: requestedRuns,
+      citationIds: before.citationIds,
+      summary: input.summary,
+    });
     let authorsRaw: unknown;
     try {
       authorsRaw = (JSON.parse(event.content) as { authors?: unknown }).authors;
     } catch {
       authorsRaw = undefined;
     }
-    const runs =
-      parseAuthors(authorsRaw, snapshot) ??
-      (snapshot === candidate.snapshot
-        ? [{ voice: candidate.ownerPubkey, text: snapshot, src: candidate.headId }]
-        : [{ voice: authorVoice(), text: snapshot }]);
-    const tags = files[path]?.tags ?? [];
-    const citationIds = files[path]?.citationIds;
-    const nextFile: FileState = {
-      ...(files[path] ?? { tags: [], runs: [], nodeId: "" }),
+    const runs = parseAuthors(authorsRaw, input.snapshot) ?? requestedRuns;
+    const steppedFile: FileState = {
+      ...before,
       runs,
       nodeId: event.id,
-      tags,
-      citationIds,
     };
-    setFiles((prev) => ({ ...prev, [path]: nextFile }));
-    await backendRef.current.writeFile(path, snapshot, tags, undefined, runs, undefined, citationIds);
-    const local = loadLocalFolder(folder!.id);
-    const cur = local?.files[path];
-    if (cur) {
-      saveLocalFile(folder!.id, path, {
-        content: snapshot,
-        tags: cur.tags,
-        nodeId: event.id,
-        runs,
-        voicePubkey: cur.voicePubkey,
-        citationIds: cur.citationIds,
-      });
-    }
-    seedSteppedRef.current({ [path]: nextFile });
-    await refreshMergeCandidates(folder!.id, path);
+    seedSteppedRef.current({ [input.path]: steppedFile });
+    setFiles((prev) => {
+      const current = prev[input.path];
+      if (!current) return prev;
+      const stillExact = current.nodeId === input.expectedNodeId &&
+        flatten(current.runs) === input.expectedContent;
+      return {
+        ...prev,
+        [input.path]: stillExact
+          ? steppedFile
+          : { ...current, nodeId: event.id },
+      };
+    });
+    await refreshMergeCandidates(folder!.id, input.path);
+    return event;
   }
 
   /** Unilateral incorporate (protocol §3.8). No-conflict: full-adopt theirs.
@@ -13050,8 +13257,18 @@ function App() {
 
     setMergeBusy(true);
     try {
-      const event = await incorporateMergeCandidate(folder.id, path, candidate);
-      await applyMergedToWorkspace(path, event, candidate.snapshot, candidate);
+      const current = filesRef.current[path];
+      if (!current) throw new Error(`Cannot merge missing trace ${path}.`);
+      await acceptMergeToWorkspace({
+        path,
+        expectedNodeId: candidate.forkedFromId ?? current.nodeId,
+        expectedContent: flatten(current.runs),
+        snapshot: candidate.snapshot,
+        parentId: candidate.headId,
+        parentPubkey: candidate.ownerPubkey,
+        parentSnapshot: candidate.snapshot,
+        summary: `incorporated fork ${candidate.headId.slice(0, 8)}`,
+      });
     } catch (e) {
       console.warn("[merge] incorporate failed:", e);
       setMergeError(e instanceof Error ? e.message : String(e));
@@ -13071,11 +13288,20 @@ function App() {
     setMergeBusy(true);
     setMergeError(null);
     try {
-      const event = await incorporateMergeCandidate(folder.id, path, candidate, {
+      const current = filesRef.current[path];
+      if (!current) throw new Error(`Cannot merge missing trace ${path}.`);
+      await acceptMergeToWorkspace({
+        path,
+        expectedNodeId: current.nodeId,
+        expectedContent: mergePreview?.path === path
+          ? mergePreview.before
+          : flatten(current.runs),
         snapshot: resolvedSnapshot,
-        force: true,
+        parentId: candidate.headId,
+        parentPubkey: candidate.ownerPubkey,
+        parentSnapshot: candidate.snapshot,
+        summary: `merged ${candidate.headId.slice(0, 8)}`,
       });
-      await applyMergedToWorkspace(path, event, resolvedSnapshot, candidate);
       setMergeError(null);
       setMergePreview(null);
     } catch (e) {
@@ -13093,11 +13319,19 @@ function App() {
     setMergeBusy(true);
     setMergeError(null);
     try {
-      const event = await incorporateMergeCandidate(folder.id, path, candidate, {
+      const current = filesRef.current[path];
+      if (!current) throw new Error(`Cannot merge missing trace ${path}.`);
+      await acceptMergeToWorkspace({
+        path,
+        expectedNodeId: current.nodeId,
+        expectedContent: mergeSession.ours,
         snapshot: resolvedSnapshot,
-        force: true,
+        parentId: candidate.headId,
+        parentPubkey: candidate.ownerPubkey,
+        parentSnapshot: candidate.snapshot,
+        baseSnapshot: mergeSession.base,
+        summary: `merged ${candidate.headId.slice(0, 8)}`,
       });
-      await applyMergedToWorkspace(path, event, resolvedSnapshot, candidate);
       setMergeSession(null);
       setMergeError(null);
     } catch (e) {
@@ -13108,54 +13342,27 @@ function App() {
     }
   }
 
-  /** Accept a staged background-pull merge: step the merge node (using the
-   *  raw ids from the pull, not a MergeCandidate — pull-path merges aren't
-   *  fork/sibling candidates), write the merged body to editor + local store,
-   *  and drop the record. Mirrors applyMergedToWorkspace's post-step sync. */
+  /** Accept a staged background-pull merge against the exact local head/body
+   * observed by the pull. The workspace publishes and adopts one merge node;
+   * it does not append a second ordinary edit. */
   async function stepStagedMerge(staged: StagedMerge) {
     if (!folder || stagedMergeBusy) return;
     setStagedMergeBusy(true);
     setStagedMergeError(null);
     try {
-      const event = await mergeFile({
-        folderId: folder.id,
-        relativePath: staged.path,
-        prevEventId: staged.localNodeId,
-        mergeParentIds: [staged.remoteHeadId],
+      await acceptMergeToWorkspace({
+        path: staged.path,
+        expectedNodeId: staged.localNodeId,
+        expectedContent: staged.ours,
         snapshot: staged.merged,
-        authors: [{ voice: staged.remoteOwnerPubkey, text: staged.merged, src: staged.remoteHeadId }],
+        parentId: staged.remoteHeadId,
+        parentPubkey: staged.remoteOwnerPubkey,
+        parentSnapshot: staged.theirs,
+        baseSnapshot: staged.base,
+        summary: `merged ${staged.remoteHeadId.slice(0, 8)}`,
       });
-      const runs = parseAuthors(
-        (JSON.parse(event.content) as { authors?: unknown }).authors,
-        staged.merged,
-      ) ?? [{ voice: authorVoice(), text: staged.merged }];
-      const tags = files[staged.path]?.tags ?? [];
-      const citationIds = files[staged.path]?.citationIds;
-      const nextFile: FileState = {
-        ...(files[staged.path] ?? { tags: [], runs: [], nodeId: "" }),
-        runs,
-        nodeId: event.id,
-        tags,
-        citationIds,
-      };
-      setFiles((prev) => ({ ...prev, [staged.path]: nextFile }));
-      await backendRef.current.writeFile(staged.path, staged.merged, tags, undefined, runs, undefined, citationIds);
-      const local = loadLocalFolder(folder.id);
-      const cur = local?.files[staged.path];
-      if (cur) {
-        saveLocalFile(folder.id, staged.path, {
-          content: staged.merged,
-          tags: cur.tags,
-          nodeId: event.id,
-          runs,
-          voicePubkey: cur.voicePubkey,
-          citationIds: cur.citationIds,
-        });
-      }
-      seedSteppedRef.current({ [staged.path]: nextFile });
       setStagedMerges((prev) => prev.filter((m) => m !== staged));
       setStagedMergeView(null);
-      await refreshMergeCandidates(folder.id, staged.path);
     } catch (e) {
       console.warn("[merge] stepStagedMerge failed:", e);
       setStagedMergeError(e instanceof Error ? e.message : String(e));
@@ -13192,8 +13399,7 @@ function App() {
         // instantly and background-pulls the relay for any newer content. Disk
         // is never read here — it's touched only by Scan (acquire) and Reify
         // (emit) gestures, never on boot.
-        const scanned = (
-          await backendRef.current.attach(folder, (path, file) => {
+        const attached = await backendRef.current.attach(folder, (path, file) => {
             if (cancelled) return;
             setFiles((prev) => {
               if (file) return { ...prev, [path]: file };
@@ -13203,11 +13409,68 @@ function App() {
               return next;
             });
             if (file) seedSteppedRef.current({ [path]: file });
+          });
+        void attached.reconciled
+          .then(() => {
+            if (cancelled || folderIdRef.current !== folder.id) return;
+            // Background relay pull can remove paths via remote-driven absence
+            // reconciliation (pullFromRelayUnlocked → deleteLocalFileDurably).
+            // The user may have mounted a sub-tree scope in the window between
+            // attach returning and this promise resolving; if pull then removed
+            // that sub-tree, the scope mount is left pointing at a path that no
+            // longer exists — the same defect class the renameNode/hardDelete
+            // scope rebase closes for user-initiated gestures. Writes already
+            // follow focus (which is rebased separately), so this is a state-
+            // machine fix: without it the scope UI lies and the next MODEL op
+            // silently loses the scope subtree (activePath is still included,
+            // but nothing else under scope is). Pull does not touch shields, so
+            // there is no disclosure risk — only scope staleness.
+            const mount = scopeRef.current[0];
+            if (!mount || mount.path === ROOT) return;
+            const loaded = loadLocalFolder(folder.id);
+            const paths = loaded?.files ?? {};
+            const stillPresent = mount.kind === "file"
+              ? mount.path in paths
+              : Object.keys(paths).some(
+                  (p) => p === mount.path || p.startsWith(`${mount.path}/`),
+                );
+            if (!stillPresent) {
+              setScope([{ kind: "folder", path: ROOT }]);
+            }
           })
-        ).files;
+          .catch((error) => {
+          if (cancelled || folderIdRef.current !== folder.id) return;
+          const storedConflicts = Object.values(
+            loadLocalFolder(folder.id)?.structuralConflicts ?? {},
+          ).sort((left, right) => right.failedAt - left.failedAt);
+          if (storedConflicts[0]) {
+            setStructuralError(
+              `A ${storedConflicts[0].operation.kind} could not be recovered: ${storedConflicts[0].reason}`,
+            );
+            setStructuralConflictId(storedConflicts[0].operation.operationId);
+          } else {
+            // Recovery threw without archiving a terminal conflict — a journal
+            // entry is stuck in pendingStructuralOperations. Surface the reason
+            // and let Dismiss force-clear it; otherwise every later Root
+            // mutation re-throws on recovery and the workspace is bricked.
+            setStructuralError(
+              `Workspace recovery failed and a structural operation is stuck: ${error instanceof Error ? error.message : String(error)}. Dismiss abandons the stuck operation so new edits can proceed.`,
+            );
+            setStructuralConflictId(null);
+          }
+        });
+        const scanned = attached.files;
         if (cancelled) return;
-        setFiles(scanned);
         await openScanned(scanned, folder.id);
+        const storedConflicts = Object.values(
+          loadLocalFolder(folder.id)?.structuralConflicts ?? {},
+        ).sort((left, right) => right.failedAt - left.failedAt);
+        if (storedConflicts[0]) {
+          setStructuralConflictId(storedConflicts[0].operation.operationId);
+          setStructuralError(
+            `A ${storedConflicts[0].operation.kind} could not be recovered: ${storedConflicts[0].reason}`,
+          );
+        }
         setBootState("ready");
       } catch (e) {
         if (cancelled) return;
@@ -13773,6 +14036,20 @@ function App() {
     chooseDirectorySelection([]);
     activateLiveTab(folderTab(path), { kind: "folder", path, nodeId });
   }
+  function commitShieldedForRoot(rootId: string, next: Set<string>): void {
+    saveLocalShielded(rootId, next);
+    if (folderIdRef.current !== rootId) return;
+    shieldedRef.current = next;
+    setShielded(next);
+  }
+  /** Optimistic structural projection only. The backend journals a union of
+   * old/new shield paths with the durable mutation, then atomically commits
+   * the final set or restores the old set. */
+  function projectShieldedForRoot(rootId: string, next: Set<string>): void {
+    if (folderIdRef.current !== rootId) return;
+    shieldedRef.current = next;
+    setShielded(next);
+  }
   function selectSpan(nodeId: string, phrase: string) {
     // A node-only Coin has no directory row to highlight. Keep the semantic
     // focus, but clear path-backed Explorer focus so the UI does not imply that
@@ -14314,147 +14591,734 @@ function App() {
     }
   }
 
-  /** Load replay for the attached folder. Fetches every FileTraceNode in the
-   *  folder, groups by file, fetches each file's chain once, and precomputes
-   *  each step's reconstructed content so stepping is O(1). Best-effort: a
+  /** Load replay for the focused recursive zine. Resolve every flattened UI
+   *  path to its direct folder trace, fetch each selected file/folder chain
+   *  once, and precompute content so stepping is O(1). Best-effort: a
    *  slow/unreachable relay yields an empty timeline rather than throwing —
    *  auto-bootstrap on folder load must never reject unhandled. */
   async function loadReplay(sequence: number): Promise<boolean> {
     if (!folder) return false;
-    let activity: Event[];
-    try {
-      activity = await fetchFolderActivity(folder.id);
-    } catch (e) {
-      console.warn("[replay] fetchFolderActivity failed:", e);
-      activity = [];
-    }
+    const replayRootId = folder.id;
     const target = focusReplayTarget(uiFocusRef.current);
     const playbackScopes = target ? [target] : [];
     if (playbackScopes.length === 0) return false;
-    // Aggregate activity can lag directly-addressed relay storage immediately
-    // after the first Step. Backfill every novel selected live head by exact id
-    // before deciding the timeline is empty, so the first durable Step paints
-    // 1 / 1 without waiting for another edit or another click.
-    const knownActivityIds = new Set(activity.map((event) => event.id));
-    const liveHeads = freshSelectedReplayHeads(
+    const sources = recursiveReplaySources(
+      folder.id,
       filesRef.current,
-      knownActivityIds,
       playbackScopes,
-      new Set(),
+      loadLocalFolder(folder.id)?.nodeId,
     );
-    for (const { path, nodeId } of liveHeads) {
-      try {
-        const event = await fetchEventById(nodeId);
-        if (!event) continue;
-        const meta = eventMeta(event);
-        if (meta.folderId !== folder.id || meta.relativePath !== path) continue;
-        activity.push(event);
-        knownActivityIds.add(event.id);
-      } catch (e) {
-        console.warn(`[replay] live-head fetch failed for ${path}:`, e);
-      }
-    }
-    // Group events by relative path so each file's chain is fetched once.
-    const byPath = new Map<string, Event[]>();
-    for (const event of activity) {
-      const path = eventMeta(event).relativePath;
-      if (!path) continue;
-      const list = byPath.get(path);
-      if (list) list.push(event);
-      else byPath.set(path, [event]);
-    }
-    // A selected file contributes only itself; a selected folder contributes
-    // its complete subtree. Prompt-context shields do not affect playback.
-    const sc = playbackScopes;
-    const selectedPaths = new Set(
-      selectedReplayPaths([...byPath.keys()], sc, new Set()),
-    );
-    for (const path of [...byPath.keys()]) {
-      if (!selectedPaths.has(path)) {
-        byPath.delete(path);
-      }
-    }
-    // Per file: fetch the genesis→latest chain (authoritative order, never
-    // created_at), then for each of that file's events find its index in the
-    // chain and reconstruct content up to it. Retain each chain on a ref so
-    // Keystroke playback can expand the recorded edits without refetching.
     const steps: ReplayStep[] = [];
+    const replayStepByEventId = new Map<string, ReplayStep>();
+    const addReplayProjection = (projection: ReplayStep) => {
+      const existing = replayStepByEventId.get(projection.event.id);
+      if (!existing) {
+        replayStepByEventId.set(projection.event.id, projection);
+        steps.push(projection);
+        return;
+      }
+      const projectionPath = projection.folder?.path ?? projection.relativePath;
+      const existingPaths = new Set([
+        existing.folder?.path ?? existing.relativePath,
+        ...(existing.occurrenceProjections ?? []).map(
+          (candidate) => candidate.folder?.path ?? candidate.relativePath,
+        ),
+      ]);
+      if (existingPaths.has(projectionPath)) return;
+      existing.occurrenceProjections = [
+        ...(existing.occurrenceProjections ?? []),
+        projection,
+      ];
+    };
     const chains: Record<string, Event[]> = {};
     const conformanceVerdicts: TraceConformanceVerdict[] = [];
-    for (const [relativePath] of byPath) {
-      let chain: Event[];
+    const collapsibleNodeIds = new Set<string>();
+    type ReplayFileSource = RecursiveReplayFileSource & {
+      contentHash?: string;
+      observedAtMs?: number;
+      removedAtMs?: number;
+    };
+    type ReplayFolderSource = RecursiveReplayFolderSource & {
+      contentHash?: string;
+      ancestors: string[];
+    };
+    const replayFileEventPromises = new Map<string, Promise<Event | null>>();
+    const replayFileEvents = new Map<string, Event>();
+    let replayFileSignedBytes = 0;
+    const loadReplayFileEvents = async (ids: readonly string[]): Promise<Event[]> => {
+      const loaded = await Promise.all(ids.map(async (id) => {
+        let pending = replayFileEventPromises.get(id);
+        if (!pending) {
+          if (replayFileEventPromises.size >= TRACE_TRAVERSAL_MAX_EVENTS) {
+            throw new Error(
+              `Replay file history exceeds ${TRACE_TRAVERSAL_MAX_EVENTS} signed events`,
+            );
+          }
+          pending = fetchEventById(id).then((event) => event ?? null);
+          replayFileEventPromises.set(id, pending);
+        }
+        const event = await pending;
+        if (event && !replayFileEvents.has(event.id)) {
+          replayFileSignedBytes += traceSignedEventBytes(event);
+          if (replayFileSignedBytes > TRACE_TRAVERSAL_MAX_SIGNED_BYTES) {
+            throw new Error(
+              `Replay file history exceeds ${TRACE_TRAVERSAL_MAX_SIGNED_BYTES} signed bytes`,
+            );
+          }
+          replayFileEvents.set(event.id, event);
+        }
+        return event;
+      }));
+      return loaded.filter((event): event is Event => event !== null);
+    };
+    const identityByNode = new Map<string, { traceId: string; depth: number }>();
+    const resolveReplayFileIdentity = async (
+      nodeId: string,
+    ): Promise<{ traceId: string; depth: number }> => {
+      const cached = identityByNode.get(nodeId);
+      if (cached) return cached;
+      const trail: Event[] = [];
+      const seen = new Set<string>();
+      let cursor: string | null = nodeId;
+      let base: { traceId: string; depth: number } | null = null;
+      while (cursor) {
+        const known = identityByNode.get(cursor);
+        if (known) {
+          base = known;
+          break;
+        }
+        if (seen.has(cursor)) throw new Error(`file ancestry cycle at ${cursor}`);
+        seen.add(cursor);
+        const event: Event | undefined = (await loadReplayFileEvents([cursor]))[0];
+        if (
+          !event ||
+          event.kind !== 4290 ||
+          !event.tags.some((tag) => tag[0] === "z" && tag[1] === "file")
+        ) {
+          throw new Error(`cannot resolve file identity at ${cursor}`);
+        }
+        trail.push(event);
+        cursor = event.tags.find((tag) => tag[0] === "e" && tag[3] === "prev")?.[1] ?? null;
+        if (!cursor) base = { traceId: event.id, depth: 0 };
+      }
+      if (!base) throw new Error(`cannot resolve file identity at ${nodeId}`);
+      for (let index = trail.length - 1; index >= 0; index -= 1) {
+        const event = trail[index]!;
+        if (event.id === base.traceId && base.depth === 0) {
+          identityByNode.set(event.id, base);
+          continue;
+        }
+        base = { traceId: base.traceId, depth: base.depth + 1 };
+        identityByNode.set(event.id, base);
+      }
+      return identityByNode.get(nodeId) ?? base;
+    };
+    const loadPinnedFile = async (
+      source: ReplayFileSource,
+      historical: boolean,
+      selectedByPath: boolean,
+    ) => {
       try {
-        chain = await fetchChain(folder.id, relativePath);
-      } catch (e) {
-        console.warn(`[replay] fetchChain failed for ${relativePath}:`, e);
+        const { traceId } = await resolveReplayFileIdentity(source.nodeId);
+        const resolution = await resolveTraceChainAtHead(
+          traceId,
+          source.nodeId,
+          loadReplayFileEvents,
+        );
+        if (resolution?.status !== "resolved") {
+          throw new Error(`cannot resolve exact file head ${source.nodeId}`);
+        }
+        const chain = resolution.chain;
+        const head = chain[chain.length - 1];
+        if (!head || head.id !== source.nodeId) {
+          throw new Error(`file chain does not end at membership pin ${source.nodeId}`);
+        }
+        if (source.contentHash && replayNodeContentHash(head) !== source.contentHash) {
+          throw new Error(`file membership hash does not match ${source.nodeId}`);
+        }
+        return {
+          ok: true as const,
+          source,
+          chain,
+          pinnedChainLength: chain.length,
+          traceId,
+          historical,
+          selectedByPath,
+          verdict: await verifyFileTraceChain(chain, {
+            expectedNucleusId: source.nodeId,
+            expectedTraceId: traceId,
+          }),
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[replay] file trace failed for ${source.path}:`, error);
+        return {
+          ok: false as const,
+          verdict: replayLoadFailure("recursive-file-unavailable", message, source.nodeId),
+        };
+      }
+    };
+
+    // Resolve the selected file identities first. Their exact chains name every
+    // historical direct folder coordinate, allowing folder discovery to follow
+    // moved files without downloading unrelated sibling file histories.
+    const currentFileResults = await mapReplayBounded(
+      sources.files,
+      REPLAY_LOAD_CONCURRENCY,
+      (source) => loadPinnedFile(source, false, true),
+    );
+    const currentFiles = currentFileResults.flatMap((result) => {
+      if (result.ok) return [result];
+      conformanceVerdicts.push(result.verdict);
+      return [];
+    });
+    const selectedFileNodeIds = new Set(
+      currentFiles.flatMap((result) => result.chain.map((event) => event.id)),
+    );
+    const requiredFolderIds = new Set(
+      currentFiles.flatMap((result) =>
+        result.chain.flatMap((event) => {
+          const folderId = event.tags.find((tag) => tag[0] === "f")?.[1];
+          return folderId ? [folderId] : [];
+        })
+      ),
+    );
+    const prefetchedFolderNodes = new Map<string, Promise<Event[]>>();
+    const requiredFolderIdByNodeId = new Map<string, string>();
+    const loadReplayFolderNodes = (folderId: string): Promise<Event[]> =>
+      memoizedReplayFolderNodeLoad(
+        prefetchedFolderNodes,
+        folderId,
+        async () => {
+          try {
+            const nodes = await fetchFolderNodes(folderId);
+            for (const event of nodes) requiredFolderIdByNodeId.set(event.id, folderId);
+            return nodes;
+          } catch {
+            return [];
+          }
+        },
+      );
+    await mapReplayBounded(
+      [...requiredFolderIds],
+      REPLAY_LOAD_CONCURRENCY,
+      loadReplayFolderNodes,
+    );
+
+    const historicalFiles = new Map<string, ReplayFileSource>();
+    const historicalFilesSelectedByPath = new Set<string>();
+    const includeDescendantsByFolderId = new Map(
+      sources.folders.map((source) => [
+        source.folderId,
+        playbackScopes.some((scope) =>
+          scope.kind === "folder" &&
+          (scope.path === "" ||
+            source.path === scope.path ||
+            source.path.startsWith(`${scope.path}/`)),
+        ),
+      ]),
+    );
+    const currentFolderIdByPath = new Map(
+      sources.folders.map((source) => [source.path, source.folderId]),
+    );
+    const currentAncestors = (path: string): string[] => {
+      if (!path) return [];
+      const ancestors = [folder.id];
+      const segments = path.split("/");
+      for (let index = 1; index < segments.length; index++) {
+        const ancestorPath = segments.slice(0, index).join("/");
+        const ancestorId = currentFolderIdByPath.get(ancestorPath);
+        if (ancestorId) ancestors.push(ancestorId);
+      }
+      return [...new Set(ancestors)];
+    };
+    const initialFolderSources: ReplayFolderSource[] = sources.folders.map((source) => ({
+      ...source,
+      ancestors: currentAncestors(source.path),
+    })).sort((left, right) =>
+      left.path.split("/").length - right.path.split("/").length ||
+      left.path.localeCompare(right.path)
+    );
+    const folderOccurrenceKey = (source: ReplayFolderSource) =>
+      `${source.folderId}\u0000${source.path}\u0000${source.nodeId ?? ""}`;
+    const queuedFolderOccurrences = new Set<string>();
+    const folderQueue: ReplayFolderSource[] = [];
+    for (const source of initialFolderSources) {
+      const admission = admitReplayFolderOccurrence(
+        queuedFolderOccurrences,
+        folderOccurrenceKey(source),
+        source.path,
+      );
+      if (admission.error) {
+        conformanceVerdicts.push(replayLoadFailure(
+          "recursive-folder-budget-exceeded",
+          admission.error,
+          source.nodeId,
+        ));
+      } else if (admission.admitted) {
+        folderQueue.push(source);
+      }
+    }
+    const inspectedHistoricalFolderPins = new Set<string>();
+    let historicalFolderDiscoverySlots = Math.max(
+      0,
+      REPLAY_MAX_FOLDER_OCCURRENCES - queuedFolderOccurrences.size,
+    );
+    let historicalFolderBudgetReported = false;
+
+    // Folder history is the index for descendants that no longer exist in the
+    // live local tree. Walk verified historical folder members breadth-first;
+    // current descendants are already queued, while removed folders are found
+    // through the pinned checkpoint stored in their former parent snapshot.
+    while (folderQueue.length > 0) {
+      // Process ancestors before descendants. Historical path occurrences
+      // discovered from a parent are inserted ahead of the current projection,
+      // so immutable child Steps are emitted at the path where they happened.
+      const depth = folderQueue[0]!.path.split("/").filter(Boolean).length;
+      const batch: ReplayFolderSource[] = [];
+      while (
+        folderQueue.length > 0 &&
+        folderQueue[0]!.path.split("/").filter(Boolean).length === depth
+      ) {
+        batch.push(folderQueue.shift()!);
+      }
+      const loaded = await mapReplayBounded(
+        batch,
+        REPLAY_LOAD_CONCURRENCY,
+        async (source) => {
+          try {
+            const folderNodes = await loadReplayFolderNodes(source.folderId);
+            const chain = source.nodeId
+              ? orderReplayTraceChainAtHead(
+                  folderNodes,
+                  source.folderId,
+                  source.nodeId,
+                )
+              : orderReplayTraceChain(folderNodes, source.folderId);
+            if (chain.length === 0) {
+              throw new Error(`cannot resolve exact folder head ${source.nodeId ?? source.folderId}`);
+            }
+            const head = chain[chain.length - 1];
+            if (source.contentHash && replayNodeContentHash(head) !== source.contentHash) {
+              throw new Error(`folder membership hash does not match ${source.nodeId}`);
+            }
+            const verdict = await verifyFolderTraceChain(chain, {
+              ...(source.nodeId ? { expectedNucleusId: source.nodeId } : {}),
+              expectedTraceId: source.folderId,
+            });
+            return { ok: true as const, source, chain, verdict };
+          } catch (error) {
+            console.warn(`[replay] folder trace failed for ${source.path || "Root"}:`, error);
+            return {
+              ok: false as const,
+              source,
+              verdict: replayLoadFailure(
+                "recursive-folder-unavailable",
+                error instanceof Error ? error.message : String(error),
+                source.nodeId,
+              ),
+            };
+          }
+        },
+      );
+      const historicalFolders = new Map<string, {
+        member: ReturnType<typeof historicalReplayMembers>[number];
+        parent: ReplayFolderSource;
+      }>();
+      for (const result of loaded) {
+        if (!result.ok) {
+          conformanceVerdicts.push(result.verdict);
+          continue;
+        }
+        const { source, chain, verdict } = result;
+        const includeDescendants = includeDescendantsByFolderId.get(source.folderId) ?? false;
+        conformanceVerdicts.push(verdict);
+        if (verdict.status === "full") {
+          for (const checked of verdict.steps) collapsibleNodeIds.add(checked.nodeId);
+          for (const member of historicalReplayMembers(source.folderId, source.path, chain)) {
+            if (member.kind === "file") {
+              const memberKey = `${member.path}\u0000${member.nodeId}`;
+              const selectedCurrent = currentFiles.find((result) =>
+                result.source.path === member.path && result.source.nodeId === member.nodeId
+              );
+              if (
+                selectedCurrent &&
+                replayNodeContentHash(selectedCurrent.chain[selectedCurrent.chain.length - 1]) !==
+                  member.contentHash
+              ) {
+                conformanceVerdicts.push(replayLoadFailure(
+                  "recursive-file-pin-invalid",
+                  `file membership hash does not match ${member.nodeId}`,
+                  member.nodeId,
+                ));
+              }
+              historicalFiles.set(memberKey, {
+                path: member.path,
+                folderId: member.parentFolderId,
+                relativePath: member.relativePath,
+                nodeId: member.nodeId,
+                contentHash: member.contentHash,
+                observedAtMs: member.observedAtMs,
+                removedAtMs: member.removedAtMs,
+              });
+              if (
+                includeDescendants ||
+                playbackScopes.some((scope) =>
+                  scope.kind === "file" && scope.path === member.path
+                )
+              ) {
+                historicalFilesSelectedByPath.add(memberKey);
+              }
+            } else {
+              const pinKey = `${member.path}\u0000${member.nodeId}`;
+              if (inspectedHistoricalFolderPins.has(pinKey)) continue;
+              inspectedHistoricalFolderPins.add(pinKey);
+              // Charge the occurrence before fetching the pinned node or
+              // resolving its identity. Otherwise one large historical folder
+              // snapshot can perform unbounded relay work before admission.
+              if (historicalFolderDiscoverySlots <= 0) {
+                if (!historicalFolderBudgetReported) {
+                  conformanceVerdicts.push(replayLoadFailure(
+                    "recursive-folder-budget-exceeded",
+                    `recursive Replay folder occurrences exceed ${REPLAY_MAX_FOLDER_OCCURRENCES}`,
+                    member.nodeId,
+                  ));
+                  historicalFolderBudgetReported = true;
+                }
+                continue;
+              }
+              historicalFolderDiscoverySlots--;
+              historicalFolders.set(pinKey, {
+                member,
+                parent: source,
+              });
+            }
+          }
+        }
+        const chainKey = `folder:${source.folderId}`;
+        if ((chains[chainKey]?.length ?? 0) < chain.length) chains[chainKey] = chain;
+        for (const event of chain) {
+          addReplayProjection(folderReplayStep(event, source.path));
+        }
+      }
+
+      const discoveredFolders = await mapReplayBounded(
+        [...historicalFolders.values()],
+        REPLAY_LOAD_CONCURRENCY,
+        async ({ member, parent }) => {
+          try {
+            const checkpoint = await fetchEventById(member.nodeId);
+            const claimedFolderId = folderTraceIdentityFromNode(checkpoint) ??
+              requiredFolderIdByNodeId.get(member.nodeId) ?? null;
+            const folderId = await resolveVerifiedFolderTraceIdentityAtHead(checkpoint);
+            if (
+              !folderId ||
+              replayNodeContentHash(checkpoint) !== member.contentHash
+            ) {
+              return { member, parent, claimedFolderId, source: null };
+            }
+            return {
+              member,
+              parent,
+              claimedFolderId: folderId,
+              source: {
+                path: member.path,
+                folderId,
+                nodeId: member.nodeId,
+                contentHash: member.contentHash,
+                ancestors: [...parent.ancestors, parent.folderId],
+              } satisfies ReplayFolderSource,
+            };
+          } catch {
+            return { member, parent, claimedFolderId: null, source: null };
+          }
+        },
+      );
+      const newlyDiscovered: ReplayFolderSource[] = [];
+      for (const discovered of discoveredFolders) {
+        const { parent, member, claimedFolderId, source } = discovered;
+        const parentIncludesDescendants = includeDescendantsByFolderId.get(
+          parent.folderId,
+        ) ?? false;
+        const required = claimedFolderId ? requiredFolderIds.has(claimedFolderId) : false;
+        const selectedFolder = claimedFolderId
+          ? includeDescendantsByFolderId.has(claimedFolderId)
+          : false;
+        if (!source) {
+          if (parentIncludesDescendants || required || selectedFolder) {
+            conformanceVerdicts.push(replayLoadFailure(
+              "recursive-folder-pin-invalid",
+              `cannot verify pinned folder member ${member.nodeId}`,
+              member.nodeId,
+            ));
+          }
+          continue;
+        }
+        if (source.ancestors.includes(source.folderId)) {
+          conformanceVerdicts.push(replayLoadFailure(
+            "recursive-folder-cycle",
+            `folder ${source.folderId} recursively contains itself`,
+            source.nodeId,
+          ));
+          continue;
+        }
+        if (
+          !parentIncludesDescendants &&
+          !includeDescendantsByFolderId.has(source.folderId) &&
+          !requiredFolderIds.has(source.folderId)
+        ) {
+          continue;
+        }
+        if (parentIncludesDescendants) {
+          includeDescendantsByFolderId.set(source.folderId, true);
+        }
+        const key = folderOccurrenceKey(source);
+        const admission = admitReplayFolderOccurrence(
+          queuedFolderOccurrences,
+          key,
+          source.path,
+        );
+        if (admission.error) {
+          conformanceVerdicts.push(replayLoadFailure(
+            "recursive-folder-budget-exceeded",
+            admission.error,
+            source.nodeId,
+          ));
+        } else if (admission.admitted) {
+          newlyDiscovered.push(source);
+        }
+      }
+      folderQueue.unshift(...newlyDiscovered);
+    }
+
+    const currentFileHeads = new Set(
+      sources.files.map((source) => `${source.path}\u0000${source.nodeId}`),
+    );
+    const fileRequests = [
+      ...[...historicalFiles.values()]
+        .filter((source) => !currentFileHeads.has(`${source.path}\u0000${source.nodeId}`))
+        .filter((source) => {
+          const key = `${source.path}\u0000${source.nodeId}`;
+          return historicalFilesSelectedByPath.has(key) || selectedFileNodeIds.has(source.nodeId);
+        })
+        .map((source) => ({
+          source,
+          historical: true,
+          selectedByPath: historicalFilesSelectedByPath.has(
+            `${source.path}\u0000${source.nodeId}`,
+          ),
+        })),
+    ];
+    const identifiedHistoricalRequests = await mapReplayBounded(
+      fileRequests,
+      REPLAY_LOAD_CONCURRENCY,
+      async (request) => {
+        try {
+          return {
+            ok: true as const,
+            request,
+            identity: await resolveReplayFileIdentity(request.source.nodeId),
+          };
+        } catch (error) {
+          return {
+            ok: false as const,
+            verdict: replayLoadFailure(
+              "recursive-file-unavailable",
+              error instanceof Error ? error.message : String(error),
+              request.source.nodeId,
+            ),
+          };
+        }
+      },
+    );
+    const historicalFileResults: Awaited<ReturnType<typeof loadPinnedFile>>[] = [];
+    const requestsByTrace = new Map<
+      string,
+      Array<Extract<typeof identifiedHistoricalRequests[number], { ok: true }>>
+    >();
+    for (const identified of identifiedHistoricalRequests) {
+      if (!identified.ok) {
+        historicalFileResults.push({ ok: false, verdict: identified.verdict });
         continue;
       }
-      if (chain.length === 0) continue;
-      chains[relativePath] = chain;
-      conformanceVerdicts.push(await verifyFileTraceChain(chain));
-      // The resolved genesis→head chain is authoritative for replay positions.
-      // Aggregate folder activity can briefly expose only the directly-fetched
-      // live head; filtering back through that lagging list would hide genesis
-      // and make a real two-node, one-Step trace look unsteppable.
-      for (const [idx, event] of chain.entries()) {
-        const meta = eventMeta(event);
-        const contentUpToHere = reconstructUpTo(chain, idx);
-        // The footprint of *this step's* deltas: diff against the previous step
-        // in chain order (genesis → "" via reconstructUpTo's clamp → the whole
-        // imported doc). Computed per-step from the chain so the timeline's
-        // file interleaving never crosses files' content. The range is in
-        // `contentUpToHere`'s coordinate space — the doc the editor holds at
-        // this step — so it's directly a CodeMirror scroll target.
-        const prevContent = reconstructUpTo(chain, idx - 1);
-        const changeRange = stepDeltaRange(prevContent, contentUpToHere);
-        steps.push({
-          event,
-          relativePath,
-          meta,
-          contentUpToHere,
-          runsUpToHere: reconstructRunsUpTo(chain, idx),
-          changeRange,
+      const group = requestsByTrace.get(identified.identity.traceId) ?? [];
+      group.push(identified);
+      requestsByTrace.set(identified.identity.traceId, group);
+    }
+    for (const group of requestsByTrace.values()) {
+      // Identity walks above populated every prev edge once. Only maximal pins
+      // need exact-chain resolution; all other occurrence prefixes are slices
+      // of one verified maximal chain rather than fresh O(N) relay walks.
+      const candidatesByNodeId = new Map(
+        group.map((candidate) => [candidate.request.source.nodeId, candidate]),
+      );
+      const dominated = new Set<string>();
+      const traversed = new Set<string>();
+      const maxima: typeof group = [];
+      for (const candidate of [...candidatesByNodeId.values()].sort(
+        (left, right) => right.identity.depth - left.identity.depth,
+      )) {
+        const headId = candidate.request.source.nodeId;
+        if (dominated.has(headId)) continue;
+        maxima.push(candidate);
+        let cursor: string | undefined = headId;
+        while (cursor && !traversed.has(cursor)) {
+          traversed.add(cursor);
+          const event = replayFileEvents.get(cursor);
+          const previous = event?.tags.find(
+            (tag) => tag[0] === "e" && tag[3] === "prev",
+          )?.[1];
+          if (previous && candidatesByNodeId.has(previous)) dominated.add(previous);
+          cursor = previous;
+        }
+      }
+      const assigned = new Set<typeof group[number]>();
+      for (const maximal of maxima) {
+        const loaded = await loadPinnedFile(
+          maximal.request.source,
+          true,
+          maximal.request.selectedByPath,
+        );
+        if (!loaded.ok) {
+          historicalFileResults.push(loaded);
+          continue;
+        }
+        const indexById = new Map(loaded.chain.map((event, index) => [event.id, index]));
+        for (const candidate of group) {
+          if (assigned.has(candidate)) continue;
+          const index = indexById.get(candidate.request.source.nodeId);
+          if (index === undefined) continue;
+          const head = loaded.chain[index];
+          if (
+            candidate.request.source.contentHash &&
+            (!head || replayNodeContentHash(head) !== candidate.request.source.contentHash)
+          ) {
+            historicalFileResults.push({
+              ok: false,
+              verdict: replayLoadFailure(
+                "recursive-file-unavailable",
+                `file membership hash does not match ${candidate.request.source.nodeId}`,
+                candidate.request.source.nodeId,
+              ),
+            });
+            assigned.add(candidate);
+            continue;
+          }
+          historicalFileResults.push({
+            ...loaded,
+            source: candidate.request.source,
+            // Share the verified maximal chain. The pinned length bounds this
+            // occurrence without materializing every O(N) prefix.
+            pinnedChainLength: index + 1,
+            selectedByPath: candidate.request.selectedByPath,
+          });
+          assigned.add(candidate);
+        }
+      }
+    }
+    const historicalFileResultsAvailable = historicalFileResults.flatMap((result) => {
+      if (result.ok) return [result];
+      conformanceVerdicts.push(result.verdict);
+      return [];
+    });
+    const availableFiles = [...historicalFileResultsAvailable, ...currentFiles];
+    const selectedTraceIds = new Set(
+      availableFiles.filter((result) => !result.historical).map((result) => result.traceId),
+    );
+    const orderedFiles = availableFiles
+      .filter((result) =>
+        !result.historical ||
+        result.selectedByPath ||
+        selectedTraceIds.has(result.traceId)
+      )
+      .sort((left, right) =>
+        left.traceId.localeCompare(right.traceId) ||
+        left.pinnedChainLength - right.pinnedChainLength ||
+        (left.source.observedAtMs ?? Number.MAX_SAFE_INTEGER) -
+          (right.source.observedAtMs ?? Number.MAX_SAFE_INTEGER) ||
+        left.source.path.localeCompare(right.source.path),
+      );
+    const longestByTrace = new Map<string, typeof orderedFiles[number]>();
+    for (const result of orderedFiles) longestByTrace.set(result.traceId, result);
+    type TemporalFileOccurrence = {
+      path: string;
+      observedAtMs: number;
+      removedAtMs?: number;
+    };
+    const occurrencesByTrace = new Map<string, TemporalFileOccurrence[]>();
+    for (const result of orderedFiles) {
+      const membership = historicalFiles.get(
+        `${result.source.path}\u0000${result.source.nodeId}`,
+      );
+      const observedAtMs = result.source.observedAtMs ??
+        membership?.observedAtMs ?? Number.MIN_SAFE_INTEGER;
+      const removedAtMs = result.source.removedAtMs ?? membership?.removedAtMs;
+      const occurrences = occurrencesByTrace.get(result.traceId) ?? [];
+      const previous = [...occurrences].reverse().find(
+        (candidate) => candidate.path === result.source.path,
+      );
+      if (previous && previous.removedAtMs === observedAtMs) {
+        previous.removedAtMs = removedAtMs;
+      } else if (
+        !previous ||
+        previous.observedAtMs !== observedAtMs ||
+        previous.removedAtMs !== removedAtMs
+      ) {
+        occurrences.push({
+          path: result.source.path,
+          observedAtMs,
+          ...(removedAtMs !== undefined ? { removedAtMs } : {}),
         });
       }
+      occurrencesByTrace.set(result.traceId, occurrences);
     }
-    // A selected folder is itself a trace. Include its complete
-    // genesis-rooted chain, not just post-genesis membership deltas. That makes
-    // an empty folder and a folder with no explicit user Step both playable at
-    // Step 0, while descendants still contribute their own file timelines via
-    // the effective-scope file loop above.
-    const seenFolderTraceIds = new Set<string>();
-    for (const mounted of sc) {
-      if (mounted.kind !== "folder") continue;
-      try {
-        const state = mounted.path === ROOT ? undefined : filesRef.current[mounted.path];
-        const traceId =
-          mounted.path === ROOT
-            ? folder.id
-            : state?.traceId ??
-              (state?.nodeId ? await resolveFolderTraceIdentity(state.nodeId) : null);
-        if (!traceId || seenFolderTraceIds.has(traceId)) continue;
-        seenFolderTraceIds.add(traceId);
-
-        const folderNodes = await fetchFolderNodes(traceId);
-        const chain = orderReplayTraceChain(folderNodes, traceId);
-        if (chain.length === 0) continue;
-        conformanceVerdicts.push(await verifyFolderTraceChain(chain, {
-          expectedTraceId: traceId,
-        }));
-        chains[`folder:${traceId}`] = chain;
-        for (const event of chain) {
-          steps.push(folderReplayStep(event, mounted.path));
-        }
-      } catch (e) {
-        // One unavailable selection must not suppress the other selected traces.
-        console.warn(`[replay] folder trace failed for ${mounted.path || "Root"}:`, e);
+    for (const { traceId, chain, verdict } of longestByTrace.values()) {
+      chains[`file:${traceId}`] = chain;
+      conformanceVerdicts.push(verdict);
+      if (verdict.status === "full") {
+        for (const checked of verdict.steps) collapsibleNodeIds.add(checked.nodeId);
       }
     }
-    if (sequence !== replayLoadSequenceRef.current || steps.length === 0) return false;
+    for (const { traceId, chain } of longestByTrace.values()) {
+      const occurrences = occurrencesByTrace.get(traceId) ?? [];
+      const firstObservedAt = Math.min(...occurrences.map((occurrence) => occurrence.observedAtMs));
+      const runsTimeline = reconstructRunsTimeline(chain);
+      let prevContent = "";
+      for (const [idx, event] of chain.entries()) {
+        const meta = eventMeta(event);
+        const parsed = JSON.parse(event.content) as { snapshot?: unknown };
+        if (typeof parsed.snapshot !== "string") {
+          throw new Error(`TraceNode ${event.id} is missing its required snapshot`);
+        }
+        const contentUpToHere = parsed.snapshot;
+        for (const occurrence of occurrences) {
+          const isInitialOccurrence = occurrence.observedAtMs === firstObservedAt;
+          if (!replayPathOccurrenceActiveAt(occurrence, meta.steppedAtMs, isInitialOccurrence)) {
+            continue;
+          }
+          addReplayProjection({
+            event,
+            relativePath: occurrence.path,
+            meta,
+            contentUpToHere,
+            runsUpToHere: runsTimeline[idx] ?? [],
+            changeRange: stepDeltaRange(prevContent, contentUpToHere),
+          });
+        }
+        prevContent = contentUpToHere;
+      }
+    }
+    if (
+      sequence !== replayLoadSequenceRef.current ||
+      folderIdRef.current !== replayRootId ||
+      steps.length === 0
+    ) return false;
     // Step-time order, ascending. stable tie-break keeps same-ms steps in
     // their original activity order rather than shuffling them.
-    steps.sort((a, b) => a.meta.steppedAtMs - b.meta.steppedAtMs);
-    const visibleSteps = collapseDerivedFolderCheckpoints(steps);
+    const causallyOrderedSteps = orderReplayTimelineSteps(steps);
+    const visibleSteps = collapseDerivedFolderCheckpoints(causallyOrderedSteps, {
+      collapsibleNodeIds,
+    });
     // Bootstrap the transport at the newest real Step. This does not open or
     // alter an editor tab; the replay panel is created only by a replay gesture.
     const last = visibleSteps.length - 1;
@@ -14507,7 +15371,8 @@ function App() {
    *  nodes exist on the relay, so the ordinary state signature can fire too
    *  early. The completion callback closes that race without disturbing a user
    *  who is deliberately parked on a historical step. */
-  function refreshMountedReplay() {
+  function refreshMountedReplay(expectedRootId = folder?.id) {
+    if (!expectedRootId || folderIdRef.current !== expectedRootId) return;
     const current = replayRef.current;
     if (replayDisplay) return;
     if (current && current.index !== current.steps.length - 1) return;
@@ -14564,11 +15429,7 @@ function App() {
     const cursor = Math.max(0, Math.min(timeline.length - 1, Math.trunc(n)));
     const target = timeline[cursor];
     if (!target) return;
-    const display = replayDisplayThroughFrame(
-      timeline,
-      cursor,
-      r.steps.map((step) => step.event.id),
-    );
+    const display = replayDisplayThroughFrame(timeline, cursor);
 
     setReplaySkipNotice(null);
     replayDisplayRef.current = display;
@@ -14858,7 +15719,6 @@ function App() {
     const nextDisplay = replayDisplayWithFrame(
       replayDisplayRef.current ?? emptyReplayDisplay(),
       frame,
-      r.steps[frame.stepIndex]?.event.id ?? "",
     );
     replayDisplayRef.current = nextDisplay;
     setReplayDisplay(nextDisplay);
@@ -15921,6 +16781,143 @@ function App() {
     }
   }
 
+  function reconcileFailedPathMutation(
+    operationFolderId: string,
+    sourcePath: string,
+    destinationPath: string | null,
+    isFolderMutation: boolean,
+    error: unknown,
+    deleteRollback?: {
+      tabs: Array<{ panelIndex: number; tab: string; wasActive: boolean }>;
+      tabModes: Record<string, Mode>;
+      emptyFolders: string[];
+      collapsed: string[];
+      shielded: string[];
+      selection: TraceRef[];
+      focus: UiFocus | null;
+    },
+    shieldRollback?: ShieldedPathChange,
+  ): void {
+    if (folderIdRef.current !== operationFolderId) return;
+    const persisted = loadLocalFolder(operationFolderId);
+    const durableFiles = persisted ? localToFiles(persisted) : {};
+    const roots = destinationPath ? [sourcePath, destinationPath] : [sourcePath];
+    const inAffectedSubtree = (path: string) => roots.some(
+      (root) => path === root || path.startsWith(`${root}/`),
+    );
+    setFiles((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([path]) => !inAffectedSubtree(path)),
+      );
+      for (const [path, file] of Object.entries(durableFiles)) {
+        if (inAffectedSubtree(path)) next[path] = file;
+      }
+      return next;
+    });
+
+    const durableHasSource = Object.keys(durableFiles).some(
+      (path) => path === sourcePath || (isFolderMutation && path.startsWith(`${sourcePath}/`)),
+    );
+    const durableHasDestination = destinationPath !== null && Object.keys(durableFiles).some(
+      (path) => path === destinationPath ||
+        (isFolderMutation && path.startsWith(`${destinationPath}/`)),
+    );
+    if (destinationPath && durableHasSource && !durableHasDestination) {
+      const reverse = (path: string): string => {
+        if (path === destinationPath) return sourcePath;
+        if (isFolderMutation && path.startsWith(`${destinationPath}/`)) {
+          return sourcePath + path.slice(destinationPath.length);
+        }
+        return path;
+      };
+      const reverseTab = (path: string): string =>
+        isFolderTab(path) ? folderTab(reverse(folderTabPath(path))) : reverse(path);
+      setEmptyFolders((current) => new Set([...current].map(reverse)));
+      setPanels((current) => current.map((panel) => ({
+        tabs: panel.tabs.map(reverseTab),
+        active: reverseTab(panel.active),
+      })) as [PanelState, PanelState]);
+      setTabModes((current) => Object.fromEntries(
+        Object.entries(current).map(([path, mode]) => [reverse(path), mode]),
+      ));
+      setCollapsed((current) => new Set([...current].map(reverse)));
+      setScope((current) => current.map((mount) => ({ ...mount, path: reverse(mount.path) })) as ContextMounts);
+      if (shieldRollback) {
+        commitShieldedForRoot(
+          operationFolderId,
+          revertShieldedPathChange(shieldedRef.current, shieldRollback),
+        );
+      }
+      chooseDirectorySelection(
+        directorySelectionRef.current.map((item) => ({ ...item, path: reverse(item.path) })),
+      );
+      commitUiFocus(rebaseUiFocus(uiFocusRef.current, reverse, reverseTab));
+    }
+    if (!destinationPath && deleteRollback && durableHasSource) {
+      setPanels((current) => {
+        const next = current.map((panel) => ({ ...panel, tabs: [...panel.tabs] }));
+        for (const saved of deleteRollback.tabs) {
+          if (next.some((panel) => panel.tabs.includes(saved.tab))) continue;
+          const panelIndex = Math.min(saved.panelIndex, Math.max(0, next.length - 1));
+          const panel = next[panelIndex];
+          if (!panel) continue;
+          panel.tabs.push(saved.tab);
+          if (saved.wasActive && !panel.active) panel.active = saved.tab;
+        }
+        panelsRef.current = next;
+        return next;
+      });
+      setTabModes((current) => ({ ...deleteRollback.tabModes, ...current }));
+      setEmptyFolders((current) => new Set([
+        ...current,
+        ...deleteRollback.emptyFolders,
+      ]));
+      setCollapsed((current) => new Set([
+        ...current,
+        ...deleteRollback.collapsed,
+      ]));
+      commitShieldedForRoot(
+        operationFolderId,
+        new Set([...shieldedRef.current, ...deleteRollback.shielded]),
+      );
+      chooseDirectorySelection([
+        ...directorySelectionRef.current,
+        ...deleteRollback.selection.filter((saved) =>
+          !directorySelectionRef.current.some((current) => current.path === saved.path)
+        ),
+      ]);
+      if (!uiFocusRef.current && deleteRollback.focus) {
+        commitUiFocus(deleteRollback.focus);
+      }
+    }
+    setStructuralError(
+      `${destinationPath ? "Move" : "Delete"} failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+
+  function retainRetryablePathMutation(
+    operationFolderId: string,
+    sourcePath: string,
+    destinationPath: string | null,
+    error: unknown,
+  ): boolean {
+    if (!hasPendingStructuralPathMutation(
+      operationFolderId,
+      sourcePath,
+      destinationPath,
+    )) return false;
+    if (folderIdRef.current === operationFolderId) {
+      setStructuralError(
+        `${destinationPath ? "Move" : "Delete"} pending retry: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    return true;
+  }
+
   // Move `src` (file or folder path) into `destFolder` ("" = root). Rewrites
   // every file and empty-folder path under src, plus any open panels and
   // collapsed-folder state, so nothing dangles. Guards against illegal moves
@@ -15937,6 +16934,7 @@ function App() {
   // carries it) so we never move the same subtree twice.
   function moveNodes(srcs: string[], destFolder: string) {
     if (!folder) return;
+    const operationFolderId = folder.id;
     if (isMint(destFolder) || isScan(destFolder)) return;
     const mintedSources = srcs.filter((src) => isMint(src) && src !== MINT);
     if (mintedSources.length > 0) void forkMintedNodes(mintedSources, destFolder);
@@ -16073,6 +17071,24 @@ function App() {
     // Context, directory operation selection, and semantic focus all follow
     // the same trace identities through a move.
     setScope((prev) => rebaseContextMountAfterMove(prev, movable, destFolder));
+    const shieldedBeforeMove = shieldedRef.current;
+    const shieldRollbackBySource = new Map<string, ShieldedPathChange>();
+    for (const source of movable) {
+      const destination = destFolder === ROOT
+        ? basename(source)
+        : `${destFolder}/${basename(source)}`;
+      shieldRollbackBySource.set(
+        source,
+        shieldedPathChange(
+          shieldedBeforeMove,
+          rebaseShieldedPath(shieldedBeforeMove, source, destination),
+        ),
+      );
+    }
+    projectShieldedForRoot(
+      operationFolderId,
+      rebaseShieldedAfterMove(shieldedBeforeMove, movable, destFolder),
+    );
     chooseDirectorySelection(
       rebaseTraceRefsAfterMove(directorySelectionRef.current, movable, destFolder),
     );
@@ -16083,9 +17099,11 @@ function App() {
     // reparent. Each
     // top-level source is a separate backend move (movePath already rebases a
     // folder's descendants), so they're independent and tolerate partial
-    // failures — a failed move logs and leaves the rest intact.
+    // failures — a failed move reconciles every affected path from the durable
+    // store and surfaces the conflict.
     for (const src of movable) {
-      const isFolderMove = folderSet.has(src) || hasChild(fileSet, folderSet, src);
+      const isFolderMove = files[src]?.kind === "folder" ||
+        folderSet.has(src) || hasChild(fileSet, folderSet, src);
       const userTagsByPath: Record<string, string[]> = {};
       for (const [p, st] of Object.entries(files)) {
         if (p === src || (isFolderMove && p.startsWith(src + "/"))) {
@@ -16093,10 +17111,28 @@ function App() {
         }
       }
       void backendRef.current.movePath(src, destFolder, isFolderMove, userTagsByPath)
-        .then(refreshMountedReplay)
-        .catch((e) =>
-          console.warn(`[workspace] movePath failed for ${src}:`, e),
-        );
+        .then(() => refreshMountedReplay(operationFolderId))
+        .catch((error) => {
+          console.warn(`[workspace] movePath failed for ${src}:`, error);
+          const destinationPath = destFolder === ROOT
+            ? basename(src)
+            : `${destFolder}/${basename(src)}`;
+          if (retainRetryablePathMutation(
+            operationFolderId,
+            src,
+            destinationPath,
+            error,
+          )) return;
+          reconcileFailedPathMutation(
+            operationFolderId,
+            src,
+            destinationPath,
+            isFolderMove,
+            error,
+            undefined,
+            shieldRollbackBySource.get(src),
+          );
+        });
     }
   }
 
@@ -16105,6 +17141,7 @@ function App() {
    * explicit landmark and its ancestors receive derived roll-ups. */
   function stepFolderPath(path: string): void {
     if (!folder || replayActiveRef.current) return;
+    const operationFolderId = folder.id;
     const pending = pendingFolderStepOperation(folder.id, path);
     const operationId = isTraceOperationId(pending)
       ? pending
@@ -16117,11 +17154,18 @@ function App() {
       .sort((left, right) => left.localeCompare(right));
     void (async () => {
       for (const descendant of dirtyDescendants) {
+        if (folderIdRef.current !== operationFolderId) return;
         await stepFile(descendant, undefined, true, false, operationId);
+        if (folderIdRef.current !== operationFolderId) return;
       }
+      if (
+        folderIdRef.current !== operationFolderId ||
+        backendRef.current.ref?.id !== operationFolderId
+      ) return;
       await backendRef.current.stepFolder(path, undefined, operationId);
-      clearFolderStepOperation(folder.id, path);
-      refreshMountedReplay();
+      if (folderIdRef.current !== operationFolderId) return;
+      clearFolderStepOperation(operationFolderId, path);
+      refreshMountedReplay(operationFolderId);
     })().catch((error) => {
       console.warn(`[provenance] folder Step failed for ${path || "Root"}:`, error);
     });
@@ -16155,6 +17199,32 @@ function App() {
         files[path]?.kind === "folder" ||
         hasChild(fileSet, folderSet, path),
     }));
+    const deleteRollback = new Map(inOblivion.map((path) => {
+      const target = deleteTargets.find((candidate) => candidate.path === path)!;
+      const under = (candidate: string) =>
+        candidate === path || (target.isFolder && candidate.startsWith(`${path}/`));
+      const tabs = panelsRef.current.flatMap((panel, panelIndex) =>
+        panel.tabs.flatMap((tab) => {
+          const tabPath = isFolderTab(tab) ? folderTabPath(tab) : tab;
+          return under(tabPath)
+            ? [{ panelIndex, tab, wasActive: panel.active === tab }]
+            : [];
+        })
+      );
+      return [path, {
+        tabs,
+        tabModes: Object.fromEntries(
+          Object.entries(tabModes).filter(([candidate]) => under(candidate)),
+        ),
+        emptyFolders: [...emptyFolders].filter(under),
+        collapsed: [...collapsed].filter(under),
+        shielded: [...shieldedRef.current].filter(under),
+        selection: directorySelectionRef.current.filter((item) => under(item.path)) as TraceRef[],
+        focus: uiFocusRef.current?.path && under(uiFocusRef.current.path)
+          ? uiFocusRef.current
+          : null,
+      }] as const;
+    }));
     const nextPanels = closeDeletedTabs(panels, deleteTargets, (tab) =>
       isFolderTab(tab) ? folderTabPath(tab) : tab,
     );
@@ -16177,14 +17247,26 @@ function App() {
       while (taken(`${OBLIVION}/${stamp}`)) stamp = `${base}-${n++}`;
       moveNodes(inRoot, `${OBLIVION}/${stamp}`);
     }
-    if (inOblivion.length > 0) hardDelete(inOblivion);
+    if (inOblivion.length > 0) hardDelete(inOblivion, deleteRollback);
   }
 
   /** Permanent delete: tombstone off disk + relay. Used only for items already
    *  in oblivion (emptying the recycle bin) — root deletions go through
    *  moveNodes(_, OBLIVION) instead. */
-  function hardDelete(paths: string[]) {
+  function hardDelete(
+    paths: string[],
+    rollbackByPath: ReadonlyMap<string, {
+      tabs: Array<{ panelIndex: number; tab: string; wasActive: boolean }>;
+      tabModes: Record<string, Mode>;
+      emptyFolders: string[];
+      collapsed: string[];
+      shielded: string[];
+      selection: TraceRef[];
+      focus: UiFocus | null;
+    }> = new Map(),
+  ) {
     if (!folder) return;
+    const operationFolderId = folder.id;
     const fileSet = new Set(Object.keys(files));
     const folderSet = new Set(emptyFolders);
     // Prune to top-level: drop any path nested beneath another deleted path.
@@ -16194,6 +17276,10 @@ function App() {
       .filter((p) => p !== ROOT && p !== OBLIVION)
       .filter((p) => !paths.some((q) => q !== p && isDescendantOrSelf(q, p)));
     if (tops.length === 0) return;
+    projectShieldedForRoot(
+      operationFolderId,
+      removeDeletedShieldedPaths(shieldedRef.current, tops),
+    );
     // A path is removed iff it is a deleted top-level path itself or a
     // descendant of a deleted folder.
     const under = (p: string) =>
@@ -16259,9 +17345,19 @@ function App() {
       for (const p of prev) if (!under(p)) next.add(p);
       return next;
     });
+
     chooseDirectorySelection(directorySelectionRef.current.filter((item) => !under(item.path)));
     if (uiFocusRef.current?.path && under(uiFocusRef.current.path)) {
       commitUiFocus(null);
+    }
+    // A scope mount sitting on or beneath a deleted subtree is now dangling.
+    // Drop it and fall back to the whole-folder mount, matching the reset on
+    // folder switch. Writes already follow the rebased focus, so this is a
+    // state-machine fix — without it the scope UI keeps pointing at a path
+    // that no longer exists and the next MODEL op silently loses the scope
+    // subtree (activePath is still included, but nothing else under scope is).
+    if (scopeRef.current.some((mount) => under(mount.path))) {
+      setScope(folder ? [{ kind: "folder", path: ROOT }] : []);
     }
 
     // Disk delete + delete node + manifest tombstone. Each top-level path is an
@@ -16269,10 +17365,24 @@ function App() {
     for (const path of tops) {
       const isFolderDelete = folderSet.has(path) || hasChild(fileSet, folderSet, path);
       void backendRef.current.deletePath(path, isFolderDelete)
-        .then(refreshMountedReplay)
-        .catch((e) =>
-          console.warn(`[workspace] deletePath failed for ${path}:`, e),
-        );
+        .then(() => refreshMountedReplay(operationFolderId))
+        .catch((error) => {
+          console.warn(`[workspace] deletePath failed for ${path}:`, error);
+          if (retainRetryablePathMutation(
+            operationFolderId,
+            path,
+            null,
+            error,
+          )) return;
+          reconcileFailedPathMutation(
+            operationFolderId,
+            path,
+            null,
+            isFolderDelete,
+            error,
+            rollbackByPath.get(path),
+          );
+        });
     }
   }
 
@@ -16310,6 +17420,7 @@ function App() {
   // path rewrite, no disk rename, no provenance delta.
   function renameNode(path: string, newName: string): string | null {
     if (!folder) return null;
+    const operationFolderId = folder.id;
     if (isMint(path) || isScan(path) || isOblivion(path)) {
       return "Mint, Scan, and Oblivion are read-only.";
     }
@@ -16341,7 +17452,8 @@ function App() {
 
     const fileSet = new Set(Object.keys(files));
     const folderSet = new Set(emptyFolders);
-    const isFolderRename = folderSet.has(path) || hasChild(fileSet, folderSet, path);
+    const isFolderRename = files[path]?.kind === "folder" ||
+      folderSet.has(path) || hasChild(fileSet, folderSet, path);
     // Folder names become nostr tags, so the same tag-token rule as createCommit.
     if (isFolderRename && !isValidTagToken(cleanName))
       return `"${cleanName}" isn't a valid folder name. Use letters, digits, _ and - only (no spaces).`;
@@ -16391,10 +17503,23 @@ function App() {
       return next;
     });
 
+    const shieldedBeforeRename = shieldedRef.current;
+    const renamedShielded = rebaseShieldedPath(shieldedBeforeRename, path, destPath);
+    const renameShieldRollback = shieldedPathChange(shieldedBeforeRename, renamedShielded);
+    projectShieldedForRoot(operationFolderId, renamedShielded);
+
     chooseDirectorySelection(
       directorySelectionRef.current.map((item) => ({ ...item, path: rebaser(item.path) })),
     );
     commitUiFocus(rebaseUiFocus(uiFocusRef.current, rebaser, renameTabRebaser));
+    // The context mount follows the renamed path too, mirroring moveNodes.
+    // Without this, renaming (or reparenting-under-rename) the scope mount
+    // leaves scope pointing at a path that no longer exists. The rebase rule
+    // (exact-match rewrite, plus prefix rewrite for folder renames) is the
+    // pure helper in scope-model.ts, unit-tested for all four cases.
+    setScope((current) =>
+      rebaseContextMountAfterRename(current, path, destPath, isFolderRename),
+    );
 
     // Storage rename + an identity-preserving provenance step. Carry each
     // affected file's user tags through, same as moveNodes.
@@ -16405,10 +17530,25 @@ function App() {
       }
     }
     void backendRef.current.renamePath(path, cleanName, isFolderRename, userTagsByPath)
-      .then(refreshMountedReplay)
-      .catch((e) =>
-        console.warn(`[workspace] renamePath failed for ${path}:`, e),
-      );
+      .then(() => refreshMountedReplay(operationFolderId))
+      .catch((error) => {
+        console.warn(`[workspace] renamePath failed for ${path}:`, error);
+        if (retainRetryablePathMutation(
+          operationFolderId,
+          path,
+          destPath,
+          error,
+        )) return;
+        reconcileFailedPathMutation(
+          operationFolderId,
+          path,
+          destPath,
+          isFolderRename,
+          error,
+          undefined,
+          renameShieldRollback,
+        );
+      });
     return null;
   }
 
@@ -16812,6 +17952,51 @@ function App() {
                     onClick={() => setStagedMergeView(stagedMerges[0])}
                   >
                     Review
+                  </button>
+                </div>
+              )}
+              {structuralError && (
+                <div className="reconcile-banner structural-error-banner" role="alert">
+                  <span>{structuralError}</span>
+                  <button
+                    type="button"
+                    className="staged-merges-review"
+                    onClick={() => {
+                      if (folder && structuralConflictId) {
+                        // Archived terminal conflict: dismiss clears the record.
+                        clearStructuralConflict(folder.id, structuralConflictId);
+                      } else if (folder) {
+                        // Unclassified recovery throw left a journal entry
+                        // stuck in pendingStructuralOperations without
+                        // archiving it to structuralConflicts. Without a
+                        // force-clear, every later Root mutation re-runs
+                        // recovery and re-throws, bricking the workspace for
+                        // new writes with no other in-app escape. Archive the
+                        // oldest stuck entry via failStructuralOperation (NOT
+                        // clearStructuralOperation): clearStructuralOperation
+                        // rolls shields during->after, which is the SUCCESS
+                        // semantic and would move shields to the destination
+                        // even though the op never completed — unshielding
+                        // content still sitting at the source (a shield leak
+                        // / trust-boundary violation). failStructuralOperation
+                        // rolls during->before, restoring the original shield
+                        // set so source content stays protected. The user
+                        // explicitly abandons the op; archiving also leaves an
+                        // honest structuralConflicts audit trail.
+                        const stuck = pendingStructuralOperations(folder.id)[0];
+                        if (stuck) {
+                          failStructuralOperation(
+                            folder.id,
+                            stuck,
+                            "abandoned by user: recovery could not classify the failure",
+                          );
+                        }
+                      }
+                      setStructuralConflictId(null);
+                      setStructuralError(null);
+                    }}
+                  >
+                    Dismiss
                   </button>
                 </div>
               )}
@@ -17463,6 +18648,9 @@ function App() {
                     loading={replayLoading}
                     latestActionOutput={latestActionOutput}
                     conformance={replayConformance}
+                    derivedCheckpoints={derivedFolderCheckpointDetails(
+                      replay?.steps[replay.index],
+                    )}
                     containerTitle={
                       replay
                         ? (() => {

@@ -27,6 +27,7 @@ import {
   buildAuthors,
   parseAuthors,
   reconstructRunsFromChain,
+  reconstructRunsTimeline,
 } from "./provenance.js";
 import type { EditorDelta } from "./provenance.js";
 import type { Run } from "../workspace/workspace-core.js";
@@ -37,6 +38,22 @@ type FakeEvent = {
   pubkey: string;
   content: string;
 };
+
+test("reconstructRunsTimeline emits one frontier per node in one traversal", () => {
+  const chain = Array.from({ length: 1_000 }, (_, index) => ({
+    id: `node-${index}`,
+    pubkey: "a".repeat(64),
+    content: JSON.stringify({
+      snapshot: `v${index}`,
+      deltas: [],
+      authors: [{ v: "a".repeat(64), len: `v${index}`.length }],
+    }),
+  }));
+  const timeline = reconstructRunsTimeline(chain as never);
+  assert.equal(timeline.length, 1_000);
+  assert.equal(timeline[0]?.[0]?.text, "v0");
+  assert.equal(timeline[999]?.[0]?.text, "v999");
+});
 
 /** Build a kind-4290-style content body for a node. */
 function nodeContent(opts: {

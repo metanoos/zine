@@ -3,6 +3,7 @@ import type { Event } from "nostr-tools";
 import { groupKEditsByTransaction } from "../provenance/kedit-capture.js";
 import {
   isFocusSelection,
+  eventMeta,
   keditsFromEvent,
   type FocusSelection,
   type KEdit,
@@ -12,6 +13,7 @@ import { traceProcessFromEvent } from "../provenance/trace-process.js";
 import {
   applyKEditTransaction,
   flattenRuns,
+  type FileState,
   type Run,
 } from "../workspace/workspace-core.js";
 
@@ -32,20 +34,156 @@ export interface ReplayTimelineStep {
   /** Signed automatic roll-ups grouped beneath this visible gesture. They
    * remain inspectable data and are still applied to structural replay state. */
   derivedFolderCheckpoints?: ReplayTimelineStep[];
+  /** Additional mounted projections of this same signed event. Repeated folder
+   * identities are aliases, not duplicate Steps, so they share one visible
+   * checkpoint while replay applies every occurrence. */
+  occurrenceProjections?: ReplayTimelineStep[];
 }
 
-/** Group automatic ancestor roll-ups under the exact checkpoint they advance.
- * Source links may form a file→folder→ancestor tree, so attachment is recursive.
- * A lone or out-of-order derived node stays visible: incomplete history is
- * never silently erased. */
+/** Merge independent trace chains without allowing wall-clock rollback to
+ * place a causal child before its signed predecessor/source. */
+export function orderReplayTimelineSteps<T extends ReplayTimelineStep>(steps: readonly T[]): T[] {
+  const byId = new Map(steps.map((step) => [step.event.id, step]));
+  const original = new Map(steps.map((step, index) => [step.event.id, index]));
+  const dependencies = new Map<string, Set<string>>();
+  for (const step of steps) {
+    const deps = new Set<string>();
+    const prev = step.event.tags.find((tag) => tag[0] === "e" && tag[3] === "prev")?.[1];
+    const source = step.meta.folderCheckpoint?.sourceNodeId;
+    if (prev && byId.has(prev)) deps.add(prev);
+    if (source && byId.has(source)) deps.add(source);
+    if (step.meta.folderCheckpoint?.cause === "explicit-step" && step.meta.operationId) {
+      const downstream = new Set<string>();
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const candidate of steps) {
+          const candidateSource = candidate.meta.folderCheckpoint?.sourceNodeId;
+          if (
+            candidateSource &&
+            (candidateSource === step.event.id || downstream.has(candidateSource)) &&
+            !downstream.has(candidate.event.id)
+          ) {
+            downstream.add(candidate.event.id);
+            changed = true;
+          }
+        }
+      }
+      for (const candidate of steps) {
+        if (
+          candidate.event.id !== step.event.id &&
+          candidate.meta.operationId === step.meta.operationId &&
+          !downstream.has(candidate.event.id)
+        ) {
+          deps.add(candidate.event.id);
+        }
+      }
+    }
+    dependencies.set(step.event.id, deps);
+  }
+  const emitted = new Set<string>();
+  const ordered: T[] = [];
+  while (ordered.length < steps.length) {
+    const next = steps
+      .filter((step) => !emitted.has(step.event.id))
+      .filter((step) => [...(dependencies.get(step.event.id) ?? [])].every((id) => emitted.has(id)))
+      .sort((a, b) => a.meta.steppedAtMs - b.meta.steppedAtMs ||
+        (original.get(a.event.id) ?? 0) - (original.get(b.event.id) ?? 0))[0];
+    if (!next) return [...steps];
+    emitted.add(next.event.id);
+    ordered.push(next);
+  }
+  return ordered;
+}
+
+/** Coalesce every load of one recursive folder identity, including lazy
+ * historical occurrences discovered concurrently. The promise is cached
+ * before the fetch starts so repeated occurrences cannot race into duplicate
+ * relay queries. */
+export function memoizedReplayFolderNodeLoad(
+  cache: Map<string, Promise<Event[]>>,
+  folderId: string,
+  load: (folderId: string) => Promise<Event[]>,
+): Promise<Event[]> {
+  const existing = cache.get(folderId);
+  if (existing) return existing;
+  const pending = load(folderId);
+  cache.set(folderId, pending);
+  return pending;
+}
+
+export const REPLAY_MAX_FOLDER_OCCURRENCES = 4_096;
+export const REPLAY_MAX_FOLDER_DEPTH = 64;
+
+export function admitReplayFolderOccurrence(
+  seen: Set<string>,
+  key: string,
+  path: string,
+  limits: { maxOccurrences?: number; maxDepth?: number } = {},
+): { admitted: boolean; error?: string } {
+  if (seen.has(key)) return { admitted: false };
+  const maxDepth = limits.maxDepth ?? REPLAY_MAX_FOLDER_DEPTH;
+  const depth = path.split("/").filter(Boolean).length;
+  if (depth > maxDepth) {
+    return {
+      admitted: false,
+      error: `recursive Replay folder depth ${depth} exceeds ${maxDepth}`,
+    };
+  }
+  const maxOccurrences = limits.maxOccurrences ?? REPLAY_MAX_FOLDER_OCCURRENCES;
+  if (seen.size >= maxOccurrences) {
+    return {
+      admitted: false,
+      error: `recursive Replay folder occurrences exceed ${maxOccurrences}`,
+    };
+  }
+  seen.add(key);
+  return { admitted: true };
+}
+
+/** Group signed checkpoints into the gesture that produced them. An explicit
+ * folder Step is the visible endpoint for its whole operation; ordinary file
+ * Steps retain the source-linked folder→ancestor roll-up tree. A derived node
+ * without its source stays visible: incomplete history is never hidden. */
 export function collapseDerivedFolderCheckpoints<T extends ReplayTimelineStep>(
   steps: readonly T[],
+  options: { collapsibleNodeIds?: ReadonlySet<string> } = {},
 ): T[] {
   const indexById = new Map(steps.map((step, index) => [step.event.id, index]));
   const children = new Map<string, T[]>();
   const attached = new Set<string>();
+  const explicitOperationMembers = new Set<string>();
+
+  const byOperation = new Map<string, T[]>();
+  for (const step of steps) {
+    if (!step.meta.operationId) continue;
+    const group = byOperation.get(step.meta.operationId) ?? [];
+    group.push(step);
+    byOperation.set(step.meta.operationId, group);
+  }
+  for (const group of byOperation.values()) {
+    const explicit = group.filter((step) =>
+      step.folder && step.meta.folderCheckpoint?.cause === "explicit-step",
+    );
+    if (explicit.length !== 1 || group.length < 2) continue;
+    if (
+      options.collapsibleNodeIds &&
+      group.some((step) => !options.collapsibleNodeIds!.has(step.event.id))
+    ) continue;
+    const endpoint = explicit[0]!;
+    for (const step of group) explicitOperationMembers.add(step.event.id);
+    children.set(
+      endpoint.event.id,
+      group.filter((step) => step.event.id !== endpoint.event.id),
+    );
+    for (const step of group) {
+      if (step.event.id !== endpoint.event.id) attached.add(step.event.id);
+    }
+  }
+
   for (let index = 0; index < steps.length; index += 1) {
     const step = steps[index]!;
+    if (explicitOperationMembers.has(step.event.id)) continue;
     const operationId = step.meta.operationId;
     const sourceNodeId = step.meta.folderCheckpoint?.sourceNodeId;
     if (
@@ -56,7 +194,12 @@ export function collapseDerivedFolderCheckpoints<T extends ReplayTimelineStep>(
     ) continue;
     const sourceIndex = indexById.get(sourceNodeId);
     const source = sourceIndex === undefined ? undefined : steps[sourceIndex];
-    if (!source || sourceIndex! >= index || source.meta.operationId !== operationId) continue;
+    if (!source || source.meta.operationId !== operationId) continue;
+    if (
+      options.collapsibleNodeIds &&
+      (!options.collapsibleNodeIds.has(source.event.id) ||
+        !options.collapsibleNodeIds.has(step.event.id))
+    ) continue;
     const group = children.get(sourceNodeId) ?? [];
     group.push(step);
     children.set(sourceNodeId, group);
@@ -74,22 +217,98 @@ export function collapseDerivedFolderCheckpoints<T extends ReplayTimelineStep>(
   return steps.filter((step) => !attached.has(step.event.id)).map(materialize);
 }
 
+export interface DerivedFolderCheckpointDetail {
+  nodeId: string;
+  path: string;
+  cause: string;
+  operationId?: string;
+  signerPubkey: string;
+  signedEventJson: string;
+}
+
+/** Flatten one visible gesture's automatic signed roll-ups for an inspectable
+ * disclosure list. Replay still applies them recursively to structural state. */
+export function derivedFolderCheckpointDetails(
+  step: ReplayTimelineStep | undefined,
+): DerivedFolderCheckpointDetail[] {
+  const details: DerivedFolderCheckpointDetail[] = [];
+  const visit = (candidate: ReplayTimelineStep) => {
+    for (const derived of candidate.derivedFolderCheckpoints ?? []) {
+      details.push({
+        nodeId: derived.event.id,
+        path: derived.folder?.path ?? derived.relativePath,
+        cause: derived.meta.folderCheckpoint?.cause ?? "child-advance",
+        operationId: derived.meta.operationId,
+        signerPubkey: derived.event.pubkey,
+        signedEventJson: JSON.stringify(derived.event, null, 2),
+      });
+      visit(derived);
+    }
+  };
+  if (step) visit(step);
+  return details;
+}
+
 function flattenGroupedSteps(
   steps: readonly ReplayTimelineStep[],
 ): ReplayTimelineStep[] {
-  const flattened: ReplayTimelineStep[] = [];
+  const discovered: ReplayTimelineStep[] = [];
+  const seen = new Set<string>();
   const visit = (step: ReplayTimelineStep) => {
-    flattened.push(step);
+    if (seen.has(step.event.id)) return;
+    seen.add(step.event.id);
+    discovered.push(step);
     for (const derived of step.derivedFolderCheckpoints ?? []) visit(derived);
   };
   for (const step of steps) visit(step);
-  return flattened;
+
+  const byId = new Map(discovered.map((step) => [step.event.id, step]));
+  const originalIndex = new Map(discovered.map((step, index) => [step.event.id, index]));
+  const dependencies = new Map<string, Set<string>>();
+  for (const step of discovered) {
+    const source = step.meta.folderCheckpoint?.sourceNodeId;
+    if (source && byId.has(source)) dependencies.set(step.event.id, new Set([source]));
+  }
+  for (const step of discovered) {
+    if (step.meta.folderCheckpoint?.cause !== "explicit-step") continue;
+    const prerequisites = discovered
+      .filter((candidate) =>
+        candidate.event.id !== step.event.id &&
+        candidate.meta.operationId === step.meta.operationId,
+      )
+      .map((candidate) => candidate.event.id);
+    if (prerequisites.length > 0) dependencies.set(step.event.id, new Set(prerequisites));
+  }
+
+  const ordered: ReplayTimelineStep[] = [];
+  const emitted = new Set<string>();
+  while (ordered.length < discovered.length) {
+    const ready = discovered
+      .filter((step) => !emitted.has(step.event.id))
+      .filter((step) => [...(dependencies.get(step.event.id) ?? [])].every((id) => emitted.has(id)))
+      .sort((left, right) =>
+        left.meta.steppedAtMs - right.meta.steppedAtMs ||
+        (originalIndex.get(left.event.id) ?? 0) - (originalIndex.get(right.event.id) ?? 0),
+      );
+    const next = ready[0];
+    if (!next) {
+      // Defensive fallback for malformed cyclic source links. The verifier
+      // normally prevents this; preserving every step is safer than dropping it.
+      return discovered;
+    }
+    emitted.add(next.event.id);
+    ordered.push(next);
+  }
+  return ordered.flatMap((step) => [step, ...(step.occurrenceProjections ?? [])]);
 }
 
 export interface PlayFrame {
   kind: "file" | "folder" | "focus";
   path: string;
   stepIndex: number;
+  /** Immutable signed event that produced this frame. `stepIndex` addresses the
+   * collapsed visible gesture and may therefore name a different folder node. */
+  eventId?: string;
   runs: Run[];
   at: number;
   /** This action is also the durable checkpoint for `stepIndex`. KEdit frames
@@ -137,6 +356,17 @@ export interface ReplayDisplay {
   /** Last recorded slot for a path, retained across an unmount so a later edit
    *  can return to the same place when no newer mount exists. */
   panelIndexByPath: Record<string, number>;
+  /** Evicted immutable members retained by node identity so a later signed
+   * re-add can restore its last replay projection without inventing a Step. */
+  detached: Record<string, ReplayDetachedSubtree>;
+}
+
+export interface ReplayDetachedSubtree {
+  boundary: string;
+  files: Record<string, ReplayFileDisplay>;
+  folders: Record<string, ReplayFolderState>;
+  panels: Record<number, string>;
+  panelIndexByPath: Record<string, number>;
 }
 
 export interface ReplayFolderMember {
@@ -158,6 +388,42 @@ export interface ReplayFolderState {
   path: string;
   members: ReplayFolderMember[];
   focus: ReplayFocusDelta[];
+  /** Same-kind, same-path members whose stable trace identity was replaced in
+   * this checkpoint. Ordinary child `advance` deltas deliberately do not
+   * appear here: their existing replay subtree remains the same occurrence. */
+  identityReplacements?: ReplayFolderIdentityReplacement[];
+}
+
+export interface ReplayFolderIdentityReplacement {
+  kind: "file" | "folder";
+  relativePath: string;
+  previousNodeId: string;
+  nodeId: string;
+}
+
+export interface HistoricalReplayMember {
+  kind: "file" | "folder";
+  path: string;
+  parentFolderId: string;
+  relativePath: string;
+  nodeId: string;
+  contentHash: string;
+  observedAtMs: number;
+  /** First checkpoint where this path occurrence is no longer a member.
+   * Omitted while the occurrence remains active at the pinned Root head. */
+  removedAtMs?: number;
+}
+
+/** Membership chronology decides where a file Step is projected. The first
+ * occurrence owns pre-membership genesis/edit events; later paths begin only
+ * at their structural checkpoint, and removed paths end at that checkpoint. */
+export function replayPathOccurrenceActiveAt(
+  occurrence: Pick<HistoricalReplayMember, "observedAtMs" | "removedAtMs">,
+  eventAtMs: number,
+  initial: boolean,
+): boolean {
+  if (!initial && eventAtMs < occurrence.observedAtMs) return false;
+  return occurrence.removedAtMs === undefined || eventAtMs < occurrence.removedAtMs;
 }
 
 function charCount(text: string): number {
@@ -254,10 +520,52 @@ interface FolderEventContent {
   deltas?: Array<{
     type?: string;
     op?: "mount" | "unmount";
+    kind?: "file" | "folder";
+    relativePath?: string;
+    nodeId?: string;
     selection?: FocusSelection;
     panelIndex?: number;
     timestamp?: number;
   }>;
+}
+
+function folderIdentityReplacements(
+  deltas: FolderEventContent["deltas"],
+): ReplayFolderIdentityReplacement[] {
+  const removedByMember = new Map<string, string>();
+  for (const delta of Array.isArray(deltas) ? deltas : []) {
+    if (
+      delta.type !== "remove" ||
+      (delta.kind !== "file" && delta.kind !== "folder") ||
+      typeof delta.relativePath !== "string" ||
+      typeof delta.nodeId !== "string"
+    ) continue;
+    removedByMember.set(
+      `${delta.kind}\u0000${delta.relativePath}`,
+      delta.nodeId,
+    );
+  }
+
+  const replacements: ReplayFolderIdentityReplacement[] = [];
+  for (const delta of Array.isArray(deltas) ? deltas : []) {
+    if (
+      delta.type !== "add" ||
+      (delta.kind !== "file" && delta.kind !== "folder") ||
+      typeof delta.relativePath !== "string" ||
+      typeof delta.nodeId !== "string"
+    ) continue;
+    const previousNodeId = removedByMember.get(
+      `${delta.kind}\u0000${delta.relativePath}`,
+    );
+    if (!previousNodeId || previousNodeId === delta.nodeId) continue;
+    replacements.push({
+      kind: delta.kind,
+      relativePath: delta.relativePath,
+      previousNodeId,
+      nodeId: delta.nodeId,
+    });
+  }
+  return replacements;
 }
 
 /** Parse one signed folder checkpoint into structural replay state. The
@@ -299,7 +607,10 @@ export function folderReplayState(event: Event, path: string): ReplayFolderState
       !isFocusSelection(delta.selection) ||
       !Number.isInteger(delta.panelIndex) ||
       (delta.panelIndex ?? -1) < 0 ||
-      !Number.isFinite(delta.timestamp)
+      // Integer milliseconds, matching the wire gate in trace-conformance.ts
+      // (focus-delta timestamp rule). `Number.isFinite` would admit fractional
+      // ms that conformance rejects.
+      !Number.isInteger(delta.timestamp)
     ) {
       continue;
     }
@@ -311,12 +622,94 @@ export function folderReplayState(event: Event, path: string): ReplayFolderState
       timestamp: delta.timestamp as number,
     });
   }
-  return { path, members, focus };
+  const identityReplacements = folderIdentityReplacements(parsed.deltas);
+  return {
+    path,
+    members,
+    focus,
+    ...(identityReplacements.length > 0 ? { identityReplacements } : {}),
+  };
 }
 
-/** Resolve one append-only trace from an unordered event set. Only a chain
- * that reaches the requested genesis is eligible. A deterministic newest-head
- * tie-break keeps replay stable if an unresolved branch is present. */
+/** Recover every direct member that appeared anywhere in one verified folder
+ * chain. Entries survive later removal so Replay can still load their pinned
+ * historical nodes even when the live workspace no longer contains the path. */
+export function historicalReplayMembers(
+  parentFolderId: string,
+  folderPath: string,
+  chain: readonly Event[],
+): HistoricalReplayMember[] {
+  const history: HistoricalReplayMember[] = [];
+  const active = new Map<string, number>();
+  for (const event of chain) {
+    const state = folderReplayState(event, folderPath);
+    const checkpointAt = eventMeta(event).steppedAtMs;
+    const replacementHeads = new Set(
+      state.identityReplacements?.map((replacement) =>
+        `${replacement.kind}\u0000${replacement.relativePath}\u0000${replacement.nodeId}`
+      ),
+    );
+    const present = new Set<string>();
+    for (const member of state.members) {
+      if (!member.latestNodeId || !member.contentHash) continue;
+      const key = `${member.kind}\u0000${member.relativePath}`;
+      present.add(key);
+      const path = folderPath
+        ? `${folderPath}/${member.relativePath}`
+        : member.relativePath;
+      const index = active.get(key);
+      const prior = index === undefined ? undefined : history[index];
+      // A file membership can switch immutable trace identity at the same
+      // structural path during fork-on-write. Without the member node itself
+      // there is no synchronous way to distinguish that seam from an ordinary
+      // same-trace advance, so retain each distinct file pin. The loader later
+      // resolves stable identities and coalesces same-trace prefixes.
+      const startsNewFileOccurrence =
+        member.kind === "file" &&
+        prior !== undefined &&
+        prior.nodeId !== member.latestNodeId;
+      const startsNewFolderOccurrence =
+        member.kind === "folder" &&
+        prior !== undefined &&
+        prior.nodeId !== member.latestNodeId &&
+        replacementHeads.has(
+          `${member.kind}\u0000${member.relativePath}\u0000${member.latestNodeId}`,
+        );
+      if (index === undefined || startsNewFileOccurrence || startsNewFolderOccurrence) {
+        if (index !== undefined && prior) {
+          history[index] = { ...prior, removedAtMs: checkpointAt };
+        }
+        active.set(key, history.length);
+        history.push({
+          kind: member.kind,
+          path,
+          parentFolderId,
+          relativePath: member.relativePath,
+          nodeId: member.latestNodeId,
+          contentHash: member.contentHash,
+          observedAtMs: checkpointAt,
+        });
+      } else {
+        history[index] = {
+          ...history[index]!,
+          nodeId: member.latestNodeId,
+          contentHash: member.contentHash,
+        };
+      }
+    }
+    for (const [key, index] of active) {
+      if (!present.has(key)) {
+        history[index] = { ...history[index]!, removedAtMs: checkpointAt };
+        active.delete(key);
+      }
+    }
+  }
+  return history;
+}
+
+/** Resolve one append-only trace from an unordered event set. Replay and prompt
+ * context require the whole unique chain: branches, gaps, cycles, and orphaned
+ * nodes are rejected instead of being hidden by a best-effort head choice. */
 export function orderReplayTraceChain(
   events: readonly Event[],
   genesisId: string,
@@ -329,30 +722,52 @@ export function orderReplayTraceChain(
     const prev = event.tags.find((tag) => tag[0] === "e" && tag[3] === "prev")?.[1];
     if (prev) citedAsPrev.add(prev);
   }
-  const heads = events
-    .filter((event) => !citedAsPrev.has(event.id))
-    .sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
+  const heads = [...byId.values()].filter((event) => !citedAsPrev.has(event.id));
+  if (heads.length !== 1) return [];
 
-  for (const head of heads) {
-    const newestFirst: Event[] = [];
-    const seen = new Set<string>();
-    let cursor: string | undefined = head.id;
-    while (cursor && !seen.has(cursor)) {
-      seen.add(cursor);
-      const event = byId.get(cursor);
-      if (!event) break;
-      newestFirst.push(event);
-      if (event.id === genesisId) {
-        const prev = event.tags.find(
-          (tag) => tag[0] === "e" && tag[3] === "prev",
-        )?.[1];
-        if (!prev) return newestFirst.reverse();
-        break;
-      }
-      cursor = event.tags.find(
-        (tag) => tag[0] === "e" && tag[3] === "prev",
-      )?.[1];
+  const newestFirst: Event[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined = heads[0]!.id;
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    const event = byId.get(cursor);
+    if (!event) return [];
+    newestFirst.push(event);
+    const prev = event.tags.find(
+      (tag) => tag[0] === "e" && tag[3] === "prev",
+    )?.[1];
+    if (event.id === genesisId) {
+      return !prev && newestFirst.length === byId.size ? newestFirst.reverse() : [];
     }
+    cursor = prev;
+  }
+  return [];
+}
+
+/** Resolve one complete ancestry ending at an exact immutable head. Later
+ * siblings and unrelated branches are irrelevant to a membership pin: only
+ * the cited head's own prev path must reach the requested genesis exactly. */
+export function orderReplayTraceChainAtHead(
+  events: readonly Event[],
+  genesisId: string,
+  headId: string,
+): Event[] {
+  const byId = new Map(events.map((event) => [event.id, event]));
+  const newestFirst: Event[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined = headId;
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    const event = byId.get(cursor);
+    if (!event) return [];
+    newestFirst.push(event);
+    const prev = event.tags.find(
+      (tag) => tag[0] === "e" && tag[3] === "prev",
+    )?.[1];
+    if (event.id === genesisId) {
+      return !prev ? newestFirst.reverse() : [];
+    }
+    cursor = prev;
   }
   return [];
 }
@@ -368,6 +783,80 @@ export function selectedReplayPaths(
   );
 }
 
+export interface RecursiveReplayFileSource {
+  path: string;
+  folderId: string;
+  relativePath: string;
+  nodeId: string;
+}
+
+export interface RecursiveReplayFolderSource {
+  path: string;
+  folderId: string;
+  /** Optional membership-pinned head for one historical path occurrence. */
+  nodeId?: string;
+}
+
+/** Resolve flattened UI paths to the direct recursive trace coordinates used
+ * on the wire. A file focus contributes exactly that file. A folder focus
+ * contributes every file and folder trace in its subtree. */
+export function recursiveReplaySources(
+  rootFolderId: string,
+  files: Readonly<Record<string, FileState>>,
+  scopes: readonly TraceRef[],
+  rootNodeId?: string,
+): {
+  files: RecursiveReplayFileSource[];
+  folders: RecursiveReplayFolderSource[];
+} {
+  const selectedFiles = Object.entries(files)
+    .filter(([, file]) => file.kind !== "folder" && Boolean(file.nodeId))
+    .filter(([path]) => pathInTraceScopes(scopes, new Set(), path))
+    .flatMap(([path, file]) => {
+      const separator = path.lastIndexOf("/");
+      if (separator === -1) {
+        return [{ path, folderId: rootFolderId, relativePath: path, nodeId: file.nodeId }];
+      }
+      const parent = files[path.slice(0, separator)];
+      const folderId = parent?.kind === "folder" ? parent.traceId ?? parent.nodeId : null;
+      return folderId
+        ? [{
+            path,
+            folderId,
+            relativePath: path.slice(separator + 1),
+            nodeId: file.nodeId,
+          }]
+        : [];
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
+
+  const candidates: RecursiveReplayFolderSource[] = [
+    { path: "", folderId: rootFolderId, ...(rootNodeId ? { nodeId: rootNodeId } : {}) },
+    ...Object.entries(files).flatMap(([path, file]) => {
+      if (file.kind !== "folder") return [];
+      const folderId = file.traceId ?? file.nodeId;
+      return folderId ? [{ path, folderId, nodeId: file.nodeId || undefined }] : [];
+    }),
+  ];
+  const selectedFolders = candidates
+    .filter((candidate, index, all) =>
+      all.findIndex((other) =>
+        other.folderId === candidate.folderId && other.path === candidate.path
+      ) === index,
+    )
+    .filter((candidate) => scopes.some((scope) => {
+      if (candidate.path === "" || scope.path === "") return true;
+      const candidateIsAncestor = scope.path.startsWith(`${candidate.path}/`);
+      if (scope.kind === "file") return candidateIsAncestor;
+      return candidate.path === scope.path ||
+        candidateIsAncestor ||
+        candidate.path.startsWith(`${scope.path}/`);
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+
+  return { files: selectedFiles, folders: selectedFolders };
+}
+
 /** Build the state of every replay tab at one real global Step. */
 export function replayDisplayAt(
   steps: readonly ReplayTimelineStep[],
@@ -376,10 +865,7 @@ export function replayDisplayAt(
   let display = emptyReplayDisplay();
   const applyStep = (step: ReplayTimelineStep) => {
     if (step.folder) {
-      display = {
-        ...display,
-        folders: { ...display.folders, [step.folder.path]: step.folder },
-      };
+      display = applyReplayFolderState(display, step.folder);
       for (const focus of step.folder.focus) {
         display = applyReplayFocus(display, focus);
       }
@@ -395,18 +881,209 @@ export function replayDisplayAt(
         },
       };
     }
-    for (const derived of step.derivedFolderCheckpoints ?? []) applyStep(derived);
   };
   for (let i = 0; i <= index && i < steps.length; i++) {
     const step = steps[i];
     if (!step) continue;
-    applyStep(step);
+    for (const grouped of flattenGroupedSteps([step])) applyStep(grouped);
   }
   return display;
 }
 
 export function emptyReplayDisplay(): ReplayDisplay {
-  return { files: {}, folders: {}, panels: {}, panelIndexByPath: {} };
+  return { files: {}, folders: {}, panels: {}, panelIndexByPath: {}, detached: {} };
+}
+
+function pathAtOrBelow(path: string, boundary: string): boolean {
+  return path === boundary || path.startsWith(`${boundary}/`);
+}
+
+function replayMemberKey(member: ReplayFolderMember): string | null {
+  return member.latestNodeId ? `${member.kind}\u0000${member.latestNodeId}` : null;
+}
+
+function rebaseReplayPath(path: string, from: string, to: string): string {
+  if (path === from) return to;
+  return `${to}/${path.slice(from.length + 1)}`;
+}
+
+function restoreReplaySnapshot(
+  snapshot: ReplayDisplay["detached"][string],
+  boundary: string,
+  files: ReplayDisplay["files"],
+  folders: ReplayDisplay["folders"],
+  panels: ReplayDisplay["panels"],
+  panelIndexByPath: ReplayDisplay["panelIndexByPath"],
+  restorePanels: boolean,
+): void {
+  for (const [path, file] of Object.entries(snapshot.files)) {
+    files[rebaseReplayPath(path, snapshot.boundary, boundary)] = file;
+  }
+  for (const [path, state] of Object.entries(snapshot.folders)) {
+    const rebased = rebaseReplayPath(path, snapshot.boundary, boundary);
+    folders[rebased] = { ...state, path: rebased };
+  }
+  for (const [path, panelIndex] of Object.entries(snapshot.panelIndexByPath)) {
+    panelIndexByPath[rebaseReplayPath(path, snapshot.boundary, boundary)] = panelIndex;
+  }
+  if (restorePanels) {
+    for (const [panelIndex, path] of Object.entries(snapshot.panels)) {
+      panels[Number(panelIndex)] = rebaseReplayPath(path, snapshot.boundary, boundary);
+    }
+  }
+}
+
+/** Apply a structural checkpoint and evict projections whose direct member (or
+ * ancestor folder member) disappeared. Historical documents re-enter only when
+ * a later checkpoint and file frame explicitly restore them. */
+function applyReplayFolderState(
+  display: ReplayDisplay,
+  folder: ReplayFolderState,
+): ReplayDisplay {
+  const previous = display.folders[folder.path];
+  const directKey = (member: ReplayFolderMember) =>
+    `${member.kind}\u0000${member.relativePath}`;
+  const replacementKeys = new Set(
+    folder.identityReplacements?.map((replacement) =>
+      `${replacement.kind}\u0000${replacement.relativePath}\u0000${replacement.previousNodeId}\u0000${replacement.nodeId}`
+    ) ?? [],
+  );
+  const replaces = (
+    before: ReplayFolderMember,
+    after: ReplayFolderMember,
+  ) => replacementKeys.has(
+    `${before.kind}\u0000${before.relativePath}\u0000${before.latestNodeId ?? ""}\u0000${after.latestNodeId ?? ""}`,
+  );
+  const previousByKey = new Map(previous?.members.map((member) => [directKey(member), member]) ?? []);
+  const currentByKey = new Map(folder.members.map((member) => [directKey(member), member]));
+  const removedMembers = previous?.members.filter((member) => {
+    const retained = currentByKey.get(directKey(member));
+    return !retained || replaces(member, retained);
+  }) ?? [];
+  const addedMembers = folder.members.filter((member) =>
+    !previousByKey.has(directKey(member)) ||
+    replaces(previousByKey.get(directKey(member))!, member),
+  );
+  const detached = { ...display.detached };
+  const detachedThisFrame = new Set<string>();
+  const removedBoundaryByMemberKey = new Map<string, string>();
+  const removedBoundarySet = new Set<string>();
+  for (const member of removedMembers) {
+    const boundary = folder.path
+      ? `${folder.path}/${member.relativePath}`
+      : member.relativePath;
+    removedBoundarySet.add(boundary);
+    const key = replayMemberKey(member);
+    if (!key) continue;
+    removedBoundaryByMemberKey.set(key, boundary);
+    detachedThisFrame.add(key);
+  }
+  const removedBoundaryFor = (path: string): string | null => {
+    let cursor = path;
+    while (cursor) {
+      if (removedBoundarySet.has(cursor)) return cursor;
+      const slash = cursor.lastIndexOf("/");
+      cursor = slash < 0 ? "" : cursor.slice(0, slash);
+    }
+    return removedBoundarySet.has("") ? "" : null;
+  };
+  type DetachedBuilder = ReplayDetachedSubtree;
+  const detachedByBoundary = new Map<string, DetachedBuilder>();
+  for (const boundary of removedBoundarySet) {
+    detachedByBoundary.set(boundary, {
+      boundary,
+      files: {},
+      folders: {},
+      panels: {},
+      panelIndexByPath: {},
+    });
+  }
+  const files: ReplayDisplay["files"] = {};
+  for (const [path, value] of Object.entries(display.files)) {
+    const boundary = removedBoundaryFor(path);
+    if (boundary === null) files[path] = value;
+    else detachedByBoundary.get(boundary)!.files[path] = value;
+  }
+  const panelIndexByPath: ReplayDisplay["panelIndexByPath"] = {};
+  for (const [path, value] of Object.entries(display.panelIndexByPath)) {
+    const boundary = removedBoundaryFor(path);
+    if (boundary === null) panelIndexByPath[path] = value;
+    else detachedByBoundary.get(boundary)!.panelIndexByPath[path] = value;
+  }
+  const panels: ReplayDisplay["panels"] = {};
+  for (const [panelIndex, path] of Object.entries(display.panels)) {
+    const boundary = removedBoundaryFor(path);
+    if (boundary === null) panels[Number(panelIndex)] = path;
+    else detachedByBoundary.get(boundary)!.panels[Number(panelIndex)] = path;
+  }
+  const folders: Record<string, ReplayFolderState> = {};
+  for (const [path, value] of Object.entries(display.folders)) {
+    const boundary = path === folder.path ? null : removedBoundaryFor(path);
+    if (boundary === null) folders[path] = value;
+    else detachedByBoundary.get(boundary)!.folders[path] = value;
+  }
+  for (const [key, boundary] of removedBoundaryByMemberKey) {
+    detached[key] = detachedByBoundary.get(boundary)!;
+  }
+  // Cross-parent moves are persisted target-add first, source-remove second.
+  // At removal time the destination membership is already visible, so move
+  // the just-captured projection there immediately instead of leaving it only
+  // in detached history with no later add frame to restore it.
+  const destinationsByMemberKey = new Map<
+    string,
+    Array<{ candidatePath: string; member: ReplayFolderMember }>
+  >();
+  for (const [candidatePath, candidate] of Object.entries(display.folders)) {
+    for (const member of candidate.members) {
+      const key = replayMemberKey(member);
+      if (!key) continue;
+      const destinations = destinationsByMemberKey.get(key) ?? [];
+      destinations.push({ candidatePath, member });
+      destinationsByMemberKey.set(key, destinations);
+    }
+  }
+  for (const member of removedMembers) {
+    const key = replayMemberKey(member);
+    const snapshot = key ? detached[key] : undefined;
+    if (!key || !snapshot) continue;
+    for (const { candidatePath, member: relocated } of destinationsByMemberKey.get(key) ?? []) {
+      if (candidatePath === folder.path || pathAtOrBelow(candidatePath, snapshot.boundary)) {
+        continue;
+      }
+      const boundary = candidatePath
+        ? `${candidatePath}/${relocated.relativePath}`
+        : relocated.relativePath;
+      restoreReplaySnapshot(
+        snapshot,
+        boundary,
+        files,
+        folders,
+        panels,
+        panelIndexByPath,
+        true,
+      );
+    }
+  }
+  for (const member of addedMembers) {
+    const key = replayMemberKey(member);
+    if (!key) continue;
+    const snapshot = detached[key];
+    if (!snapshot) continue;
+    const boundary = folder.path
+      ? `${folder.path}/${member.relativePath}`
+      : member.relativePath;
+    restoreReplaySnapshot(
+      snapshot,
+      boundary,
+      files,
+      folders,
+      panels,
+      panelIndexByPath,
+      detachedThisFrame.has(key),
+    );
+  }
+  folders[folder.path] = folder;
+  return { files, folders, panels, panelIndexByPath, detached };
 }
 
 function focusPath(selection: FocusSelection): string {
@@ -438,10 +1115,7 @@ export function replayDisplayWithFrame(
   nodeId = "",
 ): ReplayDisplay {
   if (frame.kind === "folder" && frame.folder) {
-    return {
-      ...display,
-      folders: { ...display.folders, [frame.folder.path]: frame.folder },
-    };
+    return applyReplayFolderState(display, frame.folder);
   }
   if (frame.kind === "focus" && frame.focus) {
     return applyReplayFocus(display, frame.focus);
@@ -451,7 +1125,7 @@ export function replayDisplayWithFrame(
     ...display,
     files: {
       ...display.files,
-      [frame.path]: { runs: frame.runs, nodeId },
+      [frame.path]: { runs: frame.runs, nodeId: frame.eventId ?? nodeId },
     },
     panelIndexByPath:
       frame.panelIndex === undefined
@@ -495,21 +1169,34 @@ export function buildReplayTimeline(
 ): PlayFrame[] | null {
   const stepIndexByEventId = new Map<string, number>();
   const stepByEventId = new Map<string, ReplayTimelineStep>();
+  const occurrenceProjectionsByEventId = new Map<string, ReplayTimelineStep[]>();
+  const causalOrderByEventId = new Map<string, number>();
+  let causalOrder = 0;
   steps.forEach((step, visibleIndex) => {
     for (const grouped of flattenGroupedSteps([step])) {
       stepIndexByEventId.set(grouped.event.id, visibleIndex);
-      stepByEventId.set(grouped.event.id, grouped);
+      if (!stepByEventId.has(grouped.event.id)) {
+        stepByEventId.set(grouped.event.id, grouped);
+      } else {
+        const projections = occurrenceProjectionsByEventId.get(grouped.event.id) ?? [];
+        projections.push(grouped);
+        occurrenceProjectionsByEventId.set(grouped.event.id, projections);
+      }
+      causalOrderByEventId.set(grouped.event.id, causalOrder++);
     }
   });
   const all: PlayFrame[] = [];
+  const causalOrderByFrame = new WeakMap<PlayFrame, number>();
   for (const [path, chain] of Object.entries(chains)) {
     const frames: PlayFrame[] = [];
     let runs: Run[] = [];
     for (const event of chain) {
+      const eventFrameStart = frames.length;
       const stepIndex = stepIndexByEventId.get(event.id);
       if (stepIndex === undefined) continue;
       const step = stepByEventId.get(event.id);
       const stepAt = step?.meta.steppedAtMs ?? event.created_at * 1000;
+      const eventPath = step?.relativePath ?? path;
       if (step?.folder) {
         for (const focus of step.folder.focus) {
           frames.push({
@@ -531,6 +1218,35 @@ export function buildReplayTimeline(
           reachesStep: true,
           folder: step.folder,
         });
+        for (const projection of occurrenceProjectionsByEventId.get(event.id) ?? []) {
+          if (!projection.folder) continue;
+          for (const focus of projection.folder.focus) {
+            frames.push({
+              kind: "focus",
+              path: focusPath(focus.selection),
+              stepIndex,
+              runs: [],
+              at: Math.min(focus.timestamp, stepAt),
+              panelIndex: focus.panelIndex,
+              focus,
+            });
+          }
+          frames.push({
+            kind: "folder",
+            path: "",
+            stepIndex,
+            runs: [],
+            at: stepAt,
+            folder: projection.folder,
+          });
+        }
+        for (let index = eventFrameStart; index < frames.length; index += 1) {
+          frames[index]!.eventId = event.id;
+          causalOrderByFrame.set(
+            frames[index]!,
+            causalOrderByEventId.get(event.id) ?? Number.MAX_SAFE_INTEGER,
+          );
+        }
         continue;
       }
       let parsed: { snapshot?: string };
@@ -560,7 +1276,7 @@ export function buildReplayTimeline(
           const recordedAt = transaction.find((edit) => Number.isFinite(edit.t))?.t;
           replayFrames.push({
             kind: "file",
-            path,
+            path: eventPath,
             stepIndex,
             runs: replayRuns,
             at: recordedAt === undefined ? stepAt : Math.min(recordedAt, stepAt),
@@ -593,7 +1309,7 @@ export function buildReplayTimeline(
               : [];
         frames.push({
           kind: "file",
-          path,
+          path: eventPath,
           stepIndex,
           runs,
           at: stepAt,
@@ -605,7 +1321,7 @@ export function buildReplayTimeline(
       if (!lastFrame || lastFrame.stepIndex !== stepIndex || lastFrame.at !== stepAt) {
         frames.push({
           kind: "file",
-          path,
+          path: eventPath,
           stepIndex,
           runs,
           at: stepAt,
@@ -618,12 +1334,32 @@ export function buildReplayTimeline(
         // final transaction and the savepoint. Show the whole Step footprint.
         if (stepDelta) lastFrame.delta = stepDelta;
       }
+      const primaryFrames = frames.slice(eventFrameStart);
+      for (const projection of occurrenceProjectionsByEventId.get(event.id) ?? []) {
+        if (!projection.relativePath || projection.folder) continue;
+        frames.push(...primaryFrames.map((frame) => ({
+          ...frame,
+          path: projection.relativePath,
+          reachesStep: false,
+        })));
+      }
+      for (let index = eventFrameStart; index < frames.length; index += 1) {
+        frames[index]!.eventId = event.id;
+        causalOrderByFrame.set(
+          frames[index]!,
+          causalOrderByEventId.get(event.id) ?? Number.MAX_SAFE_INTEGER,
+        );
+      }
     }
     if (frames.length > 0) all.push(...frames);
   }
 
   if (all.length === 0) return null;
-  all.sort((a, b) => a.at - b.at);
+  all.sort((a, b) =>
+    a.at - b.at ||
+    (causalOrderByFrame.get(a) ?? Number.MAX_SAFE_INTEGER) -
+      (causalOrderByFrame.get(b) ?? Number.MAX_SAFE_INTEGER)
+  );
   const firstContentIndex = all.findIndex(
     (frame) => frame.kind === "file" && flattenRuns(frame.runs).length > 0,
   );
@@ -635,6 +1371,7 @@ export function buildReplayTimeline(
       kind: "file",
       path: firstContent.path,
       stepIndex: firstContent.stepIndex,
+      eventId: firstContent.eventId,
       runs: [],
       at: firstContent.at,
     });
@@ -664,4 +1401,12 @@ export function buildReplayTimeline(
     frame.panelIndex = current ?? lastPanelByPath.get(frame.path);
   }
   return all;
+}
+
+/** Every immutable event already represented by a visible Replay timeline,
+ * including checkpoints collapsed beneath an explicit folder gesture. */
+export function replayTimelineEventIds(
+  steps: readonly ReplayTimelineStep[],
+): Set<string> {
+  return new Set(flattenGroupedSteps(steps).map((step) => step.event.id));
 }

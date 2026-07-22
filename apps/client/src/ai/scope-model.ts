@@ -105,6 +105,111 @@ export function rebaseContextMountAfterMove(
   return [rebaseTraceRefsAfterMove(mounts, movedRoots, destFolder)[0]];
 }
 
+/** Carry the one context mount across an in-place rename. `path` is the
+ * pre-rename node, `destPath` its post-rename path. A folder rename rewrites
+ * every mount whose path is the renamed folder or sits beneath it; a file
+ * rename rewrites only an exact-match mount. An ancestor-of-the-rename mount
+ * and any unrelated mount pass through unchanged. Mirrors the path-rewrite
+ * rule the storage layer applies to file keys, so scope stays consistent with
+ * the live tree. */
+export function rebaseContextMountAfterRename(
+  mounts: ContextMounts,
+  path: string,
+  destPath: string,
+  isFolderRename: boolean,
+): ContextMounts {
+  if (mounts.length === 0) return [];
+  const mount = mounts[0];
+  const p = mount.path;
+  let nextPath: string;
+  if (p === path) {
+    nextPath = destPath;
+  } else if (isFolderRename && p.startsWith(path + "/")) {
+    nextPath = destPath + p.slice(path.length);
+  } else {
+    nextPath = p;
+  }
+  return nextPath === p ? mounts : [{ ...mount, path: nextPath }];
+}
+
+/** Carry shield boundaries through one exact path-prefix rewrite. If the moved
+ * root inherited a broader shield that stays behind, install an explicit
+ * boundary at the destination so moving sensitive content cannot unshield it. */
+export function rebaseShieldedPath(
+  shielded: ReadonlySet<string>,
+  source: string,
+  destination: string,
+): Set<string> {
+  const next = new Set<string>();
+  let inherited = false;
+  for (const boundary of shielded) {
+    if (containsPath(source, boundary)) {
+      next.add(boundary === source
+        ? destination
+        : destination + boundary.slice(source.length));
+    } else {
+      next.add(boundary);
+      if (containsPath(boundary, source)) inherited = true;
+    }
+  }
+  if (inherited) next.add(destination);
+  return next;
+}
+
+/** Carry all shield boundaries through one multi-source reparent gesture. */
+export function rebaseShieldedAfterMove(
+  shielded: ReadonlySet<string>,
+  movedRoots: readonly string[],
+  destFolder: string,
+): Set<string> {
+  let next = new Set(shielded);
+  for (const source of movedRoots) {
+    const slash = source.lastIndexOf("/");
+    const sourceName = slash === -1 ? source : source.slice(slash + 1);
+    const destination = destFolder ? `${destFolder}/${sourceName}` : sourceName;
+    next = rebaseShieldedPath(next, source, destination);
+  }
+  return next;
+}
+
+export interface ShieldedPathChange {
+  added: readonly string[];
+  removed: readonly string[];
+}
+
+/** Record and reverse only the boundaries changed by one optimistic mutation.
+ * This is safer than applying the prefix rewrite backwards: a destination may
+ * inherit an unrelated pre-existing shield that never belonged to the source. */
+export function shieldedPathChange(
+  before: ReadonlySet<string>,
+  after: ReadonlySet<string>,
+): ShieldedPathChange {
+  return {
+    added: [...after].filter((path) => !before.has(path)),
+    removed: [...before].filter((path) => !after.has(path)),
+  };
+}
+
+export function revertShieldedPathChange(
+  current: ReadonlySet<string>,
+  change: ShieldedPathChange,
+): Set<string> {
+  const next = new Set(current);
+  for (const path of change.added) next.delete(path);
+  for (const path of change.removed) next.add(path);
+  return next;
+}
+
+/** Drop explicit boundaries contained by a permanently deleted subtree. */
+export function removeDeletedShieldedPaths(
+  shielded: ReadonlySet<string>,
+  deletedRoots: readonly string[],
+): Set<string> {
+  return new Set([...shielded].filter((boundary) =>
+    !deletedRoots.some((root) => containsPath(root, boundary))
+  ));
+}
+
 /** Resolve the path union contributed by an ordinary multi-selection. */
 export function pathInTraceScopes(
   scopes: readonly TraceRef[],

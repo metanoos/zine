@@ -9,7 +9,7 @@ hypotheses. Last updated 2026-07-18.
 | Capability | State | How to check |
 |---|---|---|
 | Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke; folder heads carry direct manifests and propagate recursively toward Root |
-| Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, membership transition, hash, lineage, and operation id; client tests exercise add versus advance, explicit folder/Root Step plumbing, durable retry ids, nested AI context, and Replay roll-up collapse. Fixed cross-runtime folder vectors and explicit crash-boundary real-relay fixtures remain hardening work |
+| Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, immutable child-head transitions, removal head pins, hash, lineage, operation id, and integer membership timestamps. Client tests exercise serialized file/folder/structural mutations, durable move/delete journal persistence and rejection paths, verified nested AI context, and inspectable Replay operation grouping. An explicit attach-after-crash real-relay fault fixture remains hardening work |
 | Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
 | Step, Publish (wire name Send), Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |

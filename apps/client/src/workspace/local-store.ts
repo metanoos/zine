@@ -1,5 +1,4 @@
 import { vaultStorage as localStorage } from "../storage/vault-storage.js";
-
 /**
  * localStorage persistence for webapp folders — the primary store.
  *
@@ -23,7 +22,10 @@ import { vaultStorage as localStorage } from "../storage/vault-storage.js";
  * `relay.created_at * 1000 > local.updatedAt`.
  */
 
+import type { Event } from "nostr-tools";
+import { verifyEvent } from "nostr-tools/pure";
 import type { KEdit } from "../provenance/provenance.js";
+import { operationIdFromNode } from "../provenance/provenance.js";
 import { contentFingerprint } from "../ai/context-snapshot.js";
 import { hashCanonicalV1 } from "../ai/desktop-operation-envelope.js";
 import type { FolderRef, Run } from "./workspace-core.js";
@@ -65,6 +67,10 @@ export interface LocalFile {
   /** Causal id reused across a staged file Step, its folder roll-ups, and any
    * retry after a partial relay failure. Cleared only after the gesture lands. */
   pendingOperationId?: string;
+  /** Exact immutable file node signed for the pending operation. It is stored
+   * before any outbox or relay write so recovery republishes these bytes
+   * instead of minting a sibling after a crash. */
+  pendingSignedEvent?: Event;
   /** ms-precision local write time. The tiebreaker vs the relay. */
   updatedAt: number;
   /** Live per-voice attribution (the editor's run list). Optional on
@@ -131,6 +137,8 @@ export interface DesktopOperationCrashPadReceiptV1 {
 export interface LocalFolder {
   id: string;
   label?: string;
+  /** Exact Root folder checkpoint represented by this local projection. */
+  nodeId?: string;
   files: Record<string, LocalFile>;
   /** Folder-level tags keyed by folder relative path. Folders are otherwise
    *  implicit in file paths; this is the one piece of folder metadata. Optional
@@ -142,6 +150,72 @@ export interface LocalFolder {
   /** Durable transaction ids for explicit recursive folder Steps that have
    * started but not yet reached their final explicit folder checkpoint. */
   pendingFolderSteps?: Record<string, string>;
+  /** Structural gestures span several immutable file/folder appends plus a
+   * local path update. Persist the exact gesture before its first append so an
+   * attach after a crash can reuse its causal id and finish idempotently. */
+  pendingStructuralOperations?: Record<string, PendingStructuralOperation>;
+  /** Terminal semantic conflicts are retained for diagnosis/UI without
+   * blocking every later Root mutation through automatic recovery. */
+  structuralConflicts?: Record<string, StructuralOperationConflict>;
+}
+
+export interface PendingStructuralMove {
+  oldRel: string;
+  newRel: string;
+}
+
+export interface PendingFolderMemberExpectation {
+  traceId: string;
+  nodeId: string;
+}
+
+export type PendingStructuralOperation =
+  | {
+      version: 2;
+      kind: "delete";
+      operationId: string;
+      sourcePath: string;
+      isFolder: boolean;
+      affectedPaths: string[];
+      /** Exact folder memberships this gesture is authorized to remove. */
+      expectedFolders: Record<string, PendingFolderMemberExpectation>;
+      shieldedPathsBefore?: string[];
+      shieldedPathsDuring?: string[];
+      shieldedPathsAfter?: string[];
+    }
+  | {
+      version: 2;
+      kind: "move";
+      operationId: string;
+      sourcePath: string;
+      targetPath: string;
+      isFolder: true;
+      moves: PendingStructuralMove[];
+      /** The folder identity/head being moved, never merely a destination path. */
+      expectedFolder: PendingFolderMemberExpectation;
+      /** Every recursive folder membership touched by Oblivion recovery. */
+      expectedFolders: Record<string, PendingFolderMemberExpectation>;
+      shieldedPathsBefore?: string[];
+      shieldedPathsDuring?: string[];
+      shieldedPathsAfter?: string[];
+    }
+  | {
+      version: 1;
+      kind: "create-folder";
+      operationId: string;
+      sourcePath: string;
+      isFolder: true;
+      genesisId: string;
+      contentHash: string;
+      /** Full public signed event, kept in the same atomic journal write as
+       * its id so recovery can republish it after a pre-outbox crash. */
+      genesisEvent: Event;
+    };
+
+export interface StructuralOperationConflict {
+  operation: PendingStructuralOperation;
+  reason: string;
+  failedAt: number;
 }
 
 function key(folderId: string): string {
@@ -160,17 +234,162 @@ export function loadLocalFolder(folderId: string): LocalFolder | null {
     const unknownFiles = parsed.files as Record<string, unknown>;
     if (!Object.values(unknownFiles).every(isLocalFile)) return null;
     const files = unknownFiles as Record<string, LocalFile>;
+    const droppedOperationIds = new Set<string>();
+    const structuralOperations = Object.fromEntries(
+      Object.entries(parsed.pendingStructuralOperations ?? {})
+        .filter((entry): entry is [string, PendingStructuralOperation] => {
+          const accepted = isPendingStructuralOperation(entry[1]);
+          // Track which causal ids were filter-dropped (unknown version,
+          // malformed shape, or a future schema) so a file whose optimistic
+          // projection still points at one of them via `pendingOperationId`
+          // can be reconciled below instead of leaving a phantom path
+          // mutation whose journal can no longer be recovered.
+          if (!accepted && entry[0]) droppedOperationIds.add(entry[0]);
+          return accepted;
+        }),
+    );
+    // Reconcile phantom projections: if a file references a dropped operation
+    // id, drop the reference so the next gesture does not attempt to resume a
+    // journal that no longer exists. A file may also carry `pendingSignedEvent`
+    // — the exact signed bytes staged to republish under that operation id. If
+    // its embedded operation id matches a dropped journal, those bytes cannot
+    // be safely republished (their causal binding is gone and `pushToRelay`
+    // would throw on the id mismatch against a freshly-minted operation id),
+    // so clear it too and let the next push re-sign under the new id. Other
+    // pending fields (`pendingMove`, `pendingEmptyGenesis`) are durable
+    // movement/bootstrap journals of their own and are left intact so an
+    // interrupted move/bootstrap can still resume.
+    if (droppedOperationIds.size > 0) {
+      for (const file of Object.values(files)) {
+        const droppedId = file.pendingOperationId;
+        if (droppedId && droppedOperationIds.has(droppedId)) {
+          delete file.pendingOperationId;
+        }
+        if (file.pendingSignedEvent) {
+          let signedOperationId: string | null = null;
+          try {
+            signedOperationId = operationIdFromNode(file.pendingSignedEvent);
+          } catch {
+            signedOperationId = null;
+          }
+          if (signedOperationId !== null && droppedOperationIds.has(signedOperationId)) {
+            // `nodeId` is advanced to the pending event's id at the same atomic
+            // write as `pendingSignedEvent` (see persistPendingFileNode), so it
+            // is left dangling once those bytes are gone. Clear it back to the
+            // genesis-pending sentinel so the next push computes `prevId` from
+            // the folder manifest (or null for a brand-new file) instead of
+            // linking a new node to a never-published event id — which would
+            // produce a `broken-prev` chain the relay accepts but conformance
+            // downgrades to SNAPSHOT ONLY.
+            if (file.nodeId === file.pendingSignedEvent.id) {
+              file.nodeId = "";
+            }
+            delete file.pendingSignedEvent;
+          }
+        }
+      }
+    }
+    const structuralConflicts = Object.fromEntries(
+      Object.entries(parsed.structuralConflicts ?? {})
+        .filter((entry): entry is [string, StructuralOperationConflict] => {
+          const conflict = entry[1] as Partial<StructuralOperationConflict> | undefined;
+          return !!conflict &&
+            isPendingStructuralOperation(conflict.operation) &&
+            typeof conflict.reason === "string" &&
+            typeof conflict.failedAt === "number";
+        }),
+    );
     return {
       id: parsed.id,
       label: parsed.label,
+      ...(typeof parsed.nodeId === "string" ? { nodeId: parsed.nodeId } : {}),
       files,
       folderTags: parsed.folderTags,
       shieldedPaths: parsed.shieldedPaths,
       pendingFolderSteps: parsed.pendingFolderSteps,
+      ...(Object.keys(structuralOperations).length > 0
+        ? { pendingStructuralOperations: structuralOperations }
+        : {}),
+      ...(Object.keys(structuralConflicts).length > 0
+        ? { structuralConflicts }
+        : {}),
     };
   } catch {
     return null;
   }
+}
+
+function isPendingStructuralOperation(value: unknown): value is PendingStructuralOperation {
+  if (!value || typeof value !== "object") return false;
+  const operation = value as Partial<PendingStructuralOperation>;
+  if (
+    typeof operation.operationId !== "string" ||
+    !/^[0-9a-f]{64}$/.test(operation.operationId) ||
+    typeof operation.sourcePath !== "string" ||
+    typeof operation.isFolder !== "boolean"
+  ) return false;
+  if (operation.kind === "delete") {
+    return operation.version === 2 &&
+      Array.isArray(operation.affectedPaths) &&
+      operation.affectedPaths.every((path) => typeof path === "string") &&
+      isOptionalStringArray(operation.shieldedPathsBefore) &&
+      isOptionalStringArray(operation.shieldedPathsDuring) &&
+      isOptionalStringArray(operation.shieldedPathsAfter) &&
+      isPendingFolderExpectationRecord(operation.expectedFolders);
+  }
+  if (operation.kind === "create-folder") {
+    return operation.version === 1 &&
+      operation.isFolder === true &&
+      typeof operation.genesisId === "string" &&
+      /^[0-9a-f]{64}$/.test(operation.genesisId) &&
+      typeof operation.contentHash === "string" &&
+      /^[0-9a-f]{64}$/.test(operation.contentHash) &&
+      !!operation.genesisEvent &&
+      operation.genesisEvent.id === operation.genesisId &&
+      verifyEvent(operation.genesisEvent);
+  }
+  return operation.version === 2 &&
+    operation.kind === "move" &&
+    operation.isFolder === true &&
+    typeof operation.targetPath === "string" &&
+    isOptionalStringArray(operation.shieldedPathsBefore) &&
+    isOptionalStringArray(operation.shieldedPathsDuring) &&
+    isOptionalStringArray(operation.shieldedPathsAfter) &&
+    isPendingFolderExpectation(operation.expectedFolder) &&
+    isPendingFolderExpectationRecord(operation.expectedFolders) &&
+    Array.isArray(operation.moves) &&
+    operation.moves.every((move) =>
+      !!move &&
+      typeof move.oldRel === "string" &&
+      typeof move.newRel === "string",
+    );
+}
+
+function isOptionalStringArray(value: unknown): boolean {
+  return value === undefined || (
+    Array.isArray(value) && value.every((entry) => typeof entry === "string")
+  );
+}
+
+function isPendingFolderExpectation(
+  value: unknown,
+): value is PendingFolderMemberExpectation {
+  if (!value || typeof value !== "object") return false;
+  const expectation = value as Partial<PendingFolderMemberExpectation>;
+  return typeof expectation.traceId === "string" &&
+    /^[0-9a-f]{64}$/.test(expectation.traceId) &&
+    typeof expectation.nodeId === "string" &&
+    /^[0-9a-f]{64}$/.test(expectation.nodeId);
+}
+
+function isPendingFolderExpectationRecord(
+  value: unknown,
+): value is Record<string, PendingFolderMemberExpectation> {
+  return !!value &&
+    typeof value === "object" &&
+    Object.entries(value).every(([path, expectation]) =>
+      typeof path === "string" && isPendingFolderExpectation(expectation)
+    );
 }
 
 function isLocalFile(value: unknown): value is LocalFile {
@@ -187,7 +406,14 @@ function isLocalFile(value: unknown): value is LocalFile {
       isDesktopOperationCrashPadReceiptV1(file.desktopOperationReceipt)
       && isExactDesktopOperationCrashPadReceipt(file as LocalFile)
     )) &&
-    typeof file.updatedAt === "number"
+    typeof file.updatedAt === "number" &&
+    (
+      file.pendingSignedEvent === undefined ||
+      (
+        file.pendingSignedEvent.id === file.nodeId &&
+        verifyEvent(file.pendingSignedEvent)
+      )
+    )
   );
 }
 
@@ -254,7 +480,9 @@ export function isExactDesktopOperationCrashPadReceipt(file: LocalFile): boolean
 }
 
 /** Persist a whole folder (overwrites). Returns false when browser storage
- * rejects the write so transaction coordinators can keep their retry journal. */
+ * rejects the write so transaction coordinators can keep their retry journal.
+ * The boolean lets transaction barriers distinguish a durable write from the
+ * editor's best-effort cache writes. */
 function saveLocalFolder(folder: LocalFolder): boolean {
   try {
     localStorage.setItem(key(folder.id), JSON.stringify(folder));
@@ -290,6 +518,7 @@ export function saveLocalFile(
     pendingKedits?: KEdit[];
     pendingEmptyGenesis?: boolean;
     pendingOperationId?: string;
+    pendingSignedEvent?: Event;
   },
   label?: string,
 ): boolean {
@@ -321,17 +550,42 @@ export function saveLocalFile(
     ...(data.pendingKedits ? { pendingKedits: data.pendingKedits } : {}),
     ...(data.pendingEmptyGenesis ? { pendingEmptyGenesis: true } : {}),
     ...(data.pendingOperationId ? { pendingOperationId: data.pendingOperationId } : {}),
+    ...(data.pendingSignedEvent ? { pendingSignedEvent: data.pendingSignedEvent } : {}),
   };
   if (label !== undefined) existing.label = label;
   return saveLocalFolder(existing);
 }
 
 /** Remove a file from a local folder (tombstone). Synchronous. */
-export function deleteLocalFile(folderId: string, relativePath: string): void {
+export function deleteLocalFile(folderId: string, relativePath: string): boolean {
   const existing = loadLocalFolder(folderId);
-  if (!existing) return;
+  if (!existing) return true;
   delete existing.files[relativePath];
-  saveLocalFolder(existing);
+  if (!saveLocalFolder(existing)) return false;
+  // Clear any pending MODEL-write receipt at this path so the next boot does
+  // not resurrect the deleted file's buffer. Leaf-clearing is sufficient here
+  // because the structural delete loop visits every descendant path; folder
+  // roots carry no pad entry of their own (only files are buffered).
+  deletePadPath(folderId, relativePath, false);
+  return true;
+}
+
+/** Remove several projection paths with one read/serialize/write transaction.
+ * Pull absence reconciliation uses this to avoid reparsing a large flattened
+ * workspace once per missing descendant. */
+export function deleteLocalFiles(folderId: string, relativePaths: readonly string[]): boolean {
+  if (relativePaths.length === 0) return true;
+  const existing = loadLocalFolder(folderId);
+  if (!existing) return true;
+  for (const relativePath of relativePaths) delete existing.files[relativePath];
+  if (!saveLocalFolder(existing)) return false;
+  // Mirror the per-path deletePadPath loop: relay-driven absence deletions
+  // (pull reconciliation) remove real files, so their pending MODEL-write
+  // receipts must not survive to resurrect on the next boot either. Leaf
+  // clearing per path is sufficient — each path in the batch is a concrete
+  // file the remote removed.
+  for (const relativePath of relativePaths) deletePadPath(folderId, relativePath, false);
+  return true;
 }
 
 /** Move a file's path within a local folder. Synchronous. */
@@ -341,19 +595,28 @@ export function moveLocalFile(
   newPath: string,
   pendingMove?: LocalFile["pendingMove"],
   pendingOperationId?: string,
-): void {
+  pendingLocalOnly?: boolean,
+  shieldedPaths?: readonly string[],
+): boolean {
   const existing = loadLocalFolder(folderId);
-  if (!existing) return;
+  if (!existing) return false;
   const file = existing.files[oldPath];
-  if (!file) return;
+  if (!file) return false;
   delete existing.files[oldPath];
   existing.files[newPath] = {
     ...file,
     ...(pendingMove ? { pendingMove } : {}),
     ...(pendingOperationId ? { pendingOperationId } : {}),
+    ...(pendingLocalOnly ? { pendingLocalOnly: true } : {}),
     updatedAt: Date.now(),
   };
-  saveLocalFolder(existing);
+  if (shieldedPaths) existing.shieldedPaths = [...shieldedPaths];
+  if (!saveLocalFolder(existing)) return false;
+  // Keep the crash pad keyed in lockstep with the file map so a pending
+  // MODEL-write receipt follows its file instead of resurrecting at the old
+  // path on the next boot.
+  movePadPath(folderId, oldPath, newPath);
+  return true;
 }
 
 /** Read a folder's folder-level tags (keyed by folder relative path). `{}` if
@@ -389,19 +652,29 @@ export function pendingFolderStepOperation(
   return loadLocalFolder(folderId)?.pendingFolderSteps?.[relativePath] ?? null;
 }
 
+export function pendingFolderStepOperations(
+  folderId: string,
+): Array<{ relativePath: string; operationId: string }> {
+  return Object.entries(loadLocalFolder(folderId)?.pendingFolderSteps ?? {})
+    .map(([relativePath, operationId]) => ({ relativePath, operationId }))
+    .sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+}
+
 export function stageFolderStepOperation(
   folderId: string,
   relativePath: string,
   operationId: string,
 ): void {
   const existing = loadLocalFolder(folderId) ?? { id: folderId, files: {} };
-  saveLocalFolder({
+  if (!saveLocalFolder({
     ...existing,
     pendingFolderSteps: {
       ...existing.pendingFolderSteps,
       [relativePath]: operationId,
     },
-  });
+  })) {
+    throw new Error(`cannot persist pending folder Step for ${relativePath || "Root"}`);
+  }
 }
 
 export function clearFolderStepOperation(folderId: string, relativePath: string): void {
@@ -409,10 +682,135 @@ export function clearFolderStepOperation(folderId: string, relativePath: string)
   if (!existing?.pendingFolderSteps?.[relativePath]) return;
   const next = { ...existing.pendingFolderSteps };
   delete next[relativePath];
-  saveLocalFolder({
+  if (!saveLocalFolder({
     ...existing,
     ...(Object.keys(next).length > 0 ? { pendingFolderSteps: next } : { pendingFolderSteps: undefined }),
-  });
+  })) {
+    throw new Error(`cannot clear pending folder Step for ${relativePath || "Root"}`);
+  }
+}
+
+export function pendingStructuralOperations(folderId: string): PendingStructuralOperation[] {
+  return Object.values(loadLocalFolder(folderId)?.pendingStructuralOperations ?? {})
+    .filter(isPendingStructuralOperation);
+}
+
+/** Whether a failed optimistic path mutation still has a durable retry journal.
+ * While this is true the projected destination/deletion is the user-visible
+ * intent and must not be rolled back: the next Root mutation resumes the exact
+ * operation before doing new work. */
+export function hasPendingStructuralPathMutation(
+  folderId: string,
+  sourcePath: string,
+  targetPath: string | null,
+): boolean {
+  return pendingStructuralOperations(folderId).some((operation) =>
+    operation.sourcePath === sourcePath &&
+    (targetPath === null
+      ? operation.kind === "delete"
+      : operation.kind === "move" && operation.targetPath === targetPath)
+  );
+}
+
+export function stageStructuralOperation(
+  folderId: string,
+  operation: PendingStructuralOperation,
+): void {
+  const existing = loadLocalFolder(folderId) ?? { id: folderId, files: {} };
+  if (!saveLocalFolder({
+    ...existing,
+    ...("shieldedPathsDuring" in operation && operation.shieldedPathsDuring
+      ? { shieldedPaths: [...operation.shieldedPathsDuring] }
+      : {}),
+    pendingStructuralOperations: {
+      ...existing.pendingStructuralOperations,
+      [operation.operationId]: operation,
+    },
+  })) {
+    throw new Error(`cannot persist pending structural operation ${operation.operationId}`);
+  }
+}
+
+export function applyShieldedPathTransition(
+  current: readonly string[],
+  from: readonly string[],
+  to: readonly string[],
+): string[] {
+  const next = new Set(current);
+  const target = new Set(to);
+  for (const path of from) if (!target.has(path)) next.delete(path);
+  const source = new Set(from);
+  for (const path of to) if (!source.has(path)) next.add(path);
+  return [...next].sort();
+}
+
+export function clearStructuralOperation(folderId: string, operationId: string): void {
+  const existing = loadLocalFolder(folderId);
+  const operation = existing?.pendingStructuralOperations?.[operationId];
+  if (!existing || !operation) return;
+  const next = { ...existing.pendingStructuralOperations };
+  delete next[operationId];
+  if (!saveLocalFolder({
+    ...existing,
+    ...("shieldedPathsAfter" in operation && operation.shieldedPathsAfter && operation.shieldedPathsDuring
+      ? { shieldedPaths: applyShieldedPathTransition(
+          existing.shieldedPaths ?? [], operation.shieldedPathsDuring, operation.shieldedPathsAfter,
+        ) }
+      : {}),
+    ...(Object.keys(next).length > 0
+      ? { pendingStructuralOperations: next }
+      : { pendingStructuralOperations: undefined }),
+  })) {
+    throw new Error(`cannot clear pending structural operation ${operationId}`);
+  }
+}
+
+/** Atomically remove a terminal operation from the retry barrier while
+ * retaining its exact journal and reason for diagnostics or conflict UI. */
+export function failStructuralOperation(
+  folderId: string,
+  operation: PendingStructuralOperation,
+  reason: string,
+): void {
+  const existing = loadLocalFolder(folderId);
+  if (!existing) return;
+  const pending = { ...existing.pendingStructuralOperations };
+  delete pending[operation.operationId];
+  if (!saveLocalFolder({
+    ...existing,
+    ...("shieldedPathsBefore" in operation && operation.shieldedPathsBefore && operation.shieldedPathsDuring
+      ? { shieldedPaths: applyShieldedPathTransition(
+          existing.shieldedPaths ?? [], operation.shieldedPathsDuring, operation.shieldedPathsBefore,
+        ) }
+      : {}),
+    ...(Object.keys(pending).length > 0
+      ? { pendingStructuralOperations: pending }
+      : { pendingStructuralOperations: undefined }),
+    structuralConflicts: {
+      ...existing.structuralConflicts,
+      [operation.operationId]: { operation, reason, failedAt: Date.now() },
+    },
+  })) {
+    throw new Error(`cannot persist structural conflict ${operation.operationId}`);
+  }
+}
+
+export function clearStructuralConflict(folderId: string, operationId: string): void {
+  const existing = loadLocalFolder(folderId);
+  if (!existing?.structuralConflicts?.[operationId]) return;
+  const next = { ...existing.structuralConflicts };
+  delete next[operationId];
+  if (!saveLocalFolder({
+    ...existing,
+    ...(Object.keys(next).length > 0
+      ? { structuralConflicts: next }
+      : { structuralConflicts: undefined }),
+  })) throw new Error(`cannot clear structural conflict ${operationId}`);
+}
+
+export function saveLocalFolderHead(folderId: string, nodeId: string): boolean {
+  const existing = loadLocalFolder(folderId) ?? { id: folderId, files: {} };
+  return saveLocalFolder({ ...existing, nodeId });
 }
 
 /** Ensure a folder record exists (for create/remember). */
@@ -540,5 +938,82 @@ export function clearPadPath(folderId: string, relativePath: string): void {
     }
   } catch {
     // Non-fatal — a stale pad entry just gets overwritten on the next mirror.
+  }
+}
+
+/** Rebase every crash-pad entry whose key is `oldPath` or sits beneath it
+ *  (`oldPath + "/..."`) to the corresponding key under `newPath`, preserving
+ *  each entry's buffered value. Structural moves/renames rewrite
+ *  `LocalFolder.files` keys; without this the pad is left keyed at the old
+ *  path, and the next boot (`loadPad` + `restoreCrashPadFile` loop)
+ *  unconditionally resurrects every pad entry — surfacing a ghost file at the
+ *  pre-rename path alongside the correctly-renamed live file. Best-effort:
+ *  a quota or storage failure is swallowed (the pad is a crash buffer, not a
+ *  source of truth) so the file mutation itself is not rolled back. */
+export function movePadPath(
+  folderId: string,
+  oldPath: string,
+  newPath: string,
+): void {
+  if (oldPath === newPath) return;
+  try {
+    const raw = localStorage.getItem(padKey(folderId));
+    if (!raw) return;
+    const pad = currentLocalFiles(JSON.parse(raw));
+    if (!pad) return;
+    let changed = false;
+    const prefix = oldPath + "/";
+    for (const key of Object.keys(pad)) {
+      let nextKey: string | null = null;
+      if (key === oldPath) nextKey = newPath;
+      else if (key.startsWith(prefix)) nextKey = newPath + key.slice(oldPath.length);
+      if (nextKey !== null && nextKey !== key) {
+        // Preserve insertion order: carry the value to the new key, drop the
+        // old. A pre-existing entry at nextKey (rare — a same-destination
+        // rename collision is rejected upstream) is overwritten.
+        const value = pad[key];
+        delete pad[key];
+        pad[nextKey] = value;
+        changed = true;
+      }
+    }
+    if (changed) localStorage.setItem(padKey(folderId), JSON.stringify(pad));
+  } catch {
+    // Non-fatal — see clearPadPath. The pad is best-effort crash insurance.
+  }
+}
+
+/** Clear every crash-pad entry whose key is `path` or, when `isFolder` is
+ *  true, sits beneath it (`path + "/..."`). Structural deletes remove the
+ *  file keys from `LocalFolder.files`; without this the pad is left keyed at
+ *  the deleted path, and the next boot resurrects the deleted file's last
+ *  buffer (potentially unreviewed MODEL output) as a fresh unstepped file —
+ *  defeating the deletion. Best-effort, same contract as movePadPath. */
+export function deletePadPath(
+  folderId: string,
+  path: string,
+  isFolder: boolean,
+): void {
+  try {
+    const raw = localStorage.getItem(padKey(folderId));
+    if (!raw) return;
+    const pad = currentLocalFiles(JSON.parse(raw));
+    if (!pad) return;
+    let changed = false;
+    const prefix = path + "/";
+    for (const key of Object.keys(pad)) {
+      if (key === path || (isFolder && key.startsWith(prefix))) {
+        delete pad[key];
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    if (Object.keys(pad).length === 0) {
+      localStorage.removeItem(padKey(folderId));
+    } else {
+      localStorage.setItem(padKey(folderId), JSON.stringify(pad));
+    }
+  } catch {
+    // Non-fatal — see clearPadPath.
   }
 }

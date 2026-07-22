@@ -140,18 +140,21 @@ export function createContextSnapshot(input: CreateContextSnapshotInput): Contex
       ...entry,
       contentHash: entry.contentHash || contentFingerprint(entry.body),
       citations: [...new Set(entry.citations)].sort(),
+      // `seq` is assigned by the gatherer's signed dependency topology.
+      // steppedAt has already broken ties among simultaneously ready nodes;
+      // re-sorting by a rollback-prone wall clock would invert `prev` edges.
       deltaLog: [...entry.deltaLog].sort((a, b) =>
+        a.seq - b.seq ||
         a.steppedAt - b.steppedAt ||
-        a.relativePath.localeCompare(b.relativePath) ||
-        a.seq - b.seq),
+        a.relativePath.localeCompare(b.relativePath)),
     }))
     .sort((a, b) => a.path.localeCompare(b.path));
   const deltaLog = [...(input.deltaLog ?? inputs.flatMap((entry) => entry.deltaLog))]
     .sort((a, b) =>
+      a.seq - b.seq ||
       a.steppedAt - b.steppedAt ||
       a.relativePath.localeCompare(b.relativePath) ||
       a.source.localeCompare(b.source) ||
-      a.seq - b.seq ||
       (a.nodeId ?? "").localeCompare(b.nodeId ?? ""));
   const shields = [...input.shields].sort((a, b) => a.path.localeCompare(b.path));
   const failures = [...(input.failures ?? [])].sort((a, b) =>
