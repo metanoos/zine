@@ -411,6 +411,44 @@ test("replay preserves the authors-map voice when kedits are synthesized as the 
   }
 });
 
+test("replay preserves attributed voices across multiple KEdit transactions", () => {
+  const attributedVoice = "seed-voice";
+  const node = event(
+    "seed-body-multi-transaction",
+    "hello-world.md",
+    "hello world",
+    [insert(0, "hello", 500), insert(5, " world", 700)],
+  );
+  node.content = JSON.stringify({
+    snapshot: "hello world",
+    kedits: [insert(0, "hello", 500), insert(5, " world", 700)],
+    authors: [{ v: attributedVoice, len: 11 }],
+  });
+  const attributedRuns = reconstructRunsFromChain([node]);
+  const timeline = buildReplayTimeline(
+    [
+      {
+        event: node,
+        relativePath: "hello-world.md",
+        meta: { steppedAtMs: 1_000 },
+        runsUpToHere: attributedRuns,
+      },
+    ],
+    { "hello-world.md": [node] },
+  );
+
+  assert.ok(timeline);
+  const firstEdit = timeline.find(
+    (frame) => frame.kind === "file" && frame.at === 500 && frame.runs.length > 0,
+  );
+  const secondEdit = timeline.find(
+    (frame) => frame.kind === "file" && frame.at === 700 && frame.runs.length > 0,
+  );
+  assert.deepEqual(firstEdit?.runs, [{ voice: attributedVoice, text: "hello" }]);
+  assert.deepEqual(secondEdit?.runs, [{ voice: attributedVoice, text: "hello world" }]);
+  assert.deepEqual(timeline.at(-1)?.runs, attributedRuns);
+});
+
 test("replay discards KEdits without a valid transaction id", () => {
   const node = event("invalid-kedit", "draft.md", "signed snapshot", []);
   node.content = JSON.stringify({
