@@ -454,3 +454,62 @@ test("controller invalidation aborts selector preparation after context gatherin
   assert.equal(gathered, true);
   assert.ok(verifierCalls > 0);
 });
+
+// Regression for the Extend autofire path (palette click fires Extend directly,
+// without first opening the Inspector to produce a pre-approved request). The
+// autofire branch calls controller.prepare({ operation: "extend", traceContext })
+// and then hands the result to the durable desktop runtime, which requires
+// prepared.traceContextSelection to be populated. This test pins that the
+// controller-level prepare — not just prepareDesktopTraceContextOperationV1 —
+// surfaces the selection on the prepared operation.
+test("controller prepare for extend with trace context populates traceContextSelection for the durable runtime", async () => {
+  const body = "Autofire extend body";
+  const node = await fileNode(body);
+  const snapshot = snapshotFor(node, body);
+  const controller = new ModelOperationController({
+    capture: (panelIndex) => ({
+      workspaceId: "folder-1",
+      activePath: "draft.md",
+      focus: {
+        kind: "file",
+        path: "draft.md",
+        nodeId: node.id,
+        panelIndex,
+        tabPath: "draft.md",
+      },
+      target: {
+        path: "draft.md",
+        traceId: node.id,
+        headId: node.id,
+        contentHash: snapshot.target.contentHash,
+        authoritySpans: [],
+      },
+      mount: { kind: "file", path: "draft.md" },
+      shields: [],
+      voicePrompt: "",
+      dirtyTarget: false,
+      actingAuthorId: "author-a",
+      gatherContext: async () => snapshot,
+    }),
+    readCurrentTarget: (prepared) => ({ ...prepared.targetRevision, focused: true }),
+  });
+
+  const prepared = await controller.prepare({
+    panelIndex: 0,
+    operation: "extend",
+    operationInputs: preparationInput(node, body).operationInputs,
+    provider,
+    modelVoicePubkey: "a".repeat(64),
+    lensId: "default",
+    traceContext: boundary(node),
+  });
+
+  // The durable runtime's guard (extendLLM) rejects a prepared Extend request
+  // whose traceContextSelection is missing. Autofire must satisfy it.
+  assert.ok(prepared.traceContextSelection, "autofire prepare must bind selected trace context");
+  assert.equal(prepared.operation, "extend");
+  assert.equal(
+    prepared.traceContextSelection!.manifest.policy,
+    "selected-trace-v1",
+  );
+});

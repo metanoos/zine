@@ -194,36 +194,45 @@ test("the action palette omits prompt-context summaries", () => {
   const modelEnd = appSource.indexOf('<div className="action-palette-group">', modelStart + 1);
   const modelRow = appSource.slice(modelStart, modelEnd);
 
-  assert.match(modelRow, /className="action-palette-inspect"[\s\S]*?onClick=\{\(\) => onInspect\(\)\}/);
+  // The standalone Inspect button was removed; the Inspector is reachable
+  // only via the per-op chevron (asserted in the chevron test below).
+  assert.doesNotMatch(modelRow, /className="action-palette-inspect"/);
   assert.doesNotMatch(appSource, /action-palette-context-(?:status|value)|promptContextStatus/);
   assert.doesNotMatch(cssSource, /action-palette-context-(?:status|value)/);
 });
 
-test("the Prompt Inspector opener survives missing estimates and tight layouts", () => {
+test("the standalone Inspect button and its token estimate are gone", () => {
   const modelStart = appSource.indexOf('<div className="action-palette-group action-palette-model-row">');
   const modelEnd = appSource.indexOf('<div className="action-palette-group">', modelStart + 1);
   const modelRow = appSource.slice(modelStart, modelEnd);
 
-  assert.match(modelRow, /className="action-palette-inspect"/);
-  assert.match(
-    modelRow,
-    />\s*Inspect\s*\{tokenEstimate != null && \(\s*<span className="action-palette-inspect-estimate">/,
-  );
-  assert.doesNotMatch(modelRow, /\{tokenEstimate != null && \(\s*<button/);
-  assert.doesNotMatch(
-    cssSource,
-    /@container action-palette \(max-width: 36rem\)[\s\S]*?\.action-palette-inspect\s*\{\s*display:\s*none;/,
-  );
+  assert.doesNotMatch(modelRow, /className="action-palette-inspect"/);
+  assert.doesNotMatch(modelRow, /action-palette-inspect-estimate/);
+  // The tokenEstimate prop threaded the estimate into the removed button; it
+  // has no other consumer in ActionPalette and is dropped from the signature.
+  assert.doesNotMatch(appSource, /tokenEstimate(?:\?|:|\s*=)/);
+  assert.doesNotMatch(cssSource, /\.action-palette-inspect/);
 });
 
-test("single-shot MODEL actions open their corresponding Prompt Inspector tab", () => {
+test("single-shot MODEL actions fire directly, with a chevron opening the Inspector tab", () => {
   const modelStart = appSource.indexOf('<div className="action-palette-group action-palette-model-row">');
   const modelEnd = appSource.indexOf('<div className="action-palette-group">', modelStart + 1);
   const modelRow = appSource.slice(modelStart, modelEnd);
 
-  assert.match(modelRow, /action\.kind === "operation"[\s\S]*?onInspect\(action\.id\)/);
+  // Operation-kind actions (extend/settle/stir/reply/analyze) fire directly on
+  // a main-button click — no Inspector modal in the default path. The Inspector
+  // is opt-in via a per-op chevron that opens it focused on that op.
+  assert.match(modelRow, /isOperation \?[\s\S]*?action-palette-action-split/);
   assert.match(modelRow, /else \{\s*onOp\(action\.id\);\s*\}/);
+  assert.match(modelRow, /action-palette-action-chevron[\s\S]*?onClick=\{\(\) => onInspect\(action\.id\)\}/);
   assert.match(appSource, /onInspect=\{\(operation\) => void openInspector\(operation\)\}/);
+});
+
+test("the MODEL command extension affordance has an accessible name", () => {
+  assert.match(
+    appSource,
+    /className="action-palette-action action-palette-add"[\s\S]*?aria-label="Add an AI command"/,
+  );
 });
 
 test("the MODEL row does not inject directory-mount controls", () => {
@@ -233,7 +242,6 @@ test("the MODEL row does not inject directory-mount controls", () => {
 
   assert.doesNotMatch(modelRow, /Mount folder|action-palette-rescope|onScopeToTarget/);
   assert.doesNotMatch(appSource, /action-palette-rescope|onScopeToTarget/);
-  assert.match(modelRow, /\{tokenEstimate != null && \(\s*<span/);
 });
 
 test("an empty model catalog keeps the model selector visible", () => {
@@ -250,7 +258,17 @@ test("an empty model catalog keeps the model selector visible", () => {
   );
   assert.equal(BUILTIN_AI_PALETTE_REGISTRY[0].label.storageKey, "zine.modelLabel");
   assert.match(appSource, /localStorage\.setItem\(AI_PALETTE_ROW\.label\.storageKey, next\)/);
-  assert.match(appSource, /Configure a model in Models to use AI operations/);
+  // With no provider configured, op buttons stay clickable and route the click
+  // to Models only when provider configuration is the sole blocker. Invalid
+  // targets and concurrent operations remain disabled. The chevron also needs
+  // a provider, valid target, and idle operation lane.
+  assert.match(appSource, /No model configured — click to open Models/);
+  assert.match(appSource, /onRouteToModels=/);
+  assert.match(appSource, /const missingProvider = !runningOp && !hasProviders && baseGate/);
+  assert.match(
+    appSource,
+    /const chevronDisabled = !!runningOp \|\| !hasProviders \|\| !baseGate/,
+  );
   assert.doesNotMatch(appSource, /onOpenModels|onAddModel|Add a model…|NO MODEL/);
   assert.doesNotMatch(cssSource, /action-palette-model-empty/);
 });

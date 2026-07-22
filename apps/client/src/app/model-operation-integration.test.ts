@@ -94,12 +94,23 @@ test("Settle retains current-session authoring while durable Extend accepts thro
   assert.doesNotMatch(stir, /traceAuthoring|buildAcceptedExtendChanges|validateTraceAuthoringResult/);
 });
 
-test("Inspector binds Extend to the fetched signed-chain selector boundary", () => {
+test("Extend binds to the fetched signed-chain selector boundary (shared by Inspector and autofire)", () => {
+  // gatherExtendTraceContext is the single place the focused file's genesis-to-
+  // head chain is fetched and framed as a selected-trace-v1 boundary. Both the
+  // Inspector's prepare path and the Extend autofire branch call it, so the two
+  // paths see byte-identical context.
+  const gather = functionBody("gatherExtendTraceContext", "function prepareInspectorOperation");
+  assert.match(gather, /fetchChain\(liveFolder\.id, activePath\)/);
+  assert.match(gather, /policy: "selected-trace-v1"/);
+  assert.match(gather, /verifyEvent/);
   const prepare = functionBody("prepareInspectorOperation", "function renderSteppedTraceReferences");
-  assert.match(prepare, /operation === "extend"[\s\S]*fetchChain\(liveFolder\.id, activePath\)/);
-  assert.match(prepare, /policy: "selected-trace-v1"/);
-  assert.match(prepare, /verifyEvent/);
+  assert.match(prepare, /operation === "extend"[\s\S]*gatherExtendTraceContext\(idx\)/);
   assert.match(prepare, /\.prepare\(\{[\s\S]*traceContext/);
+  // The autofire branch in extendLLM prepares through the same controller with
+  // the same trace context before handing off to the durable runtime.
+  const extend = functionBody("extendLLM", "function settleDeDupeLLM");
+  assert.match(extend, /gatherExtendTraceContext\(idx\)/);
+  assert.match(extend, /\.prepare\(\{[\s\S]*operation: "extend"[\s\S]*traceContext/);
 });
 
 test("desktop Accept writes one exact crash-pad receipt before dispatching CodeMirror", () => {

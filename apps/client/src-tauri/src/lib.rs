@@ -6,10 +6,10 @@ mod rendezvous_relay;
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -2053,6 +2053,24 @@ fn stop_owned_tor() -> Result<(), String> {
     Ok(())
 }
 
+fn drain_tor_output<R: Read + Send + 'static>(mut output: R) {
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut output, &mut std::io::sink());
+    });
+}
+
+fn tor_startup_failure_detail(output: &str) -> String {
+    let relevant: Vec<&str> = output
+        .lines()
+        .filter(|line| line.contains("[warn]") || line.contains("[err]"))
+        .collect();
+    if relevant.is_empty() {
+        output.lines().last().unwrap_or("").trim().to_string()
+    } else {
+        relevant.join("; ")
+    }
+}
+
 fn authenticated_tor_control(
     app: &tauri::AppHandle,
 ) -> Result<(TcpStream, BufReader<TcpStream>), String> {
@@ -2327,6 +2345,8 @@ fn spawn_tor(app: tauri::AppHandle) -> Result<String, String> {
         .arg(&data_dir)
         .arg("--Log")
         .arg("notice stdout")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to spawn tor binary at {}: {}", bin, e))?;
     *TOR_CHILD
@@ -2334,13 +2354,76 @@ fn spawn_tor(app: tauri::AppHandle) -> Result<String, String> {
         .map_err(|_| "Tor process lock is poisoned".to_string())? = Some(child);
 
     // Wait for the SOCKS port to accept connections (Tor's readiness signal).
+    // Also watch for early exit (bad config, port stolen out from under us,
+    // sandbox/signing kill) so a dead process doesn't just burn the full 15s
+    // and surface a content-free timeout — mirrors spawn_relay's try_wait check.
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
+        let exited = {
+            let mut owned = TOR_CHILD
+                .lock()
+                .map_err(|_| "Tor process lock is poisoned".to_string())?;
+            let child = owned
+                .as_mut()
+                .ok_or_else(|| "tor process disappeared before readiness".to_string())?;
+            match child.try_wait() {
+                Ok(None) => None,
+                Ok(Some(status)) => Some((status, owned.take())),
+                Err(error) => return Err(format!("inspect starting tor process: {error}")),
+            }
+        };
+        if let Some((status, child)) = exited {
+            TOR_SPAWNED.store(false, Ordering::SeqCst);
+            // Tor's own log output (including config/bind errors) goes to
+            // stdout because of `--Log notice stdout` above; stderr only
+            // catches things that fail before Tor's logging is set up.
+            let tail = child
+                .map(|mut child| {
+                    let mut buf = String::new();
+                    if let Some(mut out) = child.stdout.take() {
+                        let _ = out.read_to_string(&mut buf);
+                    }
+                    if let Some(mut err) = child.stderr.take() {
+                        let _ = err.read_to_string(&mut buf);
+                    }
+                    buf
+                })
+                .unwrap_or_default();
+            // Surface just the warn/err lines (the actionable ones, e.g. a
+            // bind failure) rather than the full bootstrap log dump.
+            let tail = tor_startup_failure_detail(&tail);
+            return Err(if tail.is_empty() {
+                format!("tor exited before it started listening: {status}")
+            } else {
+                format!("tor exited before it started listening: {status} — {tail}")
+            });
+        }
+
         if Instant::now() > deadline {
             let _ = stop_owned_tor();
             return Err("tor spawned but did not start listening within 15s".into());
         }
         if TcpStream::connect_timeout(&socks_addr, Duration::from_millis(200)).is_ok() {
+            // Startup diagnostics need piped output, but leaving those pipes
+            // unread after readiness can eventually block a long-lived Tor
+            // process once an OS pipe buffer fills. Detach drainers only after
+            // the early-exit window, when the output is no longer needed for a
+            // useful startup error.
+            let (stdout, stderr) = {
+                let mut owned = TOR_CHILD
+                    .lock()
+                    .map_err(|_| "Tor process lock is poisoned".to_string())?;
+                let child = owned
+                    .as_mut()
+                    .ok_or_else(|| "tor process disappeared after readiness".to_string())?;
+                (child.stdout.take(), child.stderr.take())
+            };
+            if let Some(output) = stdout {
+                drain_tor_output(output);
+            }
+            if let Some(output) = stderr {
+                drain_tor_output(output);
+            }
             TOR_SPAWNED.store(true, Ordering::SeqCst);
             return Ok("spawned".into());
         }
@@ -3142,6 +3225,20 @@ mod tests {
         );
         assert!(!path_b.exists(), "another vault path must remain untouched");
         fs::remove_dir_all(dir).expect("remove captured path test directory");
+    }
+
+    #[test]
+    fn tor_startup_failure_prefers_actionable_log_lines() {
+        let output = "Jul 22 [notice] Bootstrapped 5%\nJul 22 [warn] Failed to bind SOCKS port\nJul 22 [err] Configuration failed\n";
+        assert_eq!(
+            tor_startup_failure_detail(output),
+            "Jul 22 [warn] Failed to bind SOCKS port; Jul 22 [err] Configuration failed"
+        );
+        assert_eq!(
+            tor_startup_failure_detail("first line\nlast useful line\n"),
+            "last useful line"
+        );
+        assert!(tor_startup_failure_detail("").is_empty());
     }
 
     #[test]

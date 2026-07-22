@@ -7994,7 +7994,7 @@ html[data-theme="light"] .editor-host {
 .onboarding-stage-context-mount .tree-icon-btn,
 .onboarding-stage-context-shield .tree-icon-btn,
 .onboarding-stage-scan-file .op-scan-file,
-.onboarding-stage-context-inspect .action-palette-inspect,
+.onboarding-stage-context-inspect .op-extend + .action-palette-action-chevron,
 .onboarding-stage-context-run .op-extend,
 .onboarding-stage-context-step .op-save,
 .onboarding-stage-context-replay .action-palette-replay-play {
@@ -8604,7 +8604,6 @@ html[data-theme="light"] .editor-host {
 .action-palette-action.op-scan {
   white-space: nowrap;
 }
-.action-palette-actions > .action-palette-inspect,
 .action-palette-actions > .action-palette-action-done,
 .action-palette-actions > .action-palette-action-error {
   align-self: center;
@@ -8619,6 +8618,57 @@ html[data-theme="light"] .editor-host {
   color: var(--ink-dim);
   opacity: 0.76;
   cursor: default;
+}
+/* The MODEL-row op buttons are split: a main body that fires the op directly
+   and a narrow chevron that opens the Prompt Inspector focused on that op.
+   The wrapper holds the flex sizing the main button used to own on its own,
+   so the pair reads as one unit and the existing flex/grid layout is
+   undisturbed. Run (agent-run) is not split — it renders the bare button. */
+.action-palette-action-split {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: stretch;
+}
+.action-palette-action-split > .action-palette-action {
+  flex: 0 0 5.5rem;
+  max-width: 5.5rem;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.action-palette-action-split > .action-palette-action.running {
+  /* keep the running pulse on the main body only */
+}
+.action-palette-action-chevron {
+  flex: 0 0 auto;
+  width: 1.1rem;
+  padding: 0;
+  margin-left: -1px;
+  border: 1px solid var(--rule-strong);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.action-palette-action-chevron:hover:not(:disabled) {
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+.action-palette-action-chevron:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* No provider configured: the main body stays clickable (the click routes to
+   Models), so it gets a distinct affordance instead of the dead disabled look. */
+.action-palette-action.needs-model {
+  color: var(--ink-dim);
+  border-style: dashed;
+}
+.action-palette-action.needs-model:hover {
+  background: var(--surface-raised);
 }
 /* The in-flight op's own button becomes the stop control: accent-filled and
    gently pulsing so the affordance reads as "click again to abort" right where
@@ -8648,6 +8698,21 @@ html[data-theme="light"] .editor-host {
   color: var(--accent);
   border-color: var(--accent);
 }
+/* Step carries its own glyph — a small advancing mark — just as Send carries
+ * its outward arrow. It sits on the Step primary and on any op that will
+ * create a Step (auto-step Send/Attest), mirroring how ↗ marks anything that
+ * will Send. */
+.action-palette-action.action-palette-primary--step::after,
+.action-palette-action.action-palette-action--auto-step::after {
+  content: "▸";
+  display: inline-block;
+  margin-left: 0.22rem;
+  font-size: 0.74em;
+  font-weight: 650;
+  line-height: 1;
+  opacity: 0.78;
+  transform: translateY(-0.02em);
+}
 /* Send changes reachability, so it carries a small outward arrow independent
  * of Step's gold border. Attest receives the same arrow only while it must Send
  * its exact target first; an auto-Step-and-Send Attest therefore shows both. */
@@ -8660,6 +8725,15 @@ html[data-theme="light"] .editor-host {
   line-height: 1;
   opacity: 0.78;
   transform: translateY(-0.04em);
+}
+/* When a single op will both create a Step and Send (e.g. append-send-attest
+ * Attest), both glyphs share the one ::after — Step first, then Send's arrow,
+ * echoing the order the ops actually fire. Higher specificity than either
+ * single-class rule so it wins the ::after they would otherwise contend for. */
+.action-palette-action.action-palette-action--auto-step.action-palette-action--sends::after {
+  content: "▸ ↗";
+  font-size: 0.72em;
+  transform: translateY(-0.03em);
 }
 .action-palette-action.action-palette-primary--mint:not(:disabled):not(.running) {
   color: #17120a;
@@ -8681,6 +8755,56 @@ html[data-theme="light"] .editor-host {
  * fixed transform). Same shape, accent-tinted to echo Attest's weight. */
 .action-palette-action.op-run {
   color: var(--accent);
+}
+
+/* "+" affordance at the rightmost index of the MODEL row. Signals that the
+   commands list is extensible; the dropdown is a stub until a real
+   add-command flow lands. Compact icon track — same height/border as the
+   text actions, but auto width so the plus glyph reads as "add", not as
+   another command. Accent-tinted to echo Run/Attest weight. */
+.action-palette-add-wrap {
+  position: relative;
+}
+.action-palette-action.action-palette-add {
+  flex: 0 0 auto;
+  min-width: 2rem;
+  width: auto;
+  padding: 0.2rem;
+  color: var(--accent);
+}
+.action-palette-add-menu {
+  position: absolute;
+  top: calc(100% + 0.3rem);
+  right: 0;
+  z-index: 50;
+  min-width: 13rem;
+  padding: 0.2rem;
+  background: var(--surface-raised);
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  font-family: var(--font-mono);
+}
+.action-palette-add-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  text-align: left;
+  cursor: not-allowed;
+}
+.action-palette-add-item-meta {
+  font-size: 0.66rem;
+  color: var(--ink-dim);
+  opacity: 0.8;
 }
 
 /* Fork appears only on a replay-frozen historical view. */
@@ -9271,33 +9395,7 @@ html[data-theme="light"] .editor-host {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-.action-palette-inspect {
-  flex: 0 0 auto;
-  min-width: 5.5rem;
-  height: var(--action-palette-control-height);
-  box-sizing: border-box;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.35rem;
-  padding: 0.2rem 0.5rem;
-  border: 1px solid var(--rule-strong);
-  border-radius: 3px;
-  background: transparent;
-  color: var(--ink);
-  font: inherit;
-  font-weight: 400;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.action-palette-inspect:hover {
-  background: var(--surface-raised);
-}
-.action-palette-inspect-estimate {
-  color: var(--ink-dim);
-  font-variant-numeric: tabular-nums;
-}
-/* Very tight: terminal status can yield, but Inspector access remains visible. */
+/* Very tight: terminal status can yield to keep the action row readable. */
 @container action-palette (max-width: 36rem) {
   .action-palette-action-error {
     display: none;
