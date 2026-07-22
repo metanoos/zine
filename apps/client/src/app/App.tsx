@@ -10280,141 +10280,141 @@ function App() {
       throw publicationController.signal.reason ?? new Error("foreground Mint lease is stale");
     }
     try {
-    const coinVoice = signer ? getPublicKey(signer) : authorPubkey;
-    const mintSigner = signer ?? secretKeyForVoice(coinVoice);
-    if (!mintSigner) throw new Error(`no key for voice ${formatPubkey(coinVoice)}`);
-    const operationKey = coinMintOperationKey({
-      sourceFolderId,
-      signerPubkey: coinVoice,
-      phrase,
-      origin,
-    });
-    // Complete abandoned gestures directly from their stored records before a
-    // new one consumes journal capacity. Exclude this gesture so its retry
-    // returns the original exact Coin to the caller instead of completing it
-    // invisibly and then creating a sibling.
-    await recoverPendingCoinMints(operationKey, publicationController.signal);
-    assertPublicationFence(foregroundPublicationFence);
-    if (sourceCompletion) {
-      // Recovery may itself Step this source and shift every later UTF-16
-      // range. Revalidate the exact node, bytes, and target after recovery and
-      // before signing or publishing a new Coin pair.
-      const source = sourceCompletion.metadata;
-      const localFile = loadLocalFolder(sourceFolderId)?.files[source.relativePath];
-      const liveFile = filesRef.current[source.relativePath];
-      const currentText = liveFile ? flatten(liveFile.runs) : localFile?.content;
-      const currentNodeId = liveFile?.nodeId ?? localFile?.nodeId ?? "";
-      if (currentText === undefined || currentNodeId !== source.sourceNodeId) {
-        throw new Error(
-          `Mint source ${source.relativePath} changed while pending Mints were recovered; select it again`,
-        );
-      }
-      if (await sha256HexLocal(currentText) !== source.sourceContentHash) {
-        throw new Error(
-          `Mint source ${source.relativePath} no longer matches its captured snapshot; select it again`,
-        );
-      }
-      const targetStillMatches = source.kind === "pending-bracket"
-        ? findPendingBrackets(currentText).some((bracket) =>
-            bracket.matchStart === source.bracketRange.start &&
-            bracket.matchEnd === source.bracketRange.end &&
-            bracket.phraseStart === source.range.start &&
-            bracket.phraseEnd === source.range.end &&
-            bracket.phrase === phrase
-          )
-        : currentText.slice(source.range.start, source.range.end) === phrase;
-      if (!targetStillMatches) {
-        throw new Error(
-          `Mint source ${source.relativePath} selection moved while pending Mints were recovered; select it again`,
-        );
-      }
-    }
-    const pending = await preparePendingCoinMint(operationKey, async () => {
-      assertPublicationFence(foregroundPublicationFence);
-      const operationId = createTraceOperationId();
-      const taken = new Set([
-        ...Object.keys(filesRef.current),
-        ...Object.keys(loadLocalFolder(sourceFolderId)?.files ?? {}),
-        ...pendingPaths.current,
-        ...pendingCoinMints()
-          .filter((record) => record.sourceFolderId === sourceFolderId)
-          .map((record) => record.localPath),
-      ]);
-      const localPath = mintedPath(phrase, new Date(), taken, operationId);
-      const mintFolderId = await getOrCreateMintFolder(
+      const coinVoice = signer ? getPublicKey(signer) : authorPubkey;
+      const mintSigner = signer ?? secretKeyForVoice(coinVoice);
+      if (!mintSigner) throw new Error(`no key for voice ${formatPubkey(coinVoice)}`);
+      const operationKey = coinMintOperationKey({
         sourceFolderId,
-        mintSigner,
-        foregroundPublicationFence,
-      );
-      assertPublicationFence(foregroundPublicationFence);
-      const memberName = localPath.slice(`${MINT}/`.length);
-      const coin = origin.kind === "direct"
-        ? await publishDirectCoin({
-            folderId: mintFolderId,
-            relativePath: memberName,
-            phrase,
-            signer: mintSigner,
-            kedits,
-            prepareOnly: true,
-            operationId,
-          })
-        : await publishHardenedSpan({
-            folderId: mintFolderId,
-            relativePath: memberName,
-            phrase,
-            originNodeId: origin.sourceNodeId,
-            sourceContentHash: origin.sourceContentHash,
-            sourceRange: origin.range,
-            signer: mintSigner,
-            prepareOnly: true,
-            operationId,
-          });
-      return {
-        sourceFolderId,
-        mintFolderId,
-        localPath,
-        memberName,
+        signerPubkey: coinVoice,
         phrase,
-        coin,
-        ...(sourceCompletion ? { sourceFinalization: sourceCompletion.metadata } : {}),
-      };
-    });
-    pendingPaths.current.add(pending.localPath);
-    try {
-      // The transaction journal retains this exact signed Coin through every
-      // public and local phase. A retry resumes it instead of minting a sibling.
-      const receipt = await completePendingCoinMintTransaction(
-        pending,
-        coinMintCompletionFor(
+        origin,
+      });
+      // Complete abandoned gestures directly from their stored records before a
+      // new one consumes journal capacity. Exclude this gesture so its retry
+      // returns the original exact Coin to the caller instead of completing it
+      // invisibly and then creating a sibling.
+      await recoverPendingCoinMints(operationKey, publicationController.signal);
+      assertPublicationFence(foregroundPublicationFence);
+      if (sourceCompletion) {
+        // Recovery may itself Step this source and shift every later UTF-16
+        // range. Revalidate the exact node, bytes, and target after recovery and
+        // before signing or publishing a new Coin pair.
+        const source = sourceCompletion.metadata;
+        const localFile = loadLocalFolder(sourceFolderId)?.files[source.relativePath];
+        const liveFile = filesRef.current[source.relativePath];
+        const currentText = liveFile ? flatten(liveFile.runs) : localFile?.content;
+        const currentNodeId = liveFile?.nodeId ?? localFile?.nodeId ?? "";
+        if (currentText === undefined || currentNodeId !== source.sourceNodeId) {
+          throw new Error(
+            `Mint source ${source.relativePath} changed while pending Mints were recovered; select it again`,
+          );
+        }
+        if (await sha256HexLocal(currentText) !== source.sourceContentHash) {
+          throw new Error(
+            `Mint source ${source.relativePath} no longer matches its captured snapshot; select it again`,
+          );
+        }
+        const targetStillMatches = source.kind === "pending-bracket"
+          ? findPendingBrackets(currentText).some((bracket) =>
+              bracket.matchStart === source.bracketRange.start &&
+              bracket.matchEnd === source.bracketRange.end &&
+              bracket.phraseStart === source.range.start &&
+              bracket.phraseEnd === source.range.end &&
+              bracket.phrase === phrase
+            )
+          : currentText.slice(source.range.start, source.range.end) === phrase;
+        if (!targetStillMatches) {
+          throw new Error(
+            `Mint source ${source.relativePath} selection moved while pending Mints were recovered; select it again`,
+          );
+        }
+      }
+      const pending = await preparePendingCoinMint(operationKey, async () => {
+        assertPublicationFence(foregroundPublicationFence);
+        const operationId = createTraceOperationId();
+        const taken = new Set([
+          ...Object.keys(filesRef.current),
+          ...Object.keys(loadLocalFolder(sourceFolderId)?.files ?? {}),
+          ...pendingPaths.current,
+          ...pendingCoinMints()
+            .filter((record) => record.sourceFolderId === sourceFolderId)
+            .map((record) => record.localPath),
+        ]);
+        const localPath = mintedPath(phrase, new Date(), taken, operationId);
+        const mintFolderId = await getOrCreateMintFolder(
+          sourceFolderId,
           mintSigner,
-          sourceCompletion?.finalize,
-          publicationController.signal,
-        ),
-      );
-      const runs: Run[] = [{ voice: pending.coin.pubkey, text: pending.phrase }];
-      return {
-        path: pending.localPath,
-        nodeId: pending.coin.id,
-        attestationId: receipt.attestation.id,
-        runs,
-      };
-    } catch (error) {
-      refreshMintRecoveryNotice([
-        error instanceof Error ? error.message : String(error),
-      ]);
-      if (pendingCoinMints().some((record) => record.operationKey === operationKey)) {
-        // Startup may have found an empty journal and settled already. Wake a
-        // fresh vault/folder-scoped supervisor for work created by this failed
-        // foreground gesture; its timer and online trigger own later retries.
-        setMintRecoveryEpoch((epoch) => epoch + 1);
+          foregroundPublicationFence,
+        );
+        assertPublicationFence(foregroundPublicationFence);
+        const memberName = localPath.slice(`${MINT}/`.length);
+        const coin = origin.kind === "direct"
+          ? await publishDirectCoin({
+              folderId: mintFolderId,
+              relativePath: memberName,
+              phrase,
+              signer: mintSigner,
+              kedits,
+              prepareOnly: true,
+              operationId,
+            })
+          : await publishHardenedSpan({
+              folderId: mintFolderId,
+              relativePath: memberName,
+              phrase,
+              originNodeId: origin.sourceNodeId,
+              sourceContentHash: origin.sourceContentHash,
+              sourceRange: origin.range,
+              signer: mintSigner,
+              prepareOnly: true,
+              operationId,
+            });
+        return {
+          sourceFolderId,
+          mintFolderId,
+          localPath,
+          memberName,
+          phrase,
+          coin,
+          ...(sourceCompletion ? { sourceFinalization: sourceCompletion.metadata } : {}),
+        };
+      });
+      pendingPaths.current.add(pending.localPath);
+      try {
+        // The transaction journal retains this exact signed Coin through every
+        // public and local phase. A retry resumes it instead of minting a sibling.
+        const receipt = await completePendingCoinMintTransaction(
+          pending,
+          coinMintCompletionFor(
+            mintSigner,
+            sourceCompletion?.finalize,
+            publicationController.signal,
+          ),
+        );
+        const runs: Run[] = [{ voice: pending.coin.pubkey, text: pending.phrase }];
+        return {
+          path: pending.localPath,
+          nodeId: pending.coin.id,
+          attestationId: receipt.attestation.id,
+          runs,
+        };
+      } catch (error) {
+        refreshMintRecoveryNotice([
+          error instanceof Error ? error.message : String(error),
+        ]);
+        if (pendingCoinMints().some((record) => record.operationKey === operationKey)) {
+          // Startup may have found an empty journal and settled already. Wake a
+          // fresh vault/folder-scoped supervisor for work created by this failed
+          // foreground gesture; its timer and online trigger own later retries.
+          setMintRecoveryEpoch((epoch) => epoch + 1);
+        }
+        throw error;
+      } finally {
+        pendingPaths.current.delete(pending.localPath);
+        if (!pendingCoinMints().some((record) => record.operationKey === operationKey)) {
+          refreshMintRecoveryNotice();
+        }
       }
-      throw error;
-    } finally {
-      pendingPaths.current.delete(pending.localPath);
-      if (!pendingCoinMints().some((record) => record.operationKey === operationKey)) {
-        refreshMintRecoveryNotice();
-      }
-    }
     } finally {
       if (ownsLease) mintLease.release();
     }
