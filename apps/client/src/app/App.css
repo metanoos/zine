@@ -2526,7 +2526,7 @@ html[data-theme="light"] .rail-brand-wordmark {
    does not admit. Mirrors the relay/peer list language: mono pubkeys, dim
    shared-count, blockquote samples in the prose font. */
 
-.cocitation-list {
+.comint-list {
   list-style: none;
   padding: 0;
   margin: 0;
@@ -2535,31 +2535,31 @@ html[data-theme="light"] .rail-brand-wordmark {
   gap: 0.75rem;
 }
 
-.cocitation-card {
+.comint-card {
   padding: 0.75rem 1rem;
 }
 
-.cocitation-pair {
+.comint-pair {
   display: flex;
   align-items: center;
   gap: 0.75rem;
   margin-bottom: 0.5rem;
 }
 
-.cocitation-pubkey {
+.comint-pubkey {
   font-family: var(--font-mono);
   font-size: 0.8rem;
   color: var(--ink);
 }
 
-.cocitation-shared-count {
+.comint-shared-count {
   font-size: 0.75rem;
   color: var(--ink-dim);
   flex: 1;
   text-align: center;
 }
 
-.cocitation-sample {
+.comint-sample {
   margin: 0.25rem 0 0 0;
   padding: 0.25rem 0 0.25rem 0.75rem;
   border-left: 2px solid var(--rule);
@@ -2569,20 +2569,20 @@ html[data-theme="light"] .rail-brand-wordmark {
   font-style: italic;
 }
 
-.cocitation-more {
+.comint-more {
   font-size: 0.75rem;
   color: var(--ink-dim);
   margin: 0.25rem 0 0 0;
 }
 
-.cocitation-status,
-.cocitation-empty {
+.comint-status,
+.comint-empty {
   font-family: var(--font-mono);
   font-size: 0.8rem;
   color: var(--ink-dim);
 }
 
-.cocitation-error {
+.comint-error {
   font-family: var(--font-mono);
   font-size: 0.8rem;
   color: var(--danger, #c33);

@@ -1208,41 +1208,41 @@ function CoMintsSection() {
       </p>
 
       {status === "scanning" && (
-        <p className="cocitation-status">Scanning peer chains…</p>
+        <p className="comint-status">Scanning peer chains…</p>
       )}
       {status === "error" && (
-        <p className="cocitation-error" role="alert">
+        <p className="comint-error" role="alert">
           Scan failed: {error}
         </p>
       )}
       {status === "done" && matches.length === 0 && (
-        <p className="cocitation-empty">
+        <p className="comint-empty">
           No co-Mints found among your peers yet.
         </p>
       )}
 
       {matches.length > 0 && (
-        <ul className="cocitation-list">
+        <ul className="comint-list">
           {matches.map((m) => (
-            <li key={`${m.peerA}-${m.peerB}`} className="cocitation-card settings-card">
-              <div className="cocitation-pair">
-                <span className="cocitation-pubkey" title={m.peerA}>
+            <li key={`${m.peerA}-${m.peerB}`} className="comint-card settings-card">
+              <div className="comint-pair">
+                <span className="comint-pubkey" title={m.peerA}>
                   {m.peerA.slice(0, 12)}…
                 </span>
-                <span className="cocitation-shared-count">
+                <span className="comint-shared-count">
                   {m.coordinates.length} shared {m.coordinates.length === 1 ? "coordinate" : "coordinates"}
                 </span>
-                <span className="cocitation-pubkey" title={m.peerB}>
+                <span className="comint-pubkey" title={m.peerB}>
                   {m.peerB.slice(0, 12)}…
                 </span>
               </div>
               {m.samples.slice(0, 3).map((s) => (
-                <blockquote key={`${s.peer}-${s.coinNodeId}`} className="cocitation-sample">
+                <blockquote key={`${s.peer}-${s.coinNodeId}`} className="comint-sample">
                   {s.text ?? `Coin ${s.coinNodeId.slice(0, 12)}…`}
                 </blockquote>
               ))}
               {m.samples.length > 3 && (
-                <p className="cocitation-more">
+                <p className="comint-more">
                   +{m.samples.length - 3} more
                 </p>
               )}
