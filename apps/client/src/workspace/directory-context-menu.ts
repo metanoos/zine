@@ -1,5 +1,4 @@
 import {
-  MINT,
   OBLIVION,
   SCAN,
   isMintPath,
@@ -14,7 +13,6 @@ export interface DirectoryContextMenuCapabilities {
   openToSide: boolean;
   newFile: boolean;
   newFolder: boolean;
-  mintCoin: boolean;
   scanFile: boolean;
   scanFolder: boolean;
   reify: boolean;
@@ -55,7 +53,6 @@ export function directoryContextMenuCapabilities(
     openToSide: singleTarget && !isOblivionPath(path),
     newFile: singleTarget && isOrdinaryFolder,
     newFolder: singleTarget && isOrdinaryFolder,
-    mintCoin: singleTarget && path === MINT,
     scanFile: singleTarget && path === SCAN,
     scanFolder: singleTarget && path === SCAN,
     // Reify is an explicit filesystem export, independent of prompt context.

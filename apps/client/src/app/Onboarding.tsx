@@ -336,7 +336,7 @@ export function OnboardingGuide({
                     ? {
                         step: "AI CONTEXT · 5 OF 7",
                         title: "Inspect and approve",
-                        body: "Click the token count in the AI row. In Extend, verify the focused brief, mounted interview source, shield decision, provider, and exact messages—then Approve.",
+                        body: "Click the chevron beside Extend in the AI row. It shows the prompt you write and the context it processes so you can mount files to inject into the request—then Approve.",
                         placement: "model-inspect",
                       }
                     : stage === "context-run"

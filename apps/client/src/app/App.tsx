@@ -510,6 +510,7 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Plus,
   Quote,
   Radio,
   Radiation,
@@ -746,11 +747,11 @@ function readTheme(): Theme {
 // Horizontal resize of the press: how wide the directory sidebar is.
 // Persisted per-browser (zine.press.sidebarWidth); clamped to MIN..MAX on read.
 const SIDEBAR_WIDTH_KEY = "zine.press.sidebarWidth";
-const SIDEBAR_WIDTH_DEFAULT = 220;
-// Floor matches the default: the replay stepper row (⏮ ◀ [n / total] ▶ ⏭ plus
-// padding) needs ~200px to render without clipping, so 220 is the smallest width
-// at which the whole transport stays visible.
-const SIDEBAR_WIDTH_MIN = 220;
+const SIDEBAR_WIDTH_DEFAULT = 300;
+// Floor is the tightest width at which the replay stepper row (⏮ ◀ [n / total]
+// ▶ ⏭ plus padding) still renders without clipping (~200px). The default sits
+// above it; double-click the resizer to snap back to the default.
+const SIDEBAR_WIDTH_MIN = 200;
 const SIDEBAR_WIDTH_MAX = 520;
 function readSidebarWidth(): number {
   const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
@@ -805,13 +806,6 @@ function flatten(runs: Run[]): string {
  *  a payload-size indicator — not billing. */
 function estimateTokens(chars: number): number {
   return Math.ceil(chars / 4);
-}
-
-/** Format a token count as "22.6k tokens" (≥1000) or "940 tokens". */
-function formatTokens(n: number): string {
-  return n >= 1000
-    ? `${(n / 1000).toFixed(1)}k tokens`
-    : `${n} tokens`;
 }
 
 // A valid tag/folder-name token: a letter/digit/underscore lead, then any of
@@ -1425,7 +1419,6 @@ function TreeItem({
   onRenameCancel,
   onRowActivate,
   onCreateStart,
-  onMintCoin,
   coinsEnabled,
   onScan,
   creating,
@@ -1473,8 +1466,6 @@ function TreeItem({
   onRenameCancel: () => void;
   /** New file / New folder from the root row. Parent follows tree selection. */
   onCreateStart: (kind: "file" | "folder") => void;
-  /** Open the direct-Coin composer from the Mint region header. */
-  onMintCoin: () => void;
   coinsEnabled: boolean;
   /** Acquire a filesystem snapshot from the Scan region header. */
   onScan: (kind: "file" | "folder") => void;
@@ -1717,24 +1708,6 @@ function TreeItem({
               </button>
             </span>
           )}
-          {isRoot && node.systemKind === "mint" && (
-            <span
-              className="tree-row-actions"
-              onClick={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-            >
-              <button
-                className="icon-btn"
-                type="button"
-                title={coinsEnabled ? "Mint a direct Coin" : "Enable Coins in Networking to Mint"}
-                aria-label="Mint a direct Coin"
-                disabled={!coinsEnabled}
-                onClick={onMintCoin}
-              >
-                <CircleDollarSign size={14} aria-hidden="true" />
-              </button>
-            </span>
-          )}
           {isRoot && node.systemKind === "scan" && (
             <span
               className="tree-row-actions"
@@ -1801,7 +1774,6 @@ function TreeItem({
                 onRenameCancel={onRenameCancel}
                 onRowActivate={onRowActivate}
                 onCreateStart={onCreateStart}
-                onMintCoin={onMintCoin}
                 coinsEnabled={coinsEnabled}
                 onScan={onScan}
                 creating={creating}
@@ -1972,7 +1944,6 @@ function Sidebar({
   onActivateOblivion,
   onActivateFolder,
   onOpenFolder,
-  onMintCoin,
   coinsEnabled,
   onScan,
   onReify,
@@ -2028,8 +1999,6 @@ function Sidebar({
   onActivateFolder: (path: string) => void;
   /** Open a folder tab in the active panel from its context menu. */
   onOpenFolder: (path: string) => void;
-  /** Open the direct-Coin composer from the Mint region header. */
-  onMintCoin: () => void;
   coinsEnabled: boolean;
   /** Acquire a file or folder from the Scan region header. */
   onScan: (kind: "file" | "folder") => void;
@@ -2495,7 +2464,6 @@ function Sidebar({
               onRenameCancel={cancelRename}
               onRowActivate={onRowActivate}
               onCreateStart={(kind) => onCreateStart(kind, createParent())}
-              onMintCoin={onMintCoin}
               coinsEnabled={coinsEnabled}
               onScan={onScan}
               creating={creating}
@@ -2632,7 +2600,6 @@ function Sidebar({
             if (
               menu.newFile ||
               menu.newFolder ||
-              menu.mintCoin ||
               menu.scanFolder ||
               menu.scanFile
             ) {
@@ -2660,20 +2627,6 @@ function Sidebar({
                       }}
                     >
                       New Folder
-                    </button>
-                  )}
-                  {menu.mintCoin && (
-                    <button
-                      type="button"
-                      className="ctx-menu-item"
-                      disabled={!coinsEnabled}
-                      title={coinsEnabled ? "Mint a direct Coin" : "Enable Coins in Networking to Mint"}
-                      onClick={() => {
-                        setCtxMenu(null);
-                        onMintCoin();
-                      }}
-                    >
-                      Mint New Coin
                     </button>
                   )}
                   {menu.scanFolder && (
@@ -6195,9 +6148,12 @@ function ActionPalette({
   onOp,
   onStop,
   opStatus,
-  tokenEstimate,
   /** Open the prompt inspector for a prepared MODEL operation. */
   onInspect,
+  /** Switch the active view to Models. Fired when an AI op is clicked with no
+   *  provider configured — the buttons stay clickable (not disabled) so the
+   *  click is the trigger that routes the user to add a model. */
+  onRouteToModels,
   attestPlan,
   targetInScope,
   coinsEnabled,
@@ -6248,12 +6204,10 @@ function ActionPalette({
   onStop: () => void;
   /** Status of the op-target panel, for the action row's stop/error. */
   opStatus: SummonStatus;
-  /** Approximate prompt token count for an op on the target file, or null when
-   *  prompt preparation is unavailable. Shown as optional detail inside the
-   *  persistent prompt-inspector control. */
-  tokenEstimate: number | null;
   /** Open the prompt inspector modal, optionally selecting an operation. */
   onInspect: (operation?: PromptOpKind) => void;
+  /** Switch the active view to Models (no-provider click routing). */
+  onRouteToModels: () => void;
   /** Prerequisites the Attest gesture will compose before endorsement. */
   attestPlan: AttestationPlan;
   /** Whether the focused/target file is inside the scope subtree. When false,
@@ -6309,6 +6263,28 @@ function ActionPalette({
       ? stored
       : AI_PALETTE_ROW.label.defaultLabel;
   });
+
+  // --- "+" affordance (MODEL row) ---------------------------------------
+  // Rightmost control of the LLM action row. The commands list is meant to be
+  // extensible; this opens a stub dropdown (a greyed "Custom command…") until a
+  // real add-command flow exists. Local state — no parent prop wiring needed.
+  const [addCmdOpen, setAddCmdOpen] = useState(false);
+  const addCmdRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!addCmdOpen) return;
+    function onPointerDown(e: MouseEvent) {
+      if (addCmdRef.current && !addCmdRef.current.contains(e.target as Node)) setAddCmdOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setAddCmdOpen(false);
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [addCmdOpen]);
 
   // --- ACTIONS gating ---------------------------------------------------
   const kind = selection?.kind;
@@ -6490,21 +6466,6 @@ function ActionPalette({
               />
             </div>
           )}
-          <button
-            type="button"
-            className="action-palette-inspect"
-            onClick={() => onInspect()}
-            title={tokenEstimate == null
-              ? "Inspect the exact prompt and any preparation blocker"
-              : `Inspect the exact prompt · approximately ${formatTokens(tokenEstimate)}`}
-          >
-            Inspect
-            {tokenEstimate != null && (
-              <span className="action-palette-inspect-estimate">
-                {formatTokens(tokenEstimate)}
-              </span>
-            )}
-          </button>
           {AI_PALETTE_ROW.actions.map((action) => {
             const isRunning = runningOp === action.id;
             // extend/stir/settle write INTO the existing file, so they obey the
@@ -6514,27 +6475,38 @@ function ActionPalette({
             const createsDoc = action.id === "analyze" || action.id === "reply" || action.id === "run";
             const mutatesTarget = !createsDoc;
             const baseGate = action.id === "analyze" ? allowTextOps : mutatesTarget ? scopedText : scopedReply;
-            const enabled =
-              isRunning ||
-              (!runningOp && hasProviders && baseGate);
-            return (
+            // The op can actually run right now: not in flight, a provider is
+            // configured, and the scope/kind gate is open.
+            const canFire = !isRunning && !runningOp && hasProviders && baseGate;
+            // No provider configured: the main button stays CLICKABLE (not
+            // disabled) so the click routes the user to Models to add one.
+            // Anything else blocking the op (scope/kind) needs editor action,
+            // not a Models redirect, so those stay genuinely disabled.
+            const missingProvider = !isRunning && !hasProviders;
+            const mainDisabled = !canFire && !missingProvider;
+            // The chevron opens the Inspector focused on this op. It needs a
+            // provider to prepare a request against, so it stays disabled when
+            // none is configured or while the op is in flight.
+            const isOperation = action.kind === "operation";
+            const chevronDisabled = isRunning || !hasProviders;
+            const main = (
               <button
                 key={action.id}
                 type="button"
-                className={`action-palette-action ${action.className}${isRunning ? " running" : ""}`}
-                disabled={!enabled}
+                className={`action-palette-action ${action.className}${isRunning ? " running" : ""}${missingProvider ? " needs-model" : ""}`}
+                disabled={mainDisabled}
                 title={
                   isRunning
                     ? `${action.label} — running, click to stop`
-                    : !hasProviders
-                      ? "Configure a model in Models to use AI operations"
+                    : missingProvider
+                      ? "No model configured — click to open Models"
                       : action.title
                 }
                 onClick={() => {
                   if (isRunning) {
                     onStop();
-                  } else if (action.kind === "operation") {
-                    onInspect(action.id);
+                  } else if (missingProvider) {
+                    onRouteToModels();
                   } else {
                     onOp(action.id);
                   }
@@ -6543,7 +6515,56 @@ function ActionPalette({
                 {action.label}
               </button>
             );
+            return isOperation ? (
+              <span key={action.id} className="action-palette-action-split">
+                {main}
+                <button
+                  type="button"
+                  className="action-palette-action-chevron"
+                  aria-label={`Inspect the ${action.label} prompt`}
+                  disabled={chevronDisabled}
+                  title={
+                    chevronDisabled
+                      ? missingProvider
+                        ? "Configure a model in Models to inspect a prompt"
+                        : `${action.label} is running`
+                      : "Inspect the exact prompt before running"
+                  }
+                  onClick={() => onInspect(action.id)}
+                >
+                  <ChevronDown size={12} strokeWidth={1.75} aria-hidden="true" />
+                </button>
+              </span>
+            ) : (
+              main
+            );
           })}
+          <div className="action-palette-add-wrap" ref={addCmdRef}>
+            <button
+              type="button"
+              className="action-palette-action action-palette-add"
+              onClick={() => setAddCmdOpen((v) => !v)}
+              aria-haspopup="menu"
+              aria-expanded={addCmdOpen}
+              title="Add a command — the commands list is extensible"
+            >
+              <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+            {addCmdOpen && (
+              <div className="action-palette-add-menu" role="menu">
+                <button
+                  type="button"
+                  className="action-palette-add-item"
+                  role="menuitem"
+                  disabled
+                  title="Custom commands are not configurable yet"
+                >
+                  <span className="action-palette-add-item-label">Custom command…</span>
+                  <span className="action-palette-add-item-meta">soon</span>
+                </button>
+              </div>
+            )}
+          </div>
           <PaletteStatus row="model" status={opStatus} />
         </div>
       </div>
@@ -11374,59 +11395,13 @@ function App() {
     return provider;
   }
 
-  // Approximate prompt-size estimate shown inside the persistent Inspect
-  // control. The number reflects the payload an op would send against the
-  // op-target panel's active file (the same target Extend/Settle/Stir/Reply
-  // run against). The estimate uses the same assembler and provider-system
-  // preparation as a live Extend call, with an empty seed; the context block
-  // still dominates. Debounced so typing doesn't thrash the async gather.
-  const [tokenEstimate, setTokenEstimate] = useState<number | null>(null);
-  useEffect(() => {
-    if (!folder) {
-      setTokenEstimate(null);
-      return;
-    }
-    const panelIdx = uiFocus?.panelIndex ?? Math.min(activePanel, panels.length - 1);
-    const path = panelIdx >= 0 ? panels[panelIdx]?.active : undefined;
-    if (!path) {
-      setTokenEstimate(null);
-      return;
-    }
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      void (async () => {
-        try {
-          const provider = resolveVoiceProvider(modelPubkey);
-          if (!provider) throw new Error("No AI provider configured");
-          const prepared = await modelOperationControllerRef.current!.prepare({
-            panelIndex: panelIdx,
-            operation: "extend",
-            operationInputs: { seed: "", hasSelection: false },
-            provider,
-            modelVoicePubkey: modelPubkey,
-            lensId: opLenses.extend,
-          });
-          if (!cancelled) setTokenEstimate(prepared.budget.estimatedTokens);
-        } catch {
-          if (!cancelled) setTokenEstimate(null);
-        }
-      })();
-    }, 400);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [folder, files, panels, activePanel, uiFocus, modelPubkey, scope, shielded, providers, opLenses]);
-
   // ─── Prompt inspector ──────────────────────────────────────────────────────
-  // Clicking a single-shot MODEL action opens a modal showing exactly what that
-  // op would send; the persistent Inspect control remains an optional entry
-  // point that defaults to Extend. `inspectOp` is null when closed; non-null is
-  // the op to show first. The inputs + context block are
-  // gathered once on open (against the op-target panel + scope, mirroring what
-  // the live ops gather) and held in state so the modal can switch op tabs
-  // without re-fetching the (memoized) context block.
+  // The per-op chevron on each MODEL action opens a modal showing exactly what
+  // that op would send. `inspectOp` is null when closed; non-null is the op to
+  // show first. The inputs + context block are gathered once on open (against
+  // the op-target panel + scope, mirroring what the live ops gather) and held
+  // in state so the modal can switch op tabs without re-fetching the (memoized)
+  // context block.
   const [inspectOp, setInspectOp] = useState<PromptOpKind | null>(null);
   const [inspectContext, setInspectContext] = useState("");
   const [inspectNotes, setInspectNotes] = useState<Partial<Record<PromptOpKind, string>>>({});
@@ -11588,6 +11563,28 @@ function App() {
     };
   }
 
+  /** Gather the focused file's signed genesis-to-head chain as a trace-context
+   *  boundary for Extend. Shared by the Inspector's prepare path and the
+   *  Extend autofire branch so both see byte-identical context. Throws if no
+   *  folder is attached, no file is focused, or the chain is empty/unstepped. */
+  async function gatherExtendTraceContext(idx: number) {
+    const liveFolder = folderRef.current;
+    const activePath = panelsRef.current[idx]?.active ?? "";
+    if (!liveFolder || !activePath) {
+      throw new Error("Open and focus a stepped file before preparing Extend");
+    }
+    const chain = await fetchChain(liveFolder.id, activePath);
+    if (chain.length === 0) {
+      throw new Error("Extend needs the focused file's signed genesis-to-head chain");
+    }
+    return {
+      version: 1 as const,
+      policy: "selected-trace-v1" as const,
+      chain,
+      verifyEvent,
+    };
+  }
+
   async function prepareInspectorOperation(
     operation: PromptOpKind,
     inputs: Partial<Record<PromptOpKind, OpInputs>> = inspectInputsRef.current,
@@ -11610,23 +11607,7 @@ function App() {
     setInspectPreparationError(null);
     try {
       const traceContext = operation === "extend"
-        ? await (async () => {
-            const liveFolder = folderRef.current;
-            const activePath = panelsRef.current[idx]?.active ?? "";
-            if (!liveFolder || !activePath) {
-              throw new Error("Open and focus a stepped file before preparing Extend");
-            }
-            const chain = await fetchChain(liveFolder.id, activePath);
-            if (chain.length === 0) {
-              throw new Error("Extend needs the focused file's signed genesis-to-head chain");
-            }
-            return {
-              version: 1 as const,
-              policy: "selected-trace-v1" as const,
-              chain,
-              verifyEvent,
-            };
-          })()
+        ? await gatherExtendTraceContext(idx)
         : undefined;
       const prepared = await modelOperationControllerRef.current!.prepare({
         panelIndex: idx,
@@ -11923,8 +11904,31 @@ function App() {
    * Completion is provisional and never edits, Steps, mints, or publishes. */
   async function extendLLM(idx: number, approvedRequest?: PreparedOperation) {
     if (!approvedRequest || approvedRequest.operation !== "extend") {
-      await openInspector("extend");
-      return;
+      // Autofire (no pre-approved request from the Inspector): resolve the
+      // provider, gather the focused file's trace context, and prepare the
+      // request inline via the same controller the Inspector uses — then fall
+      // through to the durable desktop runtime path below. The Inspector is
+      // still reachable via the per-op chevron for an exact-prompt preview.
+      const provider = resolveOpProvider(idx, modelPubkey, "extend");
+      if (!provider) return;
+      setOpStatus(idx, "running", undefined, "extend");
+      try {
+        const traceContext = await gatherExtendTraceContext(idx);
+        const inputs = deriveInspectInputs().extend ?? {};
+        const prepared = await modelOperationControllerRef.current!.prepare({
+          panelIndex: idx,
+          operation: "extend",
+          operationInputs: inputs,
+          provider,
+          modelVoicePubkey: modelPubkey,
+          lensId: opLenses.extend,
+          traceContext,
+        });
+        approvedRequest = prepared;
+      } catch (error) {
+        setOpStatus(idx, "error", error instanceof Error ? error.message : String(error), "extend");
+        return;
+      }
     }
     const runtime = desktopOperationRuntimeRef.current;
     const provider = providersRef.current.find(
@@ -14245,36 +14249,6 @@ function App() {
     openInPanel(path, targetPanel);
     setActivePanel(targetPanel);
     commitUiFocus(trace ? locateFocus(trace, targetPanel, path) : null);
-  }
-
-  /** Open the one session-owned direct-Coin draft. Repeated activation focuses
-   * the existing tab so switching away and back never discards typed bytes. */
-  function openDirectCoinComposer() {
-    if (!kademliaEnabledSnapshot()) return;
-    const current = panelsRef.current;
-    const existingPanel = current.findIndex((panel) =>
-      panel.tabs.includes(DIRECT_COIN_COMPOSER_TAB),
-    );
-    const targetPanel = existingPanel >= 0
-      ? existingPanel
-      : Math.min(activePanel, current.length - 1);
-    const next = mapPanel(current, targetPanel, (panel) => ({
-      ...panel,
-      tabs: panel.tabs.includes(DIRECT_COIN_COMPOSER_TAB)
-        ? panel.tabs
-        : [...panel.tabs, DIRECT_COIN_COMPOSER_TAB],
-      active: DIRECT_COIN_COMPOSER_TAB,
-    }));
-    if (existingPanel < 0) {
-      setDirectCoinDraft(emptyDirectCoinDraft());
-      setDirectCoinError(null);
-    }
-    panelsRef.current = next;
-    setPanels(next);
-    setActivePanel(targetPanel);
-    setEditorSelection(null);
-    chooseDirectorySelection([]);
-    commitUiFocus(null);
   }
 
   /** Keep direct-Coin KEdits in App state so the draft survives ordinary tab
@@ -18089,7 +18063,6 @@ function App() {
                 onActivateOblivion={selectOblivion}
                 onActivateFolder={selectFolder}
                 onOpenFolder={openFolder}
-                onMintCoin={openDirectCoinComposer}
                 coinsEnabled={coinsEnabled}
                 onScan={(kind) => void onScan(kind)}
                 onReify={(target) => setReifyPrompt({ includeTrace: false, target })}
@@ -19084,8 +19057,8 @@ function App() {
                 onOp={(op) => runOp(opTargetPanel(), op)}
                 onStop={() => stopOp(opTargetPanel())}
                 opStatus={summonStatus[opTargetPanel()] ?? { state: "idle" }}
-                tokenEstimate={tokenEstimate}
                 onInspect={(operation) => void openInspector(operation)}
+                onRouteToModels={() => selectView("models")}
                 attestPlan={paletteAttestationPlan()}
                 coinsEnabled={coinsEnabled}
                 targetInScope={(() => {

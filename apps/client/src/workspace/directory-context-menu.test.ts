@@ -38,13 +38,12 @@ test("ordinary files and folders share Open, Open to side, rename, and delete", 
   assert.equal(file.stepFolder, false);
 });
 
-test("Mint and its Coins expose creation, open, and Reify actions", () => {
+test("Mint and its Coins expose open and Reify actions", () => {
   const mint = directoryContextMenuCapabilities("mint", true, 1);
   const coin = directoryContextMenuCapabilities("mint/coin.md", false, 1);
 
   assert.equal(mint.openLabel, "Open");
   assert.equal(mint.openToSide, true);
-  assert.equal(mint.mintCoin, true);
   assert.equal(mint.reify, true);
   assert.equal(coin.openLabel, "Open");
   assert.equal(coin.openToSide, true);
@@ -86,7 +85,6 @@ test("the Sidebar wires the standardized capabilities to their existing flows", 
   assert.match(appSource, /\{menu\.openLabel\}/);
   assert.match(appSource, /menu\.openToSide[\s\S]*?onOpenToSide\(path\)/);
   assert.doesNotMatch(appSource, /View Coin/);
-  assert.match(appSource, /menu\.mintCoin[\s\S]*?onMintCoin\(\)[\s\S]*?Mint New Coin/);
   assert.match(appSource, /menu\.scanFolder[\s\S]*?onScan\("folder"\)[\s\S]*?Scan Folder/);
   assert.match(appSource, /menu\.scanFile[\s\S]*?onScan\("file"\)[\s\S]*?Scan File/);
   assert.match(appSource, /menu\.reify[\s\S]*?onReify\(\{ kind: isFolder \? "folder" : "file", path \}\)[\s\S]*?Reify/);
