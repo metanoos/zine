@@ -231,3 +231,73 @@ before corpus measurements would lock in speculative chunk boundaries.
 **Depends on:** Stable schema-2 encoding, measured dogfood database growth,
 event-size budgets, exact reconstruction/signature tests, corruption fixtures,
 and the public-release decision.
+
+## Provenance / Rendezvous
+
+### Kademlia republish-deadline sweep test seam
+
+**What:** Add a regression test that exercises `sweep_republish_deadlines` in
+`apps/client/src-tauri/src/kademlia.rs` — the structural backstop that forces
+`query.finish()` on a republish query whose 30 s deadline expired without a
+terminal `OutboundQueryProgressed` event.
+
+**Why:** This is the load-bearing defense against a libp2p bug that leaves an
+orphan Kad query alive when the terminal event never arrives. The fix landed in
+the co-mint hardening PR (commit `cc4942d`) but has no test coverage today. A
+regression that dropped the `query.finish()` call or changed the `matches!`
+arms so a non-Republish pending got its slot decremented twice would not be
+caught.
+
+**Context:** `sweep_republish_deadlines` is a private method on `EventLoop`,
+which wraps a libp2p `Swarm` with dozens of private fields. No test seam
+exists. Existing tests use real wall-clock time (no `tokio::time::pause`), so
+driving the 30 s deadline costs unacceptable CI time. The fix requires either
+(a) extracting the deadline-sweep logic into a pure helper plus `#[cfg(test)]`
+accessors on `EventLoop`, or (b) introducing a virtual-clock test runtime.
+
+**Pros:** Locks the republish-deadline backstop against silent regression;
+documents the libp2p query-lifetime contract.
+
+**Cons:** Touches the kademlia event-loop internals; the test seam is non-trivial.
+
+**Effort:** M
+**Priority:** P2
+**Deferred:** 2026-07-19
+**Depends on:** A decision on the test-seam shape (pure helper vs. virtual
+clock) and confirmation that the libp2p `QueryId` lifetime matches the
+application deadline across versions.
+
+### Bind Mint completion attestation to coin pubkey at the IDB-load boundary
+
+**What:** Extend `validateCompletionAttestation` in
+`apps/client/src/provenance/rendezvous-outbox.ts` to require the caller pass
+the expected coin pubkey, and reject any attestation whose `pubkey` does not
+match — closing the persistence-layer gap that today relies on the drain path's
+`isValidMinterAttestation` check.
+
+**Why:** A tampered IDB row pairing a foreign-minter attestation to a Coin
+passes `validateCompletionAttestation` on load today (it only checks the
+attestation's self-consistency: signature valid, `p` tag matches
+`attestation.pubkey`, kind/tag shape correct). The drain path catches it later
+via `isValidMinterAttestation(coin, completionAttestation)` after re-fetching
+the real Coin event, and terminal-abandons the row. Impact is bounded to DoS
+on that Coin's indexing, not forgery — but the persistence-layer gap means a
+tampered row stays in the outbox consuming bytes until the drain runs.
+
+**Context:** The coin `Event` is not stored in the IDB row (only `eventId`).
+Binding the pubkey at load would require either (a) an IDB schema change to
+store the coin's pubkey in the row, or (b) re-fetching the coin event at
+validation time (expensive). The drain-boundary check is authoritative today;
+this entry exists to document why the gap is acceptable and what would close it.
+
+**Pros:** Defense-in-depth: a tampered row never even loads, instead of loading
+and being abandoned at the drain boundary.
+
+**Cons:** Schema change or eager fetch adds complexity for marginal benefit
+given the drain-boundary check already prevents forgery.
+
+**Effort:** M
+**Priority:** P3
+**Deferred:** 2026-07-19
+**Depends on:** A decision to widen the IDB schema (v2 -> v3 migration) or
+accept the eager fetch cost; currently the drain boundary is authoritative.
