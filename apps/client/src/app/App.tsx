@@ -15,7 +15,7 @@ import { PromptInspectorModal } from "../ai/PromptInspectorModal.js";
 import { SendFailureModal } from "../networking/SendFailureModal.js";
 import { describeSendFailure, type SendFailureView } from "../networking/send-failure.js";
 import { runAgentLoop, type AgentCtx } from "../ai/agent-loop.js";
-import { AUTOMATION_STORAGE_KEY, dueAutomationRecipesForWorkspace, finishAgentRunManifest, loadAutomationRecipes, markAutomationRecipeStarted, removeAutomationRecipe, serializeAgentRunManifest, upsertAutomationRecipe, withAutomationSchedulerLock, type AgentRunManifest, type AgentRunTrigger, type AutomationRecipeDraft, type AutomationScopes } from "../ai/automation-store.js";
+import { AUTOMATION_STORAGE_KEY, dueAutomationRecipesForWorkspace, finishAgentRunManifest, loadAutomationRecipes, markAutomationRecipeStarted, reconcileAutomationRecipes, removeAutomationRecipe, serializeAgentRunManifest, upsertAutomationRecipe, withAutomationSchedulerLock, type AgentRunManifest, type AgentRunTrigger, type AutomationRecipeDraft, type AutomationScopes } from "../ai/automation-store.js";
 import { ensureModelVoice } from "../ai/model-voice.js";
 import { ownerFolderOf, activeMount } from "../workspace/focus-routing.js";
 import { focusDirectoryPath, focusReplayTarget, locateFocus, rebaseUiFocus, refreshFocusNode, sameUiFocus, type FocusRef, type UiFocus } from "../workspace/ui-focus.js";
@@ -3223,7 +3223,7 @@ function App() {
           console.warn("[automation] scheduled run failed before completion:", error);
         })
         .finally(() => {
-          setAutomationRecipes(loadAutomationRecipes());
+          setAutomationRecipes((current) => reconcileAutomationRecipes(current));
           automationSchedulerBusyRef.current = false;
         });
     };

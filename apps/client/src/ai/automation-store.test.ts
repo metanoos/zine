@@ -8,6 +8,7 @@ import {
   loadAutomationRecipes,
   markAutomationRecipeStarted,
   nextAutomationRunAt,
+  reconcileAutomationRecipes,
   releaseAutomationLease,
   removeAutomationRecipe,
   serializeAgentRunManifest,
@@ -145,6 +146,35 @@ test("disabled and manual-only recipes are never due", () => {
     () => "manual",
   );
   assert.deepEqual(dueAutomationRecipes([paused, manual], Number.MAX_SAFE_INTEGER), []);
+});
+
+test("scheduler recipe refresh preserves state identity when storage is unchanged", () => {
+  const storage = new MemoryStorage();
+  upsertAutomationRecipe(
+    {
+      label: "Morning brief",
+      goal: "Summarize notes",
+      providerId: "model-a",
+      ...WORKSPACE_BINDING,
+      intervalMinutes: 60,
+      enabled: true,
+    },
+    storage,
+    1_000,
+    () => "recipe-a",
+  );
+  const current = loadAutomationRecipes(storage, 2_000);
+
+  assert.strictEqual(reconcileAutomationRecipes(current, storage, 2_000), current);
+
+  markAutomationRecipeStarted("recipe-a", 3_000, storage);
+  const refreshed = reconcileAutomationRecipes(current, storage, 3_000);
+  assert.notStrictEqual(refreshed, current);
+  assert.equal(refreshed[0]?.lastRunAt, 3_000);
+  assert.strictEqual(reconcileAutomationRecipes(refreshed, storage, 3_000), refreshed);
+
+  removeAutomationRecipe("recipe-a", storage, 4_000);
+  assert.deepEqual(reconcileAutomationRecipes(refreshed, storage, 4_000), []);
 });
 
 test("corrupt recipe storage fails closed", () => {

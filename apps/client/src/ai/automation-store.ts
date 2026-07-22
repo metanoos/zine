@@ -185,6 +185,18 @@ export function loadAutomationRecipes(
   }
 }
 
+/** Reload recipes without changing the array identity when storage is unchanged.
+ * React scheduler effects can safely depend on the returned state without
+ * turning a periodic refresh into an immediate render loop. */
+export function reconcileAutomationRecipes(
+  current: AutomationRecipe[],
+  storage: AutomationStorage = localStorage,
+  now = Date.now(),
+): AutomationRecipe[] {
+  const next = loadAutomationRecipes(storage, now);
+  return JSON.stringify(next) === JSON.stringify(current) ? current : next;
+}
+
 export function saveAutomationRecipes(
   recipes: readonly AutomationRecipe[],
   storage: AutomationStorage = localStorage,
