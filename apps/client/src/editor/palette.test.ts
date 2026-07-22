@@ -10,7 +10,10 @@ import {
 } from "./palette.js";
 import { BUILTIN_AI_PALETTE_REGISTRY } from "../ai/palette-registry.js";
 
-const appSource = readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8");
+const appSource = [
+  readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
+].join("\n");
 const cssSource = readFileSync(new URL("../app/App.css", import.meta.url), "utf8");
 const voiceChipSource = readFileSync(new URL("../identity/VoiceChip.tsx", import.meta.url), "utf8");
 

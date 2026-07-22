@@ -14,7 +14,10 @@ import {
 } from "./onboarding-state.js";
 
 const onboardingSource = readFileSync(new URL("./Onboarding.tsx", import.meta.url), "utf8");
-const appSource = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+const appSource = [
+  readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("./App.tsx", import.meta.url), "utf8"),
+].join("\n");
 const rootSource = readFileSync(new URL("../workspace/root.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("./App.css", import.meta.url), "utf8");
 

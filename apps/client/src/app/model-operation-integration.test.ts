@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+const app = [
+  readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("./App.tsx", import.meta.url), "utf8"),
+].join("\n");
 const contextGather = readFileSync(new URL("../ai/context-gather.ts", import.meta.url), "utf8");
 const inspector = readFileSync(new URL("../ai/PromptInspectorModal.tsx", import.meta.url), "utf8");
 const desktopRuntime = readFileSync(new URL("../ai/desktop-operation-runtime.ts", import.meta.url), "utf8");
