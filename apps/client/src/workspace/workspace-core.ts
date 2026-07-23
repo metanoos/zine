@@ -450,7 +450,8 @@ export function fileHasUnsteppedChanges(
     baseline.tags.length !== tags.length ||
     baseline.tags.some((tag, index) => tag !== tags[index]) ||
     baseline.citationIds.length !== citationIds.length ||
-    baseline.citationIds.some((nodeId, index) => nodeId !== citationIds[index])
+    baseline.citationIds.some((nodeId, index) => nodeId !== citationIds[index]) ||
+    (file.editorTransactions?.length ?? 0) > 0
   );
 }
 

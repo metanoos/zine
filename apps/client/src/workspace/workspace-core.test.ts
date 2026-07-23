@@ -356,3 +356,35 @@ test("the first real change makes a fresh file unstepped", () => {
     true,
   );
 });
+
+test("selection-only activity remains pending against an existing Step baseline", () => {
+  const selectionOnly: EditorTransaction = {
+    sequence: 0,
+    timestamp: 1,
+    actor: A,
+    changes: [],
+    selectionBefore: {
+      ranges: [{ anchor: 0, head: 0 }],
+      main: 0,
+    },
+    selectionAfter: {
+      ranges: [{ anchor: 0, head: 1 }],
+      main: 0,
+    },
+  };
+  assert.equal(
+    fileHasUnsteppedChanges(
+      {
+        runs: [{ voice: A, text: "a" }],
+        nodeId: "1".repeat(64),
+        tags: [],
+        editorTransactions: appendEditorTransactionLog(
+          EMPTY_EDITOR_TRANSACTION_LOG,
+          [selectionOnly],
+        ),
+      },
+      { content: "a", tags: [], citationIds: [] },
+    ),
+    true,
+  );
+});

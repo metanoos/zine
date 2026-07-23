@@ -8530,11 +8530,15 @@ function App() {
       tags: previous?.tags ?? [],
       ...(nextLog.length > 0 ? { editorTransactions: nextLog } : {}),
     };
-    // Journal the exact content+process transaction before waiting for React's
-    // render or the 800ms metadata refresh. A crash after this line can restore
-    // both the buffer and the EditorTransactions that produced it.
+    // Publish the exact content+process transaction to synchronous in-memory
+    // readers before waiting for React's render or persistence.
     filesRef.current = { ...filesRef.current, [path]: nextFile };
-    if (folder) {
+    // Text changes are crash-critical and stay synchronous. Selection-only
+    // transactions do not alter the recoverable buffer, so let
+    // useProvenance's quiet-period mirror batch their growing process log
+    // instead of parsing and rewriting the full folder pad on every cursor
+    // movement.
+    if (folder && previousText !== nextText) {
       mirrorPad(folder.id, path, {
         content: nextText,
         tags: nextFile.tags,

@@ -217,6 +217,13 @@ test("manual seeks preserve the current play/pause state", () => {
   assert.match(source, /onSeekAt=\{seekReplayToTime\}/);
 });
 
+test("selection-only editor activity batches crash-pad persistence", () => {
+  assert.match(
+    source,
+    /if \(folder && previousText !== nextText\) \{\s*mirrorPad\(folder\.id, path,/,
+  );
+});
+
 test("keystroke playback can begin blank without creating a pseudo-step", () => {
   assert.match(timelineSource, /const firstContentIndex = all\.findIndex\(/);
   assert.match(timelineSource, /frame\.kind === "file"/);
