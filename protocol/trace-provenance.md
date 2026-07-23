@@ -424,7 +424,7 @@ Given `prompt` + the rule manifest + the cited nuclei, a reader whose binary imp
 [[ some phrase | eventId ]]    resolved — coined, permanently addressable, frozen
 ```
 
-Everything outside brackets is fluid by default. A bare bracket is rewrite protection only: it shields a span from silent drift across LLM rounds without minting anything. A selection deletion that fully contains brackets removes the loose text but spares each complete bracket; Cut and paste/type-over operate on the complete selection. Clicking bracketed text selects the whole occurrence, and Backspace twice unwraps it to ordinary text (dropping any resolved citation suffix without deleting the visible phrase). A bare bracket is NEVER auto-resolved by coincidental text match — resolution is always an explicit act.
+Everything outside brackets is fluid by default. A bare bracket is rewrite protection only: it shields a span from silent drift across LLM rounds without minting anything. A selection deletion that fully contains brackets removes the loose text but spares each complete bracket; Cut and paste/type-over operate on the complete selection. Clicking bracketed text selects the whole occurrence, and Backspace twice reopens it as editable `[[ text` (preserving the opening brackets and visible phrase while dropping any resolved citation suffix and closing brackets). While an opening `[[` is incomplete, the editor styles it as an in-progress bracket; only the adjacent second closing `]` completes `]]` and turns it into a Preview chip. A bare bracket is NEVER auto-resolved by coincidental text match — resolution is always an explicit act.
 
 **Extracted coining pass** (client- or CLI-triggered), for each unresolved bracket:
 

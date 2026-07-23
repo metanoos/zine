@@ -8,6 +8,7 @@ import {
   bracketRangeAt,
   doubleBackspaceUnwrapCommand,
   findAddedInlineCitations,
+  findInProgressBracket,
   findMintSelectionTarget,
   findResolvedBrackets,
   modeFacet,
@@ -95,6 +96,22 @@ test("click target lookup exposes the phrase separately from bracket markup", ()
   });
 });
 
+test("an opening bracket stays in progress through the first closing bracket", () => {
+  for (const doc of ["[[", "[[ kept", "[[ kept ]"] as const) {
+    assert.deepEqual(findInProgressBracket(doc), {
+      matchStart: 0,
+      matchEnd: doc.length,
+    });
+  }
+  assert.equal(findInProgressBracket("[[ kept ]]"), null);
+
+  const afterComplete = "[[ done ]] then [[ draft ]";
+  assert.deepEqual(findInProgressBracket(afterComplete), {
+    matchStart: afterComplete.lastIndexOf("[["),
+    matchEnd: afterComplete.length,
+  });
+});
+
 test("Step target: a loose highlight mints exactly the highlighted text", () => {
   const doc = "before selected after";
   assert.deepEqual(findMintSelectionTarget(doc, 7, 15), {
@@ -162,7 +179,7 @@ test("paste/type-over replaces the complete selection, including brackets", () =
   );
 });
 
-test("double Backspace unwraps a resolved bracket selected by its phrase", () => {
+test("double Backspace reopens a resolved bracket while preserving its opener", () => {
   let time = 100;
   let state = EditorState.create({
     doc: "before [[ kept | node-1 ]] after",
@@ -187,9 +204,40 @@ test("double Backspace unwraps a resolved bracket selected by its phrase", () =>
 
   time = 500;
   assert.equal(command(view), true);
-  assert.equal(state.doc.toString(), "before kept after");
+  assert.equal(state.doc.toString(), "before [[ kept after");
   assert.deepEqual(
     { from: state.selection.main.from, to: state.selection.main.to },
-    { from: 7, to: 11 },
+    { from: 10, to: 14 },
+  );
+});
+
+test("double Backspace from after a pending chip reopens it for editing", () => {
+  let time = 100;
+  let state = EditorState.create({
+    doc: "[[ draft ]]",
+    selection: { anchor: "[[ draft ]]".length },
+  });
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(spec: Parameters<EditorView["dispatch"]>[0]) {
+      state = state.update(spec).state;
+    },
+  } as unknown as EditorView;
+  const command = doubleBackspaceUnwrapCommand(() => time);
+
+  assert.equal(command(view), true);
+  assert.deepEqual(
+    { from: state.selection.main.from, to: state.selection.main.to },
+    { from: 0, to: "[[ draft ]]".length },
+  );
+
+  time = 500;
+  assert.equal(command(view), true);
+  assert.equal(state.doc.toString(), "[[ draft");
+  assert.deepEqual(
+    { from: state.selection.main.from, to: state.selection.main.to },
+    { from: 3, to: 8 },
   );
 });

@@ -20,7 +20,7 @@
  * gap-deletions so the brackets survive. Cut and paste/type-over keep normal
  * editor semantics and remove/replace the complete selection. Edge-overlapping
  * deletes still rupture brackets. Double-Backspace over one selected bracket
- * deliberately unwraps it to normal text.
+ * deliberately reopens it as editable `[[ …` text.
  *
  * The bracketing is LITERAL: the `[[ ]]` characters render as plain document
  * text and stay visible — they are what marks a run as a trace component. The
@@ -338,6 +338,36 @@ export function* iterBrackets(text: string): Generator<BracketMatch> {
   }
 }
 
+export interface InProgressBracketRange {
+  matchStart: number;
+  matchEnd: number;
+}
+
+/** Find the one bracket draft that has an opening `[[` but not a closing `]]`.
+ *
+ * Complete brackets are consumed from left to right using the same first-close
+ * rule as `iterBrackets`. That leaves at most one active draft: its styling runs
+ * from `[[` through the first lone `]` (when the author has started closing it),
+ * or through the end of the document while no close has been typed. The next
+ * adjacent `]` makes the normal complete-bracket parser take over. */
+export function findInProgressBracket(text: string): InProgressBracketRange | null {
+  let cursor = 0;
+  while (cursor < text.length) {
+    const matchStart = text.indexOf("[[", cursor);
+    if (matchStart === -1) return null;
+    const closeStart = text.indexOf("]]", matchStart + 2);
+    if (closeStart === -1) {
+      const firstClose = text.indexOf("]", matchStart + 2);
+      return {
+        matchStart,
+        matchEnd: firstClose === -1 ? text.length : firstClose + 1,
+      };
+    }
+    cursor = closeStart + 2;
+  }
+  return null;
+}
+
 /** Find the complete bracket occurrence at a document position. The pointer
  *  layer uses the phrase range so one click targets human text without leaking
  *  `[[ ]]` or the internal node id into copy, Mint, or model operations. */
@@ -419,8 +449,9 @@ export function findMintSelectionTarget(
  *  In Preview mode, a complete match (non-empty phrase) instead collapses
  *  into one atomic `CitationWidget` covering the whole occurrence — see
  *  `EditorView.atomicRanges` below for why it behaves as a single unit. An
- *  incomplete/empty match (`[[]]`, or `[[` still being typed) is left as
- *  literal text in both modes — "the author is mid-typed." */
+ *  empty complete match (`[[]]`) stays literal. An incomplete match is
+ *  styled as an in-progress citation, but remains ordinary editable text; the
+ *  second adjacent closing `]` is what turns it into a Preview chip. */
 function buildBracketDecorations(view: EditorView): DecorationSet {
   const text = view.state.doc.toString();
   const preview = view.state.facet(modeFacet) === "preview";
@@ -480,6 +511,40 @@ function buildBracketDecorations(view: EditorView): DecorationSet {
         Decoration.replace({
           widget: new NodeAbbrevWidget(nodeId.slice(0, 8), nodeId),
         }).range(b.phraseEnd, b.matchEnd - 2),
+      );
+    }
+  }
+  const inProgress = findInProgressBracket(text);
+  if (inProgress && inProgress.matchEnd > inProgress.matchStart) {
+    if (preview) {
+      // Match the finished chip's fill while preserving ordinary text editing.
+      // Accent the opening `[[` and the first closing `]` with the same bracket
+      // chrome the CitationWidget uses; the second `]` swaps this marked text
+      // for the complete atomic widget on the next decoration rebuild.
+      decos.push(
+        Decoration.mark({ class: "md-cite" }).range(
+          inProgress.matchStart,
+          inProgress.matchEnd,
+        ),
+        Decoration.mark({ class: "md-cite-bracket" }).range(
+          inProgress.matchStart,
+          inProgress.matchStart + 2,
+        ),
+      );
+      if (text[inProgress.matchEnd - 1] === "]") {
+        decos.push(
+          Decoration.mark({ class: "md-cite-bracket" }).range(
+            inProgress.matchEnd - 1,
+            inProgress.matchEnd,
+          ),
+        );
+      }
+    } else {
+      decos.push(
+        Decoration.mark({ class: "bracketed-span bracketed-span--pending" }).range(
+          inProgress.matchStart,
+          inProgress.matchEnd,
+        ),
       );
     }
   }
@@ -632,11 +697,12 @@ export function wrapSelectionCommand(): Command {
   };
 }
 
-/** Backspace twice over one whole bracket to unwrap it instead of deleting its
+/** Backspace twice over one whole bracket to reopen it instead of deleting its
  *  phrase. The first press arms the gesture and leaves the bracket selected;
- *  the second press within the timeout replaces the occurrence with plain text.
+ *  the second press within the timeout drops the suffix/closing brackets while
+ *  preserving the opening `[[` and selecting the now-editable phrase.
  *  A cursor immediately after a bracket gets the same two-step behavior: first
- *  press selects it, second press unwraps it. */
+ *  press selects it, second press reopens it. */
 export function doubleBackspaceUnwrapCommand(
   now: () => number = Date.now,
   timeoutMs = 1000,
@@ -704,13 +770,12 @@ export function doubleBackspaceUnwrapCommand(
     armed = null;
     view.dispatch({
       changes: {
-        from: bracket.matchStart,
+        from: bracket.phraseEnd,
         to: bracket.matchEnd,
-        insert: bracket.phrase,
       },
       selection: {
-        anchor: bracket.matchStart,
-        head: bracket.matchStart + bracket.phrase.length,
+        anchor: bracket.phraseStart,
+        head: bracket.phraseEnd,
       },
       scrollIntoView: true,
       userEvent: "delete.backward",
