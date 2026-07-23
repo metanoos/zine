@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +15,84 @@ import (
 	"github.com/fiatjaf/eventstore/sqlite3"
 	"github.com/nbd-wtf/go-nostr"
 )
+
+func TestRelayServeReturnsCleanlyWhenParentPipeCloses(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	reader, writer := io.Pipe()
+	result := make(chan error, 1)
+	go func() {
+		result <- serveUntilParentCloses(
+			listener,
+			http.NotFoundHandler(),
+			reader,
+			true,
+		)
+	}()
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close parent pipe: %v", err)
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("serve after parent close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("relay serve did not stop after the parent pipe closed")
+	}
+}
+
+func TestRelayServeReturnsUnexpectedListenerErrors(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+
+	if err := serveUntilParentCloses(
+		listener,
+		http.NotFoundHandler(),
+		strings.NewReader(""),
+		false,
+	); err == nil {
+		t.Fatal("serve unexpectedly accepted a closed listener")
+	}
+}
+
+func TestParentPipeClosesRelayTargetOnEOF(t *testing.T) {
+	reader, writer := io.Pipe()
+	targetClosed := make(chan struct{})
+	done := make(chan struct{})
+	go closeOnReaderEOF(reader, func() error {
+		close(targetClosed)
+		return nil
+	}, done)
+
+	select {
+	case <-targetClosed:
+		t.Fatal("relay target closed while the parent pipe was still open")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close parent pipe: %v", err)
+	}
+	select {
+	case <-targetClosed:
+	case <-time.After(time.Second):
+		t.Fatal("relay target remained open after the parent pipe reached EOF")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("parent pipe monitor did not finish")
+	}
+}
 
 func TestAccessPolicyPollerActivatesAfterOwnerIsCreated(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "peers.json")

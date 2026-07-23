@@ -32,6 +32,7 @@ const SECRET_VAULTS_DIRNAME: &str = "vaults";
 const SECRET_VAULT_SNAPSHOT_FILENAME: &str = "secrets.hold";
 const SECRET_VAULT_SALT_FILENAME: &str = "secrets.salt";
 const VAULT_RELAY_FILENAME: &str = "relay.sqlite3";
+const VAULT_RELAY_PID_FILENAME: &str = ".relay.pid";
 const VAULT_PEERS_FILENAME: &str = "peers.json";
 const VAULT_RUNTIME_VERIFIER_FILENAME: &str = "runtime.keycheck";
 const SECRET_VAULT_REGISTRY_FILENAME: &str = "zine-vaults.json";
@@ -863,6 +864,73 @@ const IGNORED_SEGMENTS: &[&str] = &[
     ".DS_Store",
 ];
 
+/// Check whether whatever is occupying the relay port is a stale relay this
+/// app previously spawned for `database`, and if so, kill it.
+///
+/// Identity is established two ways, both required: the PID file at
+/// `<vault_dir>/.relay.pid` (written by spawn_relay on success) names a
+/// process that is (a) still alive and (b) running with `--db <database>` in
+/// its argv. A dead or non-matching PID leaves the port untouched — the
+/// caller falls back to the existing "already in use" refusal. This is not a
+/// general port-conflict resolver; it only ever reaps a relay this exact app
+/// installation spawned for this exact vault.
+#[cfg(unix)]
+fn reap_stale_relay_if_owned(vault_dir: &Path, database: &Path) -> Result<bool, String> {
+    let pid_path = vault_dir.join(VAULT_RELAY_PID_FILENAME);
+    let pid_text = match fs::read_to_string(&pid_path) {
+        Ok(text) => text,
+        Err(_) => return Ok(false),
+    };
+    let Ok(pid) = pid_text.trim().parse::<u32>() else {
+        let _ = fs::remove_file(&pid_path);
+        return Ok(false);
+    };
+
+    let inspect = Command::new("ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .arg("-o")
+        .arg("args=")
+        .output()
+        .map_err(|error| format!("inspect pid {pid}: {error}"))?;
+    if !inspect.status.success() {
+        // Process is gone; the pid file just outlived it.
+        let _ = fs::remove_file(&pid_path);
+        return Ok(false);
+    }
+    let args = String::from_utf8_lossy(&inspect.stdout);
+    if !args.contains(&*database.to_string_lossy()) {
+        // Alive, but not serving our vault's database — not ours to touch.
+        return Ok(false);
+    }
+
+    let _ = Command::new("kill").arg(pid.to_string()).status();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let alive = Command::new("ps")
+            .arg("-p")
+            .arg(pid.to_string())
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !alive {
+            break;
+        }
+        if Instant::now() > deadline {
+            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = fs::remove_file(&pid_path);
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+fn reap_stale_relay_if_owned(_vault_dir: &Path, _database: &Path) -> Result<bool, String> {
+    Ok(false)
+}
+
 /// Spawn the local zine-relay sidecar if it isn't already up.
 ///
 /// Locates the relay binary via (in order):
@@ -908,17 +976,31 @@ fn spawn_relay(app: tauri::AppHandle) -> Result<String, String> {
     let addr: SocketAddr = "127.0.0.1:4869"
         .parse::<SocketAddr>()
         .map_err(|e: std::net::AddrParseError| e.to_string())?;
+    let runtime = active_vault_runtime()?;
+    let database = runtime.directory.join(VAULT_RELAY_FILENAME);
 
     // A process we do not own could be serving another vault's database. Never
     // silently attach to it: the fixed loopback port is part of the active
-    // vault boundary.
+    // vault boundary. The one exception is a relay we ourselves spawned for
+    // this vault that outlived its parent app process. The stale-relay check
+    // verifies both the persisted PID and this vault's database path before
+    // touching the process.
     if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
-        return Err("relay port 4869 is already in use by another process".into());
+        match reap_stale_relay_if_owned(&runtime.directory, &database) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err("relay port 4869 is already in use by another process".into());
+            }
+            Err(error) => {
+                return Err(format!(
+                    "relay port 4869 is already in use by another process \
+                     (stale-relay check failed: {error})"
+                ));
+            }
+        }
     }
 
     let bin = resolve_relay_binary(&app)?;
-    let runtime = active_vault_runtime()?;
-    let database = runtime.directory.join(VAULT_RELAY_FILENAME);
     let mut ready_nonce = [0u8; 32];
     getrandom::fill(&mut ready_nonce)
         .map_err(|error| format!("generate relay readiness nonce: {error}"))?;
@@ -953,8 +1035,14 @@ fn spawn_relay(app: tauri::AppHandle) -> Result<String, String> {
         .arg(&ready_path)
         .arg("--ready-token")
         .arg(&ready_token)
+        // Keep a private write end open for the lifetime of the desktop
+        // process. The relay watches the read end and closes its listener on
+        // EOF, so even a crash or forced parent termination cannot orphan it.
+        .arg("--exit-on-stdin-close")
+        .stdin(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to spawn relay binary at {}: {}", bin, e))?;
+    let child_pid = child.id();
     *RELAY_CHILD
         .lock()
         .map_err(|_| "relay process lock is poisoned".to_string())? = Some(child);
@@ -1013,6 +1101,12 @@ fn spawn_relay(app: tauri::AppHandle) -> Result<String, String> {
                     };
                     if child_still_running {
                         let _ = fs::remove_file(&ready_path);
+                        // Record the pid so a future launch can recognize and
+                        // reap this exact relay after an abnormal parent exit.
+                        let _ = fs::write(
+                            runtime.directory.join(VAULT_RELAY_PID_FILENAME),
+                            child_pid.to_string(),
+                        );
                         RELAY_SPAWNED.store(true, Ordering::SeqCst);
                         return Ok("spawned".into());
                     }
@@ -2912,6 +3006,30 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn test_reap_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "zine-reap-stale-relay-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create reap test directory");
+        dir
+    }
+
+    #[cfg(unix)]
+    fn ps_alive(pid: u32) -> bool {
+        Command::new("ps")
+            .arg("-p")
+            .arg(pid.to_string())
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
     #[test]
     fn owned_relay_can_stop_and_relaunch_without_leaving_a_child() {
         let _gate = VAULT_RUNTIME_GATE
@@ -2930,6 +3048,105 @@ mod tests {
             assert!(!RELAY_SPAWNED.load(Ordering::SeqCst));
             assert!(RELAY_CHILD.lock().expect("relay process lock").is_none());
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reap_stale_relay_if_owned_is_noop_without_a_pid_file() {
+        let dir = test_reap_dir("no-pid-file");
+        let database = dir.join(VAULT_RELAY_FILENAME);
+
+        let reaped =
+            reap_stale_relay_if_owned(&dir, &database).expect("missing pid file is not an error");
+        assert!(!reaped);
+
+        fs::remove_dir_all(dir).expect("remove reap test directory");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reap_stale_relay_if_owned_cleans_up_a_pid_file_for_a_dead_process() {
+        let dir = test_reap_dir("dead-pid");
+        let database = dir.join(VAULT_RELAY_FILENAME);
+        // Far beyond any real pid space (macOS/Linux max out well under 1<<22).
+        fs::write(dir.join(VAULT_RELAY_PID_FILENAME), "4000000000").expect("write stale pid file");
+
+        let reaped = reap_stale_relay_if_owned(&dir, &database).expect("dead pid is not an error");
+        assert!(!reaped);
+        assert!(
+            !dir.join(VAULT_RELAY_PID_FILENAME).exists(),
+            "stale pid file for a dead process should be cleaned up"
+        );
+
+        fs::remove_dir_all(dir).expect("remove reap test directory");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reap_stale_relay_if_owned_leaves_an_alive_process_for_a_different_database_alone() {
+        let dir = test_reap_dir("mismatched-db");
+        let database = dir.join(VAULT_RELAY_FILENAME);
+        // A loop, not a single tail command: the shell would otherwise replace
+        // itself with `sleep` and drop this database marker from its argv.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("while :; do sleep 1; done # /some/other/vault/relay.sqlite3")
+            .spawn()
+            .expect("spawn decoy process");
+        let pid = child.id();
+        fs::write(dir.join(VAULT_RELAY_PID_FILENAME), pid.to_string())
+            .expect("write pid file for decoy process");
+
+        let reaped =
+            reap_stale_relay_if_owned(&dir, &database).expect("mismatched db is not an error");
+        assert!(!reaped);
+        assert!(
+            dir.join(VAULT_RELAY_PID_FILENAME).exists(),
+            "pid file for a process serving a different database must not be touched"
+        );
+        assert!(
+            ps_alive(pid),
+            "process serving a different database must not be killed"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+        fs::remove_dir_all(dir).expect("remove reap test directory");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reap_stale_relay_if_owned_kills_a_stale_relay_for_this_vault() {
+        let dir = test_reap_dir("matching-db");
+        let database = dir.join(VAULT_RELAY_FILENAME);
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "while :; do sleep 1; done # {}",
+                database.display()
+            ))
+            .spawn()
+            .expect("spawn stand-in stale relay");
+        let pid = child.id();
+        fs::write(dir.join(VAULT_RELAY_PID_FILENAME), pid.to_string())
+            .expect("write pid file for stand-in relay");
+
+        let reaped = reap_stale_relay_if_owned(&dir, &database)
+            .expect("matching stale relay should be reaped without error");
+        assert!(reaped);
+        assert!(
+            !dir.join(VAULT_RELAY_PID_FILENAME).exists(),
+            "pid file should be removed once the stale relay is reaped"
+        );
+        // This test process is the child owner, so reap the zombie before
+        // checking that the PID is no longer visible.
+        let _ = child.wait();
+        assert!(
+            !ps_alive(pid),
+            "stale relay for this vault should be killed"
+        );
+
+        fs::remove_dir_all(dir).expect("remove reap test directory");
     }
 
     #[cfg(unix)]
