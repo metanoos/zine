@@ -5019,7 +5019,6 @@ body.panel-resizing {
   min-width: 0;
   max-width: 100%;
   margin-left: auto;
-  padding-block-start: var(--tab-scrollbar-h, 0px);
   border-left: 1px solid var(--rule);
   background: var(--surface-sunken);
 }
