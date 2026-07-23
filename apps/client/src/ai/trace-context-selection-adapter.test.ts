@@ -542,6 +542,49 @@ test("enumerates a verified no-op transaction without a zero-effect change fact"
   assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
 });
 
+test("preserves a verified selection-only transaction actor through the desktop boundary", async () => {
+  const genesis = await fileNode("", "Draft", undefined, { timestamp: 1_000, sequence: 17 });
+  const head = await fileNode("Draft", "Draft", genesis, {
+    editorTransactions: [{
+      sequence: 41,
+      timestamp: 2_000,
+      actor: OWNER,
+      changes: [],
+      selectionBefore: { ranges: [{ anchor: 0, head: 0 }], main: 0 },
+      selectionAfter: { ranges: [{ anchor: 1, head: 1 }], main: 0 },
+    }],
+  });
+  const adapted = await adaptDesktopTraceContextSelectionV1(input([genesis, head]));
+  const transactionFact = adapted.candidates.find((candidate) =>
+    candidate.kind === "process-fact"
+    && candidate.source.kind === "trace"
+    && candidate.source.nodeId === head.id
+    && candidate.fact.kind === "transaction");
+
+  assert.ok(
+    transactionFact
+    && transactionFact.kind === "process-fact"
+    && transactionFact.fact.kind === "transaction",
+  );
+  if (
+    !transactionFact
+    || transactionFact.kind !== "process-fact"
+    || transactionFact.fact.kind !== "transaction"
+  ) return;
+  assert.deepEqual(transactionFact.fact, {
+    kind: "transaction",
+    transactionIndex: 0,
+    capturedAtMs: 2_000,
+    changeCount: 0,
+    voiceIds: [OWNER],
+  });
+  const selected = await selectTraceContextV1(adapted);
+  assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
+  if (selected.ok) {
+    assert.match(selected.renderedContext, new RegExp(`selection only · actor ${OWNER}`));
+  }
+});
+
 test("projects every protocol-valid FULL EditorTransaction domain value through the desktop boundary", async () => {
   const node = await fileNode("", "AB", undefined, {
     editorTransactions: [

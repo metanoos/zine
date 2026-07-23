@@ -517,6 +517,7 @@
                 "version": 1,
                 "sourceTransactionId": 0,
                 "capturedAtMs": 1700000000000,
+                "actor": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
                 "changes": [
                   {
                     "version": 1,
@@ -542,6 +543,7 @@
                 "version": 1,
                 "sourceTransactionId": 0,
                 "capturedAtMs": 1700000000001,
+                "actor": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
                 "changes": [
                   {
                     "version": 1,
@@ -1126,6 +1128,7 @@
                 "version": 1,
                 "sourceTransactionId": 7,
                 "capturedAtMs": 1700000000100,
+                "actor": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
                 "changes": [
                   {
                     "version": 1,
@@ -1262,6 +1265,7 @@
                 "version": 1,
                 "sourceTransactionId": 9,
                 "capturedAtMs": 1700000000200,
+                "actor": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
                 "changes": [
                   {
                     "version": 1,

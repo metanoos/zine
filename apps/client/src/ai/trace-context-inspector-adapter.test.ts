@@ -35,6 +35,7 @@ function fullTraceRows(): readonly DeltaLogEntry[] {
         transactions: [{
           sequence: 3,
           timestamp: 900,
+          actor: "a".repeat(64),
           selectionBefore: null,
           selectionAfter: null,
           changes: [{

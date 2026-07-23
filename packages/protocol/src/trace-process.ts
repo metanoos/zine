@@ -19,6 +19,7 @@ export interface TraceProcessChange {
 export interface TraceProcessTransaction {
   sequence: number;
   timestamp: number;
+  actor: string;
   intent?: EditorTransactionIntent;
   selectionBefore: EditorSelectionState | null;
   selectionAfter: EditorSelectionState | null;
@@ -111,6 +112,7 @@ function processEditorTransactions(
     transactions.push({
       sequence: transaction.sequence,
       timestamp: transaction.timestamp,
+      actor: transaction.actor,
       ...(transaction.intent ? { intent: transaction.intent } : {}),
       selectionBefore: transaction.selectionBefore,
       selectionAfter: transaction.selectionAfter,
@@ -274,10 +276,9 @@ export function renderTraceProcessLog(steps: readonly TraceProcessLogStep[]): st
     const gap = priorTimestamp === null
       ? ""
       : ` · Δ${formatDuration(Math.max(0, transaction.timestamp - priorTimestamp))}`;
-    const actors = [...new Set(transaction.changes.map((change) => change.actor))].join(", ");
     const intent = transaction.intent ? ` · ${transaction.intent}` : "";
     lines.push(
-      `[#${step.seq}.${transactionIndex + 1}] ${isoTime(transaction.timestamp)}${gap} · ${step.relativePath} · node ${step.nodeId ?? "unknown"} · transaction ${transaction.sequence} · actor ${actors || "unknown"}${intent}`,
+      `[#${step.seq}.${transactionIndex + 1}] ${isoTime(transaction.timestamp)}${gap} · ${step.relativePath} · node ${step.nodeId ?? "unknown"} · transaction ${transaction.sequence} · actor ${transaction.actor || "unknown"}${intent}`,
     );
     for (const change of transaction.changes) {
       if (change.deleted) {

@@ -233,6 +233,7 @@ test("complete process history retains exact deltas, conformance, and mechanical
         {
           sequence: 1,
           timestamp: 1_000,
+          actor: "a".repeat(64),
           selectionBefore: null,
           selectionAfter: null,
           changes: [{
@@ -247,6 +248,7 @@ test("complete process history retains exact deltas, conformance, and mechanical
         {
           sequence: 2,
           timestamp: 61_000,
+          actor: "a".repeat(64),
           selectionBefore: null,
           selectionAfter: null,
           intent: "undo",

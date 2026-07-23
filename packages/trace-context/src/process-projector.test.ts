@@ -29,6 +29,7 @@ test("projector owns press-neutral identity, enumeration, ordinals, and exact ra
           version: 1,
           sourceTransactionId: 42,
           capturedAtMs: 200,
+          actor: VOICE_B,
           changes: [{
             version: 1,
             operation: "insert",
@@ -47,6 +48,7 @@ test("projector owns press-neutral identity, enumeration, ordinals, and exact ra
           version: 1,
           sourceTransactionId: 7,
           capturedAtMs: 300,
+          actor: VOICE_A,
           intent: "undo",
           changes: [{
             version: 1,
@@ -113,6 +115,7 @@ test("native-neutral no-op process views retain summary/transaction and omit zer
         version: 1,
         sourceTransactionId: 9,
         capturedAtMs: 400,
+        actor: VOICE_A,
         changes: [{
           version: 1,
           operation: "insert",
@@ -163,6 +166,7 @@ test("selection-only transactions survive projection, selection, and manifest va
         version: 1,
         sourceTransactionId: 10,
         capturedAtMs: 500,
+        actor: VOICE_A,
         changes: [],
       }],
     }],
@@ -187,7 +191,7 @@ test("selection-only transactions survive projection, selection, and manifest va
       transactionIndex: 0,
       capturedAtMs: 500,
       changeCount: 0,
-      voiceIds: [],
+      voiceIds: [VOICE_A],
     },
   ]);
 
@@ -213,7 +217,9 @@ test("selection-only transactions survive projection, selection, and manifest va
   assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
   if (!selected.ok) return;
   assert.doesNotThrow(() => validateSelectedTraceContextManifestV1(selected.manifest));
-  assert.match(selected.renderedContext, /transaction 0 @ 500 · selection only/);
+  assert.match(selected.renderedContext, new RegExp(
+    `transaction 0 @ 500 · selection only · actor ${VOICE_A}`,
+  ));
 });
 
 test("projector rejects ambiguous chain and ordinal projections", () => {
@@ -241,12 +247,28 @@ test("projector rejects ambiguous chain and ordinal projections", () => {
       steps: [{
         ...baseline.steps[0]!,
         transactions: [
-          { version: 1, sourceTransactionId: 7, capturedAtMs: 1, changes: [noOp()] },
-          { version: 1, sourceTransactionId: 7, capturedAtMs: 2, changes: [noOp()] },
+          { version: 1, sourceTransactionId: 7, capturedAtMs: 1, actor: VOICE_A, changes: [noOp()] },
+          { version: 1, sourceTransactionId: 7, capturedAtMs: 2, actor: VOICE_A, changes: [noOp()] },
         ],
       }],
     }),
     /source transaction ids must be strictly increasing/,
+  );
+  assert.throws(
+    () => projectTraceProcessCandidatesV1({
+      ...baseline,
+      steps: [{
+        ...baseline.steps[0]!,
+        transactions: [{
+          version: 1,
+          sourceTransactionId: 8,
+          capturedAtMs: 3,
+          actor: VOICE_A,
+          changes: [{ ...noOp(), voiceId: VOICE_B }],
+        }],
+      }],
+    }),
+    /change voice must match its actor/,
   );
 });
 
@@ -266,6 +288,7 @@ test("projector closes the complete protocol EditorTransaction domain without in
           version: 1,
           sourceTransactionId: 0,
           capturedAtMs: -Number.MAX_VALUE,
+          actor: nonPubkeyActor,
           changes: [{
             version: 1,
             operation: "insert",
@@ -279,6 +302,7 @@ test("projector closes the complete protocol EditorTransaction domain without in
           version: 1,
           sourceTransactionId: Number.MAX_SAFE_INTEGER + 1,
           capturedAtMs: Number.MAX_VALUE,
+          actor: surrogateVoice,
           changes: [{
             version: 1,
             operation: "insert",
@@ -327,6 +351,7 @@ test("async projector enforces selector bounds and cancellation before returning
         version: 1,
         sourceTransactionId: 0,
         capturedAtMs: 1,
+        actor: VOICE_A,
         changes: [noOp()],
       }],
     }],

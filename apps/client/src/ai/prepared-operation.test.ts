@@ -36,6 +36,7 @@ function snapshot(options: { sourceUnstepped?: boolean; failure?: boolean; trace
       transactions: [{
         sequence: 7,
         timestamp: 1_900,
+        actor: "a".repeat(64),
         selectionBefore: null,
         selectionAfter: null,
         changes: [{

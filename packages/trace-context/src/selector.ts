@@ -1163,9 +1163,10 @@ function normalizeProcessFact(
       }
       if (
         !Array.isArray(value.voiceIds)
+        || value.voiceIds.length === 0
         || value.voiceIds.length > TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxFactVoiceIds
       ) {
-        return malformed(`${path}.voiceIds`, "Transaction voices must be a bounded array");
+        return malformed(`${path}.voiceIds`, "Transaction voices must be a non-empty bounded array");
       }
       const voices: string[] = [];
       for (let index = 0; index < value.voiceIds.length; index += 1) {
@@ -1183,13 +1184,13 @@ function normalizeProcessFact(
       if (new Set(voices).size !== voices.length) {
         return malformed(`${path}.voiceIds`, "Transaction voice ids must be unique");
       }
-      if ((value.changeCount === 0) !== (voices.length === 0)) {
+      if (value.changeCount === 0 && voices.length !== 1) {
         return malformed(
           `${path}.voiceIds`,
-          "Only a zero-change selection transaction may omit transaction voices",
+          "A zero-change selection transaction must preserve exactly one actor voice",
         );
       }
-      if (voices.length > value.changeCount) {
+      if (value.changeCount > 0 && voices.length > value.changeCount) {
         return malformed(`${path}.voiceIds`, "Transaction cannot report more unique voices than changes");
       }
       return {
@@ -1891,7 +1892,7 @@ function renderProcessFact(fact: TraceProcessFactV1, source: SelectedEvidenceSou
       return `Step ${node} · ${fact.transactionCount} transactions / ${fact.rangeCount} ranges · +${fact.insertedCodePointCount}/−${fact.deletedCodePointCount} · first ${fact.firstCapturedAtMs ?? "none"} · last ${fact.lastCapturedAtMs ?? "none"} · span ${fact.spanMs}ms · longest gap ${fact.longestGapMs}ms${fact.timingStatus ? " · timing outside summary domain" : ""} · undo ${fact.undoCount} · redo ${fact.redoCount}`;
     case "transaction":
       return fact.changeCount === 0
-        ? `transaction ${fact.transactionIndex} @ ${fact.capturedAtMs} · ${fact.intent ? `${fact.intent} · ` : ""}selection only`
+        ? `transaction ${fact.transactionIndex} @ ${fact.capturedAtMs} · ${fact.intent ? `${fact.intent} · ` : ""}selection only · actor ${fact.voiceIds[0]}`
         : `transaction ${fact.transactionIndex} @ ${fact.capturedAtMs} · ${fact.intent ? `${fact.intent} · ` : ""}${fact.changeCount} changes · voices ${fact.voiceIds.join(",")}`;
     case "change":
       return `change in transaction ${fact.transactionIndex} · ${fact.operation} · range [${fact.range.fromUtf16},${fact.range.toUtf16}) · +${fact.insertedCodePointCount}/−${fact.deletedCodePointCount} · voice ${fact.voiceId}`;

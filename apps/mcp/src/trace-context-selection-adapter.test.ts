@@ -441,6 +441,58 @@ test("deterministic enumeration keeps no-op summaries and transactions but omits
   assert.equal(headFacts.some((fact) => fact.kind === "change"), false);
 });
 
+test("preserves a verified selection-only transaction actor through the MCP boundary", async () => {
+  const draftHash = await sha256("Draft");
+  const chain = [
+    event(GENESIS_ID, [], "Draft", draftHash, [
+      transaction(0, 0, "Draft", VOICE_ID, 100, 0),
+    ], "1".repeat(64)),
+    event(HEAD_ID, [["e", GENESIS_ID, "", "prev"]], "Draft", draftHash, [{
+      sequence: 1,
+      timestamp: 200,
+      actor: VOICE_ID,
+      changes: [],
+      selectionBefore: { ranges: [{ anchor: 0, head: 0 }], main: 0 },
+      selectionAfter: { ranges: [{ anchor: 1, head: 1 }], main: 0 },
+    }], "2".repeat(64)),
+  ];
+  const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1({
+    version: 1,
+    policy: "selected-trace-v1",
+    operation: ADAPTER_CASES[0].operation,
+    chain,
+    verifyEvent: exactVectorVerifier(chain),
+  });
+  const transactionFact = adapted.candidates.find((candidate) =>
+    candidate.kind === "process-fact"
+    && candidate.source.kind === "trace"
+    && candidate.source.nodeId === HEAD_ID
+    && candidate.fact.kind === "transaction");
+
+  assert.ok(
+    transactionFact
+    && transactionFact.kind === "process-fact"
+    && transactionFact.fact.kind === "transaction",
+  );
+  if (
+    !transactionFact
+    || transactionFact.kind !== "process-fact"
+    || transactionFact.fact.kind !== "transaction"
+  ) return;
+  assert.deepEqual(transactionFact.fact, {
+    kind: "transaction",
+    transactionIndex: 0,
+    capturedAtMs: 200,
+    changeCount: 0,
+    voiceIds: [VOICE_ID],
+  });
+  const selected = await selectTraceContextV1(adapted);
+  assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
+  if (selected.ok) {
+    assert.match(selected.renderedContext, new RegExp(`selection only · actor ${VOICE_ID}`));
+  }
+});
+
 test("projects every protocol-valid FULL EditorTransaction domain value through the MCP boundary", async () => {
   const snapshot = "AB";
   const contentHash = await sha256(snapshot);

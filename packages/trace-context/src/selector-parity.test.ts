@@ -501,7 +501,7 @@ function deriveFacts(chain: readonly ProtocolEvent[]): Map<string, TraceProcessF
         capturedAtMs: transaction.timestamp,
         ...(transaction.intent ? { intent: transaction.intent } : {}),
         changeCount: transaction.changes.length,
-        voiceIds: [...new Set(transaction.changes.map((change) => change.actor))].sort(),
+        voiceIds: [transaction.actor],
       });
       transaction.changes.forEach((change, changeIndex) => {
         facts.set(`${event.id}:transaction:${transactionIndex}:change:${changeIndex}`, {
@@ -537,6 +537,7 @@ function deriveProjection(chain: readonly ProtocolEvent[]): TraceContextProcessP
         version: 1 as const,
         sourceTransactionId: transaction.sequence,
         capturedAtMs: transaction.timestamp,
+        actor: transaction.actor,
         ...(transaction.intent ? { intent: transaction.intent } : {}),
         changes: transaction.changes.map((change) => ({
           version: 1 as const,

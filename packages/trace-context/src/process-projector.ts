@@ -23,6 +23,8 @@ export interface TraceContextProcessProjectionTransactionV1 {
   /** Signed source transaction sequence; output identity uses the array ordinal. */
   sourceTransactionId: number;
   capturedAtMs: number;
+  /** EditorTransaction actor preserved even when the transaction changes only selection. */
+  actor: string;
   intent?: "undo" | "redo";
   changes: readonly TraceContextProcessProjectionChangeV1[];
 }
@@ -279,14 +281,14 @@ function transactionFact(
   transaction: TraceContextProcessProjectionTransactionV1,
   transactionIndex: number,
 ): Extract<TraceProcessFactV1, { kind: "transaction" }> {
+  const actor = selectorVoiceId(transaction.actor);
   return {
     kind: "transaction",
     transactionIndex,
     capturedAtMs: transaction.capturedAtMs,
     ...(transaction.intent ? { intent: transaction.intent } : {}),
     changeCount: transaction.changes.length,
-    voiceIds: [...new Set(transaction.changes.map((change) => selectorVoiceId(change.voiceId)))]
-      .sort(compareUtf8),
+    voiceIds: [actor],
   };
 }
 
@@ -333,13 +335,19 @@ function validateInput(input: TraceContextProcessProjectionInputV1): void {
       }
       previousSourceTransactionId = transaction.sourceTransactionId;
       requireFiniteNumber(transaction.capturedAtMs, "transaction captured time");
+      requireString(transaction.actor, "transaction actor");
       if (transaction.intent !== undefined
         && transaction.intent !== "undo"
         && transaction.intent !== "redo") {
         fail("transaction intent must be undo or redo");
       }
       if (!Array.isArray(transaction.changes)) fail("transaction changes must be an array");
-      for (const change of transaction.changes) validateChange(change);
+      for (const change of transaction.changes) {
+        validateChange(change);
+        if (change.voiceId !== transaction.actor) {
+          fail("transaction change voice must match its actor");
+        }
+      }
     }
   }
 }

@@ -124,6 +124,31 @@ test("exact Analyze log carries stable evidence anchors, node ids, actors, and d
   assert.match(log, /\+ 0:5 "final"/);
 });
 
+test("selection-only transactions retain their actor in the derived process and Analyze log", () => {
+  const selectionOnly: EditorTransaction = {
+    sequence: 0,
+    timestamp: 1_000,
+    actor: voice,
+    changes: [],
+    selectionBefore: { ranges: [{ anchor: 0, head: 0 }], main: 0 },
+    selectionAfter: { ranges: [{ anchor: 1, head: 1 }], main: 0 },
+  };
+  const process = traceProcessFromEvent(event("draft", [
+    edit(0, 0, 0, "draft", 500),
+    { ...selectionOnly, sequence: 1 },
+  ]), "");
+
+  assert.equal(process.status, "complete");
+  assert.equal(process.transactions[1]?.actor, voice);
+  assert.match(renderTraceProcessLog([{
+    seq: 5,
+    nodeId: "node-5",
+    steppedAt: 2_000,
+    relativePath: "selection.md",
+    process,
+  }]), new RegExp(`transaction 1 · actor ${voice}`));
+});
+
 test("Analyze interleaves transactions from different Steps by captured editor time", () => {
   const early = traceProcessFromEvent(event("early", [edit(0, 0, 0, "early", 1_000)]), "");
   const late = traceProcessFromEvent(event("late", [edit(0, 0, 0, "late", 3_000)]), "");

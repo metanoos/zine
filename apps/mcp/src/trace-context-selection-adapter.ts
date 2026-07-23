@@ -389,6 +389,7 @@ function fullProcessProjection(
         version: 1 as const,
         sourceTransactionId: transaction.sequence,
         capturedAtMs: transaction.timestamp,
+        actor: transaction.actor,
         ...(transaction.intent ? { intent: transaction.intent } : {}),
         changes: transaction.changes.map((change) => ({
           version: 1 as const,

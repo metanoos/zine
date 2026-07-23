@@ -495,14 +495,17 @@ function validateProcessFact(value: unknown, path: string): TraceProcessFactV1 {
       const changeCount = nonNegative(fact.changeCount, `${path}.changeCount`);
       if (
         !Array.isArray(fact.voiceIds)
+        || fact.voiceIds.length === 0
         || fact.voiceIds.length > TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxFactVoiceIds
-      ) fail(`${path}.voiceIds`, "must be a bounded array");
+      ) fail(`${path}.voiceIds`, "must be a non-empty bounded array");
       const voiceIds = fact.voiceIds.map((voice, index) => voiceId(voice, `${path}.voiceIds[${index}]`));
       if (new Set(voiceIds).size !== voiceIds.length) fail(`${path}.voiceIds`, "must be unique");
-      if ((changeCount === 0) !== (voiceIds.length === 0)) {
-        fail(`${path}.voiceIds`, "must be empty exactly when changeCount is zero");
+      if (changeCount === 0 && voiceIds.length !== 1) {
+        fail(`${path}.voiceIds`, "must preserve exactly one actor voice when changeCount is zero");
       }
-      if (voiceIds.length > changeCount) fail(`${path}.voiceIds`, "cannot contain more unique voices than changes");
+      if (changeCount > 0 && voiceIds.length > changeCount) {
+        fail(`${path}.voiceIds`, "cannot contain more unique voices than changes");
+      }
       return { kind: "transaction", transactionIndex, capturedAtMs, ...(fact.intent ? { intent: fact.intent } : {}), changeCount, voiceIds };
     }
     case "change": {

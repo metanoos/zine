@@ -140,6 +140,7 @@ export type TraceProcessFactV1 =
       capturedAtMs: number;
       intent?: "undo" | "redo";
       changeCount: number;
+      /** Includes the transaction actor even when this is a selection-only transaction. */
       voiceIds: readonly TraceVoiceIdV1[];
     }
   | {
