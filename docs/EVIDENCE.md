@@ -10,7 +10,7 @@ hypotheses. Last updated 2026-07-18.
 |---|---|---|
 | Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke; folder heads carry direct manifests and propagate recursively toward Root |
 | Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, immutable child-head transitions, removal head pins, hash, lineage, operation id, and integer membership timestamps. Client tests exercise serialized file/folder/structural mutations, durable move/delete journal persistence and rejection paths, verified nested AI context, and inspectable Replay operation grouping. An explicit attach-after-crash real-relay fault fixture remains hardening work |
-| Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
+| Mandatory replay-valid editor transaction process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
 | Step, Publish (wire name Send), Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
 | Passphrase-gated desktop vault sessions with independent Roots, encrypted webview workspaces, relay databases, ACLs, signing keys, and provider secrets | Implemented on desktop; browser remains read-only | Vault lifecycle and encrypted-storage tests, registry recovery tests, key/model store tests, and the Tauri Stronghold shell |
@@ -114,7 +114,7 @@ market demand, longitudinal memory value, or a general model-independent effect.
 | Evidence | Supports | Does not establish |
 |---|---|---|
 | Valid TraceNode signature | The named pubkey signed this exact event | Legal identity, humanness, truth, or exclusive authorship |
-| Snapshot hash and replay-valid KEdit transition | The stored body is internally consistent with the signed process record | That the press observed activity outside its own editor/tool boundaries, or that a signer did not deliberately fabricate a trace |
+| Snapshot hash and replay-valid editor transaction transition | The stored body is internally consistent with the signed process record | That the press observed activity outside its own editor/tool boundaries, or that a signer did not deliberately fabricate a trace |
 | Per-delta voice index | The node signer asserted that voice for the changed span | Independent proof that the attributed person or model produced it |
 | Cross-author seam plus signed source node | The attributed text is corroborated by a node under the source key | Consent, originality, or copyright ownership |
 | Completed OpenTimestamps proof | The committed event id existed no later than the Bitcoin attestation | The truth of `created_at`, author identity, or uninterrupted human work |

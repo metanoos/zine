@@ -568,19 +568,129 @@ Parallel anthologies with the same informal name are not a conflict.
 
 Who wrote what. Two layers, in priority order.
 
-**Process replay.** Every file Step carries a `kedits` array whose atomic
+**Process replay.** Every file Step carries an `editorTransactions` array whose atomic
 transactions replay the previous snapshot to the current signed snapshot.
 Genesis replays from the empty string; a metadata-only checkpoint carries an
 explicit `[]`. Interactive writing preserves the captured editor transactions,
-including undo and redo. A discrete import, fork, scan, AI file creation, or
+including undo, redo, and before/after multi-range selection state. A discrete import, fork, scan, AI file creation, or
 headless tool write is recorded as one atomic transition rather than being
-misrepresented as physical typing.
+misrepresented as physical typing; its selection fields are `null` because no
+cursor was observed.
 
 The snapshot remains the self-contained materialized body, so a node can still
-be read in one fetch. But a missing, malformed, or replay-mismatched KEdit log
+be read in one fetch. But a missing, malformed, or replay-mismatched editor transaction log
 is not a valid Full Trace: readers may show the signed body only with the
 process record marked nonconforming. A Step keeps this record local; Publish
 discloses it, including intermediate text and timing that may be identifying.
+
+### Composable collaboration layers
+
+The collaboration surface is three separate layers, implemented in this order:
+
+1. **Collaboration** is a durable folder-level shared space: membership,
+   selections, voices, text transactions, and folder actions persist while
+   participants connect, disconnect, and catch up asynchronously. Connected
+   peers additionally exchange ephemeral live presence and cursors. Each
+   participant's ordinary workspace layout remains private. Collaboration
+   scope is a copied, independently mutable instance of the same singular
+   mount plus shield resolver used for MODEL context. A participant capability
+   may narrow that scope but can never widen it.
+2. **Stage** is an optional shared cluster of one or two panels. It synchronizes
+   the complete versioned view state inside those panels: arrangement, active
+   panel, resource, mode, selection, scroll/fold/preview anchors, and any Replay
+   playhead. Following a Stage never changes edit authority. Direct interaction
+   in a followed staged panel detaches locally; rejoin snaps to the complete
+   current state. Starting or joining an active Stage follows automatically.
+   The starter is its first Stage Controller; a transfer takes effect only
+   after the recipient accepts. The Controller changes presentation only. On
+   disconnect, control has a short grace period and then becomes vacant/frozen
+   until the owner recovers or ends Stage. Ending Stage converts its final
+   panels to private panels instead of discarding them.
+3. **Replay** is a panel presentation, either private or inside Stage. Local
+   playback has local control. Playback inside Stage uses the Stage Controller;
+   Replay itself has no separate controller. Entering Replay replaces that one
+   panel in place and preserves the suspended working editor state for Return
+   to Work.
+
+The panel model is a closed union:
+`PanelPresentation = WorkingPresentation | ReplayPresentation`.
+`ReplayPresentation.returnTo` names the shared, view-only working destination.
+Each participant's workspace adapter privately suspends its own CodeMirror
+document, unstepped text, selection, scroll, and undo state; those values never
+enter Stage state. Changing the staged trace set pauses, rebuilds, and resets
+that presentation by default. A follower who plays or scrubs first detaches
+and creates a private Replay presentation. Stage persists only reconnectable
+current view state; it does not publish a permanent view-history trail by
+default.
+
+Collaboration state, Stage state, and Replay control are distinct composable documents.
+Stage references a Collaboration without becoming its authority layer. Stage
+cannot expose a trace beyond the collaboration mount and the follower's readable
+capabilities. Theme, window geometry, hover, clipboard, IME state, and private
+panels never enter Stage state.
+
+The initial client Collaboration core keeps one Y.Doc per file and a typed
+stable-ID directory document. Those IDs are the entries' existing workspace
+identities; Collaboration does not mint replacement file or folder IDs.
+Participant identities sign the accepted operation log; `actorPubkey` is
+attribution, not signing authority. A non-owner must hold an explicit
+`collaboration.join` grant. The owner's signature authenticates each
+recipient-bound bootstrap digest, including the definition, directory
+snapshot, readable file snapshots, and operation prefixes; a bootstrap is not
+accepted as trusted transport input merely because it arrived from a peer.
+Unknown or unreadable file documents are rejected during materialization and
+again at file access.
+
+Cursor presence uses ephemeral Awareness with Yjs-relative positions, while
+signed edit batches retain every ordered `EditorTransaction`, including exact
+before/after selections. Pending CodeMirror transactions live in an isolated
+local draft, not the shared Y.Text. A batch carries one causal-base Yjs
+snapshot, one merged Yjs update, and one participant signature for a short
+same-file, same-actor run. Every receiver reconstructs the signed base and
+rejects an update unless its materialized text exactly matches the ordered
+transactions. Batching therefore changes cryptographic and network
+granularity, not replay or attribution granularity. Undo/redo, file or voice
+changes, explicit Step preparation, size bounds, and intervening remote edits
+close the current batch. A failed or revoked commit leaves shared Yjs untouched
+and preserves the draft as a private patch/fork.
+
+Concurrent directory operations may produce the same requested sibling name.
+They are not rejected according to arrival order: all stable IDs converge, the
+lexicographically lowest ID keeps the requested name, and the remaining names
+receive deterministic hash suffixes when materialized. A Step captures and
+acknowledges an exact accepted-batch prefix so edits accepted while signing
+remain pending. Acknowledgement does not erase durable replay/deduplication
+history, so a participant that was offline can later catch up. Read
+capabilities are enforced at bootstrap, operation, and API boundaries, but
+they do not turn plaintext transport into confidentiality; production privacy
+still requires recipient filtering and per-file encryption keys.
+
+The initial client Stage core uses strict, versioned one- or two-panel
+snapshots and signed participant commands. It enforces Collaboration
+`stage.view`, `stage.start`, `stage.control`, and `stage.end` capabilities
+without treating a writing voice as authority; every staged working or replay
+resource must also remain readable within the collaboration mount. Controller
+handoff is request/accept, disconnect freezes immediately and becomes vacant
+after a grace period, and only the owner can recover vacancy. A separate local
+workspace adapter owns follow/detach/rejoin, final-panel privatization, and
+opaque replay editor suspensions. Production durable Collaboration storage,
+peer transport, invitation UI, and the visible Stage controls remain deferred.
+
+The initial Replay presentation reducer changes one stable panel in place
+without changing its slot, split, or siblings. Trace-set replacement pauses and
+resets the playhead. A follower's Play or scrub detaches first and changes only
+their private projection; Return to Work releases only the matching private
+editor suspension. This reducer does not yet bind those transitions to the
+visible Stage controls or an active CodeMirror instance.
+
+The current Stage core's capability check is a projection boundary, not
+plaintext confidentiality. A production provider must recipient-filter or
+encrypt commands so an unreadable resource identifier never reaches that
+participant. Its disconnect/vacancy helpers likewise assume one authenticated,
+ordered provider-wide delivery fence. An unordered peer mesh cannot infer
+shared controller loss independently without risking divergent Stage state, so
+the production P2P layer needs an explicit sequencer or epoch rule before those
+helpers are connected.
 
 **Per-delta attribution (primary).** A body-edit delta may carry an `author`
 index into the node's local `voices` table. Without it, the delta belongs to
@@ -809,7 +919,7 @@ hypotheses. Last updated 2026-07-18.
 |---|---|---|
 | Signed, self-contained file and folder checkpoints | Implemented | Client provenance tests and real-relay smoke; folder heads carry direct manifests and propagate recursively toward Root |
 | Normative folder checkpoint cause and `advance` semantics | Implemented | The shared kernel verifies folder cause, immutable child-head transitions, removal head pins, hash, lineage, operation id, and integer membership timestamps. Client tests exercise serialized file/folder/structural mutations, durable move/delete journal persistence and rejection paths, verified nested AI context, and inspectable Replay operation grouping. An explicit attach-after-crash real-relay fault fixture remains hardening work |
-| Mandatory replay-valid KEdit process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
+| Mandatory replay-valid editor transaction process log on every file Step | Implemented | Publisher rejects mismatches; editor, AI, import/fork, MCP, replay, and real-relay regression coverage exercise the invariant |
 | Step, Publish (wire name Send), Attest, Mint, and Cite | Implemented | `npm run verify:relay` exercises temporary ACL-protected relays |
 | Desktop press with local relay sidecar | Implemented | React/Tauri client, Rust sidecar lifecycle, Go relay |
 | Passphrase-gated desktop vault sessions with independent Roots, encrypted webview workspaces, relay databases, ACLs, signing keys, and provider secrets | Implemented on desktop; browser remains read-only | Vault lifecycle and encrypted-storage tests, registry recovery tests, key/model store tests, and the Tauri Stronghold shell |
@@ -913,7 +1023,7 @@ market demand, longitudinal memory value, or a general model-independent effect.
 | Evidence | Supports | Does not establish |
 |---|---|---|
 | Valid TraceNode signature | The named pubkey signed this exact event | Legal identity, humanness, truth, or exclusive authorship |
-| Snapshot hash and replay-valid KEdit transition | The stored body is internally consistent with the signed process record | That the press observed activity outside its own editor/tool boundaries, or that a signer did not deliberately fabricate a trace |
+| Snapshot hash and replay-valid editor transaction transition | The stored body is internally consistent with the signed process record | That the press observed activity outside its own editor/tool boundaries, or that a signer did not deliberately fabricate a trace |
 | Per-delta voice index | The node signer asserted that voice for the changed span | Independent proof that the attributed person or model produced it |
 | Cross-author seam plus signed source node | The attributed text is corroborated by a node under the source key | Consent, originality, or copyright ownership |
 | Completed OpenTimestamps proof | The committed event id existed no later than the Bitcoin attestation | The truth of `created_at`, author identity, or uninterrupted human work |
@@ -1000,9 +1110,27 @@ Already built:
 - desktop and MCP presses;
 - signed file and folder trace chains;
 - Step, Publish (wire name Send), Attest, Mint, Cite, fork, merge, and replay;
-- mandatory replay-valid KEdit process logs and shared `FULL TRACE` /
+- mandatory replay-valid editor transaction process logs and shared `FULL TRACE` /
   `SNAPSHOT ONLY` / `INVALID` reader verdicts;
 - distinct human, model, and agent voice keys with per-delta attribution;
+- an initial durable folder Collaboration core with shared mount/shield
+  resolution, explicit join grants, owner-signed recipient bootstraps,
+  read-scoped per-file Yjs documents, causally verified micro-batched edit
+  operations retaining ordered editor transactions, isolated unsigned drafts,
+  deterministic same-name materialization, delegated voice attribution, typed
+  stable-ID folder actions, scoped capabilities, ephemeral live presence,
+  private denied-work patches, retained reconnect history, and exact
+  Step-prefix draining; durable provider storage, join UI, encrypted transport,
+  and a production peer provider remain deferred;
+- an initial Stage core with strict versioned one/two-panel snapshots, signed
+  Controller commands, mounted/readable capability enforcement, accepted
+  handoff, disconnect grace and vacancy, owner recovery, plus a private-layout
+  follow/detach/rejoin adapter with opaque local Replay suspensions; visible
+  controls and production peer transport remain deferred;
+- an initial in-place Replay presentation reducer that preserves stable panel
+  identity/arrangement, scopes playback to one panel, resets changed trace sets,
+  and detaches follower playback into a private projection; visible controls
+  and the concrete CodeMirror suspension binding remain deferred;
 - local and hosted relay implementations, with a remaining hosted ACL gap;
 - raw-file Reify with an optional signed-event bundle and report;
 - passphrase-gated desktop vault sessions with independent Roots, encrypted

@@ -182,14 +182,14 @@ file or operation ineligible without explanation.
 
 Confirmatory operations are:
 
-- **Extend:** continue a target from its current head; and
+- **Append:** continue a target from its current head (internal operation id `extend`); and
 - **Settle:** revise a declared range toward an explicit instruction.
 
 Each must use a closed, frozen operation descriptor and pass the same
 preparation, approval, and acceptance lifecycle. Stir, Reply, Analyze, Run,
 and future operations may be reported as exploratory cohorts only until a
 dated amendment fixes their eligible ranges, result shapes, outcomes, and
-consumption semantics. They are never silently pooled with Extend or Settle.
+consumption semantics. They are never silently pooled with Append or Settle.
 
 An operation is eligible only when the target and all mandatory context fit the
 hard ceiling, the trace reader reaches a valid declared condition, the exact
@@ -409,7 +409,7 @@ The minimally important broad-product benefit is either:
 
 For a broad claim, the adjusted 95% interval must exclude no improvement for at
 least one co-primary endpoint, and that endpoint must meet its minimally
-important threshold separately in both Extend and Settle. The point estimate
+important threshold separately in both Append and Settle. The point estimate
 for the other co-primary endpoint must not be negative in either operation.
 Both model families must remain on the beneficial side of every material-harm
 boundary. A cross-model claim additionally requires a positive family-specific

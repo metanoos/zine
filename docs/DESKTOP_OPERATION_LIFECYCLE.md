@@ -1,7 +1,7 @@
 # Desktop operation lifecycle
 
 This note defines the private, local Phase 2 contract that can make one desktop
-Extend operation recoverable without changing the Zine protocol. It is an
+Append operation (internal operation id `extend`) recoverable without changing the Zine protocol. It is an
 integration boundary for the desktop UI and native operation store, not a wire
 format, signed provenance claim, or completed product capability.
 
@@ -54,7 +54,7 @@ at the parent's deadline is valid.
 The envelope retains, as private local data:
 
 - the exact ordered provider-neutral messages and operation inputs;
-- the exact prepared Extend authoring/apply contract, including staged
+- the exact prepared Append authoring/apply contract, including staged
   directive deletions, while its authority remains valid only for the current
   editor activation;
 - the approved public MODEL voice key (never its credential or signing key);
@@ -103,7 +103,7 @@ transition into `provider-io` emits the single provider-dispatch effect, but
 only after the caller durably stores the new envelope. Replaying the same
 transition is idempotent and emits no effect.
 
-Every live desktop Extend owns an `AbortController` from before private-envelope
+Every live desktop Append owns an `AbortController` from before private-envelope
 persistence through provider completion. App teardown first clears ephemeral
 directive authority, then aborts every controller, and only then releases the
 vault-frozen runtime and repository references. An async persistence or
@@ -186,11 +186,11 @@ fresh-preparation path described above. Directive-free attempts remain
 recoverable across activations.
 
 The public MODEL voice key frozen in the prepared request is the sole identity
-used for CodeMirror attribution, local runs, KEdits, crash-pad metadata, and
+used for CodeMirror attribution, local runs, editor transactions, crash-pad metadata, and
 recovery verification. The crash-pad receipt binds the intent id to canonical
-content, canonical runs, canonical KEdits, and that public MODEL key. A missing
+content, canonical runs, canonical editor transactions, and that public MODEL key. A missing
 or tampered component cannot produce `already-applied`; recovery never
-synthesizes attribution or KEdits as a fallback. On restart, exact crash-pad
+synthesizes attribution or editor transactions as a fallback. On restart, exact crash-pad
 receipt recognition and restoration precede the ephemeral directive-authority
 check: converging an already-applied receipt records no new editor mutation and
 must not be rewritten as target-stale merely because the App activation
@@ -288,7 +288,7 @@ The narrow TypeScript adapter validates the strict V1 contract before writes
 and after reads. It exposes create/update CAS, recovery load/list,
 whole-envelope deletion, and expiry deletion. Production construction names the
 native authority explicitly; browser tests may inject a backend, but there is
-no silent local-storage fallback. The app now routes desktop Extend through
+no silent local-storage fallback. The app now routes desktop Append through
 this substrate: Inspector approval persists the request before
 provider I/O, completion enters explicit local review, Accept performs the
 idempotent local editor/crash-pad transaction, and recovery resumes only safe
@@ -336,7 +336,7 @@ This contract intentionally does not:
 - add Settle, Stir, Reply, Analyze, Run, or multi-provider orchestration; or
 - claim that selected trace improves writing.
 
-The current integration is desktop-only and Extend-only. It does not Step,
+The current integration is desktop-only and Append-only. It does not Step,
 Mint, attest, publish, or produce portable provenance when a draft is accepted.
 The separate accepted MODEL Step transaction remains Phase 3 work. Settle
 should reuse the lifecycle rather than invent a second one; mobile and
