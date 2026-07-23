@@ -2,11 +2,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { schnorr } from "@noble/curves/secp256k1.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { EditorTransaction } from "@zine/protocol";
+import {
+  Awareness,
+  encodeAwarenessUpdate,
+} from "y-protocols/awareness.js";
 import * as Y from "yjs";
 
 import {
+  createCollaborationNonce,
   signCollaborationOperation,
   signCollaborationBootstrap,
   verifyCollaborationOperation,
@@ -379,6 +384,143 @@ test("bootstrap and fileText reject unknown or unreadable file documents", () =>
   }
 });
 
+test("unreadable live edit operations are filtered without history or materialization", () => {
+  const narrowDefinition: CollaborationDefinition = {
+    ...definition,
+    collaborationId: "collaboration-narrow-live",
+    capabilities: [{
+      id: "narrow-reader",
+      subjectPubkey: narrowReader.pubkey,
+      resource: {
+        kind: "entry",
+        entryId: "draft",
+        includeDescendants: false,
+      },
+      actions: ["collaboration.join", "file.read"],
+    }],
+  };
+  const host = CollaborationReplica.createHost({
+    definition: narrowDefinition,
+    participantPubkey: owner.pubkey,
+    entries,
+  });
+  const narrow = CollaborationReplica.fromBootstrap(
+    narrowReader.pubkey,
+    host.bootstrapFor(narrowReader.pubkey, owner.secretKey),
+  );
+  try {
+    assert.throws(
+      () => narrow.fileText("notes-file"),
+      /not readable by this participant/,
+    );
+    const acceptedBefore = narrow.acceptedOperations();
+    const historyBefore = narrow.replayOperations();
+    const operation = submitEdit(host, {
+      fileId: "notes-file",
+      actorPubkey: owner.pubkey,
+      secretKey: owner.secretKey,
+      editorTransaction: transaction(owner.pubkey, 0, 4, 4, "!"),
+    });
+
+    assert.equal(narrow.canReceive(operation), false);
+    assert.equal(narrow.receive(operation), false);
+    assert.deepEqual(narrow.acceptedOperations(), acceptedBefore);
+    assert.deepEqual(narrow.replayOperations(), historyBefore);
+    assert.throws(
+      () => narrow.fileText("notes-file"),
+      /not readable by this participant/,
+    );
+  } finally {
+    narrow.destroy();
+    host.destroy();
+  }
+});
+
+test("unreadable file creates omit initial text from live delivery and bootstrap history", () => {
+  const narrowDefinition: CollaborationDefinition = {
+    ...definition,
+    collaborationId: "collaboration-narrow-create",
+    capabilities: [{
+      id: "narrow-reader",
+      subjectPubkey: narrowReader.pubkey,
+      resource: {
+        kind: "entry",
+        entryId: "draft",
+        includeDescendants: false,
+      },
+      actions: ["collaboration.join", "file.read"],
+    }],
+  };
+  const host = CollaborationReplica.createHost({
+    definition: narrowDefinition,
+    participantPubkey: owner.pubkey,
+    entries,
+  });
+  let narrow: CollaborationReplica | null = null;
+  let disconnect: (() => void) | null = null;
+  try {
+    const historicalCreate = host.createEntry(
+      "notes",
+      {
+        id: "historical-private-file",
+        kind: "file",
+        name: "historical.md",
+        text: "historical secret",
+      },
+      owner.pubkey,
+      owner.secretKey,
+    );
+    const bootstrap = host.bootstrapFor(
+      narrowReader.pubkey,
+      owner.secretKey,
+    );
+    assert.equal(
+      bootstrap.operationHistory.some(
+        (operation) => operation.operationId === historicalCreate.operationId,
+      ),
+      false,
+    );
+    assert.equal(
+      bootstrap.acceptedOperations.some(
+        (operation) => operation.operationId === historicalCreate.operationId,
+      ),
+      false,
+    );
+    assert.equal(
+      JSON.stringify(bootstrap).includes("historical secret"),
+      false,
+    );
+
+    narrow = CollaborationReplica.fromBootstrap(narrowReader.pubkey, bootstrap);
+    assert.equal(narrow.hasEntry("historical-private-file"), true);
+    assert.throws(
+      () => narrow!.fileText("historical-private-file"),
+      /not readable by this participant/,
+    );
+
+    disconnect = connectCollaborationReplicas(host, narrow);
+    const historyBefore = narrow.replayOperations();
+    const liveCreate = host.createEntry(
+      "notes",
+      {
+        id: "live-private-file",
+        kind: "file",
+        name: "live.md",
+        text: "live secret",
+      },
+      owner.pubkey,
+      owner.secretKey,
+    );
+    assert.equal(narrow.canReceive(liveCreate), false);
+    assert.equal(narrow.hasEntry("live-private-file"), false);
+    assert.deepEqual(narrow.replayOperations(), historyBefore);
+  } finally {
+    disconnect?.();
+    narrow?.destroy();
+    host.destroy();
+  }
+});
+
 test("signed Yjs text operations converge and retain actor selection metadata", () => {
   const { host, guest } = replicas();
   const disconnect = connectCollaborationReplicas(host, guest);
@@ -419,6 +561,133 @@ test("signed Yjs text operations converge and retain actor selection metadata", 
     assert.equal(verifyCollaborationOperation(tampered), false);
   } finally {
     disconnect();
+    host.destroy();
+    guest.destroy();
+  }
+});
+
+test("causally incomplete Yjs updates cannot queue unsigned text for later materialization", () => {
+  const { host, guest } = replicas();
+  const dependencyDoc = new Y.Doc({ gc: false });
+  try {
+    const operation = submitEdit(guest, {
+      fileId: "draft",
+      actorPubkey: collaboratorVoice.pubkey,
+      secretKey: collaborator.secretKey,
+      editorTransaction: transaction(
+        collaboratorVoice.pubkey,
+        0,
+        5,
+        5,
+        "!",
+        5,
+      ),
+    });
+    const dependencyText = dependencyDoc.getText("content");
+    dependencyText.insert(0, "anchor");
+    const dependencyUpdate = Y.encodeStateAsUpdate(dependencyDoc);
+    const dependencyState = Y.encodeStateVector(dependencyDoc);
+    dependencyText.insert(dependencyText.length, " unsigned");
+    const unresolvedUpdate = Y.encodeStateAsUpdate(
+      dependencyDoc,
+      dependencyState,
+    );
+    const {
+      operationId: _operationId,
+      signature: _signature,
+      nonce: _nonce,
+      timestamp: _timestamp,
+      ...body
+    } = operation;
+    const malicious = signCollaborationOperation(
+      {
+        ...body,
+        nonce: createCollaborationNonce(),
+        timestamp: Date.now(),
+        payload: {
+          ...operation.payload,
+          update: bytesToHex(
+            Y.mergeUpdates([
+              hexToBytes(operation.payload.update),
+              unresolvedUpdate,
+            ]),
+          ),
+        },
+      },
+      collaborator.secretKey,
+    );
+
+    const proof = new Y.Doc({ gc: false });
+    try {
+      Y.applyUpdate(proof, Y.encodeStateAsUpdate(host.fileText("draft").doc!));
+      Y.applyUpdate(proof, hexToBytes(malicious.payload.update));
+      assert.equal(proof.getText("content").toString(), "Hello!");
+      assert.ok(proof.store.pendingStructs);
+      Y.applyUpdate(proof, dependencyUpdate);
+      assert.match(proof.getText("content").toString(), /unsigned/);
+    } finally {
+      proof.destroy();
+    }
+
+    assert.throws(
+      () => host.receive(malicious),
+      /causally incomplete Yjs update/,
+    );
+    assert.equal(host.fileText("draft").toString(), "Hello");
+    assert.equal(host.acceptedOperations().length, 0);
+    assert.equal(host.replayOperations().length, 0);
+  } finally {
+    dependencyDoc.destroy();
+    host.destroy();
+    guest.destroy();
+  }
+});
+
+test("semantic edit duplicates with fresh nonces do not add provenance", () => {
+  const { host, guest } = replicas();
+  try {
+    const operation = submitEdit(guest, {
+      fileId: "draft",
+      actorPubkey: collaboratorVoice.pubkey,
+      secretKey: collaborator.secretKey,
+      editorTransaction: transaction(
+        collaboratorVoice.pubkey,
+        0,
+        5,
+        5,
+        "!",
+        5,
+      ),
+    });
+    assert.equal(host.receive(operation), true);
+    const {
+      operationId: _operationId,
+      signature: _signature,
+      nonce: _nonce,
+      timestamp: _timestamp,
+      ...body
+    } = operation;
+    const duplicate = signCollaborationOperation(
+      {
+        ...body,
+        nonce: createCollaborationNonce(),
+        timestamp: Date.now() + 1,
+      },
+      collaborator.secretKey,
+    );
+    assert.notEqual(duplicate.operationId, operation.operationId);
+
+    assert.equal(host.receive(duplicate), false);
+    assert.equal(host.fileText("draft").toString(), "Hello!");
+    assert.deepEqual(
+      host.acceptedOperations().map((accepted) => accepted.operationId),
+      [operation.operationId],
+    );
+    assert.deepEqual(
+      host.replayOperations().map((accepted) => accepted.operationId),
+      [operation.operationId],
+    );
+  } finally {
     host.destroy();
     guest.destroy();
   }
@@ -524,6 +793,146 @@ test("prepared edit batches remain isolated until a signed commit", () => {
   } finally {
     _host.destroy();
     guest.destroy();
+  }
+});
+
+test("prepared edit commits reject altered, incomplete, and stale batches without unsigned mutation", () => {
+  {
+    const { host, guest } = replicas();
+    try {
+      const prepared = guest.prepareEditTransaction({
+        fileId: "draft",
+        actorPubkey: collaboratorVoice.pubkey,
+        secretKey: collaborator.secretKey,
+        editorTransaction: transaction(
+          collaboratorVoice.pubkey,
+          0,
+          5,
+          5,
+          "!",
+        ),
+      });
+      const altered = {
+        ...prepared,
+        editorTransaction: {
+          ...prepared.editorTransaction,
+          timestamp: prepared.editorTransaction.timestamp + 1,
+        },
+      };
+
+      assert.throws(
+        () => guest.commitPreparedEditBatch({
+          edits: [altered],
+          secretKey: collaborator.secretKey,
+        }),
+        /prepared edit is unknown or was altered/,
+      );
+      assert.equal(guest.fileText("draft").toString(), "Hello");
+      assert.equal(guest.acceptedOperations().length, 0);
+
+      guest.commitPreparedEditBatch({
+        edits: [prepared],
+        secretKey: collaborator.secretKey,
+      });
+      assert.equal(guest.fileText("draft").toString(), "Hello!");
+    } finally {
+      host.destroy();
+      guest.destroy();
+    }
+  }
+
+  {
+    const { host, guest } = replicas();
+    try {
+      const first = guest.prepareEditTransaction({
+        fileId: "draft",
+        actorPubkey: collaboratorVoice.pubkey,
+        secretKey: collaborator.secretKey,
+        editorTransaction: transaction(
+          collaboratorVoice.pubkey,
+          0,
+          5,
+          5,
+          "!",
+        ),
+      });
+      const second = guest.prepareEditTransaction({
+        fileId: "draft",
+        actorPubkey: collaboratorVoice.pubkey,
+        secretKey: collaborator.secretKey,
+        editorTransaction: transaction(
+          collaboratorVoice.pubkey,
+          1,
+          6,
+          6,
+          "?",
+        ),
+      });
+
+      for (const edits of [[first], [second, first]]) {
+        assert.throws(
+          () => guest.commitPreparedEditBatch({
+            edits,
+            secretKey: collaborator.secretKey,
+          }),
+          /complete isolated batch/,
+        );
+        assert.equal(guest.fileText("draft").toString(), "Hello");
+        assert.equal(guest.acceptedOperations().length, 0);
+      }
+
+      guest.commitPreparedEditBatch({
+        edits: [first, second],
+        secretKey: collaborator.secretKey,
+      });
+      assert.equal(guest.fileText("draft").toString(), "Hello!?");
+    } finally {
+      host.destroy();
+      guest.destroy();
+    }
+  }
+
+  {
+    const { host, guest } = replicas();
+    try {
+      const prepared = guest.prepareEditTransaction({
+        fileId: "draft",
+        actorPubkey: collaboratorVoice.pubkey,
+        secretKey: collaborator.secretKey,
+        editorTransaction: transaction(
+          collaboratorVoice.pubkey,
+          0,
+          5,
+          5,
+          "!",
+        ),
+      });
+      submitEdit(guest, {
+        fileId: "draft",
+        actorPubkey: collaboratorVoice.pubkey,
+        secretKey: collaborator.secretKey,
+        editorTransaction: transaction(
+          collaboratorVoice.pubkey,
+          9,
+          5,
+          5,
+          "?",
+        ),
+      });
+
+      assert.throws(
+        () => guest.commitPreparedEditBatch({
+          edits: [prepared],
+          secretKey: collaborator.secretKey,
+        }),
+        /prepared edit base changed before the batch could be signed/,
+      );
+      assert.equal(guest.fileText("draft").toString(), "Hello?");
+      assert.equal(guest.acceptedOperations().length, 1);
+    } finally {
+      host.destroy();
+      guest.destroy();
+    }
   }
 });
 
@@ -732,6 +1141,46 @@ test("Awareness selections are ephemeral and follow Yjs-relative positions", () 
       false,
     );
   } finally {
+    disconnect();
+    host.destroy();
+    guest.destroy();
+  }
+});
+
+test("an authenticated peer cannot remove another participant's Awareness client", () => {
+  const { host, guest } = replicas();
+  const disconnect = connectCollaborationReplicas(host, guest);
+  const attackerDoc = new Y.Doc();
+  const attackerAwareness = new Awareness(attackerDoc);
+  try {
+    guest.submitPresence({
+      activeFileId: "draft",
+      selection: null,
+      actorPubkey: collaboratorVoice.pubkey,
+      secretKey: collaborator.secretKey,
+    });
+    assert.ok(host.presenceFor(collaborator.pubkey));
+
+    const victimClientId = guest.awareness.clientID;
+    const victimClock = host.awareness.meta.get(victimClientId)?.clock;
+    assert.notEqual(victimClock, undefined);
+    attackerAwareness.meta.set(victimClientId, {
+      clock: victimClock!,
+      lastUpdated: Date.now(),
+    });
+    const forgedRemoval = encodeAwarenessUpdate(
+      attackerAwareness,
+      [victimClientId],
+    );
+
+    assert.throws(
+      () => host.receiveAwarenessUpdate(forgedRemoval, reader.pubkey),
+      /Awareness client id belongs to another authenticated peer/,
+    );
+    assert.ok(host.presenceFor(collaborator.pubkey));
+  } finally {
+    attackerAwareness.destroy();
+    attackerDoc.destroy();
     disconnect();
     host.destroy();
     guest.destroy();

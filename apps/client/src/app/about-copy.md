@@ -657,16 +657,20 @@ and preserves the draft as a private patch/fork.
 Concurrent directory operations may produce the same requested sibling name.
 They are not rejected according to arrival order: all stable IDs converge, the
 lexicographically lowest ID keeps the requested name, and the remaining names
-receive deterministic hash suffixes when materialized. A Step captures and
-acknowledges an exact accepted-batch prefix so edits accepted while signing
-remain pending. Acknowledgement does not erase durable replay/deduplication
-history, so a participant that was offline can later catch up. Read
+receive deterministic hash suffixes when materialized. The Collaboration core
+exposes capture and acknowledgement of an exact accepted-batch prefix so a
+production Step integration can leave edits accepted while signing pending.
+That production Step wiring is still deferred. Acknowledgement does not erase
+durable replay/deduplication history, so a participant that was offline can
+later catch up. Read
 capabilities are enforced at bootstrap, operation, and API boundaries, but
 they do not turn plaintext transport into confidentiality; production privacy
 still requires recipient filtering and per-file encryption keys.
 
 The initial client Stage core uses strict, versioned one- or two-panel
-snapshots and signed participant commands. It enforces Collaboration
+snapshots and signed participant commands chained to the exact parent snapshot
+hash. Concurrent commands for one parent resolve by deterministic command ID,
+independent of delivery order. It enforces Collaboration
 `stage.view`, `stage.start`, `stage.control`, and `stage.end` capabilities
 without treating a writing voice as authority; every staged working or replay
 resource must also remain readable within the collaboration mount. Controller
@@ -1120,11 +1124,13 @@ Already built:
   deterministic same-name materialization, delegated voice attribution, typed
   stable-ID folder actions, scoped capabilities, ephemeral live presence,
   private denied-work patches, retained reconnect history, and exact
-  Step-prefix draining; durable provider storage, join UI, encrypted transport,
-  and a production peer provider remain deferred;
+  Step-prefix capture/acknowledgement APIs; production Step wiring, durable
+  provider storage, join UI, encrypted transport, and a peer provider remain
+  deferred;
 - an initial Stage core with strict versioned one/two-panel snapshots, signed
-  Controller commands, mounted/readable capability enforcement, accepted
-  handoff, disconnect grace and vacancy, owner recovery, plus a private-layout
+  Controller commands chained to exact parent snapshots with deterministic
+  fork resolution, mounted/readable capability enforcement, accepted handoff,
+  disconnect grace and vacancy, owner recovery, plus a private-layout
   follow/detach/rejoin adapter with opaque local Replay suspensions; visible
   controls and production peer transport remain deferred;
 - an initial in-place Replay presentation reducer that preserves stable panel

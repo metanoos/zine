@@ -273,6 +273,75 @@ test("signed controller updates converge and reject tampering and replay", () =>
   }
 });
 
+test("concurrent commands converge independent of delivery order", () => {
+  const { host, replica } = replicas();
+  const presenterLive = replica(presenter.pubkey);
+  const firstRecipient = replica(recipient.pubkey);
+  const secondRecipient = replica(recipient.pubkey);
+  try {
+    const firstController = StageSession.start({
+      collaboration: presenterLive,
+      stageId: "concurrent-stage",
+      view: onePanelView(),
+      secretKey: presenter.secretKey,
+      timestamp: 20,
+    });
+    assert(firstController.startCommand);
+    const secondController = StageSession.fromStart(
+      presenterLive,
+      firstController.startCommand,
+    );
+    const firstFollower = StageSession.fromStart(
+      firstRecipient,
+      firstController.startCommand,
+    );
+    const secondFollower = StageSession.fromStart(
+      secondRecipient,
+      firstController.startCommand,
+    );
+
+    const first = firstController.updateView(
+      twoPanelView(1),
+      presenter.secretKey,
+      21,
+    );
+    const second = secondController.updateView(
+      onePanelView("b", 1),
+      presenter.secretKey,
+      22,
+    );
+    assert.equal(first.expectedRevision, second.expectedRevision);
+    assert.equal(first.expectedStateHash, second.expectedStateHash);
+
+    assert.equal(firstFollower.receive(first), true);
+    assert.equal(firstFollower.receive(second), true);
+    assert.equal(secondFollower.receive(second), true);
+    assert.equal(secondFollower.receive(first), true);
+
+    const winner = first.commandId < second.commandId
+      ? first
+      : second;
+    assert.deepEqual(firstFollower.snapshot(), secondFollower.snapshot());
+    assert.deepEqual(
+      firstFollower.snapshot().view,
+      winner.payload.view,
+    );
+    assert.deepEqual(
+      firstFollower.canonicalCommandIds(),
+      secondFollower.canonicalCommandIds(),
+    );
+    assert.deepEqual(firstFollower.canonicalCommandIds(), [
+      firstController.startCommand.commandId,
+      winner.commandId,
+    ]);
+  } finally {
+    presenterLive.destroy();
+    firstRecipient.destroy();
+    secondRecipient.destroy();
+    host.destroy();
+  }
+});
+
 test("Stage views are closed, one-or-two-panel states inside the mounted scope", () => {
   const { host } = replicas();
   try {
@@ -594,6 +663,78 @@ test("disconnect grace freezes Stage, then leaves it vacant for owner recovery",
   }
 });
 
+test("Controller reconnect honors both sides of the disconnect grace boundary", () => {
+  const { host } = replicas();
+  try {
+    const reconnected = StageSession.start({
+      collaboration: host,
+      stageId: "reconnected-stage",
+      view: onePanelView(),
+      secretKey: owner.secretKey,
+      timestamp: 100,
+    });
+    const reconnectedSources: string[] = [];
+    const unsubscribe = reconnected.subscribeSnapshot((_snapshot, source) => {
+      reconnectedSources.push(source);
+    });
+    try {
+      const disconnectedAt = 200;
+      assert.equal(
+        reconnected.noteControllerDisconnected(owner.pubkey, disconnectedAt),
+        true,
+      );
+      assert.equal(
+        reconnected.noteControllerReconnected(
+          owner.pubkey,
+          disconnectedAt + STAGE_CONTROLLER_GRACE_MS - 1,
+        ),
+        true,
+      );
+      assert.equal(reconnected.snapshot().status, "active");
+      assert.equal(reconnected.snapshot().controllerPubkey, owner.pubkey);
+      assert.equal(reconnected.snapshot().controllerDisconnectedAt, null);
+      assert.equal(reconnected.snapshot().view.revision, 2);
+      assert.deepEqual(reconnectedSources, ["transport", "transport"]);
+
+      reconnected.updateView(
+        onePanelView("b", 3),
+        owner.secretKey,
+        disconnectedAt + STAGE_CONTROLLER_GRACE_MS,
+      );
+      assert.equal(reconnected.snapshot().view.panels[0].presentation.kind, "working");
+      assert.deepEqual(reconnectedSources, ["transport", "transport", "local"]);
+    } finally {
+      unsubscribe();
+    }
+
+    const expired = StageSession.start({
+      collaboration: host,
+      stageId: "expired-reconnect-stage",
+      view: onePanelView(),
+      secretKey: owner.secretKey,
+      timestamp: 300,
+    });
+    const disconnectedAt = 400;
+    assert.equal(
+      expired.noteControllerDisconnected(owner.pubkey, disconnectedAt),
+      true,
+    );
+    assert.equal(
+      expired.noteControllerReconnected(
+        owner.pubkey,
+        disconnectedAt + STAGE_CONTROLLER_GRACE_MS,
+      ),
+      false,
+    );
+    assert.equal(expired.snapshot().status, "vacant");
+    assert.equal(expired.snapshot().controllerPubkey, null);
+    assert.equal(expired.snapshot().controllerDisconnectedAt, null);
+    assert.equal(expired.snapshot().view.revision, 2);
+  } finally {
+    host.destroy();
+  }
+});
+
 test("owner can end a vacant Stage and its final panel state is retained", () => {
   const { host } = replicas();
   try {
@@ -659,6 +800,60 @@ test("narrow followers accept authoritative state but refuse unreadable projecti
   } finally {
     presenterLive.destroy();
     narrowLive.destroy();
+    host.destroy();
+  }
+});
+
+test("snapshot restoration rejects malformed, foreign, and unauthorized state", () => {
+  const { host } = replicas();
+  try {
+    const stage = StageSession.start({
+      collaboration: host,
+      stageId: "restore-validation-stage",
+      view: onePanelView(),
+      secretKey: owner.secretKey,
+      timestamp: 700,
+    });
+    const snapshot = stage.snapshot();
+
+    assert.throws(
+      () => StageSession.restore(host, { ...snapshot, stageId: "" }),
+      /malformed Stage snapshot/,
+    );
+    assert.throws(
+      () => StageSession.restore(host, {
+        ...snapshot,
+        collaborationId: "another-collaboration",
+      }),
+      /belongs to another Collaboration/,
+    );
+    assert.throws(
+      () => StageSession.restore(host, {
+        ...snapshot,
+        ownerPubkey: presenter.pubkey,
+      }),
+      /belongs to another Collaboration/,
+    );
+    assert.throws(
+      () => StageSession.restore(host, {
+        ...snapshot,
+        controllerPubkey: noControl.pubkey,
+      }),
+      /lacks stage.control/,
+    );
+    assert.throws(
+      () => StageSession.restore(host, {
+        ...snapshot,
+        pendingControlTransfer: {
+          transferId: "0".repeat(32),
+          fromPubkey: owner.pubkey,
+          toPubkey: noControl.pubkey,
+          requestedAt: 701,
+        },
+      }),
+      /pending Stage Controller lacks stage.control/,
+    );
+  } finally {
     host.destroy();
   }
 });

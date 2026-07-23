@@ -198,6 +198,32 @@ function operationDigest(body: CollaborationOperationBody): Uint8Array {
   return sha256(canonicalBytes(body as unknown as CanonicalJsonValue));
 }
 
+/**
+ * Stable identity for one collaboration mutation, independent of transport
+ * retry entropy and wall-clock time.
+ */
+export function collaborationOperationSemanticId(
+  operation: CollaborationSignedOperation,
+): string {
+  if (!verifyCollaborationOperation(operation)) {
+    throw new TypeError(
+      "cannot fingerprint a malformed Collaboration operation",
+    );
+  }
+  const {
+    nonce: _nonce,
+    timestamp: _timestamp,
+    operationId: _operationId,
+    signature: _signature,
+    ...semanticBody
+  } = operation;
+  return bytesToHex(
+    sha256(
+      canonicalBytes(semanticBody as unknown as CanonicalJsonValue),
+    ),
+  );
+}
+
 export function createCollaborationNonce(): string {
   return bytesToHex(randomBytes(16));
 }

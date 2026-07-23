@@ -35,6 +35,12 @@ interface StageCommandBase {
    * command, including controller lifecycle changes, advances that revision.
    */
   expectedRevision: number;
+  /**
+   * Cryptographic identity of the exact shared snapshot this command extends.
+   * Concurrent commands may occupy the same revision, so the revision alone
+   * is not a sufficient parent pointer.
+   */
+  expectedStateHash: string | null;
 }
 
 export type StageCommandBody =
@@ -363,6 +369,15 @@ export function isStageSessionSnapshot(
   );
 }
 
+/** Stable identity for the complete shared state a Stage command extends. */
+export function stageSessionSnapshotHash(
+  snapshot: StageSessionSnapshot,
+): string {
+  return bytesToHex(
+    sha256(canonicalBytes(snapshot as unknown as CanonicalJsonValue)),
+  );
+}
+
 function isPayload(
   kind: StageCommandBody["kind"],
   value: unknown,
@@ -408,6 +423,7 @@ export function isStageCommandBody(value: unknown): value is StageCommandBody {
         "participantPubkey",
         "timestamp",
         "expectedRevision",
+        "expectedStateHash",
         "kind",
         "payload",
       ],
@@ -424,6 +440,13 @@ export function isStageCommandBody(value: unknown): value is StageCommandBody {
     typeof value.expectedRevision !== "number" ||
     !Number.isInteger(value.expectedRevision) ||
     (
+      value.expectedStateHash !== null &&
+      (
+        typeof value.expectedStateHash !== "string" ||
+        !HEX_32.test(value.expectedStateHash)
+      )
+    ) ||
+    (
       value.kind !== "stage.start" &&
       value.kind !== "stage.view.update" &&
       value.kind !== "stage.control.request" &&
@@ -437,8 +460,9 @@ export function isStageCommandBody(value: unknown): value is StageCommandBody {
 
   return value.kind === "stage.start"
     ? value.expectedRevision === -1 &&
+        value.expectedStateHash === null &&
         (value.payload as { view: StageViewState }).view.revision === 0
-    : value.expectedRevision >= 0;
+    : value.expectedRevision >= 0 && value.expectedStateHash !== null;
 }
 
 export function isStageSignedCommand(
@@ -456,6 +480,7 @@ export function isStageSignedCommand(
         "participantPubkey",
         "timestamp",
         "expectedRevision",
+        "expectedStateHash",
         "kind",
         "payload",
         "commandId",

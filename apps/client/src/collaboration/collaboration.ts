@@ -22,6 +22,7 @@ import {
   type MountScope,
 } from "../workspace/mount-scope.js";
 import {
+  collaborationOperationSemanticId,
   createCollaborationNonce,
   signCollaborationBootstrap,
   signCollaborationOperation,
@@ -96,6 +97,17 @@ interface PreparedEditBatchRecord {
   currentText: string;
   preparationIds: string[];
   origin: unknown;
+}
+
+interface DecodedAwarenessEntry {
+  clientId: number;
+  clock: number;
+  state: unknown;
+}
+
+interface ValidatedYjsTransition {
+  beforeState: string;
+  afterState: string;
 }
 
 export interface CollaborationHostInput {
@@ -366,6 +378,138 @@ function decodeEntry(entryId: string, value: unknown): DirectoryEntryState {
   return { id: entryId, kind, parentId, name, deleted };
 }
 
+function permissionDirectoryForDoc(
+  doc: Y.Doc,
+): CollaborationPermissionDirectory {
+  const entries = doc.getMap(DIRECTORY_TYPE);
+  const liveEntry = (entryId: string): DirectoryEntryState | null => {
+    try {
+      const entry = decodeEntry(entryId, entries.get(entryId));
+      return entry.deleted ? null : entry;
+    } catch {
+      return null;
+    }
+  };
+  return {
+    hasEntry(entryId) {
+      return liveEntry(entryId) !== null;
+    },
+    isDescendantOrSelf(entryId, ancestorId) {
+      const seen = new Set<string>();
+      let current: string | null = entryId;
+      while (current !== null) {
+        if (current === ancestorId) return true;
+        if (seen.has(current)) return false;
+        seen.add(current);
+        const entry = liveEntry(current);
+        if (!entry) return false;
+        current = entry.parentId;
+      }
+      return false;
+    },
+  };
+}
+
+function assertCompleteYjsState(doc: Y.Doc, context: string): void {
+  if (doc.store.pendingStructs !== null || doc.store.pendingDs !== null) {
+    throw new CollaborationError(`${context} contains a causally incomplete Yjs update`);
+  }
+}
+
+function encodedYjsState(doc: Y.Doc): string {
+  assertCompleteYjsState(doc, "Yjs document");
+  return bytesToHex(Y.encodeStateAsUpdate(doc));
+}
+
+function assertYjsStateMatches(
+  doc: Y.Doc,
+  expectedState: string,
+  context: string,
+): void {
+  assertCompleteYjsState(doc, context);
+  if (bytesToHex(Y.encodeStateAsUpdate(doc)) !== expectedState) {
+    throw new CollaborationError(
+      `${context} does not match its validated preview`,
+    );
+  }
+}
+
+function assertYjsTransitionStillApplies(
+  doc: Y.Doc,
+  update: string,
+  transition: ValidatedYjsTransition,
+  context: string,
+): void {
+  assertYjsStateMatches(doc, transition.beforeState, `${context} base`);
+  const preview = cloneWithUpdate(doc, update);
+  try {
+    assertYjsStateMatches(
+      preview,
+      transition.afterState,
+      `${context} result`,
+    );
+  } finally {
+    preview.destroy();
+  }
+}
+
+function readAwarenessVarUint(
+  update: Uint8Array,
+  cursor: { offset: number },
+): number {
+  let value = 0;
+  let shift = 0;
+  while (cursor.offset < update.length && shift <= 49) {
+    const byte = update[cursor.offset++];
+    value += (byte & 0x7f) * 2 ** shift;
+    if (!Number.isSafeInteger(value)) {
+      throw new CollaborationError("Awareness update integer is out of range");
+    }
+    if ((byte & 0x80) === 0) return value;
+    shift += 7;
+  }
+  throw new CollaborationError("Awareness update is truncated or malformed");
+}
+
+function decodeAwarenessEntries(
+  update: Uint8Array,
+): DecodedAwarenessEntry[] {
+  const cursor = { offset: 0 };
+  const count = readAwarenessVarUint(update, cursor);
+  if (count > update.length) {
+    throw new CollaborationError("Awareness update declares too many entries");
+  }
+  const entries: DecodedAwarenessEntry[] = [];
+  const clientIds = new Set<number>();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  for (let index = 0; index < count; index += 1) {
+    const clientId = readAwarenessVarUint(update, cursor);
+    const clock = readAwarenessVarUint(update, cursor);
+    const byteLength = readAwarenessVarUint(update, cursor);
+    const end = cursor.offset + byteLength;
+    if (end > update.length || clientIds.has(clientId)) {
+      throw new CollaborationError(
+        end > update.length
+          ? "Awareness update state is truncated"
+          : "Awareness update repeats a client id",
+      );
+    }
+    clientIds.add(clientId);
+    let state: unknown;
+    try {
+      state = JSON.parse(decoder.decode(update.subarray(cursor.offset, end)));
+    } catch {
+      throw new CollaborationError("Awareness update state is malformed");
+    }
+    cursor.offset = end;
+    entries.push({ clientId, clock, state });
+  }
+  if (cursor.offset !== update.length) {
+    throw new CollaborationError("Awareness update has trailing bytes");
+  }
+  return entries;
+}
+
 function captureYjsUpdate(
   doc: Y.Doc,
   origin: unknown,
@@ -400,6 +544,7 @@ function cloneWithUpdate(doc: Y.Doc, update: string): Y.Doc {
   const clone = new Y.Doc({ gc: false });
   Y.applyUpdate(clone, Y.encodeStateAsUpdate(doc));
   if (update.length > 0) Y.applyUpdate(clone, hexToBytes(update));
+  assertCompleteYjsState(clone, "Yjs preview");
   return clone;
 }
 
@@ -442,12 +587,14 @@ function validateEditBatchMaterialization(
   baseSnapshotValue: string,
   update: string,
   editorTransactions: readonly EditorTransaction[],
-): void {
+): ValidatedYjsTransition {
   if (doc.gc) {
     throw new CollaborationError(
       "file edit verification requires retained Yjs history",
     );
   }
+  assertCompleteYjsState(doc, "file edit base");
+  const beforeState = encodedYjsState(doc);
   const baseSnapshot = decodeSnapshot(baseSnapshotValue);
   const currentSnapshot = Y.snapshot(doc);
   const currentState = currentSnapshot.sv;
@@ -511,6 +658,7 @@ function validateEditBatchMaterialization(
     } finally {
       text.unobserve(observe);
     }
+    assertCompleteYjsState(base, "file edit batch");
     if (
       formatted ||
       [...base.share.keys()].some((key) => key !== FILE_TEXT_TYPE) ||
@@ -519,6 +667,15 @@ function validateEditBatchMaterialization(
       throw new CollaborationError(
         "file edit update disagrees with its signed editor transactions",
       );
+    }
+    const livePreview = cloneWithUpdate(doc, update);
+    try {
+      return {
+        beforeState,
+        afterState: encodedYjsState(livePreview),
+      };
+    } finally {
+      livePreview.destroy();
     }
   } catch (error) {
     if (error instanceof CollaborationError) throw error;
@@ -661,6 +818,7 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
   private readonly fileDocs: Map<string, Y.Doc>;
   private readonly pendingAccepted = new Map<string, CollaborationSignedOperation>();
   private readonly operationHistory = new Map<string, CollaborationSignedOperation>();
+  private readonly semanticOperationIds = new Map<string, string>();
   private readonly preparedEdits = new Map<string, PreparedEditRecord>();
   private readonly preparedEditBatches = new Map<string, PreparedEditBatchRecord>();
   private readonly privatePatchLog: CollaborationPrivateTextPatch[] = [];
@@ -669,6 +827,7 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
   private readonly beforeRemoteOperationListeners =
     new Set<BeforeRemoteOperationListener>();
   private readonly awarenessOutgoingListeners = new Set<AwarenessOutgoingListener>();
+  private readonly awarenessClientOwners = new Map<number, string>();
   private readonly presenceListeners = new Set<PresenceListener>();
   private readonly rootId: string;
 
@@ -729,7 +888,14 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
       ) {
         throw new CollaborationError("bootstrap contains an invalid operation");
       }
+      const semanticId = collaborationOperationSemanticId(operation);
+      if (this.semanticOperationIds.has(semanticId)) {
+        throw new CollaborationError(
+          "bootstrap contains a duplicate semantic operation",
+        );
+      }
       this.operationHistory.set(operation.operationId, operation);
+      this.semanticOperationIds.set(semanticId, operation.operationId);
     }
     for (const operation of pendingOperations) {
       if (
@@ -744,6 +910,10 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
       this.pendingAccepted.set(operation.operationId, operation);
     }
     this.awareness = new Awareness(directoryDoc);
+    this.awarenessClientOwners.set(
+      this.awareness.clientID,
+      this.participantPubkey,
+    );
     this.awareness.on("change", this.handleAwarenessChange);
     this.awareness.on("update", this.handleAwarenessUpdate);
     this.awareness.setLocalState(null);
@@ -805,33 +975,9 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
       gc: false,
     });
     Y.applyUpdate(directoryDoc, hexToBytes(bootstrap.directoryUpdate));
+    assertCompleteYjsState(directoryDoc, "bootstrap directory");
     const entries = directoryDoc.getMap<unknown>(DIRECTORY_TYPE);
-    const permissionDirectory: CollaborationPermissionDirectory = {
-      hasEntry(entryId) {
-        try {
-          return decodeEntry(entryId, entries.get(entryId)).deleted === false;
-        } catch {
-          return false;
-        }
-      },
-      isDescendantOrSelf(entryId, ancestorId) {
-        const seen = new Set<string>();
-        let current: string | null = entryId;
-        while (current !== null) {
-          if (current === ancestorId) return true;
-          if (seen.has(current)) return false;
-          seen.add(current);
-          try {
-            const entry = decodeEntry(current, entries.get(current));
-            if (entry.deleted) return false;
-            current = entry.parentId;
-          } catch {
-            return false;
-          }
-        }
-        return false;
-      },
-    };
+    const permissionDirectory = permissionDirectoryForDoc(directoryDoc);
     const fileDocs = new Map<string, Y.Doc>();
     for (const [fileId, update] of Object.entries(bootstrap.fileUpdates)) {
       let entry: DirectoryEntryState;
@@ -863,6 +1009,7 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
         gc: false,
       });
       Y.applyUpdate(doc, hexToBytes(update));
+      assertCompleteYjsState(doc, `bootstrap file ${fileId}`);
       if ([...doc.share.keys()].some((key) => key !== FILE_TEXT_TYPE)) {
         doc.destroy();
         directoryDoc.destroy();
@@ -1208,30 +1355,53 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
     authenticatedParticipantPubkey: string,
   ): void {
     assertParticipant(this.definition, authenticatedParticipantPubkey);
-    const changed = new Set<number>();
-    const origin = { authenticatedParticipantPubkey };
-    const collect = (
-      change: { added: number[]; updated: number[]; removed: number[] },
-      changeOrigin: unknown,
-    ) => {
-      if (changeOrigin !== origin) return;
-      for (const clientId of [...change.added, ...change.updated]) {
-        changed.add(clientId);
+    const entries = decodeAwarenessEntries(update);
+    for (const entry of entries) {
+      const owner = this.awarenessClientOwners.get(entry.clientId);
+      if (
+        owner !== undefined &&
+        owner !== authenticatedParticipantPubkey
+      ) {
+        throw new CollaborationError(
+          "Awareness client id belongs to another authenticated peer",
+        );
       }
-    };
-    this.awareness.on("change", collect);
+      if (entry.state === null) {
+        if (owner !== authenticatedParticipantPubkey) {
+          throw new CollaborationError(
+            "Awareness removal requires an authenticated client-id owner",
+          );
+        }
+        continue;
+      }
+      const presence = this.parsePresenceState(entry.state);
+      if (
+        !presence ||
+        presence.participantPubkey !== authenticatedParticipantPubkey
+      ) {
+        throw new CollaborationError(
+          "awareness identity does not match its authenticated peer",
+        );
+      }
+    }
+    const origin = { authenticatedParticipantPubkey };
     try {
       applyAwarenessUpdate(this.awareness, update, origin);
-    } finally {
-      this.awareness.off("change", collect);
+    } catch (error) {
+      if (error instanceof CollaborationError) throw error;
+      throw new CollaborationError("Awareness update is malformed");
     }
-    const invalid = [...changed].filter((clientId) => {
-      const state = this.parsePresenceState(this.awareness.getStates().get(clientId));
-      return state?.participantPubkey !== authenticatedParticipantPubkey;
-    });
-    if (invalid.length > 0) {
-      removeAwarenessStates(this.awareness, invalid, "invalid-awareness");
-      throw new CollaborationError("awareness identity does not match its authenticated peer");
+    for (const entry of entries) {
+      if (
+        entry.state !== null &&
+        this.awareness.meta.get(entry.clientId)?.clock === entry.clock &&
+        this.awareness.getStates().has(entry.clientId)
+      ) {
+        this.awarenessClientOwners.set(
+          entry.clientId,
+          authenticatedParticipantPubkey,
+        );
+      }
     }
   }
 
@@ -1358,6 +1528,10 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
     operation: Operation,
   ): Operation {
     this.operationHistory.set(operation.operationId, operation);
+    this.semanticOperationIds.set(
+      collaborationOperationSemanticId(operation),
+      operation.operationId,
+    );
     this.pendingAccepted.set(operation.operationId, operation);
     const accepted = { operation, source: "local" as const };
     for (const listener of this.acceptedListeners) listener(accepted);
@@ -1367,6 +1541,10 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
 
   private acceptRemote(operation: CollaborationSignedOperation): void {
     this.operationHistory.set(operation.operationId, operation);
+    this.semanticOperationIds.set(
+      collaborationOperationSemanticId(operation),
+      operation.operationId,
+    );
     this.pendingAccepted.set(operation.operationId, operation);
     const accepted = { operation, source: "remote" as const };
     for (const listener of this.acceptedListeners) listener(accepted);
@@ -1528,11 +1706,17 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
         }),
         input.secretKey,
       );
-      validateEditBatchMaterialization(
+      const validated = validateEditBatchMaterialization(
         text.doc!,
         operation.payload.baseSnapshot,
         operation.payload.update,
         operation.payload.editorTransactions,
+      );
+      assertYjsTransitionStillApplies(
+        text.doc!,
+        update,
+        validated,
+        "file edit before application",
       );
       Y.applyUpdate(text.doc!, hexToBytes(update), origin);
       return this.acceptLocal(operation);
@@ -1704,11 +1888,17 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
         }),
         input.secretKey,
       );
-      validateEditBatchMaterialization(
+      const validated = validateEditBatchMaterialization(
         text.doc!,
         operation.payload.baseSnapshot,
         operation.payload.update,
         operation.payload.editorTransactions,
+      );
+      assertYjsTransitionStillApplies(
+        text.doc!,
+        update,
+        validated,
+        "prepared file edit before application",
       );
       Y.applyUpdate(text.doc!, hexToBytes(update), batch.origin);
       for (const edit of input.edits) {
@@ -1979,7 +2169,9 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
     return this.acceptLocal(operation);
   }
 
-  private validateDirectoryOperation(operation: CollaborationSignedOperation): void {
+  private validateDirectoryOperation(
+    operation: CollaborationSignedOperation,
+  ): ValidatedYjsTransition {
     if (
       operation.kind !== "entry.create" &&
       operation.kind !== "entry.rename" &&
@@ -1988,6 +2180,7 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
     ) {
       throw new CollaborationError("operation is not a directory mutation");
     }
+    const beforeState = encodedYjsState(this.directoryDoc);
     const before = directorySnapshot(this.directoryDoc);
     const next = cloneWithUpdate(this.directoryDoc, operation.payload.update);
     try {
@@ -2027,6 +2220,10 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
           throw new CollaborationError("directory update disagrees with its typed payload");
         }
       }
+      return {
+        beforeState,
+        afterState: encodedYjsState(next),
+      };
     } finally {
       next.destroy();
     }
@@ -2131,14 +2328,60 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
     }
   }
 
-  canReceive(operation: CollaborationSignedOperation): boolean {
-    return operation.kind !== "file.edit.batch" ||
+  private canReadIncomingCreatedFile(
+    operation: CollaborationSignedOperationOf<"entry.create">,
+  ): boolean {
+    if (operation.payload.entryKind !== "file") return true;
+    let preview: Y.Doc | null = null;
+    try {
+      preview = cloneWithUpdate(
+        this.directoryDoc,
+        operation.payload.update,
+      );
+      return permitsCollaborationRead(
+        this.definition,
+        permissionDirectoryForDoc(preview),
+        this.participantPubkey,
+        operation.payload.entryId,
+      );
+    } catch {
+      return false;
+    } finally {
+      preview?.destroy();
+    }
+  }
+
+  canShareOperationWith(
+    operation: CollaborationSignedOperation,
+    participantPubkey: string,
+  ): boolean {
+    assertParticipant(this.definition, participantPubkey);
+    const fileId = operation.kind === "file.edit.batch"
+      ? operation.payload.fileId
+      : operation.kind === "entry.create" &&
+          operation.payload.entryKind === "file"
+        ? operation.payload.entryId
+        : null;
+    return fileId === null ||
       permitsCollaborationRead(
+        this.definition,
+        this,
+        participantPubkey,
+        fileId,
+      );
+  }
+
+  canReceive(operation: CollaborationSignedOperation): boolean {
+    if (operation.kind === "file.edit.batch") {
+      return permitsCollaborationRead(
         this.definition,
         this,
         this.participantPubkey,
         operation.payload.fileId,
       );
+    }
+    return operation.kind !== "entry.create" ||
+      this.canReadIncomingCreatedFile(operation);
   }
 
   receive(value: unknown): boolean {
@@ -2147,28 +2390,39 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
     }
     const operation = value;
     if (this.operationHistory.has(operation.operationId)) return false;
+    if (
+      this.semanticOperationIds.has(
+        collaborationOperationSemanticId(operation),
+      )
+    ) return false;
     this.authorizeIncoming(operation);
     if (!this.canReceive(operation)) return false;
 
     if (operation.kind === "file.edit.batch") {
       const text = this.fileText(operation.payload.fileId);
-      validateEditBatchMaterialization(
+      for (const listener of this.beforeRemoteOperationListeners) {
+        listener(operation);
+      }
+      const validated = validateEditBatchMaterialization(
         text.doc!,
         operation.payload.baseSnapshot,
         operation.payload.update,
         operation.payload.editorTransactions,
       );
-      for (const listener of this.beforeRemoteOperationListeners) {
-        listener(operation);
-      }
       const origin: CollaborationRemoteYjsOrigin = {
         kind: "collaboration-operation",
         source: "remote",
         operation,
       };
+      assertYjsTransitionStillApplies(
+        text.doc!,
+        operation.payload.update,
+        validated,
+        "remote file edit before application",
+      );
       Y.applyUpdate(text.doc!, hexToBytes(operation.payload.update), origin);
     } else {
-      this.validateDirectoryOperation(operation);
+      const validatedDirectory = this.validateDirectoryOperation(operation);
       let createdFileDoc: Y.Doc | null = null;
       if (
         operation.kind === "entry.create" &&
@@ -2182,6 +2436,7 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
           createdFileDoc,
           hexToBytes(operation.payload.fileUpdate!),
         );
+        assertCompleteYjsState(createdFileDoc, "new file");
         if (
           [...createdFileDoc.share.keys()].some((key) => key !== FILE_TEXT_TYPE)
         ) {
@@ -2196,6 +2451,12 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
         source: "remote",
         operation,
       };
+      assertYjsTransitionStillApplies(
+        this.directoryDoc,
+        operation.payload.update,
+        validatedDirectory,
+        "remote directory update before application",
+      );
       Y.applyUpdate(
         this.directoryDoc,
         hexToBytes(operation.payload.update),
@@ -2239,13 +2500,7 @@ export class CollaborationReplica implements CollaborationPermissionDirectory {
       if (doc) fileUpdates[entry.id] = bytesToHex(Y.encodeStateAsUpdate(doc));
     }
     const canShareOperation = (operation: CollaborationSignedOperation) =>
-      operation.kind !== "file.edit.batch" ||
-      permitsCollaborationRead(
-        this.definition,
-        this,
-        participantPubkey,
-        operation.payload.fileId,
-      );
+      this.canShareOperationWith(operation, participantPubkey);
     const operationHistory = this.replayOperations().filter(canShareOperation);
     const acceptedOperations = this.acceptedOperations().filter(canShareOperation);
     const body: CollaborationBootstrapBody = {
@@ -2290,10 +2545,16 @@ export function connectCollaborationReplicas(
     throw new CollaborationError("cannot connect replicas from different collaborations");
   }
   const leftToRight = left.subscribeOutgoing((operation) => {
-    if (right.canReceive(operation)) right.receive(operation);
+    if (
+      left.canShareOperationWith(operation, right.participantPubkey) &&
+      right.canReceive(operation)
+    ) right.receive(operation);
   });
   const rightToLeft = right.subscribeOutgoing((operation) => {
-    if (left.canReceive(operation)) left.receive(operation);
+    if (
+      right.canShareOperationWith(operation, left.participantPubkey) &&
+      left.canReceive(operation)
+    ) left.receive(operation);
   });
   const leftAwarenessToRight = left.subscribeAwarenessOutgoing((update) => {
     right.receiveAwarenessUpdate(update, left.participantPubkey);
@@ -2304,10 +2565,16 @@ export function connectCollaborationReplicas(
   // Reconnect catch-up replays signed actor boundaries rather than
   // exchanging one merged update whose authors could no longer be recovered.
   for (const operation of left.replayOperations()) {
-    if (right.canReceive(operation)) right.receive(operation);
+    if (
+      left.canShareOperationWith(operation, right.participantPubkey) &&
+      right.canReceive(operation)
+    ) right.receive(operation);
   }
   for (const operation of right.replayOperations()) {
-    if (left.canReceive(operation)) left.receive(operation);
+    if (
+      right.canShareOperationWith(operation, left.participantPubkey) &&
+      left.canReceive(operation)
+    ) left.receive(operation);
   }
   if (left.awareness.getLocalState() !== null) {
     right.receiveAwarenessUpdate(

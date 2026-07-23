@@ -5,6 +5,7 @@ import {
   isStageSessionSnapshot,
   isStageViewState,
   signStageCommand,
+  stageSessionSnapshotHash,
   verifyStageCommand,
   type StageCommandBody,
   type StageSignedCommand,
@@ -289,7 +290,11 @@ export class StageSession {
   readonly startCommand: StageSignedCommandOf<"stage.start"> | null;
 
   private current: StageSessionSnapshot;
+  private historyBase: StageSessionSnapshot;
   private readonly seenCommandIds = new Set<string>();
+  private readonly commandCandidates = new Map<string, StageActiveCommand>();
+  private readonly historyPrefixCommandIds: string[];
+  private canonicalHistory: StageActiveCommand[] = [];
   private readonly outgoingListeners = new Set<StageOutgoingListener>();
   private readonly snapshotListeners = new Set<StageSnapshotListener>();
 
@@ -300,7 +305,11 @@ export class StageSession {
   ) {
     this.collaboration = collaboration;
     this.current = cloneStageSessionSnapshot(snapshot);
+    this.historyBase = cloneStageSessionSnapshot(snapshot);
     this.startCommand = startCommand;
+    this.historyPrefixCommandIds = startCommand === null
+      ? []
+      : [startCommand.commandId];
     if (startCommand) this.seenCommandIds.add(startCommand.commandId);
   }
 
@@ -335,6 +344,7 @@ export class StageSession {
       participantPubkey,
       timestamp,
       expectedRevision: -1,
+      expectedStateHash: null,
       kind: "stage.start",
       payload: { view: cloneStageViewState(input.view) },
     };
@@ -435,6 +445,14 @@ export class StageSession {
     return cloneStageSessionSnapshot(this.current);
   }
 
+  /** Canonical signed-command lineage, useful for persistence diagnostics. */
+  canonicalCommandIds(): readonly string[] {
+    return [
+      ...this.historyPrefixCommandIds,
+      ...this.canonicalHistory.map((command) => command.commandId),
+    ];
+  }
+
   canView(
     participantPubkey = this.collaboration.participantPubkey,
   ): boolean {
@@ -498,6 +516,7 @@ export class StageSession {
       participantPubkey: this.collaboration.participantPubkey,
       timestamp,
       expectedRevision: this.current.view.revision,
+      expectedStateHash: stageSessionSnapshotHash(this.current),
       kind,
       payload,
     } as Exclude<StageCommandBody, { kind: "stage.start" }>;
@@ -595,14 +614,20 @@ export class StageSession {
     return true;
   }
 
-  private assertCurrentCommand(command: StageSignedCommand): void {
+  private assertCommandForSnapshot(
+    command: StageSignedCommand,
+    snapshot: StageSessionSnapshot,
+  ): void {
     if (
-      command.stageId !== this.current.stageId ||
-      command.collaborationId !== this.current.collaborationId
+      command.stageId !== snapshot.stageId ||
+      command.collaborationId !== snapshot.collaborationId
     ) {
       throw new StageSessionError("Stage command targets another Stage");
     }
-    if (command.expectedRevision !== this.current.view.revision) {
+    if (
+      command.expectedRevision !== snapshot.view.revision ||
+      command.expectedStateHash !== stageSessionSnapshotHash(snapshot)
+    ) {
       throw new StageSessionError(
         "rejected a stale or replayed Stage command",
       );
@@ -614,16 +639,19 @@ export class StageSession {
     }
   }
 
-  private assertControlling(command: StageSignedCommand): void {
+  private assertControlling(
+    command: StageSignedCommand,
+    snapshot: StageSessionSnapshot,
+  ): void {
     if (
-      this.current.status !== "active" ||
-      this.current.controllerPubkey !== command.participantPubkey
+      snapshot.status !== "active" ||
+      snapshot.controllerPubkey !== command.participantPubkey
     ) {
       throw new StageSessionError(
         "only the active Stage Controller may perform this command",
       );
     }
-    if (this.current.controllerDisconnectedAt !== null) {
+    if (snapshot.controllerDisconnectedAt !== null) {
       throw new StageSessionError(
         "Stage is frozen while its Controller is disconnected",
       );
@@ -632,16 +660,16 @@ export class StageSession {
       this.collaboration,
       command.participantPubkey,
       "stage.control",
-      this.current.view,
+      snapshot.view,
     );
   }
 
-  private apply(
+  private transition(
     command: Exclude<StageSignedCommand, { kind: "stage.start" }>,
-    source: "local" | "remote",
-  ): void {
-    this.assertCurrentCommand(command);
-    const old = this.current;
+    old: StageSessionSnapshot,
+  ): StageSessionSnapshot {
+    this.assertCommandForSnapshot(command, old);
+    let next: StageSessionSnapshot;
     if (
       old.pendingControlTransfer !== null &&
       command.kind !== "stage.control.accept" &&
@@ -654,7 +682,7 @@ export class StageSession {
     }
     switch (command.kind) {
       case "stage.view.update": {
-        this.assertControlling(command);
+        this.assertControlling(command, old);
         if (command.payload.view.revision !== old.view.revision + 1) {
           throw new StageSessionError(
             "Stage view update must advance exactly one revision",
@@ -671,7 +699,7 @@ export class StageSession {
           "stage.control",
           command.payload.view,
         );
-        this.current = {
+        next = {
           ...old,
           view: cloneStageViewState(command.payload.view),
           updatedAt: command.timestamp,
@@ -679,7 +707,7 @@ export class StageSession {
         break;
       }
       case "stage.control.request": {
-        this.assertControlling(command);
+        this.assertControlling(command, old);
         if (
           command.payload.toPubkey === command.participantPubkey ||
           !participantExists(this.collaboration, command.payload.toPubkey)
@@ -705,7 +733,7 @@ export class StageSession {
             "Stage Controller recipient cannot view the current Stage",
           );
         }
-        this.current = {
+        next = {
           ...old,
           view: advancedView(old.view),
           pendingControlTransfer: {
@@ -743,7 +771,7 @@ export class StageSession {
           command.participantPubkey,
           old.view,
         );
-        this.current = {
+        next = {
           ...old,
           controllerPubkey: command.participantPubkey,
           view: advancedView(old.view),
@@ -773,7 +801,7 @@ export class StageSession {
           "stage.control",
           old.view,
         );
-        this.current = {
+        next = {
           ...old,
           view: advancedView(old.view),
           pendingControlTransfer: null,
@@ -801,7 +829,7 @@ export class StageSession {
           command.participantPubkey,
           old.view,
         );
-        this.current = {
+        next = {
           ...old,
           controllerPubkey: command.participantPubkey,
           status: "active",
@@ -830,7 +858,7 @@ export class StageSession {
           "stage.end",
           old.view,
         );
-        this.current = {
+        next = {
           ...old,
           controllerPubkey: null,
           status: "ended",
@@ -842,8 +870,108 @@ export class StageSession {
         break;
       }
     }
+    return next;
+  }
+
+  private canonicalParentFor(
+    command: StageActiveCommand,
+  ): StageSessionSnapshot | null {
+    let state = cloneStageSessionSnapshot(this.historyBase);
+    const matches = () =>
+      command.expectedRevision === state.view.revision &&
+      command.expectedStateHash === stageSessionSnapshotHash(state);
+    if (matches()) return state;
+    for (const canonicalCommand of this.canonicalHistory) {
+      state = this.transition(canonicalCommand, state);
+      if (matches()) return state;
+    }
+    return null;
+  }
+
+  private rebuildCanonicalHistory(): void {
+    let state = cloneStageSessionSnapshot(this.historyBase);
+    const history: StageActiveCommand[] = [];
+    while (true) {
+      const stateHash = stageSessionSnapshotHash(state);
+      const candidates = [...this.commandCandidates.values()]
+        .filter((candidate) =>
+          candidate.expectedRevision === state.view.revision &&
+          candidate.expectedStateHash === stateHash
+        )
+        .sort((left, right) =>
+          left.commandId < right.commandId
+            ? -1
+            : left.commandId > right.commandId
+              ? 1
+              : 0
+        );
+      let winner: StageActiveCommand | null = null;
+      let next: StageSessionSnapshot | null = null;
+      for (const candidate of candidates) {
+        try {
+          next = this.transition(candidate, state);
+          winner = candidate;
+          break;
+        } catch {
+          // A command valid on a superseded branch may no longer be valid.
+        }
+      }
+      if (winner === null || next === null) break;
+      history.push(winner);
+      state = next;
+    }
+    this.canonicalHistory = history;
+    this.current = state;
+  }
+
+  private apply(
+    command: StageActiveCommand,
+    source: "local" | "remote",
+  ): void {
+    if (
+      command.stageId !== this.current.stageId ||
+      command.collaborationId !== this.current.collaborationId
+    ) {
+      throw new StageSessionError("Stage command targets another Stage");
+    }
+    if (!participantExists(this.collaboration, command.participantPubkey)) {
+      throw new StageSessionError(
+        "Stage command signer is not a Collaboration participant",
+      );
+    }
+    const parent = this.canonicalParentFor(command);
+    if (parent === null) {
+      throw new StageSessionError("rejected a stale or replayed Stage command");
+    }
+    // Validate the new candidate against the exact state its signature names.
+    this.transition(command, parent);
+
+    const previousHistory = this.canonicalHistory
+      .map((candidate) => candidate.commandId)
+      .join(",");
+    const previousStateHash = stageSessionSnapshotHash(this.current);
+    this.commandCandidates.set(command.commandId, command);
     this.seenCommandIds.add(command.commandId);
-    this.publish(source);
+    this.rebuildCanonicalHistory();
+
+    const historyChanged = previousHistory !== this.canonicalHistory
+      .map((candidate) => candidate.commandId)
+      .join(",");
+    if (
+      historyChanged ||
+      previousStateHash !== stageSessionSnapshotHash(this.current)
+    ) {
+      this.publish(source);
+    }
+  }
+
+  private checkpointCommandHistory(): void {
+    this.historyPrefixCommandIds.push(
+      ...this.canonicalHistory.map((command) => command.commandId),
+    );
+    this.historyBase = cloneStageSessionSnapshot(this.current);
+    this.commandCandidates.clear();
+    this.canonicalHistory = [];
   }
 
   /**
@@ -872,6 +1000,7 @@ export class StageSession {
       controllerDisconnectedAt: disconnectedAt,
       updatedAt: disconnectedAt,
     };
+    this.checkpointCommandHistory();
     this.publish("transport");
     return true;
   }
@@ -900,6 +1029,7 @@ export class StageSession {
       controllerDisconnectedAt: null,
       updatedAt: reconnectedAt,
     };
+    this.checkpointCommandHistory();
     this.publish("transport");
     return true;
   }
@@ -922,6 +1052,7 @@ export class StageSession {
       controllerDisconnectedAt: null,
       updatedAt: now,
     };
+    this.checkpointCommandHistory();
     this.publish("transport");
     return true;
   }

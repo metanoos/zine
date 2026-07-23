@@ -53,11 +53,13 @@ Already built:
   deterministic same-name materialization, delegated voice attribution, typed
   stable-ID folder actions, scoped capabilities, ephemeral live presence,
   private denied-work patches, retained reconnect history, and exact
-  Step-prefix draining; durable provider storage, join UI, encrypted transport,
-  and a production peer provider remain deferred;
+  Step-prefix capture/acknowledgement APIs; production Step wiring, durable
+  provider storage, join UI, encrypted transport, and a peer provider remain
+  deferred;
 - an initial Stage core with strict versioned one/two-panel snapshots, signed
-  Controller commands, mounted/readable capability enforcement, accepted
-  handoff, disconnect grace and vacancy, owner recovery, plus a private-layout
+  Controller commands chained to exact parent snapshots with deterministic
+  fork resolution, mounted/readable capability enforcement, accepted handoff,
+  disconnect grace and vacancy, owner recovery, plus a private-layout
   follow/detach/rejoin adapter with opaque local Replay suspensions; visible
   controls and production peer transport remain deferred;
 - an initial in-place Replay presentation reducer that preserves stable panel
