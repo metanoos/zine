@@ -76,6 +76,7 @@ import { getPublicKey, verifyEvent } from "nostr-tools/pure";
 import { isTauri, resolveRelayUrl } from "../identity/identity.js";
 import { getOrCreateMintFolder, getOrCreateScanFolder, getRootId, getRootLabel, mintRoot, setRootLabel, DEFAULT_ROOT_LABEL } from "../workspace/root.js";
 import { planScanIntake } from "../workspace/scan-intake.js";
+import { stackFolderPath } from "../workspace/stack-navigation.js";
 import { loadOnboardingDemo } from "./onboarding-demo.js";
 import { modelContextLessonForFolder, planModelContextLesson, type ModelContextLesson } from "../ai/model-context-lesson.js";
 import { getReconcilerVoice, getSubstrateVoice, getSubstrateSignerKeyId, setSubstrateSignerKeyId, getSubstrateBindingPubkey } from "../identity/external-voice-store.js";
@@ -1498,6 +1499,7 @@ function App() {
       ? "about"
       : "editor",
   );
+  const [stackOpenError, setStackOpenError] = useState<string | null>(null);
   function selectView(view: View) {
     if (view !== "about" && aboutHashTarget(window.location.hash)) {
       const url = new URL(window.location.href);
@@ -6300,10 +6302,36 @@ function App() {
     commitUiFocus(locateFocus({ kind: "folder", path, nodeId }, targetPanel, targetTab));
   }
   function openFolder(path: string) {
-    const nodeId = files[path]?.nodeId;
+    const nodeId = path === ROOT ? folder?.id : files[path]?.nodeId;
     chooseDirectorySelection([]);
     activateLiveTab(folderTab(path), { kind: "folder", path, nodeId });
   }
+  /** Stacks addresses zines by stable folder genesis id; the Press addresses
+   * them by their path inside the permanent Root. */
+  function openFromStacks(folderId: string) {
+    const path = stackFolderPath(folderId, folder?.id ?? null, files);
+    if (path === null) {
+      setStackOpenError(
+        "That zine is not present in this Root. Adopt or fork it into Root before opening it in the Press.",
+      );
+      return;
+    }
+    setStackOpenError(null);
+    selectView("editor");
+    openFolder(path);
+  }
+
+  // Spaces pins and Stacks cards share one folder-id navigation route.
+  useEffect(() => {
+    const onOpen = (event: globalThis.Event) => {
+      const folderId = (event as globalThis.CustomEvent<string>).detail;
+      if (typeof folderId === "string") openFromStacks(folderId);
+    };
+    window.addEventListener("zine:open-folder", onOpen);
+    return () => window.removeEventListener("zine:open-folder", onOpen);
+    // The handler resolves against the current Root projection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [folder?.id, files, activePanel]);
   function commitShieldedForRoot(rootId: string, next: Set<string>): void {
     saveLocalShielded(rootId, next);
     if (folderIdRef.current !== rootId) return;
@@ -11269,11 +11297,21 @@ function App() {
           </ViewErrorBoundary>
         ) : activeView === "globe" ? (
           <ViewErrorBoundary view="globe">
-            <GlobeView query={socialQuery} />
+            <>
+              {stackOpenError ? (
+                <p className="sampler-status error" role="alert">{stackOpenError}</p>
+              ) : null}
+              <GlobeView query={socialQuery} />
+            </>
           </ViewErrorBoundary>
         ) : activeView === "listings" ? (
           <ViewErrorBoundary view="listings">
-            <ListingsView query={socialQuery} />
+            <>
+              {stackOpenError ? (
+                <p className="sampler-status error" role="alert">{stackOpenError}</p>
+              ) : null}
+              <ListingsView query={socialQuery} onOpenFolder={openFromStacks} />
+            </>
           </ViewErrorBoundary>
         ) : activeView === "stats" ? (
           <ViewErrorBoundary view="stats">

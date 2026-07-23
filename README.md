@@ -203,12 +203,15 @@ in the [protocol index](protocol/README.md).
 
 ```sh
 git clone https://github.com/metanoos/zine.git && cd zine
-npm run dev
+npm start
 ```
 
-The script checks prerequisites, builds the relay sidecar, synchronizes client
-dependencies when the npm manifests change, and launches the Tauri app. Later
-runs skip current dependencies and relay builds.
+`npm start` safely fast-forwards a clean checkout from its tracked branch,
+checks prerequisites, builds the relay sidecar, synchronizes client
+dependencies when manifests change, and launches the Tauri app. It never
+overwrites local changes. Use `npm run update` to update without launching, or
+`npm run dev` to run the exact checkout without checking for source updates.
+Later runs skip current dependencies and relay builds.
 
 **Prerequisites:** [Go](https://go.dev/dl/) >= 1.25,
 [Node 24 LTS](https://nodejs.org/), and [Rust](https://rustup.rs/) stable. On

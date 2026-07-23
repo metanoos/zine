@@ -14,7 +14,7 @@ import { type UiFocus } from "../workspace/ui-focus.js";
 import { activateTreeItem, type ActivatableTreeItem } from "../workspace/tree-routing.js";
 import type { Event } from "nostr-tools";
 import { diffLines } from "diff";
-import { bracketExtensions, bracketVoiceResolverFacet, doubleBackspaceUnwrapCommand, findResolvedBrackets, focusedVoiceFacet, iterBrackets, modeCompartment, modeFacet, onSelectSpanFacet, selectedNodeIdFacet, wrapSelectionCommand, type Mode } from "../provenance/brackets.js";
+import { bracketExtensions, bracketVoiceResolverFacet, doubleBackspaceReopenCommand, findResolvedBrackets, focusedVoiceFacet, iterBrackets, modeCompartment, modeFacet, onSelectSpanFacet, selectedNodeIdFacet, wrapSelectionCommand, type Mode } from "../provenance/brackets.js";
 import { markdownPreviewExtensions } from "../editor/markdown-preview.js";
 import { palettePrimaryAction, paletteSecondaryActions, paletteStatusMessage, paletteStatusRow, type PaletteStatusRow, type PaletteSelectionState } from "../editor/palette.js";
 import { bindOperator, type OperatorState } from "../networking/operator-store.js";
@@ -4145,10 +4145,10 @@ function buildExtensions(
     lineNumbers(),
     ...markdownIndentExtensions,
     keymap.of([
-      // Backspace twice over one selected bracket to unwrap it into ordinary
-      // text. This binding runs before CodeMirror's default deletion command;
+      // Backspace twice over one selected bracket to reopen it as editable
+      // `[[ …` text. This binding runs before CodeMirror's default deletion;
       // broader selections still flow through bracketProtect below.
-      { key: "Backspace", run: doubleBackspaceUnwrapCommand() },
+      { key: "Backspace", run: doubleBackspaceReopenCommand() },
       // One four-space unit nests both ordered and unordered CommonMark list
       // items. Shift+Tab removes the same unit; no literal tab is written.
       indentWithTab,

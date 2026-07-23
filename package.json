@@ -5,7 +5,9 @@
   "type": "module",
   "description": "An open, BYOK LLM harness for editing files with composable, signed provenance.",
   "scripts": {
+    "start": "node scripts/dev.mjs start",
     "dev": "node scripts/dev.mjs dev",
+    "update": "node scripts/source-update.mjs",
     "build": "node scripts/dev.mjs build",
     "build:relay": "node scripts/build-relay.mjs",
     "dogfood:macos": "node scripts/dogfood-macos.mjs",

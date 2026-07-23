@@ -15,6 +15,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -35,6 +36,7 @@ func main() {
 	reset := flag.Bool("reset", false, "delete every local event and reset the desktop access policy, then exit")
 	readyFile := flag.String("ready-file", "", "optional desktop parent readiness file")
 	readyToken := flag.String("ready-token", "", "token written after the listener is owned")
+	exitOnStdinClose := flag.Bool("exit-on-stdin-close", false, "exit when the desktop parent's private stdin pipe closes")
 	flag.Parse()
 	if *reset {
 		deleted, err := resetLocalState(*dbPath)
@@ -164,9 +166,42 @@ func main() {
 		defer os.Remove(*readyFile)
 	}
 	log.Printf("zine relay listening on ws://%s  (db: %s)", addr, *dbPath)
-	if err := http.Serve(listener, relay); err != nil {
+	if err := serveUntilParentCloses(listener, relay, os.Stdin, *exitOnStdinClose); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func serveUntilParentCloses(
+	listener net.Listener,
+	handler http.Handler,
+	parentPipe io.Reader,
+	exitOnParentClose bool,
+) error {
+	var parentClosed <-chan struct{}
+	if exitOnParentClose {
+		done := make(chan struct{})
+		parentClosed = done
+		go closeOnReaderEOF(parentPipe, listener.Close, done)
+	}
+	err := http.Serve(listener, handler)
+	if parentClosed != nil {
+		select {
+		case <-parentClosed:
+			return nil
+		default:
+		}
+	}
+	return err
+}
+
+// closeOnReaderEOF ties a desktop-owned relay to an OS pipe rather than to an
+// orderly application callback. All of the parent's descriptors close when
+// its process exits, including on crashes and forced termination, which makes
+// EOF a reliable signal to release the relay listener.
+func closeOnReaderEOF(reader io.Reader, closeTarget func() error, done chan<- struct{}) {
+	_, _ = io.Copy(io.Discard, reader)
+	close(done)
+	_ = closeTarget()
 }
 
 func refreshPolicyOnConnection(policy *AccessPolicy) func(*http.Request) bool {

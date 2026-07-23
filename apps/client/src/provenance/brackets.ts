@@ -613,8 +613,8 @@ const bracketDecorations = ViewPlugin.fromClass(
 );
 
 /** The whole span of a Preview-mode citation widget is one cursor-motion unit.
- *  Deletion still runs through bracketProtect, and explicit unwrapping runs
- *  through doubleBackspaceUnwrapCommand. In Markdown mode bracketDecorations
+ *  Deletion still runs through bracketProtect, and explicit reopening runs
+ *  through doubleBackspaceReopenCommand. In Markdown mode bracketDecorations
  *  emits no replace ranges, so this facet is a no-op. */
 const bracketAtomicRanges = EditorView.atomicRanges.of(
   (view) => view.plugin(bracketDecorations)?.decorations ?? Decoration.none,
@@ -703,7 +703,7 @@ export function wrapSelectionCommand(): Command {
  *  preserving the opening `[[` and selecting the now-editable phrase.
  *  A cursor immediately after a bracket gets the same two-step behavior: first
  *  press selects it, second press reopens it. */
-export function doubleBackspaceUnwrapCommand(
+export function doubleBackspaceReopenCommand(
   now: () => number = Date.now,
   timeoutMs = 1000,
 ): Command {
@@ -801,7 +801,7 @@ export function doubleBackspaceUnwrapCommand(
  *
  *  This runs in both modes. Preview's atomic range may expand an edge-delete to
  *  the whole chip, which this filter intentionally spares; double-Backspace is
- *  the explicit unwrap gesture. */
+ *  the explicit reopen gesture. */
 function bracketProtect(tr: Transaction): TransactionSpec | readonly Transaction[] {
   if (!tr.docChanged) return [tr];
   // Cut is an explicit move operation: copy the complete selection to the
