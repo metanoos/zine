@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import type { KEdit } from "@zine/protocol";
+import type { EditorTransaction } from "@zine/protocol";
 import type { Event, Filter } from "nostr-tools";
 
 import { installNodeStorage } from "../src/storage-node.js";
@@ -117,8 +117,8 @@ async function main(): Promise<void> {
   const { Relay } = await import("nostr-tools/relay");
   const {
     createTraceOperationId,
-    synthesizeKEditTransition,
-    validateKEditTransition,
+    synthesizeEditorTransactionTransition,
+    validateEditorTransactionTransition,
     verifyFolderTraceChain,
   } = await import("@zine/protocol");
 
@@ -212,7 +212,7 @@ async function main(): Promise<void> {
     action: "import",
     signer: voice.secretKey,
     localOnly: true,
-    kedits: synthesizeKEditTransition("", queuedSnapshots[0]!, voice.publicKey),
+    editorTransactions: synthesizeEditorTransactionTransition("", queuedSnapshots[0]!, voice.publicKey),
   });
   const queuedSecondHash = await sha256HexLocal(queuedSnapshots[1]!);
   const queuedSecond = await publishEdit({
@@ -227,7 +227,7 @@ async function main(): Promise<void> {
     action: "edit",
     signer: voice.secretKey,
     localOnly: true,
-    kedits: synthesizeKEditTransition(queuedSnapshots[0]!, queuedSnapshots[1]!, voice.publicKey),
+    editorTransactions: synthesizeEditorTransactionTransition(queuedSnapshots[0]!, queuedSnapshots[1]!, voice.publicKey),
   });
   const queuedEvents = [queuedGenesis, queuedSecond].map(canonicalEvent);
   assert.equal(pendingLocalEventCount(), 2);
@@ -333,15 +333,15 @@ async function main(): Promise<void> {
     action: "import",
     signer: voice.secretKey,
     localOnly: true,
-    kedits: synthesizeKEditTransition("", firstText, voice.publicKey),
+    editorTransactions: synthesizeEditorTransactionTransition("", firstText, voice.publicKey),
   });
   assert.equal(verifyEvent(first), true, "first Step signature is invalid");
-  const firstPayload = JSON.parse(first.content) as { kedits?: unknown };
-  assert.ok(Array.isArray(firstPayload.kedits), "first Step is missing required KEdits");
+  const firstPayload = JSON.parse(first.content) as { editorTransactions?: unknown };
+  assert.ok(Array.isArray(firstPayload.editorTransactions), "first Step is missing required EditorTransactions");
   assert.equal(
-    validateKEditTransition("", firstText, firstPayload.kedits as KEdit[]).valid,
+    validateEditorTransactionTransition("", firstText, firstPayload.editorTransactions as EditorTransaction[]).valid,
     true,
-    "first Step KEdits do not reproduce its snapshot",
+    "first Step EditorTransactions do not reproduce its snapshot",
   );
   assert.equal(first.pubkey, expectedAgent, "Step must be owned by the agent voice");
   const firstFolderHead = await upsertManifestEntry(folderId, {
@@ -401,15 +401,15 @@ async function main(): Promise<void> {
     action: "edit",
     signer: voice.secretKey,
     localOnly: true,
-    kedits: synthesizeKEditTransition(firstText, secondText, voice.publicKey),
+    editorTransactions: synthesizeEditorTransactionTransition(firstText, secondText, voice.publicKey),
   });
   assert.equal(verifyEvent(second), true, "second Step signature is invalid");
-  const secondPayload = JSON.parse(second.content) as { kedits?: unknown };
-  assert.ok(Array.isArray(secondPayload.kedits), "second Step is missing required KEdits");
+  const secondPayload = JSON.parse(second.content) as { editorTransactions?: unknown };
+  assert.ok(Array.isArray(secondPayload.editorTransactions), "second Step is missing required EditorTransactions");
   assert.equal(
-    validateKEditTransition(firstText, secondText, secondPayload.kedits as KEdit[]).valid,
+    validateEditorTransactionTransition(firstText, secondText, secondPayload.editorTransactions as EditorTransaction[]).valid,
     true,
-    "second Step KEdits do not reproduce its snapshot",
+    "second Step EditorTransactions do not reproduce its snapshot",
   );
   assert.ok(second.tags.some((tag) => tag[0] === "e" && tag[1] === first.id && tag[3] === "prev"));
   await sendStep(second, voice.secretKey);
@@ -446,14 +446,13 @@ async function main(): Promise<void> {
     relativePath: "2026-07-15-direct.md",
     phrase: directPhrase,
     signer: voice.secretKey,
-    kedits: [{
-      op: "ins",
-      from: 0,
-      to: 0,
-      text: directPhrase,
-      voice: voice.publicKey,
-      t: Date.now(),
-      tx: 0,
+    editorTransactions: [{
+      sequence: 0,
+      timestamp: Date.now(),
+      actor: voice.publicKey,
+      changes: [{ op: "insert", from: 0, to: 0, text: directPhrase }],
+      selectionBefore: null,
+      selectionAfter: null,
     }],
     localOnly: true,
   });
@@ -488,15 +487,15 @@ async function main(): Promise<void> {
     citations: [coin.id],
     signer: voice.secretKey,
     localOnly: true,
-    kedits: synthesizeKEditTransition(secondText, thirdText, voice.publicKey),
+    editorTransactions: synthesizeEditorTransactionTransition(secondText, thirdText, voice.publicKey),
   });
   assert.ok(eventMeta(third).citationTargets.includes(coin.id), "Cite target is missing");
-  const thirdPayload = JSON.parse(third.content) as { kedits?: unknown };
-  assert.ok(Array.isArray(thirdPayload.kedits), "Cite Step is missing required KEdits");
+  const thirdPayload = JSON.parse(third.content) as { editorTransactions?: unknown };
+  assert.ok(Array.isArray(thirdPayload.editorTransactions), "Cite Step is missing required EditorTransactions");
   assert.equal(
-    validateKEditTransition(secondText, thirdText, thirdPayload.kedits as KEdit[]).valid,
+    validateEditorTransactionTransition(secondText, thirdText, thirdPayload.editorTransactions as EditorTransaction[]).valid,
     true,
-    "Cite Step KEdits do not reproduce its snapshot",
+    "Cite Step EditorTransactions do not reproduce its snapshot",
   );
   assert.equal(verifyEvent(third), true, "Cite Step signature is invalid");
   await sendStep(third, voice.secretKey);
@@ -702,7 +701,7 @@ async function main(): Promise<void> {
         nodeId: string;
         payload: {
           snapshot?: string;
-          kedits?: KEdit[];
+          editorTransactions?: EditorTransaction[];
           deltas?: Array<{
             type?: string;
             role?: string;
@@ -719,13 +718,13 @@ async function main(): Promise<void> {
         const row = rows[index]!;
         const snapshot = exactSnapshots[index]!;
         assert.equal(row.payload.snapshot, snapshot);
-        assert.ok(Array.isArray(row.payload.kedits));
+        assert.ok(Array.isArray(row.payload.editorTransactions));
         assert.equal(
-          validateKEditTransition(priorSnapshot, snapshot, row.payload.kedits!).valid,
+          validateEditorTransactionTransition(priorSnapshot, snapshot, row.payload.editorTransactions!).valid,
           true,
         );
-        assert.equal(row.payload.kedits!.length, 1, "each changed MCP write is one KEdit");
-        assert.equal(row.payload.kedits![0]!.voice, voice.publicKey);
+        assert.equal(row.payload.editorTransactions!.length, 1, "each changed MCP write is one EditorTransaction");
+        assert.equal(row.payload.editorTransactions![0]!.actor, voice.publicKey);
         assert.equal(verifyEvent(canonicalEvent(row.event)), true);
         priorSnapshot = snapshot;
       }

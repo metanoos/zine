@@ -434,20 +434,20 @@ export function projectDesktopOperationReviewV1(
   }
   switch (envelope.lifecycle.status) {
     case "prepared":
-      return { ...common, label: "Extend saved", detail: "Not sent", actions: ["resume", "abandon"] };
+      return { ...common, label: "Append saved", detail: "Not sent", actions: ["resume", "abandon"] };
     case "approved":
-      return { ...common, label: "Extend queued", detail: "Provider call not yet started", actions: ["resume", "abandon"] };
+      return { ...common, label: "Append queued", detail: "Provider call not yet started", actions: ["resume", "abandon"] };
     case "dispatch-intent":
       return {
         ...common,
-        label: "Reconciling saved Extend…",
+        label: "Reconciling saved Append…",
         detail: "No operator action is available yet",
         actions: [],
       };
     case "provider-io":
       return {
         ...common,
-        label: "Reconciling saved Extend…",
+        label: "Reconciling saved Append…",
         detail: "No operator action is available yet",
         actions: [],
       };
@@ -468,12 +468,12 @@ export function projectDesktopOperationReviewV1(
           }
         : {
             ...common,
-            label: "Extend failed",
+            label: "Append failed",
             detail: "No provider effect was recorded",
             actions: ["retry"],
           };
     case "cancelled":
-      return { ...common, label: "Extend cancelled", detail: "Not sent", actions: ["retry"] };
+      return { ...common, label: "Append cancelled", detail: "Not sent", actions: ["retry"] };
     case "unknown":
       return {
         ...common,

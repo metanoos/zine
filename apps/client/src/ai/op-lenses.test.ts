@@ -18,10 +18,18 @@ import {
 } from "./op-lenses.js";
 
 test("each operation exposes only relevant editorial lenses", () => {
+  assert.ok(OP_LENSES.extend.some((lens) => lens.id === "outside-perspective"));
   assert.ok(OP_LENSES.settle.some((lens) => lens.id === "conservative-line-editor"));
   assert.ok(OP_LENSES.reply.some((lens) => lens.id === "psychoanalytic-reading"));
   assert.ok(OP_LENSES.analyze.some((lens) => lens.id === "forensic-process-analyst"));
   assert.ok(!OP_LENSES.settle.some((lens) => lens.id === "psychoanalytic-reading"));
+});
+
+test("the outside-perspective lens responds instead of imitating the source", () => {
+  const lens = lensForOp("extend", "outside-perspective");
+  assert.match(lens.instruction, /distinct outside perspective/);
+  assert.match(lens.instruction, /rather than continuing in its voice/);
+  assert.match(lens.instruction, /write only the response that should be appended/);
 });
 
 test("lens selections persist per operation without leaking to another op", () => {

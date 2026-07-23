@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const appSource = [
+  readFileSync(new URL("./AppNavigation.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("./App.tsx", import.meta.url), "utf8"),
 ].join("\n");

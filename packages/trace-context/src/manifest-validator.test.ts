@@ -164,13 +164,13 @@ test("reuses selector semantics for process bindings, order, shapes, and rendere
   }
 });
 
-// Regression: process-projector emits these two forms for legacy / overflow
+// Regression: process-projector emits these two forms for boundary / overflow
 // inputs, and selector.ts accepts them, so the manifest validator must too.
 // Before this fix the validator's exact() call omitted timingStatus and its
 // voiceId() rejected anything that was not a 64-hex pubkey, so any durable
 // envelope carrying one of these facts failed persistence — silently, because
 // the in-memory prepared-operation path never calls this validator.
-async function processSelectionWithLegacyForms() {
+async function processSelectionWithBoundaryForms() {
   const result = await selectTraceContextV1({
     version: 1,
     policy: "selected-trace-v1",
@@ -178,10 +178,10 @@ async function processSelectionWithLegacyForms() {
       version: 1,
       operation: "extend",
       target: {
-        traceId: "trace-legacy",
-        headId: "head-legacy",
-        contentHash: "content-legacy",
-        currentText: "Legacy target",
+        traceId: "trace-boundary",
+        headId: "head-boundary",
+        contentHash: "content-boundary",
+        currentText: "Boundary target",
       },
       range: { fromUtf16: 0, toUtf16: 7 },
       maxContextBytes: 16_384,
@@ -196,12 +196,12 @@ async function processSelectionWithLegacyForms() {
         kind: "process-fact",
         claimClass: "mechanical",
         source: {
-          kind: "trace", ref: "step-summary", traceId: "trace-legacy",
-          headId: "head-legacy", nodeId: "head-legacy", processStatus: "full-trace",
+          kind: "trace", ref: "step-summary", traceId: "trace-boundary",
+          headId: "head-boundary", nodeId: "head-boundary", processStatus: "full-trace",
           chainDistance: 0, transactionIndex: 0,
         },
         reasons: ["prepared-head-process"],
-        // step-summary carrying the timingStatus the projector emits when KEdit
+        // step-summary carrying the timingStatus the projector emits when EditorTransaction
         // capture times overflow Number.MAX_SAFE_INTEGER differences.
         fact: {
           kind: "step-summary",
@@ -214,13 +214,13 @@ async function processSelectionWithLegacyForms() {
       },
       {
         version: 1,
-        id: "process-change-legacy-voice",
-        dedupeKey: "process-change-legacy-voice",
+        id: "process-change-boundary-voice",
+        dedupeKey: "process-change-boundary-voice",
         kind: "process-fact",
         claimClass: "mechanical",
         source: {
-          kind: "trace", ref: "a-change-legacy", traceId: "trace-legacy",
-          headId: "head-legacy", nodeId: "head-legacy", processStatus: "full-trace",
+          kind: "trace", ref: "a-change-boundary", traceId: "trace-boundary",
+          headId: "head-boundary", nodeId: "head-boundary", processStatus: "full-trace",
           chainDistance: 0, transactionIndex: 0,
         },
         reasons: ["prepared-head-process"],
@@ -228,8 +228,8 @@ async function processSelectionWithLegacyForms() {
           kind: "change", transactionIndex: 0, operation: "insert",
           range: { fromUtf16: 0, toUtf16: 0 }, insertedCodePointCount: 1,
           deletedCodePointCount: 0,
-          // Canonical legacy KEdit voice for a non-pubkey voice field.
-          voiceId: "kedit-voice-utf16-v1:0061",
+          // Canonical projection id for a protocol-valid non-pubkey actor.
+          voiceId: "editor-transaction-actor-utf16-v1:0061",
         },
       },
     ],
@@ -238,11 +238,11 @@ async function processSelectionWithLegacyForms() {
   return result;
 }
 
-test("accepts projector-emitted timingStatus and canonical KEdit legacy voices", async () => {
-  const selected = await processSelectionWithLegacyForms();
+test("accepts projector-emitted timingStatus and canonical non-pubkey actor ids", async () => {
+  const selected = await processSelectionWithBoundaryForms();
   assert.doesNotThrow(
     () => validateSelectedTraceContextManifestV1(selected.manifest, selected.renderedContext),
-    "projector-emitted timingStatus and legacy KEdit voice should round-trip through the validator",
+    "projector-emitted timingStatus and actor ids should round-trip through the validator",
   );
 
   // Negative guard: a hand-set timingStatus paired with a non-zero spanMs must

@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   projectTraceProcessCandidatesV1,
   projectTraceProcessCandidatesV1Async,
+  selectTraceContextV1,
+  validateSelectedTraceContextManifestV1,
   type TraceContextProcessProjectionInputV1,
 } from "./index.js";
 
@@ -71,7 +73,7 @@ test("projector owns press-neutral identity, enumeration, ordinals, and exact ra
   assert.deepEqual(
     candidates.map((candidate) => candidate.source.transactionIndex),
     [0, 0, 0, 0, 0, 0],
-    "signed source tx ids 7/42 must not leak into process-array ordinals",
+    "signed source transaction ids 7/42 must not leak into process-array ordinals",
   );
   assert.deepEqual(candidates[2]?.fact, {
     kind: "change",
@@ -148,6 +150,72 @@ test("native-neutral no-op process views retain summary/transaction and omit zer
   ]);
 });
 
+test("selection-only transactions survive projection, selection, and manifest validation", async () => {
+  const candidates = projectTraceProcessCandidatesV1({
+    version: 1,
+    traceId: TRACE_ID,
+    headId: HEAD_ID,
+    steps: [{
+      version: 1,
+      nodeId: HEAD_ID,
+      chainDistance: 0,
+      transactions: [{
+        version: 1,
+        sourceTransactionId: 10,
+        capturedAtMs: 500,
+        changes: [],
+      }],
+    }],
+  });
+
+  assert.deepEqual(candidates.map((candidate) => candidate.fact), [
+    {
+      kind: "step-summary",
+      transactionCount: 1,
+      rangeCount: 0,
+      insertedCodePointCount: 0,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 500,
+      lastCapturedAtMs: 500,
+      spanMs: 0,
+      longestGapMs: 0,
+      undoCount: 0,
+      redoCount: 0,
+    },
+    {
+      kind: "transaction",
+      transactionIndex: 0,
+      capturedAtMs: 500,
+      changeCount: 0,
+      voiceIds: [],
+    },
+  ]);
+
+  const selected = await selectTraceContextV1({
+    version: 1,
+    policy: "selected-trace-v1",
+    operation: {
+      version: 1,
+      operation: "extend",
+      target: {
+        traceId: TRACE_ID,
+        headId: HEAD_ID,
+        contentHash: "selection-only-content",
+        currentText: "draft",
+        chosenPath: "draft.md",
+      },
+      maxContextBytes: 16_384,
+      preparedRequestMaxBytes: 32_768,
+      reservedPromptBytes: 512,
+    },
+    candidates,
+  });
+  assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
+  if (!selected.ok) return;
+  assert.doesNotThrow(() => validateSelectedTraceContextManifestV1(selected.manifest));
+  assert.match(selected.renderedContext, /transaction 0 @ 500 · selection only/);
+});
+
 test("projector rejects ambiguous chain and ordinal projections", () => {
   const baseline: TraceContextProcessProjectionInputV1 = {
     version: 1,
@@ -182,8 +250,8 @@ test("projector rejects ambiguous chain and ordinal projections", () => {
   );
 });
 
-test("projector closes the complete protocol KEdit domain without inventing signer authority", () => {
-  const legacyVoice = "legacy writer";
+test("projector closes the complete protocol EditorTransaction domain without inventing signer authority", () => {
+  const nonPubkeyActor = "non-pubkey actor";
   const surrogateVoice = "\ud800";
   const candidates = projectTraceProcessCandidatesV1({
     version: 1,
@@ -204,7 +272,7 @@ test("projector closes the complete protocol KEdit domain without inventing sign
             range: { fromUtf16: 0, toUtf16: 0 },
             insertedText: "A",
             deletedText: "",
-            voiceId: legacyVoice,
+            voiceId: nonPubkeyActor,
           }],
         },
         {
@@ -240,8 +308,8 @@ test("projector closes the complete protocol KEdit domain without inventing sign
     candidates.flatMap((candidate) =>
       candidate.fact.kind === "change" ? [candidate.fact.voiceId] : []),
     [
-      "kedit-voice-utf16-v1:006c006500670061006300790020007700720069007400650072",
-      "kedit-voice-utf16-v1:d800",
+      "editor-transaction-actor-utf16-v1:006e006f006e002d007000750062006b006500790020006100630074006f0072",
+      "editor-transaction-actor-utf16-v1:d800",
     ],
   );
 });

@@ -73,7 +73,9 @@
       "name": "lone surrogate constructor is rejected before UTF-8 rendering",
       "construct": {
         "kind": "candidate-text-code-units",
-        "textCodeUnits": [55296],
+        "textCodeUnits": [
+          55296
+        ],
         "input": {
           "version": 1,
           "policy": "selected-trace-v1",
@@ -103,7 +105,9 @@
                 "nodeId": "node-broken",
                 "approvedOrder": 0
               },
-              "reasons": ["approved-direct-citation"]
+              "reasons": [
+                "approved-direct-citation"
+              ]
             }
           ]
         }
@@ -150,7 +154,9 @@
               "chainDistance": 0,
               "transactionIndex": 0
             },
-            "reasons": ["prepared-head-process"],
+            "reasons": [
+              "prepared-head-process"
+            ],
             "fact": {
               "kind": "step-summary",
               "transactionCount": 0,
@@ -207,7 +213,9 @@
               "chainDistance": 0,
               "transactionIndex": 0
             },
-            "reasons": ["prepared-head-process"],
+            "reasons": [
+              "prepared-head-process"
+            ],
             "fact": {
               "kind": "step-summary",
               "transactionCount": 0,
@@ -257,7 +265,7 @@
             "claimClass": "mechanical",
             "source": {
               "kind": "trace",
-              "ref": "trace:tx:0",
+              "ref": "trace:transaction:0",
               "traceId": "trace-fact",
               "headId": "head-fact",
               "nodeId": "head-fact",
@@ -265,22 +273,29 @@
               "chainDistance": 0,
               "transactionIndex": 0
             },
-            "reasons": ["prepared-head-process"],
+            "reasons": [
+              "prepared-head-process"
+            ],
             "fact": {
               "kind": "transaction",
               "transactionIndex": 0,
               "capturedAtMs": 100,
               "intent": "undo",
               "changeCount": 2,
-              "voiceIds": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+              "voiceIds": [
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              ]
             }
           }
         ]
       },
       "expected": {
         "ok": true,
-        "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"Draft\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"transaction\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"head-fact\",\"kind\":\"trace\",\"nodeId\":\"head-fact\",\"processStatus\":\"full-trace\",\"ref\":\"trace:tx:0\",\"traceId\":\"trace-fact\",\"transactionIndex\":0},\"text\":\"tx 0 @ 100 · undo · 2 changes · voices aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"version\":1}]",
-        "selectedIds": ["transaction"],
+        "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"Draft\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"mechanical\",\"evidenceId\":\"transaction\",\"kind\":\"process-fact\",\"reasons\":[\"prepared-head-process\"],\"source\":{\"chainDistance\":0,\"headId\":\"head-fact\",\"kind\":\"trace\",\"nodeId\":\"head-fact\",\"processStatus\":\"full-trace\",\"ref\":\"trace:transaction:0\",\"traceId\":\"trace-fact\",\"transactionIndex\":0},\"text\":\"transaction 0 @ 100 · undo · 2 changes · voices aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"version\":1}]",
+        "selectedIds": [
+          "transaction"
+        ],
         "effectiveContextBytes": 4096,
         "preparedRequestAvailableBytes": 8192,
         "currentTargetTextBytes": 5,
@@ -314,7 +329,7 @@
             "claimClass": "mechanical",
             "source": {
               "kind": "trace",
-              "ref": "foreign:tx",
+              "ref": "foreign:transaction",
               "traceId": "foreign-trace",
               "headId": "foreign-head",
               "nodeId": "foreign-head",
@@ -322,13 +337,17 @@
               "chainDistance": 0,
               "transactionIndex": 0
             },
-            "reasons": ["caller-selected"],
+            "reasons": [
+              "caller-selected"
+            ],
             "fact": {
               "kind": "transaction",
               "transactionIndex": 0,
               "capturedAtMs": 100,
               "changeCount": 1,
-              "voiceIds": ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]
+              "voiceIds": [
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+              ]
             }
           }
         ]
@@ -384,9 +403,14 @@
               "approvedOrder": 0,
               "processStatus": "invalid",
               "traceId": "LEAK-TRACE",
-              "range": { "fromUtf16": 999, "toUtf16": 1 }
+              "range": {
+                "fromUtf16": 999,
+                "toUtf16": 1
+              }
             },
-            "reasons": ["approved-direct-citation"],
+            "reasons": [
+              "approved-direct-citation"
+            ],
             "text": "Quoted body"
           }
         ]
@@ -394,7 +418,9 @@
       "expected": {
         "ok": true,
         "renderedContext": "[{\"authority\":\"quoted-data\",\"kind\":\"current-target\",\"text\":\"Draft\",\"version\":1},{\"authority\":\"quoted-data\",\"claimClass\":\"explicit\",\"evidenceId\":\"citation\",\"kind\":\"citation\",\"reasons\":[\"approved-direct-citation\"],\"source\":{\"approvedOrder\":0,\"kind\":\"citation\",\"ref\":\"citation:one\"},\"text\":\"Quoted body\",\"version\":1}]",
-        "selectedIds": ["citation"],
+        "selectedIds": [
+          "citation"
+        ],
         "effectiveContextBytes": 4096,
         "preparedRequestAvailableBytes": 8192,
         "currentTargetTextBytes": 5,
@@ -501,7 +527,9 @@
               "nodeId": "node-large",
               "approvedOrder": 0
             },
-            "reasons": ["approved-direct-citation"],
+            "reasons": [
+              "approved-direct-citation"
+            ],
             "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
           }
         ]

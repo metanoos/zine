@@ -6,6 +6,10 @@ const appSource = [
   readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
 ].join("\n");
+const mutationSource = readFileSync(
+  new URL("./useWorkspaceMutations.ts", import.meta.url),
+  "utf8",
+);
 const workspaceSource = readFileSync(new URL("./workspace-local.ts", import.meta.url), "utf8");
 
 function sourceBetween(start: string, end: string): string {
@@ -37,7 +41,7 @@ test("historical and Mint forks resolve recursive destination folders", () => {
 test("nested Scan adoption retains explicit folder replay identities", () => {
   const adoption = sourceBetween(
     "async function adoptScannedNodes(",
-    "// Move `src` (file or folder path)",
+    "/** Step one recursive",
   );
 
   assert.match(adoption, /forkFileIntoLocalTree\(/);
@@ -71,9 +75,9 @@ test("nested local-only folder Steps keep ancestor acceptance on local authority
 });
 
 test("terminal move, rename, and delete failures reconcile from durable paths", () => {
-  const reconciliation = sourceBetween(
-    "function reconcileFailedPathMutation(",
-    "// Move `src` (file or folder path)",
+  const reconciliation = mutationSource.slice(
+    mutationSource.indexOf("function reconcileFailedPathMutation("),
+    mutationSource.indexOf("function retainRetryablePathMutation("),
   );
   assert.match(reconciliation, /folderIdRef\.current !== operationFolderId/);
   assert.match(reconciliation, /loadLocalFolder\(operationFolderId\)/);
@@ -87,37 +91,34 @@ test("terminal move, rename, and delete failures reconcile from durable paths", 
   assert.match(reconciliation, /chooseDirectorySelection/);
   assert.match(reconciliation, /commitUiFocus\(deleteRollback\.focus\)/);
   assert.equal(
-    (appSource.match(/reconcileFailedPathMutation\(/g) ?? []).length,
+    (mutationSource.match(/reconcileFailedPathMutation\(/g) ?? []).length,
     4,
   );
 });
 
 test("retryable structural failures keep the optimistic projection for recovery", () => {
-  const retryGate = sourceBetween(
-    "function retainRetryablePathMutation(",
-    "// Move `src` (file or folder path)",
+  const retryGate = mutationSource.slice(
+    mutationSource.indexOf("function retainRetryablePathMutation("),
+    mutationSource.indexOf("function moveNodes("),
   );
   assert.match(retryGate, /hasPendingStructuralPathMutation/);
   assert.match(retryGate, /pending retry/);
   assert.equal(
-    (appSource.match(/retainRetryablePathMutation\(/g) ?? []).length,
+    (mutationSource.match(/retainRetryablePathMutation\(/g) ?? []).length,
     4,
   );
 });
 
 test("structural gestures persist shield rebases and scope refreshes stay Root-bound", () => {
-  const move = sourceBetween(
-    "function moveNodes(",
-    "/** Step one recursive zine",
+  const move = mutationSource.slice(
+    mutationSource.indexOf("function moveNodes("),
+    mutationSource.indexOf("function deleteNodes("),
   );
-  const hardDelete = sourceBetween(
-    "function hardDelete(",
-    "/** Relay revocation",
+  const hardDelete = mutationSource.slice(
+    mutationSource.indexOf("function hardDelete("),
+    mutationSource.indexOf("function renameNode("),
   );
-  const rename = sourceBetween(
-    "function renameNode(",
-    "useEffect(() => {",
-  );
+  const rename = mutationSource.slice(mutationSource.indexOf("function renameNode("));
   assert.match(move, /rebaseShieldedAfterMove/);
   assert.match(hardDelete, /removeDeletedShieldedPaths/);
   assert.match(rename, /rebaseShieldedPath/);
@@ -176,7 +177,7 @@ test("an async replay load cannot commit after the mounted Root changes", () => 
   assert.match(loadReplay, /folderIdRef\.current !== replayRootId/);
   assert.ok(
     loadReplay.indexOf("folderIdRef.current !== replayRootId") <
-      loadReplay.indexOf("setReplay({ steps: visibleSteps"),
+      loadReplay.indexOf("installReplay({"),
   );
 });
 
@@ -254,7 +255,7 @@ test("clean pull merges do not claim the mixed snapshot came from the remote hea
 test("recursive folder Steps remain bound to their originating Root", () => {
   const folderStep = sourceBetween(
     "function stepFolderPath(",
-    "// Apply the Delete gesture",
+    "/** Relay revocation",
   );
   assert.ok(
     (folderStep.match(/folderIdRef\.current !== operationFolderId/g) ?? []).length >= 3,
@@ -299,8 +300,8 @@ test("a new write recovers an earlier signed file Step before replacing its jour
 });
 
 test("persisted empty folders use folder move and rename semantics", () => {
-  assert.match(appSource, /files\[src\]\?\.kind === "folder"/);
-  assert.match(appSource, /files\[path\]\?\.kind === "folder"/);
+  assert.match(mutationSource, /files\[src\]\?\.kind === "folder"/);
+  assert.match(mutationSource, /files\[path\]\?\.kind === "folder"/);
 });
 
 test("pull distinguishes a missing local trace from a divergent empty trace", () => {

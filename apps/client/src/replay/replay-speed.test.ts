@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -9,6 +10,11 @@ import {
   nextReplaySpeed,
   saveReplaySpeed,
 } from "./replay-speed.js";
+
+const controllerSource = readFileSync(
+  new URL("./useReplayController.ts", import.meta.url),
+  "utf8",
+);
 
 class MemoryStorage {
   values = new Map<string, string>();
@@ -47,6 +53,18 @@ test("replay speed cycles in order and wraps", () => {
     REPLAY_SPEEDS.map(nextReplaySpeed),
     [2, 4, 8, 16, 1],
   );
+});
+
+test("the replay controller restores and saves the speed preference", () => {
+  assert.match(
+    controllerSource,
+    /useState<ReplaySpeed>\(\(\) => loadReplaySpeed\(\)\)/,
+  );
+  assert.match(
+    controllerSource,
+    /const next = nextReplaySpeed\(playSpeedRef\.current\)/,
+  );
+  assert.match(controllerSource, /saveReplaySpeed\(next\)/);
 });
 
 test("replay speed storage failures leave the 4x default usable", () => {

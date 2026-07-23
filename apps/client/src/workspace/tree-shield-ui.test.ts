@@ -4,6 +4,7 @@ import test from "node:test";
 
 const source = [
   readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("./WorkspaceSidebar.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
 ].join("\n");
 const css = readFileSync(new URL("../app/App.css", import.meta.url), "utf8");
@@ -53,6 +54,12 @@ test("fixed top-level directory regions have gapless dividers and ordinary row h
   );
 });
 
+test("the directory tree is the only vertical scrollport", () => {
+  assert.match(css, /\.tree\s*\{[^}]*overflow-y:\s*auto/s);
+  assert.doesNotMatch(source, /tree-node-system|tree-system-children/);
+  assert.doesNotMatch(css, /\.tree-node-system|\.tree-system-children/);
+});
+
 test("folder context mounting replaces the active root or shields an included subtree", () => {
   assert.match(source, /contextMountState\(scopes, shielded, node\.path\)/);
   assert.match(model, /applyMountScope\(/);
@@ -74,7 +81,10 @@ test("context icons distinguish the exact mount from inherited inclusion", () =>
     css,
     /\.tree-icon-shielded\s*\{[^}]*color:\s*var\(--shielded-fg\)/s,
   );
-  assert.match(css, /\.tree-icon\s*\{[^}]*color:\s*var\(--tree-icon-idle-fg\)/s);
+  assert.match(
+    css,
+    /\.tree-icon,\s*\.action-palette-replay-target-icon\s*\{[^}]*color:\s*var\(--tree-icon-idle-fg\)/s,
+  );
   assert.match(source, /const folderMounted = folderMountState === "mounted"/);
   assert.match(source, /folderMountState === "included"[\s\S]*tree-icon-included/);
   assert.match(source, /folderMountState === "shielded"[\s\S]*tree-icon-shielded/);

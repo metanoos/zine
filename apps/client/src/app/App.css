@@ -3715,28 +3715,6 @@ body.sidebar-resizing {
   border-top: 1px solid var(--rule-strong);
 }
 
-/* Scan, Mint, and Oblivion include their header row in the half-list cap. Their
-   contents scroll independently once they reach that limit, leaving at least
-   half of the directory listing available to the other regions. */
-.tree-node-system {
-  display: flex;
-  flex-direction: column;
-  max-height: 50vh;
-  max-height: 50cqh;
-  overflow: hidden;
-}
-
-.tree-node-system > .tree-row {
-  flex: 0 0 auto;
-}
-
-.tree-system-children {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
 .tree-row {
   display: flex;
   align-items: center;
@@ -3752,20 +3730,23 @@ body.sidebar-resizing {
   background: var(--surface-sunken);
 }
 
-/* The active tab of the focused panel. A raised row plus a thick gold inset
-   at the leading edge mirrors the tab's gold top edge without conflating focus
-   with injected-context state. */
-.tree-row-tab-focused {
-  background: var(--surface-raised);
-  box-shadow: inset 4px 0 0 var(--accent);
+/* The active tab of the focused panel and its replay transport target share
+   one accent treatment without conflating focus with operation selection. */
+.tree-row-tab-focused,
+.action-palette-replay-target {
+  background: var(--accent-surface);
+  color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
-.tree-row-tab-focused .tree-name {
-  color: var(--ink);
+.tree-row-tab-focused .tree-name,
+.action-palette-replay-target-label {
+  color: var(--accent);
   font-weight: 600;
 }
 
-.tree-icon {
+.tree-icon,
+.action-palette-replay-target-icon {
   flex: none;
   color: var(--tree-icon-idle-fg);
 }
@@ -3885,9 +3866,10 @@ body.sidebar-resizing {
 
 /* Preserve both signals when the focused tab is also selected in the tree. */
 .tree-row-selected.tree-row-tab-focused {
+  background: var(--accent-surface);
   box-shadow:
     inset 0 0 0 1px var(--rule-strong),
-    inset 4px 0 0 var(--accent);
+    inset 2px 0 0 var(--accent);
 }
 
 /* Drag & drop */
@@ -4509,6 +4491,7 @@ body.panel-resizing {
 .tab.active {
   color: var(--ink);
   background: var(--surface-sunken);
+  box-shadow: inset 0 2px 0 var(--rule-strong);
 }
 
 /* The single active trace: the frontmost tab of the focused panel. This is
@@ -7255,7 +7238,6 @@ html[data-theme="light"] .editor-host {
 }
 
 .action-palette-replay-target .tab-status {
-  color: var(--accent);
   opacity: 1;
 }
 

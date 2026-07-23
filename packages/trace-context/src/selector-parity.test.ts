@@ -174,7 +174,7 @@ test("native-neutral projector cases pin nonzero source ids and no-op enumeratio
   assert.deepEqual(
     corpus.processProjectionCases.map((fixture) => fixture.name),
     [
-      "nonzero source KEdit tx uses process-array ordinals",
+      "nonzero source transaction sequence uses process-array ordinals",
       "no-op range omits only zero-effect change",
     ],
   );
@@ -220,7 +220,7 @@ test("adapter rejection descriptors resolve to strict, non-inert drift mutations
   assert.deepEqual(
     corpus.adapterRejectionMutations.map((descriptor) => descriptor.mutation.target),
     [
-      "verdict.steps[1].process.transactions[0].at",
+      "verdict.steps[1].process.transactions[0].timestamp",
       "chain[1].content",
       "read.headId",
       "processProjection.steps[0].nodeId",
@@ -495,23 +495,23 @@ function deriveFacts(chain: readonly ProtocolEvent[]): Map<string, TraceProcessF
       redoCount: summary.redo,
     });
     process.transactions.forEach((transaction, transactionIndex) => {
-      facts.set(`${event.id}:tx:${transactionIndex}`, {
+      facts.set(`${event.id}:transaction:${transactionIndex}`, {
         kind: "transaction",
         transactionIndex,
-        capturedAtMs: transaction.at,
+        capturedAtMs: transaction.timestamp,
         ...(transaction.intent ? { intent: transaction.intent } : {}),
         changeCount: transaction.changes.length,
-        voiceIds: [...new Set(transaction.changes.map((change) => change.voice))].sort(),
+        voiceIds: [...new Set(transaction.changes.map((change) => change.actor))].sort(),
       });
       transaction.changes.forEach((change, changeIndex) => {
-        facts.set(`${event.id}:tx:${transactionIndex}:change:${changeIndex}`, {
+        facts.set(`${event.id}:transaction:${transactionIndex}:change:${changeIndex}`, {
           kind: "change",
           transactionIndex,
-          operation: change.op === "ins" ? "insert" : change.op === "del" ? "delete" : "replace",
+          operation: change.op,
           range: { fromUtf16: change.from, toUtf16: change.to },
           insertedCodePointCount: [...change.inserted].length,
           deletedCodePointCount: [...change.deleted].length,
-          voiceId: change.voice,
+          voiceId: change.actor,
         });
       });
     });
@@ -535,18 +535,16 @@ function deriveProjection(chain: readonly ProtocolEvent[]): TraceContextProcessP
       chainDistance: chain.length - eventIndex - 1,
       transactions: process.transactions.map((transaction) => ({
         version: 1 as const,
-        sourceTransactionId: transaction.tx,
-        capturedAtMs: transaction.at,
+        sourceTransactionId: transaction.sequence,
+        capturedAtMs: transaction.timestamp,
         ...(transaction.intent ? { intent: transaction.intent } : {}),
         changes: transaction.changes.map((change) => ({
           version: 1 as const,
-          operation: change.op === "ins"
-            ? "insert" as const
-            : change.op === "del" ? "delete" as const : "replace" as const,
+          operation: change.op,
           range: { fromUtf16: change.from, toUtf16: change.to },
           insertedText: change.inserted,
           deletedText: change.deleted,
-          voiceId: change.voice,
+          voiceId: change.actor,
         })),
       })),
     };
@@ -563,11 +561,11 @@ function factKey(candidate: Extract<EvidenceCandidateV1, { kind: "process-fact" 
   const prefix = candidate.source.nodeId;
   switch (candidate.fact.kind) {
     case "step-summary": return `${prefix}:summary`;
-    case "transaction": return `${prefix}:tx:${candidate.fact.transactionIndex}`;
+    case "transaction": return `${prefix}:transaction:${candidate.fact.transactionIndex}`;
     case "change": {
       const changeIndex = /:change:(\d+)$/.exec(candidate.source.ref)?.[1];
       assert.ok(changeIndex, candidate.id);
-      return `${prefix}:tx:${candidate.fact.transactionIndex}:change:${changeIndex}`;
+      return `${prefix}:transaction:${candidate.fact.transactionIndex}:change:${changeIndex}`;
     }
   }
 }

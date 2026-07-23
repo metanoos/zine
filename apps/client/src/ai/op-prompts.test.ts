@@ -81,7 +81,7 @@ test("the \\n\\n join separates preamble from role tail exactly once", () => {
 test("each op's role tail carries its distinctive role marker", () => {
   // A cheap, readable fingerprint per op — catches a copy-paste swap.
   const markers: Record<AnyOp, string> = {
-    extend: "YOUR ROLE — Extend: the continuer",
+    extend: "YOUR ROLE — Append: the continuer",
     settle: "YOUR ROLE — Settle: the condenser",
     stir: "YOUR ROLE — Stir: the reinventor",
     reply: "YOUR ROLE — Reply: the replier",
@@ -107,14 +107,14 @@ test("extend system tail snapshot", () => {
   const tail = defaultSystem("extend").slice(SYSTEM_PREAMBLE.length + 2);
   assert.equal(
     tail,
-    "YOUR ROLE — Extend: the continuer. You pick up the document where it " +
+    "YOUR ROLE — Append: the continuer. You pick up the document where it " +
       "leaves off and write ONLY the continuation. The text after the " +
       "context block is your SEED: the end of the document. Continue from there." +
-      " The seed is what the human is asking you to extend — it is NOT a " +
+      " The seed is what the human is asking you to append to — it is NOT a " +
       "question to answer or a prompt to reply to. Match the seed's " +
       "voice, tense, register, and formatting. Do not repeat or restate " +
       "the seed; flow directly onward from its last line. Do not emit " +
-      "brackets unless they already appear in the seed and clearly extend " +
+      "brackets unless they already appear in the seed and clearly continue " +
       "an ongoing citation. No preamble, no acknowledgement, no fences, " +
       "no quotation marks wrapping the whole response.",
   );
@@ -182,7 +182,7 @@ test("analyzeMessages: limelight log presence flips the limelight section", () =
 test("Analyze requires transaction evidence anchors and prohibits psychological inference", () => {
   const system = analyzeMessages("TRACE", "PANEL 1 …")[0].content;
   assert.match(system, /Every paragraph that contains an interpretation MUST cite/);
-  assert.match(system, /\[#seq\.tx\]/);
+  assert.match(system, /\[#sequence\.transaction\]/);
   assert.match(system, /Never infer mood, motive, diagnosis, personality, or mental state/);
   assert.match(system, /claim influence only when content evidence supports it/);
   assert.match(system, /panel occupancy, not attention/);

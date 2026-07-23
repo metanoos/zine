@@ -8,27 +8,37 @@
         "z": 1,
         "a": {
           "β": "two",
-          "a": [true, null, "é"]
+          "a": [
+            true,
+            null,
+            "é"
+          ]
         }
       },
       "encoded": "{\"a\":{\"a\":[true,null,\"é\"],\"β\":\"two\"},\"z\":1}",
       "utf8Hex": "7b2261223a7b2261223a5b747275652c6e756c6c2c22c3a9225d2c22ceb2223a2274776f227d2c227a223a317d"
     }
   ],
-  "kedits": [
+  "editorTransactions": [
     {
       "name": "one atomic replacement",
       "before": "hello world",
       "after": "hello Zine",
-      "kedits": [
+      "editorTransactions": [
         {
-          "op": "repl",
-          "from": 6,
-          "to": 11,
-          "text": "Zine",
-          "voice": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "t": 123,
-          "tx": 7
+          "sequence": 7,
+          "timestamp": 123,
+          "actor": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "changes": [
+            {
+              "op": "replace",
+              "from": 6,
+              "to": 11,
+              "text": "Zine"
+            }
+          ],
+          "selectionBefore": null,
+          "selectionAfter": null
         }
       ],
       "valid": true
@@ -37,28 +47,120 @@
       "name": "overlapping transaction ranges fail closed",
       "before": "abcd",
       "after": "xy",
-      "kedits": [
+      "editorTransactions": [
         {
-          "op": "repl",
-          "from": 0,
-          "to": 3,
-          "text": "x",
-          "voice": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "t": 456,
-          "tx": 0
-        },
-        {
-          "op": "repl",
-          "from": 2,
-          "to": 4,
-          "text": "y",
-          "voice": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "t": 456,
-          "tx": 0
+          "sequence": 0,
+          "timestamp": 456,
+          "actor": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "changes": [
+            {
+              "op": "replace",
+              "from": 0,
+              "to": 3,
+              "text": "x"
+            },
+            {
+              "op": "replace",
+              "from": 2,
+              "to": 4,
+              "text": "y"
+            }
+          ],
+          "selectionBefore": null,
+          "selectionAfter": null
         }
       ],
       "valid": false,
       "reasonIncludes": "overlapping ranges"
+    },
+    {
+      "name": "selection-only activity preserves text",
+      "before": "abcd",
+      "after": "abcd",
+      "editorTransactions": [
+        {
+          "sequence": 0,
+          "timestamp": 789,
+          "actor": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "changes": [],
+          "selectionBefore": {
+            "ranges": [{ "anchor": 0, "head": 0 }],
+            "main": 0
+          },
+          "selectionAfter": {
+            "ranges": [{ "anchor": 1, "head": 3 }],
+            "main": 0
+          }
+        }
+      ],
+      "valid": true
+    },
+    {
+      "name": "post-transaction selection must fit the post-state",
+      "before": "abcd",
+      "after": "a",
+      "editorTransactions": [
+        {
+          "sequence": 0,
+          "timestamp": 790,
+          "actor": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "changes": [
+            {
+              "op": "delete",
+              "from": 1,
+              "to": 4,
+              "text": ""
+            }
+          ],
+          "selectionBefore": {
+            "ranges": [{ "anchor": 4, "head": 4 }],
+            "main": 0
+          },
+          "selectionAfter": {
+            "ranges": [{ "anchor": 2, "head": 2 }],
+            "main": 0
+          }
+        }
+      ],
+      "valid": false,
+      "reasonIncludes": "selection outside its post-state"
+    },
+    {
+      "name": "observed selections must continue across transactions",
+      "before": "abcd",
+      "after": "abcd",
+      "editorTransactions": [
+        {
+          "sequence": 0,
+          "timestamp": 791,
+          "actor": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "changes": [],
+          "selectionBefore": {
+            "ranges": [{ "anchor": 0, "head": 0 }],
+            "main": 0
+          },
+          "selectionAfter": {
+            "ranges": [{ "anchor": 1, "head": 1 }],
+            "main": 0
+          }
+        },
+        {
+          "sequence": 1,
+          "timestamp": 792,
+          "actor": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "changes": [],
+          "selectionBefore": {
+            "ranges": [{ "anchor": 2, "head": 2 }],
+            "main": 0
+          },
+          "selectionAfter": {
+            "ranges": [{ "anchor": 3, "head": 3 }],
+            "main": 0
+          }
+        }
+      ],
+      "valid": false,
+      "reasonIncludes": "does not continue"
     }
   ],
   "locators": [
@@ -106,24 +208,67 @@
         {
           "kind": 4290,
           "created_at": 1700000000,
-          "tags": [["z", "file"], ["F", "essay.md"], ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"], ["action", "import"]],
-          "content": "{\"snapshot\":\"draft\",\"contentHash\":\"7743ce348d9284d677a185f33295b92266cc435a5b5f775029b300066d26693a\",\"kedits\":[{\"op\":\"ins\",\"from\":0,\"to\":0,\"text\":\"draft\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000000000,\"tx\":0}],\"operationId\":\"0101010101010101010101010101010101010101010101010101010101010101\"}",
+          "tags": [
+            [
+              "z",
+              "file"
+            ],
+            [
+              "F",
+              "essay.md"
+            ],
+            [
+              "f",
+              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ],
+            [
+              "action",
+              "import"
+            ]
+          ],
+          "content": "{\"snapshot\":\"draft\",\"contentHash\":\"7743ce348d9284d677a185f33295b92266cc435a5b5f775029b300066d26693a\",\"editorTransactions\":[{\"sequence\":0,\"timestamp\":1700000000000,\"actor\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"changes\":[{\"op\":\"insert\",\"from\":0,\"to\":0,\"text\":\"draft\"}],\"selectionBefore\":null,\"selectionAfter\":null}],\"operationId\":\"0101010101010101010101010101010101010101010101010101010101010101\"}",
           "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-          "id": "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81",
-          "sig": "642bc4e280b51aba1c6a29ae7beda69759db97b05fee5a246b6c29af48f0e87054c2f4743a344c192d1078c60d07b6ad7f16645a17b15139ea9620ab497274a6"
+          "id": "a2754c1ba411115c933b711a4e74d02fa794ad0af364636cdbb71c662585e91c",
+          "sig": "09665a245fe33d8aebe57cac88bc2533d7ffd7a43a532e8681a05710b0893912cb3f036e099b1a5adc97b16f31aa58e2f2790403b9186049e06e40e0173db41e"
         },
         {
           "kind": 4290,
           "created_at": 1700000001,
-          "tags": [["z", "file"], ["F", "essay.md"], ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"], ["action", "edit"], ["e", "44a0e6a6064ba22508a89ff6076bdaacf80a0558c00b36ff0dd4c2ca48aefa81", "", "prev"]],
-          "content": "{\"snapshot\":\"final\",\"contentHash\":\"2443630b4620165c8b173e7265e17526fe2787ae594364dd6d839ad58f2fc007\",\"kedits\":[{\"op\":\"repl\",\"from\":0,\"to\":5,\"text\":\"final\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000000001,\"tx\":0}],\"operationId\":\"0101010101010101010101010101010101010101010101010101010101010101\"}",
+          "tags": [
+            [
+              "z",
+              "file"
+            ],
+            [
+              "F",
+              "essay.md"
+            ],
+            [
+              "f",
+              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ],
+            [
+              "action",
+              "edit"
+            ],
+            [
+              "e",
+              "a2754c1ba411115c933b711a4e74d02fa794ad0af364636cdbb71c662585e91c",
+              "",
+              "prev"
+            ]
+          ],
+          "content": "{\"snapshot\":\"final\",\"contentHash\":\"2443630b4620165c8b173e7265e17526fe2787ae594364dd6d839ad58f2fc007\",\"editorTransactions\":[{\"sequence\":0,\"timestamp\":1700000000001,\"actor\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"changes\":[{\"op\":\"replace\",\"from\":0,\"to\":5,\"text\":\"final\"}],\"selectionBefore\":null,\"selectionAfter\":null}],\"operationId\":\"0101010101010101010101010101010101010101010101010101010101010101\"}",
           "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-          "id": "46373910a3a0596df841faa2258146863339e7695c88fffbf4fdab7ffc8c8e0a",
-          "sig": "6ca17fb581f1ea7901eced274e8f64a4ed742c9f41a64736eb86deeebe86885f8fde8ae44bb33770e9c7253fac990dc51c95640b09aee1c25d7266d369f76b33"
+          "id": "b077f2a308e725201a2c75a364c9e4ad935a49d3b09ff2b4ac385e75d82b25d5",
+          "sig": "786c0605e7a2cf6fcaec054181709c6cb6153be101f609c3ed77b2d2bfa8105c495e6172fb8148ce7f23f495c2e5c5152d4a93449fe0eb0fd99df3be8572a5da"
         }
       ],
       "status": "full",
-      "stepStatuses": ["full", "full"]
+      "stepStatuses": [
+        "full",
+        "full"
+      ]
     },
     {
       "name": "readable snapshot without process log",
@@ -131,15 +276,34 @@
         {
           "kind": 4290,
           "created_at": 1700000002,
-          "tags": [["z", "file"], ["F", "essay.md"], ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"], ["action", "import"]],
+          "tags": [
+            [
+              "z",
+              "file"
+            ],
+            [
+              "F",
+              "essay.md"
+            ],
+            [
+              "f",
+              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ],
+            [
+              "action",
+              "import"
+            ]
+          ],
           "content": "{\"snapshot\":\"readable\",\"contentHash\":\"9c49e2bceb8eecb24f3135db28c9482f18b3f9ef3473369b0c0ea85e7fb92d8b\",\"operationId\":\"0202020202020202020202020202020202020202020202020202020202020202\"}",
           "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
           "id": "3c496bcb2426706c10a2e6843febeac944535984353c70653e8b3a410699ca4e",
-          "sig": "4175db8b257ae554e9c94c468f59ffa4b35b3fbdd8994a5fbbe12bf339df2700b18f8bbbd20c87267adfcee6bb0b4eed3978319d6b3c95f7bc113eda67182a7b"
+          "sig": "886d94525a0d8d25ee8e3c473050d729b3572c7147877b01d4aa7bc57dc9e06ae744e54ed0316ac1e1979bbc062829999e9c5e030d97bf5d9961e65a9d61859b"
         }
       ],
       "status": "snapshot-only",
-      "stepStatuses": ["snapshot-only"]
+      "stepStatuses": [
+        "snapshot-only"
+      ]
     },
     {
       "name": "invalid signature",
@@ -147,15 +311,34 @@
         {
           "kind": 4290,
           "created_at": 1700000000,
-          "tags": [["z", "file"], ["F", "essay.md"], ["f", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"], ["action", "import"]],
-          "content": "{\"snapshot\":\"draft\",\"contentHash\":\"7743ce348d9284d677a185f33295b92266cc435a5b5f775029b300066d26693a\",\"kedits\":[{\"op\":\"ins\",\"from\":0,\"to\":0,\"text\":\"draft\",\"voice\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"t\":1700000000000,\"tx\":0}],\"operationId\":\"0303030303030303030303030303030303030303030303030303030303030303\"}",
+          "tags": [
+            [
+              "z",
+              "file"
+            ],
+            [
+              "F",
+              "essay.md"
+            ],
+            [
+              "f",
+              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ],
+            [
+              "action",
+              "import"
+            ]
+          ],
+          "content": "{\"snapshot\":\"draft\",\"contentHash\":\"7743ce348d9284d677a185f33295b92266cc435a5b5f775029b300066d26693a\",\"editorTransactions\":[{\"sequence\":0,\"timestamp\":1700000000000,\"actor\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"changes\":[{\"op\":\"insert\",\"from\":0,\"to\":0,\"text\":\"draft\"}],\"selectionBefore\":null,\"selectionAfter\":null}],\"operationId\":\"0303030303030303030303030303030303030303030303030303030303030303\"}",
           "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-          "id": "5321df5efc4556b54e188dbfca320aec08ec9c18bfc91d9ba0b7f2cabd901e73",
+          "id": "273e896eff80cf63f1f1a6d3f5d3cb59ac2c190667842d5b06ed833adfc4cdd0",
           "sig": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         }
       ],
       "status": "invalid",
-      "stepStatuses": ["invalid"]
+      "stepStatuses": [
+        "invalid"
+      ]
     }
   ]
 }

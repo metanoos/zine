@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const source = [
+  readFileSync(new URL("./FileEditor.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
 ].join("\n");
@@ -38,4 +39,17 @@ test("voice attribution sits outside the citation bars", () => {
   const citationIndex = header[1].indexOf("{citationBar}");
   assert.ok(voiceIndex >= 0, "missing voice attribution in document header");
   assert.ok(citationIndex > voiceIndex, "outgoing citations must remain flush with the body");
+});
+
+test("switching the physical-input voice reconfigures subsequent run attribution", () => {
+  assert.match(source, /function chooseAuthorKey\(id: string\) \{\s*setAuthorKeyId\(id\)/);
+  assert.match(source, /voice=\{authorPubkey\}/);
+  assert.match(
+    source,
+    /voiceCompartment\.reconfigure\(voiceFacet\.of\(voice\)\)/,
+  );
+  assert.match(
+    source,
+    /const pen = opVoice \|\| remoteVoice \|\| tr\.state\.facet\(voiceFacet\) \|\| authorVoice\(\);[\s\S]*?spliceRuns\(out, fromA, toA, insert, pen\)/,
+  );
 });

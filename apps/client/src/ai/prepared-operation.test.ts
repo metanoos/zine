@@ -34,15 +34,17 @@ function snapshot(options: { sourceUnstepped?: boolean; failure?: boolean; trace
     process: {
       status: "complete",
       transactions: [{
-        tx: 7,
-        at: 1_900,
+        sequence: 7,
+        timestamp: 1_900,
+        selectionBefore: null,
+        selectionAfter: null,
         changes: [{
-          op: "repl",
+          op: "replace",
           from: 0,
           to: 5,
           inserted: "final",
           deleted: "draft",
-          voice: "a".repeat(64),
+          actor: "a".repeat(64),
         }],
       }],
     },
@@ -161,7 +163,7 @@ test("dirty targets, unstepped mounts, incomplete gather, and oversize all block
   );
 });
 
-test("prepared Extend freezes compiler output and separates instructions from quoted data", () => {
+test("prepared Append freezes compiler output and separates instructions from quoted data", () => {
   const body = "Before (( tighten this )) after";
   const from = body.indexOf("((");
   const to = body.indexOf("))") + 2;

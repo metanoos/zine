@@ -83,11 +83,11 @@ test("abort-signal validation accepts only signal-compatible values", () => {
   }
 });
 
-test("adapter process preflight bounds events, KEdits, and projected candidates", () => {
+test("adapter process preflight bounds events, editor transactions, and projected candidates", () => {
   assert.doesNotThrow(() => validateTraceContextAdapterProcessBoundsV1([
     "not-json",
     JSON.stringify({ other: [] }),
-    JSON.stringify({ kedits: [null, { tx: "a", from: 0, to: 0, text: "" }] }),
+    JSON.stringify({ editorTransactions: [null, { sequence: "a", changes: [] }] }),
   ], undefined));
 
   assert.throws(
@@ -103,19 +103,24 @@ test("adapter process preflight bounds events, KEdits, and projected candidates"
   );
   assert.throws(
     () => validateTraceContextAdapterProcessBoundsV1([
-      JSON.stringify({ kedits: [{ tx: "a", from: 0, to: 0, text: "x" }] }),
+      JSON.stringify({
+        editorTransactions: [{
+          sequence: 0,
+          changes: [{ op: "insert", from: 0, to: 0, text: "x" }],
+        }],
+      }),
     ], 2),
     /projected candidate count/,
   );
   assert.throws(
     () => validateTraceContextAdapterProcessBoundsV1([
       JSON.stringify({
-        kedits: Array.from(
+        editorTransactions: Array.from(
           { length: TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidateSlots + 1 },
           () => null,
         ),
       }),
     ], undefined),
-    /bounded KEdit scan ceiling/,
+    /bounded editor transaction scan ceiling/,
   );
 });

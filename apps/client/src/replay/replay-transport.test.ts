@@ -39,6 +39,8 @@ import {
 const source = [
   readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("./useReplayController.ts", import.meta.url), "utf8"),
+  readFileSync(new URL("../workspace/useWorkspaceMutations.ts", import.meta.url), "utf8"),
 ].join("\n");
 const styles = readFileSync(new URL("../app/App.css", import.meta.url), "utf8");
 const timelineSource = readFileSync(
@@ -177,7 +179,10 @@ test("creating a folder mints the folder genesis that replay uses as Step 0", ()
 });
 
 test("transport numbers the real genesis as Step 0 and keeps a one-Step trace navigable", () => {
-  assert.match(source, /const clamped = Math\.max\(0, Math\.min\(n, r\.steps\.length - 1\)\)/);
+  assert.match(
+    source,
+    /const index = Math\.max\(0, Math\.min\(n, current\.steps\.length - 1\)\)/,
+  );
   assert.match(source, /replayStepTo\(n\)/);
   assert.match(source, /const latest = Math\.max\(0, count - 1\)/);
   assert.match(source, /const first = index <= 0/);
@@ -222,8 +227,14 @@ test("keystroke playback can begin blank without creating a pseudo-step", () => 
 });
 
 test("manual seek and Play share structural display state and panel routing", () => {
-  assert.match(source, /syncReplayPanels\(\s*display,\s*targetPath/);
-  assert.match(source, /syncReplayPanels\(nextDisplay, frame\.path, frame\.panelIndex\)/);
+  assert.match(
+    source,
+    /projectDisplayRef\.current\(display, \{[\s\S]*?activePath: targetPath,[\s\S]*?activeRecordedPanel:/,
+  );
+  assert.match(
+    source,
+    /projectDisplayRef\.current\(nextDisplay, \{[\s\S]*?activePath: frame\.path,[\s\S]*?activeRecordedPanel: frame\.panelIndex/,
+  );
   assert.match(source, /function renderPlayFrame\(frame: PlayFrame\)/);
   assert.match(source, /replayDisplayWithFrame\(/);
   assert.match(source, /setReplayDisplay\(nextDisplay\)/);
@@ -244,14 +255,17 @@ test("folder replay remains structural and only file paths reach replay panels",
 test("file edits focus their recorded panel and unrecorded files get new columns", () => {
   assert.match(timelineSource, /lastPanelByPath\.get\(frame\.path\)/);
   assert.match(source, /display\.panelIndexByPath\[path\]/);
-  assert.match(source, /syncReplayPanels\(nextDisplay, frame\.path, frame\.panelIndex\)/);
+  assert.match(
+    source,
+    /projectDisplayRef\.current\(nextDisplay, \{[\s\S]*?activePath: frame\.path,[\s\S]*?activeRecordedPanel: frame\.panelIndex/,
+  );
   assert.match(source, /createReplayPanels\(\s*entries,/);
 });
 
 test("file replay leaves foreground-tab moments on the owning folder trace", () => {
   assert.doesNotMatch(source, /focusSourcesForPaths/);
   assert.doesNotMatch(source, /replayFocusSourcesRef/);
-  assert.match(source, /buildReplayTimeline\(r\.steps, replayChainsRef\.current\)/);
+  assert.match(source, /buildReplayTimeline\(current\.steps, replayChainsRef\.current\)/);
   assert.doesNotMatch(timelineSource, /supplementalFocus/);
 });
 
@@ -348,15 +362,16 @@ test("savepoint lines have tall, wide hit targets that seek their exact Step", (
 
 test("the focused replay trace uses a tab icon and monospace label", () => {
   assert.match(source, /className="action-palette-replay-target"/);
-  assert.match(source, /<FolderOpen size=\{12\} className="tab-status"/);
-  assert.match(source, /<FileText size=\{12\} className="tab-status"/);
+  assert.match(source, /<FolderOpen[\s\S]*?className="tab-status action-palette-replay-target-icon"/);
+  assert.match(source, /<FileText[\s\S]*?className="tab-status action-palette-replay-target-icon"/);
   assert.match(source, /const target = focusReplayTarget\(uiFocus\)/);
   assert.match(source, /label: target\.path === ROOT \? rootLabel : systemPathDisplayName\(target\.path\)/);
   assert.match(source, /targets\.map\(\(target\) => \(/);
   assert.doesNotMatch(source, /className="action-palette-replay-scope-key"/);
 
-  const targetRule = styles.match(/\.action-palette-replay-target\s*\{([^}]*)\}/s);
-  assert.ok(targetRule, "missing playback target styles");
+  const targetRule = [...styles.matchAll(/\.action-palette-replay-target\s*\{([^}]*)\}/gs)]
+    .find((match) => /font-family:\s*var\(--font-mono\)/.test(match[1] ?? ""));
+  assert.ok(targetRule, "missing playback target layout styles");
   assert.match(targetRule[1], /font-family:\s*var\(--font-mono\)/);
   assert.match(targetRule[1], /width:\s*var\(--action-palette-voice-width\)/);
   assert.match(targetRule[1], /box-sizing:\s*border-box/);
@@ -589,7 +604,7 @@ function recursiveTraceEvent(
       contentHash: "b".repeat(64),
       operationId: ROOT_OPERATION,
       deltas: [],
-      kedits: [],
+      editorTransactions: [],
     }),
     sig: "c".repeat(128),
   };

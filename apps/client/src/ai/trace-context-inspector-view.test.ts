@@ -109,11 +109,11 @@ function makeFullPresentation(): TraceContextInspectorPresentationV1 {
         displayClaim: "Step a1 · 4 transactions · +83/−21 code points",
         classification: "quoted-data",
         source: {
-          displayLabel: "Step a1, transaction tx-3",
+          displayLabel: "Step a1, transaction transaction-3",
           traceId: "trace-7f",
           headId: "head-exact-44",
           nodeId: "node-a1",
-          transactionId: "tx-3",
+          transactionId: "transaction-3",
           sourceRange: { fromUtf16: 30, toUtf16: 64 },
         },
         scope: "file",

@@ -6,6 +6,7 @@ import { directoryContextMenuCapabilities } from "./directory-context-menu.js";
 
 const appSource = [
   readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("./WorkspaceSidebar.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
 ].join("\n");
 

@@ -6,7 +6,7 @@ import test from "node:test";
 
 import corpusJson from "../corpus/evidence-selection-v1.json" with { type: "json" };
 import type { ProtocolEvent } from "../../protocol/src/event.js";
-import type { KEdit } from "../../protocol/src/kedit.js";
+import type { EditorTransaction } from "../../protocol/src/editor-transaction.js";
 import {
   summarizeTraceProcess,
   traceProcessFromEvent,
@@ -218,14 +218,14 @@ test("process facts reject impossible summaries, signer identities, and count re
     },
     {
       kind: "step-summary",
-      transactionCount: 2,
-      rangeCount: 1,
+      transactionCount: 1,
+      rangeCount: 0,
       insertedCodePointCount: 1,
       deletedCodePointCount: 0,
       firstCapturedAtMs: 1,
-      lastCapturedAtMs: 2,
-      spanMs: 1,
-      longestGapMs: 1,
+      lastCapturedAtMs: 1,
+      spanMs: 0,
+      longestGapMs: 0,
       undoCount: 0,
       redoCount: 0,
     },
@@ -403,15 +403,14 @@ test("Step summaries enforce exact one/two-transaction timing", async () => {
   }
 });
 
-test("Step summaries accept protocol-valid no-op KEdit ranges", async () => {
+test("Step summaries accept protocol-valid no-op EditorTransaction ranges", async () => {
   const noOp = protocolStepSummary("a", "a", [{
-    op: "ins",
-    from: 0,
-    to: 0,
-    text: "",
-    voice: VOICE_A,
-    t: 7,
-    tx: 0,
+    sequence: 0,
+    timestamp: 7,
+    actor: VOICE_A,
+    changes: [{ op: "insert", from: 0, to: 0, text: "" }],
+    selectionBefore: null,
+    selectionAfter: null,
   }]);
   assert.deepEqual(noOp, {
     kind: "step-summary",
@@ -429,22 +428,15 @@ test("Step summaries accept protocol-valid no-op KEdit ranges", async () => {
 
   const mixed = protocolStepSummary("a", "ax", [
     {
-      op: "ins",
-      from: 0,
-      to: 0,
-      text: "",
-      voice: VOICE_A,
-      t: 9,
-      tx: 0,
-    },
-    {
-      op: "ins",
-      from: 1,
-      to: 1,
-      text: "x",
-      voice: VOICE_A,
-      t: 9,
-      tx: 0,
+      sequence: 0,
+      timestamp: 9,
+      actor: VOICE_A,
+      changes: [
+        { op: "insert", from: 0, to: 0, text: "" },
+        { op: "insert", from: 1, to: 1, text: "x" },
+      ],
+      selectionBefore: null,
+      selectionAfter: null,
     },
   ]);
   assert.equal(mixed.rangeCount, 2);
@@ -565,7 +557,7 @@ test("every process fact is bound to the exact target trace and prepared head ch
     processFact("wrong-head", zeroStepSummary(), { headId: "other" }),
     processFact("wrong-zero", zeroStepSummary(), { nodeId: "prior" }),
     processFact("wrong-prior", zeroStepSummary(), { chainDistance: 1, nodeId: "head" }),
-    processFact("wrong-tx", {
+    processFact("wrong-transaction", {
       kind: "transaction",
       transactionIndex: 1,
       capturedAtMs: 1,
@@ -1037,7 +1029,7 @@ function zeroStepSummary(): Extract<TraceProcessFactV1, { kind: "step-summary" }
 function protocolStepSummary(
   previousSnapshot: string,
   snapshot: string,
-  kedits: readonly KEdit[],
+  editorTransactions: readonly EditorTransaction[],
 ): Extract<TraceProcessFactV1, { kind: "step-summary" }> {
   const event: ProtocolEvent = {
     id: "event",
@@ -1045,7 +1037,7 @@ function protocolStepSummary(
     created_at: 0,
     kind: 4_290,
     tags: [],
-    content: JSON.stringify({ snapshot, kedits }),
+    content: JSON.stringify({ snapshot, editorTransactions }),
     sig: "signature",
   };
   const process = traceProcessFromEvent(event, previousSnapshot);

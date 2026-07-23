@@ -11,6 +11,7 @@ import {
 import { contentFingerprint } from "./context-snapshot.js";
 import {
   PREPARED_REQUEST_MAX_BYTES,
+  assertPrepareOperationPrerequisites,
   measurePreparedRequestReservedBytes,
   prepareOperationWithSelectedTraceContext,
   type PreparedOperation,
@@ -56,8 +57,9 @@ export async function prepareDesktopTraceContextOperationV1(
     throw new DesktopTraceContextPreparationError("boundary version must be 1");
   }
   if (input.operation !== "extend" && input.operation !== "settle") {
-    throw new DesktopTraceContextPreparationError("only Extend and Settle have a selector boundary");
+    throw new DesktopTraceContextPreparationError("only Append and Settle have a selector boundary");
   }
+  assertPrepareOperationPrerequisites(input);
   const operationRange = operationRangeFor(input);
   const preparedRequestMaxBytes = input.maxBytes ?? PREPARED_REQUEST_MAX_BYTES;
   const adapterInput: DesktopTraceContextSelectionAdapterInputV1 = {

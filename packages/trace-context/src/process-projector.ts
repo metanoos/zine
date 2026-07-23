@@ -7,7 +7,7 @@ import type { Utf16Range } from "./types.js";
 
 const NODE_ID_PATTERN = /^[0-9a-f]{64}$/;
 const VOICE_PUBKEY_PATTERN = /^[0-9a-f]{64}$/;
-const NON_PUBKEY_VOICE_PREFIX = "kedit-voice-utf16-v1:";
+const NON_PUBKEY_ACTOR_PREFIX = "editor-transaction-actor-utf16-v1:";
 
 export interface TraceContextProcessProjectionChangeV1 {
   version: 1;
@@ -20,7 +20,7 @@ export interface TraceContextProcessProjectionChangeV1 {
 
 export interface TraceContextProcessProjectionTransactionV1 {
   version: 1;
-  /** Signed source KEdit transaction id; output identity uses the array ordinal. */
+  /** Signed source transaction sequence; output identity uses the array ordinal. */
   sourceTransactionId: number;
   capturedAtMs: number;
   intent?: "undo" | "redo";
@@ -55,7 +55,7 @@ export interface TraceContextProcessProjectionOptionsV1 {
 /**
  * Deterministically enumerate closed process candidates for every supplied
  * verified Step. Identity is press-neutral and transaction/change indexes are
- * zero-based process-array ordinals, never signed KEdit transaction ids.
+ * zero-based process-array ordinals, never signed EditorTransaction transaction ids.
  */
 export function projectTraceProcessCandidatesV1(
   input: TraceContextProcessProjectionInputV1,
@@ -338,9 +338,7 @@ function validateInput(input: TraceContextProcessProjectionInputV1): void {
         && transaction.intent !== "redo") {
         fail("transaction intent must be undo or redo");
       }
-      if (!Array.isArray(transaction.changes) || transaction.changes.length === 0) {
-        fail("transactions must contain at least one verified change");
-      }
+      if (!Array.isArray(transaction.changes)) fail("transaction changes must be an array");
       for (const change of transaction.changes) validateChange(change);
     }
   }
@@ -400,7 +398,7 @@ function requireFiniteNumber(value: number, subject: string): void {
 
 function selectorVoiceId(value: string): string {
   if (VOICE_PUBKEY_PATTERN.test(value)) return value;
-  let encoded = NON_PUBKEY_VOICE_PREFIX;
+  let encoded = NON_PUBKEY_ACTOR_PREFIX;
   for (let index = 0; index < value.length; index += 1) {
     encoded += value.charCodeAt(index).toString(16).padStart(4, "0");
   }

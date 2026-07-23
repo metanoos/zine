@@ -189,11 +189,8 @@ export function prepareOperationWithSelectedTraceContext(
   return prepareOperationInternal(input, traceContextSelection, true);
 }
 
-function prepareOperationInternal(
-  input: PrepareOperationInput,
-  traceContextSelection: TraceContextSelectionSuccessV1 | undefined,
-  requireExactSelectorBudget: boolean,
-): PreparedOperation {
+/** @internal Shared preflight for preparation paths that do work before assembly. */
+export function assertPrepareOperationPrerequisites(input: PrepareOperationInput): void {
   const issues: string[] = [];
   try {
     assertUsableContextSnapshot(input.contextSnapshot);
@@ -201,7 +198,9 @@ function prepareOperationInternal(
     issues.push(error instanceof Error ? error.message : String(error));
   }
   const target = input.contextSnapshot.target;
-  if (input.dirtyTarget) issues.push(`${target.path} has unstepped changes`);
+  if (input.dirtyTarget) {
+    issues.push(`${target.path} has unstepped changes; click Step before running an AI action`);
+  }
   if (!target.traceId || !target.headId) issues.push(`${target.path} has no stepped provenance identity`);
   if (!input.modelVoicePubkey) issues.push("AI voice has no provenance identity");
   if (!input.provider.baseUrl) issues.push(`provider ${input.provider.label} has no base URL`);
@@ -213,6 +212,15 @@ function prepareOperationInternal(
     issues.push(`mounted inputs need Step: ${unsteppedSources.join(", ")}`);
   }
   if (issues.length > 0) throw new PreparedOperationError(issues);
+}
+
+function prepareOperationInternal(
+  input: PrepareOperationInput,
+  traceContextSelection: TraceContextSelectionSuccessV1 | undefined,
+  requireExactSelectorBudget: boolean,
+): PreparedOperation {
+  assertPrepareOperationPrerequisites(input);
+  const target = input.contextSnapshot.target;
 
   const compiledAuthoring = compileTraceAuthoringOperation({
     operation: input.operation,
@@ -384,12 +392,16 @@ function assertTraceContextSelection(
     issues.push("trace-context selection operation changed");
   }
   const selectedTarget = selection.manifest.operation.target;
+  const separator = target.path.lastIndexOf("/");
+  const structuralPath = separator === -1 ? target.path : target.path.slice(separator + 1);
   if (
     selectedTarget.traceId !== target.traceId
     || selectedTarget.headId !== target.headId
     || selectedTarget.contentHash !== target.contentHash
     || selectedTarget.currentText !== target.body
-    || (selectedTarget.chosenPath !== undefined && selectedTarget.chosenPath !== target.path)
+    // TraceNode F tags name the file inside its direct folder, while the
+    // workspace target is addressed from Root and may therefore be nested.
+    || (selectedTarget.chosenPath !== undefined && selectedTarget.chosenPath !== structuralPath)
   ) {
     issues.push("trace-context selection target/head does not match the prepared target");
   }

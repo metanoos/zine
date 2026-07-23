@@ -350,8 +350,9 @@ function folderMembershipTransition(
  *
  * Snapshot integrity and process integrity deliberately have different
  * failure states. A signed, hash-valid snapshot remains readable when its
- * KEdit evidence is missing or does not replay; it is SNAPSHOT ONLY. Broken
- * event integrity or lineage is INVALID. Only both together are FULL TRACE.
+ * EditorTransaction evidence is missing or does not replay;
+ * it is SNAPSHOT ONLY. Broken event integrity or lineage is INVALID. Only both
+ * snapshot and process integrity together are FULL TRACE.
  */
 export async function verifyFileTraceChain(
   chain: readonly ProtocolEvent[],
@@ -506,8 +507,11 @@ export async function verifyFileTraceChain(
     if (process.status !== "complete") {
       issues.push({
         kind: "process",
-        code: priorAvailable ? "nonconforming-kedits" : "process-history-unavailable",
-        message: process.reason ?? "KEdit process could not be validated",
+        code: priorAvailable
+          ? "nonconforming-editor-transactions"
+          : "process-history-unavailable",
+        message: process.reason ??
+          "EditorTransaction process could not be validated",
         stepIndex,
         nodeId: event.id,
       });
@@ -652,6 +656,7 @@ export async function verifyFolderTraceChain(
       operationId?: unknown;
       folderCheckpoint?: { version?: unknown; cause?: unknown; sourceNodeId?: unknown };
       deltas?: unknown;
+      editorTransactions?: unknown;
       kedits?: unknown;
     } = {};
     try {
@@ -693,6 +698,9 @@ export async function verifyFolderTraceChain(
     }
     if (!isTraceOperationId(parsed.operationId)) {
       addIntegrity("invalid-operation-id", "folder TraceNode must carry one 32-byte lowercase-hex operation id");
+    }
+    if (Object.prototype.hasOwnProperty.call(parsed, "editorTransactions")) {
+      addIntegrity("unexpected-editor-transactions", "folder TraceNode must not carry file EditorTransactions");
     }
     if (Object.prototype.hasOwnProperty.call(parsed, "kedits")) {
       addIntegrity("unexpected-kedits", "folder TraceNode must not carry file KEdits");

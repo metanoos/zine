@@ -480,7 +480,7 @@ const MODEL_ROLE_KEY = "zine.roles.model";
 
 /** The id of the MODEL key, or null. Defaults to the first keychain key when
  *  unset or dangling — same fallback as AUTHOR/NODE. The MODEL key drives LLM
- *  ops (Extend/Settle/Stir/Reply); switching it is harmless (no provenance
+ *  ops (Append/Settle/Stir/Reply); switching it is harmless (no provenance
  *  impact), so it needs no confirmation. */
 export function getModelKeyId(): string | null {
   const stored = localStorage.getItem(MODEL_ROLE_KEY);

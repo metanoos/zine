@@ -1,7 +1,7 @@
 /**
  * Single source of truth for the per-op LLM message builders.
  *
- * Every single-shot LLM op (Extend / Settle / Stir / Reply / Analyze, plus the
+ * Every single-shot LLM op (Append / Settle / Stir / Reply / Analyze, plus the
  * de-dupe and edit variants) assembles its `messages[]` here. The live actions
  * and the pre-send prompt inspector read these exact strings:
  *
@@ -13,8 +13,8 @@
  * Keeping the strings here prevents the live operation and preview from
  * drifting. `op-prompts.test.ts` snapshots role tails and variable infixes.
  *
- * On variable infixes: three ops (Extend, Stir, Analyze) bake a runtime value
- * into the system prompt itself — Extend's seed-kind sentence depends on
+ * On variable infixes: three ops (Append, Stir, Analyze) bake a runtime value
+ * into the system prompt itself — Append's seed-kind sentence depends on
  * whether there's a selection; Stir's anchor line depends on the bracket count;
  * Analyze's limelight section depends on whether a log exists. The builders
  * accept those values explicitly, so both live calls and previews stay honest.
@@ -40,7 +40,7 @@ export const OP_ORDER: OpKind[] = ["extend", "settle", "stir", "reply", "analyze
 
 /** Tab labels for the inspector. Capitalized to match the action-palette op buttons. */
 export const OP_LABELS: Record<OpKind, string> = {
-  extend: "Extend",
+  extend: "Append",
   settle: "Settle",
   stir: "Stir",
   reply: "Reply",
@@ -52,7 +52,7 @@ export const OP_LABELS: Record<OpKind, string> = {
 // Each composer returns the FULL system prompt (SYSTEM_PREAMBLE + role tail,
 // with any variable infix baked in). Callers provide the real runtime inputs.
 
-/** The seed-kind sentence baked into Extend's system prompt. */
+/** The seed-kind sentence baked into Append's system prompt. */
 function extendSeedKind(hasSelection: boolean): string {
   return hasSelection
     ? "a selected passage. Continue from the end of that passage as if the cursor sat right after it."
@@ -62,15 +62,15 @@ function extendSeedKind(hasSelection: boolean): string {
 function composeExtendSystem(hasSelection: boolean): string {
   return (
     `${SYSTEM_PREAMBLE}\n\n` +
-    "YOUR ROLE — Extend: the continuer. You pick up the document where it " +
+    "YOUR ROLE — Append: the continuer. You pick up the document where it " +
     "leaves off and write ONLY the continuation. The text after the " +
     "context block is your SEED: " +
     extendSeedKind(hasSelection) +
-    " The seed is what the human is asking you to extend — it is NOT a " +
+    " The seed is what the human is asking you to append to — it is NOT a " +
     "question to answer or a prompt to reply to. Match the seed's " +
     "voice, tense, register, and formatting. Do not repeat or restate " +
     "the seed; flow directly onward from its last line. Do not emit " +
-    "brackets unless they already appear in the seed and clearly extend " +
+    "brackets unless they already appear in the seed and clearly continue " +
     "an ongoing citation. No preamble, no acknowledgement, no fences, " +
     "no quotation marks wrapping the whole response."
   );
@@ -193,7 +193,7 @@ function composeAnalyzeSystem(limelightLog: string): string {
     "- **Limelight behavior**: what was visible when changes were made\n\n" +
     "Write as prose observations, not bullet points. Every paragraph that " +
     "contains an interpretation MUST cite at least one transaction anchor " +
-    "(`[#seq.tx]`) or Step anchor (`[#seq]`), exact " +
+    "(`[#sequence.transaction]`) or Step anchor (`[#sequence]`), exact " +
     "timestamp, character delta, or panel number. Use direct language for " +
     "logged facts and calibrated language (`may`, `could`, `is consistent " +
     "with`) for inference. Never infer mood, motive, diagnosis, personality, " +
@@ -235,7 +235,7 @@ function composeEditSystem(): string {
 // context block reads the live files map + scope). Keeping them out keeps these
 // builders pure and testable.
 
-/** Extend messages. `seed` is the selected passage or the doc tail; `hasSelection`
+/** Append messages. `seed` is the selected passage or the doc tail; `hasSelection`
  *  picks the seed-kind phrasing in the system prompt. */
 export function extendMessages(seed: string, hasSelection: boolean): ChatMessage[] {
   return [
@@ -328,14 +328,14 @@ export interface OpInputs {
    *  it participates in PreparedOperation dependencies and atomic apply. */
   rangeFrom?: number;
   rangeTo?: number;
-  /** Exact source range interpreted by the trace-authoring compiler. Extend's
+  /** Exact source range interpreted by the trace-authoring compiler. Append's
    * apply range is an insertion point, so its source range is recorded
    * separately. Settle normally uses the same source and apply range. */
   sourceFrom?: number;
   sourceTo?: number;
-  /** Extend: selected passage or doc tail. */
+  /** Append: selected passage or doc tail. */
   seed?: string;
-  /** Extend: was there a live selection? */
+  /** Append: was there a live selection? */
   hasSelection?: boolean;
   /** Settle / Stir: the loose prose passage. */
   loose?: string;

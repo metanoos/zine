@@ -9,14 +9,15 @@ import {
   canonicalBytes,
   canonicalJson,
   encodeTraceLocator,
+  parseEditorTransactionsFromContent,
   parseTraceLocator,
-  validateKEditTransition,
+  validateEditorTransactionTransition,
   validateTraceLocator,
   verifyFileTraceChain,
   verifyFolderTraceChain,
   traceOperationIdFromEvent,
   type CanonicalJsonValue,
-  type KEdit,
+  type EditorTransaction,
   type TraceConformanceStatus,
 } from "./index.js";
 
@@ -147,18 +148,47 @@ test("canonical encoding matches every fixed byte vector", () => {
   assert.throws(() => canonicalJson("\ud800"), /unpaired Unicode surrogate/);
 });
 
-test("KEdit validation matches every fixed transition vector", () => {
-  for (const vector of corpus.kedits) {
-    const verdict = validateKEditTransition(
+test("EditorTransaction validation matches every fixed transition vector", () => {
+  for (const vector of corpus.editorTransactions) {
+    const verdict = validateEditorTransactionTransition(
       vector.before,
       vector.after,
-      vector.kedits as KEdit[],
+      vector.editorTransactions as EditorTransaction[],
     );
     assert.equal(verdict.valid, vector.valid, vector.name);
     if (vector.reasonIncludes) {
       assert.match(verdict.reason ?? "", new RegExp(vector.reasonIncludes), vector.name);
     }
   }
+});
+
+test("editor transaction parsing has no flat-entry compatibility dialect", () => {
+  assert.deepEqual(parseEditorTransactionsFromContent(JSON.stringify({
+    editorTransactions: [{
+      op: "insert",
+      from: 0,
+      to: 0,
+      text: "x",
+      actor: "a".repeat(64),
+      timestamp: 1,
+      sequence: 0,
+    }],
+  })), []);
+
+  const current = {
+    sequence: 0,
+    timestamp: 1,
+    actor: "a".repeat(64),
+    changes: [{ op: "insert", from: 0, to: 0, text: "x" }],
+    selectionBefore: null,
+    selectionAfter: null,
+  };
+  assert.deepEqual(parseEditorTransactionsFromContent(JSON.stringify({
+    editorTransactions: [current, { ...current, sequence: 1, tx: 1 }],
+  })), [], "unknown fields make the whole transaction array nonconforming");
+  assert.deepEqual(parseEditorTransactionsFromContent(JSON.stringify({
+    editorTransactions: [current, { ...current, sequence: 1, selectionAfter: { ranges: [], main: 0 } }],
+  })), [], "malformed entries are not filtered out of an otherwise valid array");
 });
 
 test("trace locator validation and encoding match every fixed vector", () => {
@@ -670,4 +700,3 @@ test("folder conformance rejects a child-advance whose source does not match the
   assert.equal(verdict.status, "invalid");
   assert.ok(verdict.issues.some((issue) => issue.code === "invalid-child-advance-source"));
 });
-

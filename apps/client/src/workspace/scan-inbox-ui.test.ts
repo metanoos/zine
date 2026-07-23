@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 
 const appSource = [
   readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("./WorkspaceSidebar.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
 ].join("\n");
 const styles = readFileSync(new URL("../app/App.css", import.meta.url), "utf8");
@@ -18,7 +19,7 @@ const reifyTargets = appSource.slice(
 
 test("Scan uses a dedicated ScanLine system header above Oblivion", () => {
   assert.match(appSource, /node\.systemKind === "scan"[\s\S]*?<ScanLine/);
-  assert.match(appSource, /isCappedSystemRegion \|\| isScan\(node\.path\)/);
+  assert.match(appSource, /isSystemRegion \|\| isScan\(node\.path\)/);
   assert.match(appSource, /\? "Scan"[\s\S]*?: "Oblivion"/);
 });
 

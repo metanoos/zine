@@ -9,29 +9,52 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  EMPTY_KEDIT_LOG,
-  applyKEditTransaction,
-  appendKEditLog,
+  EMPTY_EDITOR_TRANSACTION_LOG,
+  applyEditorTransaction,
+  appendEditorTransactionLog,
   changedRegion,
   dominantVoiceInRegion,
-  dropKEditLogPrefix,
+  dropEditorTransactionLogPrefix,
   fileHasUnsteppedChanges,
-  keditLogFromArray,
-  keditLogToArray,
+  editorTransactionLogFromArray,
+  editorTransactionLogToArray,
   minimalTextChange,
-  nextKEditTx,
+  nextEditorTransactionSequence,
   reconcileRunsText,
-  recoverStepKEdits,
-  resolveStepKEdits,
+  recoverStepEditorTransactions,
+  resolveStepEditorTransactions,
   spliceRuns,
-  synthesizeKEditTransition,
-  validateKEditTransition,
+  synthesizeEditorTransactionTransition,
+  validateEditorTransactionTransition,
 } from "./workspace-core.js";
 import type { Run } from "./workspace-core.js";
-import type { KEdit } from "../provenance/provenance.js";
+import type { EditorTransaction } from "../provenance/provenance.js";
 
 const A = "aaaa".repeat(8); // the AUTHOR voice (pubkey)
 const B = "bbbb".repeat(8); // the MODEL voice (pubkey)
+
+function transaction(
+  from: number,
+  to: number,
+  text: string,
+  actor = A,
+  timestamp = 1,
+  sequence = timestamp,
+): EditorTransaction {
+  return {
+    sequence,
+    timestamp,
+    actor,
+    changes: [{
+      op: from === to ? "insert" : text === "" ? "delete" : "replace",
+      from,
+      to,
+      text,
+    }],
+    selectionBefore: null,
+    selectionAfter: null,
+  };
+}
 
 // --- changedRegion --------------------------------------------------------
 
@@ -104,93 +127,68 @@ test("minimalTextChange localizes a whole-document citation rewrite", () => {
   );
 });
 
-test("synthetic KEdit records a non-editor transition as one atomic replacement", () => {
-  const kedits = synthesizeKEditTransition("hello world", "hello Zine", B, 123, 7);
-  assert.deepEqual(kedits, [{
-    op: "repl",
-    from: 6,
-    to: 11,
-    text: "Zine",
-    voice: B,
-    t: 123,
-    tx: 7,
+test("synthetic EditorTransaction records a non-editor transition as one atomic replacement", () => {
+  const editorTransactions = synthesizeEditorTransactionTransition("hello world", "hello Zine", B, 123, 7);
+  assert.deepEqual(editorTransactions, [{
+    sequence: 7,
+    timestamp: 123,
+    actor: B,
+    changes: [{ op: "replace", from: 6, to: 11, text: "Zine" }],
+    selectionBefore: null,
+    selectionAfter: null,
   }]);
-  assert.deepEqual(validateKEditTransition("hello world", "hello Zine", kedits), { valid: true });
+  assert.deepEqual(validateEditorTransactionTransition("hello world", "hello Zine", editorTransactions), { valid: true });
 });
 
-test("an empty KEdit log is valid only for an unchanged transition", () => {
-  assert.deepEqual(validateKEditTransition("same", "same", []), { valid: true });
-  assert.equal(validateKEditTransition("", "changed", []).valid, false);
+test("an empty EditorTransaction log is valid only for an unchanged transition", () => {
+  assert.deepEqual(validateEditorTransactionTransition("same", "same", []), { valid: true });
+  assert.equal(validateEditorTransactionTransition("", "changed", []).valid, false);
 });
 
-test("KEdit transition validation fails closed on bad ranges and replay mismatch", () => {
+test("EditorTransaction transition validation fails closed on bad ranges and replay mismatch", () => {
   assert.match(
-    validateKEditTransition("abc", "x", [{
-      op: "repl", from: 0, to: 4, text: "x", voice: A, t: 1, tx: 0,
+    validateEditorTransactionTransition("abc", "x", [{
+      ...transaction(0, 4, "x", A, 1, 0),
     }]).reason ?? "",
     /outside/,
   );
   assert.match(
-    validateKEditTransition("abc", "abd", [{
-      op: "repl", from: 2, to: 3, text: "x", voice: A, t: 1, tx: 0,
+    validateEditorTransactionTransition("abc", "abd", [{
+      ...transaction(2, 3, "x", A, 1, 0),
     }]).reason ?? "",
     /do not reproduce/,
   );
 });
 
-test("only explicit crash recovery replaces an unusable partial KEdit log with a snapshot transition", () => {
-  const legacyText = "legacy draft";
-  const currentText = `${legacyText}!`;
-  const partialCapture: KEdit[] = [{
-    op: "ins",
-    from: legacyText.length,
-    to: legacyText.length,
-    text: "!",
-    voice: A,
-    t: 2,
-    tx: 0,
-  }];
+test("only explicit crash recovery replaces an unusable partial EditorTransaction log with a snapshot transition", () => {
+  const priorText = "prior draft";
+  const currentText = `${priorText}!`;
+  const partialCapture = [transaction(priorText.length, priorText.length, "!", A, 2, 0)];
 
   assert.match(
-    validateKEditTransition("", currentText, partialCapture).reason ?? "",
+    validateEditorTransactionTransition("", currentText, partialCapture).reason ?? "",
     /outside its pre-state/,
   );
-  const resolved = recoverStepKEdits("", currentText, partialCapture, A, 3);
+  const resolved = recoverStepEditorTransactions("", currentText, partialCapture, A, 3);
   assert.equal(resolved.source, "snapshot");
   assert.match(resolved.rejectedReason ?? "", /outside its pre-state/);
-  assert.deepEqual(validateKEditTransition("", currentText, resolved.kedits), { valid: true });
+  assert.deepEqual(validateEditorTransactionTransition("", currentText, resolved.editorTransactions), { valid: true });
 });
 
-test("ordinary Step rejects an invalid current-session KEdit journal", () => {
-  const partialCapture: KEdit[] = [{
-    op: "ins",
-    from: 12,
-    to: 12,
-    text: "!",
-    voice: A,
-    t: 2,
-    tx: 0,
-  }];
+test("ordinary Step rejects an invalid current-session EditorTransaction journal", () => {
+  const partialCapture = [transaction(12, 12, "!", A, 2, 0)];
 
   assert.throws(
-    () => resolveStepKEdits("", "legacy draft!", partialCapture, A, 3),
-    /invalid captured KEdit log.*outside its pre-state/,
+    () => resolveStepEditorTransactions("", "prior draft!", partialCapture, A, 3),
+    /invalid captured EditorTransaction log.*outside its pre-state/,
   );
 });
 
-test("Step recovery preserves a complete captured KEdit log exactly", () => {
-  const captured: KEdit[] = [{
-    op: "ins",
-    from: 3,
-    to: 3,
-    text: "!",
-    voice: A,
-    t: 2,
-    tx: 4,
-  }];
+test("Step recovery preserves a complete captured EditorTransaction log exactly", () => {
+  const captured = [transaction(3, 3, "!", A, 2, 4)];
 
-  assert.deepEqual(resolveStepKEdits("hey", "hey!", captured, B, 9), {
-    kedits: captured,
+  assert.deepEqual(resolveStepEditorTransactions("hey", "hey!", captured, B, 9), {
+    editorTransactions: captured,
     source: "captured",
   });
 });
@@ -277,43 +275,42 @@ test("dominantVoiceInRegion: empty run list → null", () => {
   assert.equal(dominantVoiceInRegion([], 0, 10), null);
 });
 
-// --- append-efficient KEdit log -----------------------------------------
+// --- append-efficient EditorTransaction log -----------------------------------------
 
-function edit(text: string, t: number): KEdit {
-  return { op: "ins", from: 0, to: 0, text, voice: A, t, tx: t };
+function edit(text: string, t: number): EditorTransaction {
+  return transaction(0, 0, text, A, t, t);
 }
 
-test("KEdit log appends chunks without changing the prior log", () => {
-  const first = appendKEditLog(EMPTY_KEDIT_LOG, [edit("a", 1)]);
-  const second = appendKEditLog(first, [edit("b", 2), edit("c", 3)]);
+test("EditorTransaction log appends chunks without changing the prior log", () => {
+  const first = appendEditorTransactionLog(EMPTY_EDITOR_TRANSACTION_LOG, [edit("a", 1)]);
+  const second = appendEditorTransactionLog(first, [edit("b", 2), edit("c", 3)]);
   assert.equal(first.length, 1);
   assert.equal(second.length, 3);
-  assert.deepEqual(keditLogToArray(first).map((e) => e.text), ["a"]);
-  assert.deepEqual(keditLogToArray(second).map((e) => e.text), ["a", "b", "c"]);
+  assert.deepEqual(editorTransactionLogToArray(first).map((entry) => entry.changes[0]?.text), ["a"]);
+  assert.deepEqual(editorTransactionLogToArray(second).map((entry) => entry.changes[0]?.text), ["a", "b", "c"]);
 });
 
-test("KEdit log round-trips a crash-pad array", () => {
+test("EditorTransaction log round-trips a crash-pad array", () => {
   const entries = [edit("a", 1), edit("b", 2)];
-  assert.deepEqual(keditLogToArray(keditLogFromArray(entries)), entries);
-  assert.deepEqual(keditLogToArray(undefined), []);
+  assert.deepEqual(editorTransactionLogToArray(editorTransactionLogFromArray(entries)), entries);
+  assert.deepEqual(editorTransactionLogToArray(undefined), []);
 });
 
-test("KEdit log continues transaction ids after capture and restore", () => {
-  const captured = keditLogFromArray([
-    { ...edit("a", 1), tx: 3 },
-    { ...edit("b", 2), tx: 4 },
+test("EditorTransaction log continues transaction ids after capture and restore", () => {
+  const captured = editorTransactionLogFromArray([
+    { ...edit("a", 1), sequence: 3 },
+    { ...edit("b", 2), sequence: 4 },
   ]);
-  assert.equal(nextKEditTx(captured), 5);
-  assert.equal(nextKEditTx(EMPTY_KEDIT_LOG), 0);
+  assert.equal(nextEditorTransactionSequence(captured), 5);
+  assert.equal(nextEditorTransactionSequence(EMPTY_EDITOR_TRANSACTION_LOG), 0);
 });
 
-test("KEdit transaction applies multi-range offsets against one pre-state", () => {
+test("editor transaction applies multi-range offsets against one pre-state", () => {
   const runs: Run[] = [{ voice: A, text: "abcd" }];
-  const edits: KEdit[] = [
-    { op: "repl", from: 0, to: 1, text: "A", voice: B, t: 1, tx: 0 },
-    { op: "repl", from: 2, to: 3, text: "C", voice: B, t: 1, tx: 0 },
-  ];
-  assert.deepEqual(applyKEditTransaction(runs, edits), [
+  const first = transaction(0, 1, "A", B, 1, 0);
+  const second = transaction(2, 3, "C", B, 1, 0);
+  const atomic = { ...first, changes: [...first.changes, ...second.changes] };
+  assert.deepEqual(applyEditorTransaction(runs, atomic), [
     { voice: B, text: "A" },
     { voice: A, text: "b" },
     { voice: B, text: "C" },
@@ -321,19 +318,19 @@ test("KEdit transaction applies multi-range offsets against one pre-state", () =
   ]);
 });
 
-test("Step drains its KEdit prefix but preserves edits typed while it is in flight", () => {
-  const stepped = appendKEditLog(EMPTY_KEDIT_LOG, [edit("a", 1), edit("b", 2)]);
-  const current = appendKEditLog(stepped, [edit("c", 3)]);
-  const remaining = dropKEditLogPrefix(current, stepped);
+test("Step drains its EditorTransaction prefix but preserves edits typed while it is in flight", () => {
+  const stepped = appendEditorTransactionLog(EMPTY_EDITOR_TRANSACTION_LOG, [edit("a", 1), edit("b", 2)]);
+  const current = appendEditorTransactionLog(stepped, [edit("c", 3)]);
+  const remaining = dropEditorTransactionLogPrefix(current, stepped);
 
-  assert.deepEqual(keditLogToArray(remaining).map((e) => e.text), ["c"]);
-  assert.equal(dropKEditLogPrefix(stepped, stepped), EMPTY_KEDIT_LOG);
+  assert.deepEqual(editorTransactionLogToArray(remaining).map((entry) => entry.changes[0]?.text), ["c"]);
+  assert.equal(dropEditorTransactionLogPrefix(stepped, stepped), EMPTY_EDITOR_TRANSACTION_LOG);
 });
 
-test("Step never drains an unrelated KEdit log", () => {
-  const current = keditLogFromArray([edit("a", 1), edit("b", 2)]);
-  const unrelated = keditLogFromArray([edit("a", 1)]);
-  assert.equal(dropKEditLogPrefix(current, unrelated), current);
+test("Step never drains an unrelated EditorTransaction log", () => {
+  const current = editorTransactionLogFromArray([edit("a", 1), edit("b", 2)]);
+  const unrelated = editorTransactionLogFromArray([edit("a", 1)]);
+  assert.equal(dropEditorTransactionLogPrefix(current, unrelated), current);
 });
 
 test("a freshly created empty file has no unstepped indicator", () => {
@@ -352,7 +349,7 @@ test("the first real change makes a fresh file unstepped", () => {
         runs: [],
         nodeId: "",
         tags: [],
-        kedits: appendKEditLog(EMPTY_KEDIT_LOG, [edit("a", 1), edit("", 2)]),
+        editorTransactions: appendEditorTransactionLog(EMPTY_EDITOR_TRANSACTION_LOG, [edit("a", 1), edit("", 2)]),
       },
       undefined,
     ),

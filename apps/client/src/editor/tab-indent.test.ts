@@ -6,6 +6,7 @@ import { EditorState, type Transaction } from "@codemirror/state";
 import { MARKDOWN_TAB_WIDTH, markdownIndentExtensions } from "./tab-indent.js";
 
 const source = [
+  readFileSync(new URL("./FileEditor.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
 ].join("\n");

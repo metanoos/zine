@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const app = [
+  readFileSync(new URL("./AppOverlays.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("../editor/FileEditor.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("./App.tsx", import.meta.url), "utf8"),
 ].join("\n");
 const contextGather = readFileSync(new URL("../ai/context-gather.ts", import.meta.url), "utf8");
@@ -24,7 +26,7 @@ const legacyOperations = [
   ["analyzeLLM", "function awaitViewMount"],
 ] as const;
 
-test("non-Extend MODEL actions retain approved preparation and stale-safe execution", () => {
+test("non-Append MODEL actions retain approved preparation and stale-safe execution", () => {
   for (const [name, next] of legacyOperations) {
     const source = functionBody(name, next);
     assert.match(source, /modelOperationControllerRef\.current!\.executeApproved\(/, name);
@@ -34,7 +36,7 @@ test("non-Extend MODEL actions retain approved preparation and stale-safe execut
   }
 });
 
-test("Extend persists and dispatches the exact Inspector-approved desktop request without auto-apply", () => {
+test("Append persists and dispatches the exact Inspector-approved desktop request without auto-apply", () => {
   const extend = functionBody("extendLLM", "function settleDeDupeLLM");
   assert.match(extend, /approvedRequest\.traceContextSelection/);
   assert.match(extend, /runtime\.persistApprovedExtend\(\{[\s\S]*prepared: approvedRequest/);
@@ -47,7 +49,14 @@ test("Extend persists and dispatches the exact Inspector-approved desktop reques
 test("Inspector dispatches the frozen PreparedOperation through App's explicit approval boundary", () => {
   assert.match(inspector, /preparedOperation\?\.messages \?\? \[\]/);
   assert.match(inspector, /onDispatch\(preparedOperation\)/);
-  assert.match(app, /onDispatch=\{\(prepared\) => \{[\s\S]*?\.approve\(prepared\);[\s\S]*?runOp\(opTargetPanel\(\), prepared\.operation, prepared\)/);
+  assert.match(
+    inspector,
+    /dispatchOnboardingTarget && op === "extend"[\s\S]*prompt-inspector-dispatch-onboarding/,
+  );
+  assert.match(
+    app,
+    /onDispatch=\{\(prepared\) => \{[\s\S]*?\.approve\(prepared\);[\s\S]*?runOp\(opTargetPanel\(\), prepared\.operation, prepared\)/,
+  );
   assert.doesNotMatch(inspector, /assembleOpMessages|prepareChatMessages|complete\(/);
 });
 
@@ -82,7 +91,7 @@ test("Analyze produces an ordinary review with citations to every analyzed sourc
   assert.match(source, /openInPanel\(newPath, destIdx\)/);
 });
 
-test("Settle retains current-session authoring while durable Extend accepts through its local receipt", () => {
+test("Settle retains current-session authoring while durable Append accepts through its local receipt", () => {
   const extend = functionBody("extendLLM", "function settleDeDupeLLM");
   const settle = functionBody("settleLLM", "function stirLLM");
   const stir = functionBody("stirLLM", "function replyLLM");
@@ -97,13 +106,15 @@ test("Settle retains current-session authoring while durable Extend accepts thro
   assert.doesNotMatch(stir, /traceAuthoring|buildAcceptedExtendChanges|validateTraceAuthoringResult/);
 });
 
-test("Extend binds to the fetched signed-chain selector boundary (shared by Inspector and autofire)", () => {
+test("Append binds to the exact signed-head selector boundary (shared by Inspector and autofire)", () => {
   // gatherExtendTraceContext is the single place the focused file's genesis-to-
-  // head chain is fetched and framed as a selected-trace-v1 boundary. Both the
-  // Inspector's prepare path and the Extend autofire branch call it, so the two
+  // head chain is resolved and framed as a selected-trace-v1 boundary. Both the
+  // Inspector's prepare path and the Append autofire branch call it, so the two
   // paths see byte-identical context.
   const gather = functionBody("gatherExtendTraceContext", "function prepareInspectorOperation");
-  assert.match(gather, /fetchChain\(liveFolder\.id, activePath\)/);
+  assert.match(gather, /resolveTraceIdentity\(focused\.nodeId\)/);
+  assert.match(gather, /resolveTraceChainAtHead\(traceId, focused\.nodeId\)/);
+  assert.doesNotMatch(gather, /fetchChain\(liveFolder\.id, activePath\)/);
   assert.match(gather, /policy: "selected-trace-v1"/);
   assert.match(gather, /verifyEvent/);
   const prepare = functionBody("prepareInspectorOperation", "function renderSteppedTraceReferences");
@@ -122,7 +133,7 @@ test("desktop Accept writes one exact crash-pad receipt before dispatching CodeM
   assert.match(apply, /prepared\.traceAuthoring/);
   assert.match(apply, /planned\.changes/);
   assert.match(apply, /transaction\.state\.field\(voiceField\)/);
-  assert.match(apply, /transaction\.state\.field\(keditField\)/);
+  assert.match(apply, /transaction\.state\.field\(editorTransactionField\)/);
   assert.ok(apply.indexOf("mirrorPad(") < apply.indexOf("view.dispatch(transaction)"));
   assert.ok(
     apply.indexOf("receipt?.intentId === input.intent.intentId")
@@ -206,7 +217,7 @@ test("recovery never publishes partial pins and cancellation or vault replacemen
   assert.match(app, /return \(\) => \{[\s\S]*desktopOperationRefreshSequenceRef\.current \+= 1;[\s\S]*desktopAuthorizedAttemptKeysRef\.current\.clear\(\);[\s\S]*controller\.abort\(\);[\s\S]*desktopOperationRuntimeRef\.current = null;[\s\S]*desktopOperationStoreRef\.current = null;/);
 });
 
-test("vault cleanup owns and aborts every desktop Extend barrier before releasing runtime refs", () => {
+test("vault cleanup owns and aborts every desktop Append barrier before releasing runtime refs", () => {
   const extend = functionBody("extendLLM", "function settleDeDupeLLM");
   const dispatch = functionBody(
     "dispatchDesktopOperationAttempt",

@@ -113,7 +113,7 @@ export type SelectedEvidenceSourceV1 = EvidenceSourceV1 | TextOnlyEvidenceSource
 
 /**
  * Runtime-validated process voice identity. Normal writers use an exact Nostr
- * signer pubkey; legacy protocol-valid KEdits outside that normative shape are
+ * signer pubkey; protocol-valid editor transactions outside that normative shape are
  * carried by the projector as an explicit UTF-16 code-unit identity instead.
  */
 export type TraceVoiceIdV1 = string;
@@ -129,7 +129,7 @@ export type TraceProcessFactV1 =
       lastCapturedAtMs?: number;
       spanMs: number;
       longestGapMs: number;
-      /** Present only when finite KEdit timestamps overflow derived JS differences. */
+      /** Present only when finite EditorTransaction timestamps overflow derived JS differences. */
       timingStatus?: "outside-summary-domain";
       undoCount: number;
       redoCount: number;

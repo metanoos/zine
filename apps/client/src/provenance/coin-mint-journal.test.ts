@@ -14,7 +14,7 @@ import {
   createCoinMintRecoverySessionRegistry,
   createCoinMintSourceReservationRegistry,
   finalizedCoinMintSourceText,
-  finalizedCoinMintSourceStepKEdits,
+  finalizedCoinMintSourceStepEditorTransactions,
   pendingCoinMints,
   pendingCoinMint,
   pendingCoinMintBlockingSourceMutation,
@@ -27,17 +27,43 @@ import {
 } from "./coin-mint-journal.js";
 import { resolvedBracketMarkup } from "./brackets.js";
 import {
-  applyKEditTransaction,
+  applyEditorTransaction,
+  editorTransactionLogFromArray,
+  editorTransactionLogToArray,
   flattenRuns,
-  keditLogFromArray,
-  keditLogToArray,
-  validateKEditTransition,
+  validateEditorTransactionTransition,
 } from "../workspace/workspace-core.js";
+import type { EditorTransaction } from "@zine/protocol";
 
 const SECRET = Uint8Array.from([...new Uint8Array(31), 1]);
 const VAULT_KEY_A = new Uint8Array(32).fill(0x51);
 const VAULT_KEY_B = new Uint8Array(32).fill(0x52);
 const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+
+function transaction(
+  sequence: number,
+  timestamp: number,
+  actor: string,
+  from: number,
+  to: number,
+  text: string,
+  intent?: "undo" | "redo",
+): EditorTransaction {
+  return {
+    sequence,
+    timestamp,
+    actor,
+    changes: [{
+      op: from === to ? "insert" : text === "" ? "delete" : "replace",
+      from,
+      to,
+      text,
+    }],
+    selectionBefore: null,
+    selectionAfter: null,
+    ...(intent ? { intent } : {}),
+  };
+}
 
 test("StrictMode replay reuses recovery while a real opt-out aborts it", async () => {
   const registry = createCoinMintRecoverySessionRegistry();
@@ -517,26 +543,17 @@ test("a delayed source citation Step preserves and rebases newer editor text", a
   const concurrentVoice = "b".repeat(64);
   const prefix = "typed before ";
   const suffix = " typed after";
-  const concurrentKEdits = [
-    {
-      op: "ins" as const,
-      from: 0,
-      to: 0,
-      text: prefix,
-      voice: concurrentVoice,
-      t: 1_001,
-      tx: 7,
-    },
-    {
-      op: "ins" as const,
-      from: prefix.length + "[[ phrase ]]".length,
-      to: prefix.length + "[[ phrase ]]".length,
-      text: suffix,
-      voice: concurrentVoice,
-      t: 1_002,
-      tx: 8,
-      intent: "redo" as const,
-    },
+  const concurrentTransactions = [
+    transaction(7, 1_001, concurrentVoice, 0, 0, prefix),
+    transaction(
+      8,
+      1_002,
+      concurrentVoice,
+      prefix.length + "[[ phrase ]]".length,
+      prefix.length + "[[ phrase ]]".length,
+      suffix,
+      "redo",
+    ),
   ];
   const rebased = rebaseFinalizedCoinMintSourceFile(
     pending,
@@ -554,33 +571,39 @@ test("a delayed source citation Step preserves and rebases newer editor text", a
     steppedText,
     "f".repeat(64),
     pending.coin.pubkey,
-    concurrentKEdits,
+    concurrentTransactions,
   );
   const expected = `${prefix}${steppedText}${suffix}`;
   assert.equal(flattenRuns(rebased.runs), expected);
   assert.equal(rebased.nodeId, "f".repeat(64));
   assert.deepEqual(rebased.tags, ["draft"]);
   assert.deepEqual(rebased.citationIds, ["c".repeat(64)]);
-  assert.deepEqual(keditLogToArray(rebased.kedits), [
-    concurrentKEdits[0],
+  assert.deepEqual(editorTransactionLogToArray(rebased.editorTransactions), [
+    concurrentTransactions[0],
     {
-      ...concurrentKEdits[1],
-      from: prefix.length + steppedText.length,
-      to: prefix.length + steppedText.length,
+      ...concurrentTransactions[1],
+      changes: [{
+        ...concurrentTransactions[1]!.changes[0],
+        from: prefix.length + steppedText.length,
+        to: prefix.length + steppedText.length,
+      }],
     },
   ]);
+  const replayed = editorTransactionLogToArray(
+    rebased.editorTransactions,
+  ).reduce(
+    (runs, editorTransaction) => applyEditorTransaction(runs, editorTransaction),
+    [{ voice: pending.coin.pubkey, text: steppedText }],
+  );
   assert.equal(
-    flattenRuns(applyKEditTransaction(
-      [{ voice: pending.coin.pubkey, text: steppedText }],
-      keditLogToArray(rebased.kedits),
-    )),
+    flattenRuns(replayed),
     expected,
   );
 });
 
-test("source recovery Steps preserve pending KEdit metadata before the citation transaction", async () => {
+test("source recovery Steps preserve pending EditorTransaction metadata before the citation transaction", async () => {
   const store = storage();
-  const pending = await preparePendingCoinMint("recovery-kedits", async () => ({
+  const pending = await preparePendingCoinMint("recovery-editor-transactions", async () => ({
     sourceFolderId: "source",
     mintFolderId: "mint",
     localPath: "Mint/phrase.md",
@@ -598,34 +621,38 @@ test("source recovery Steps preserve pending KEdit metadata before the citation 
   }), store, 1);
   const priorText = "before [[ phrase ]]";
   const currentText = "typed before [[ phrase ]]";
-  const captured = [{
-    op: "repl" as const,
-    from: 0,
-    to: "before".length,
-    text: "typed before",
-    voice: "b".repeat(64),
-    t: 5_001,
-    tx: 9,
-    intent: "redo" as const,
-  }];
+  const captured = [
+    transaction(
+      9,
+      5_001,
+      "b".repeat(64),
+      0,
+      "before".length,
+      "typed before",
+      "redo",
+    ),
+  ];
   const finalizedText = rebasedFinalizedCoinMintSourceText(
     pending,
     priorText,
     currentText,
   );
-  const composed = finalizedCoinMintSourceStepKEdits(
+  const composed = finalizedCoinMintSourceStepEditorTransactions(
     currentText,
     finalizedText,
-    keditLogFromArray(captured),
+    editorTransactionLogFromArray(captured),
     pending.coin.pubkey,
     5_002,
   );
 
   assert.deepEqual(composed[0], captured[0]);
-  assert.equal(composed[1]?.tx, 10);
-  assert.equal(composed[1]?.t, 5_002);
-  assert.equal(composed[1]?.voice, pending.coin.pubkey);
-  assert.equal(validateKEditTransition(priorText, finalizedText, composed).valid, true);
+  assert.equal(composed[1]?.sequence, 10);
+  assert.equal(composed[1]?.timestamp, 5_002);
+  assert.equal(composed[1]?.actor, pending.coin.pubkey);
+  assert.equal(
+    validateEditorTransactionTransition(priorText, finalizedText, composed).valid,
+    true,
+  );
 });
 
 test("headless span finalization replaces only its recorded UTF-16 source range", async () => {
@@ -1422,10 +1449,11 @@ test("Mint journal refuses to persist a record whose coin is not cryptographical
   assert.equal(pendingCoinMint("invalid-coin"), null);
 });
 
-// Negative paths for the KEdit rebase. The happy-path test above covers clean
+// Negative paths for the EditorTransaction rebase. The happy-path test above covers clean
 // prefix/suffix concurrent edits; these exercise the three fail-closed guards
-// inside rebaseCoinMintSourceKEdits (reached via rebaseFinalizedCoinMintSourceFile
-// when concurrentKEdits.length > 0). Each must throw instead of silently
+// inside rebaseCoinMintSourceEditorTransactions (reached through
+// rebaseFinalizedCoinMintSourceFile when concurrent transactions exist).
+// Each must throw instead of silently
 // producing a corrupted source Step.
 
 async function pendingBracketMint(operationKey: string) {
@@ -1448,8 +1476,8 @@ async function pendingBracketMint(operationKey: string) {
   }), store, 1);
 }
 
-test("rebase rejects concurrent KEdits that do not reconstruct currentText", async () => {
-  const pending = await pendingBracketMint("rebase-invalid-kedit");
+test("rebase rejects concurrent EditorTransactions that do not reconstruct currentText", async () => {
+  const pending = await pendingBracketMint("rebase-invalid-editor-transaction");
   const sourceText = "[[ phrase ]]";
   const steppedText = finalizedCoinMintSourceText(pending, sourceText);
   const current = {
@@ -1458,10 +1486,10 @@ test("rebase rejects concurrent KEdits that do not reconstruct currentText", asy
     tags: [],
     citationIds: [],
   };
-  // KEdit claims to insert at [0,0) but the resulting text would not equal
-  // currentText (it would have the prefix). validateKEditTransition fails.
-  const bogusKEdits = [
-    { op: "ins" as const, from: 0, to: 0, text: "typed before ", voice: "b".repeat(64), t: 1, tx: 1 },
+  // The transaction claims an insert at [0,0), but the resulting text would
+  // not equal currentText (it would have the prefix).
+  const bogusTransactions = [
+    transaction(1, 1, "b".repeat(64), 0, 0, "typed before "),
   ];
   assert.throws(
     () => rebaseFinalizedCoinMintSourceFile(
@@ -1471,20 +1499,20 @@ test("rebase rejects concurrent KEdits that do not reconstruct currentText", asy
       steppedText,
       "f".repeat(64),
       pending.coin.pubkey,
-      bogusKEdits,
+      bogusTransactions,
     ),
-    /invalid concurrent KEdit log/,
+    /invalid concurrent EditorTransaction log/,
   );
 });
 
-test("rebase rejects a concurrent KEdit that overlaps the citation range", async () => {
+test("rebase rejects a concurrent EditorTransaction that overlaps the citation range", async () => {
   const pending = await pendingBracketMint("rebase-overlap");
   const sourceText = "[[ phrase ]]";
   const steppedText = finalizedCoinMintSourceText(pending, sourceText);
   // minimalTextChange(sourceText, steppedText) returns a citation envelope
   // bounded by the divergence of "[[ phrase ]]" from "[[ phrase | <id> ]]" —
   // roughly {from=10, to=9} (the closing "]]" is shared, so the inner edit
-  // boundary inverts). A concurrent KEdit whose [from, to] straddles that
+  // boundary inverts). A concurrent transaction whose [from, to] straddles that
   // envelope (from < citationTo AND to > citationFrom) must fail closed
   // instead of letting the citation rewrite and the editor transaction both
   // claim the same bytes.
@@ -1497,8 +1525,15 @@ test("rebase rejects a concurrent KEdit that overlaps the citation range", async
     tags: [],
     citationIds: [],
   };
-  const overlappingKEdits = [
-    { op: "repl" as const, from: overlappingFrom, to: overlappingTo, text: replacedSlice, voice: "b".repeat(64), t: 1, tx: 1 },
+  const overlappingTransactions = [
+    transaction(
+      1,
+      1,
+      "b".repeat(64),
+      overlappingFrom,
+      overlappingTo,
+      replacedSlice,
+    ),
   ];
   assert.throws(
     () => rebaseFinalizedCoinMintSourceFile(
@@ -1508,7 +1543,7 @@ test("rebase rejects a concurrent KEdit that overlaps the citation range", async
       steppedText,
       "f".repeat(64),
       pending.coin.pubkey,
-      overlappingKEdits,
+      overlappingTransactions,
     ),
     /overlaps a concurrent editor transaction/,
   );

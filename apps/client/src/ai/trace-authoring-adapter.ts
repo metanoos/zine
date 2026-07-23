@@ -66,7 +66,7 @@ export class TraceAuthoringResultError extends Error {
 }
 
 /**
- * Compile Extend/Settle against the exact captured target before prompt
+ * Compile Append/Settle against the exact captured target before prompt
  * assembly. Legacy Stir deliberately remains outside this adapter in Wave 1.
  */
 export function compileTraceAuthoringOperation(
@@ -282,7 +282,7 @@ export function buildAcceptedExtendChanges(
     .sort((left, right) => left.from - right.from);
 }
 
-/** Canonical source bytes interpreted by Extend/Settle preparation and receipts. */
+/** Canonical source bytes interpreted by Append/Settle preparation and receipts. */
 export function traceSourceRangeForOperationV1(
   operation: "extend" | "settle",
   inputs: OpInputs,

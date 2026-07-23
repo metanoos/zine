@@ -97,7 +97,7 @@ async function main(): Promise<void> {
   } = await import("../../client/src/workspace/local-store.js");
   const {
     createTraceOperationId,
-    synthesizeKEditTransition,
+    synthesizeEditorTransactionTransition,
     verifyFolderTraceChain,
   } = await import("@zine/protocol");
   const { finalizeEvent, getPublicKey, verifyEvent } = await import("nostr-tools/pure");
@@ -238,7 +238,7 @@ async function main(): Promise<void> {
     signer,
     localOnly: true,
     operationId: leafOperationId,
-    kedits: synthesizeKEditTransition("", leafText, agentPubkey),
+    editorTransactions: synthesizeEditorTransactionTransition("", leafText, agentPubkey),
   });
   const fetchedLeaf = await fetchEventById(leaf.id);
   assert.ok(fetchedLeaf, "file Step was not durable");

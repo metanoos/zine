@@ -14,18 +14,21 @@ import {
   vaultStorageSessionAcceptsWork,
 } from "../storage/vault-storage.js";
 import {
+  editorTransactionLogFromArray,
+  editorTransactionLogToArray,
   flattenRuns,
-  keditLogFromArray,
-  keditLogToArray,
   minimalTextChange,
-  nextKEditTx,
+  nextEditorTransactionSequence,
   reconcileRunsText,
-  synthesizeKEditTransition,
-  validateKEditTransition,
+  synthesizeEditorTransactionTransition,
+  validateEditorTransactionTransition,
+  type EditorTransactionLog,
   type FileState,
-  type KEditLog,
 } from "../workspace/workspace-core.js";
-import type { KEdit } from "@zine/protocol";
+import type {
+  EditorSelectionState,
+  EditorTransaction,
+} from "@zine/protocol";
 
 const STORAGE_KEY = "zine.pending-coin-mints.v1";
 // Bounds localStorage write amplification and the recovery sweep cost each
@@ -198,105 +201,153 @@ export function resolvedFinalizedCoinMintSourceText(
 /** Preserve every editor transaction already pending on the source and append
  * the citation resolution as one later transaction. The workspace validates
  * this complete log against the prior signed Step before publication. */
-export function finalizedCoinMintSourceStepKEdits(
+export function finalizedCoinMintSourceStepEditorTransactions(
   currentText: string,
   finalizedText: string,
-  captured: KEditLog,
+  captured: EditorTransactionLog,
   signerPubkey: string,
   timestamp = Date.now(),
-): KEdit[] {
+): EditorTransaction[] {
   return [
-    ...keditLogToArray(captured),
-    ...synthesizeKEditTransition(
+    ...editorTransactionLogToArray(captured),
+    ...synthesizeEditorTransactionTransition(
       currentText,
       finalizedText,
       signerPubkey,
       timestamp,
-      nextKEditTx(captured),
+      nextEditorTransactionSequence(captured),
     ),
   ];
 }
 
-function applyKEditGroup(text: string, edits: readonly KEdit[]): string {
-  const ordered = edits.map((edit, index) => ({ edit, index })).sort(
+function applyEditorTransactionText(
+  text: string,
+  transaction: EditorTransaction,
+): string {
+  const ordered = transaction.changes.map((change, index) => ({ change, index })).sort(
     (left, right) =>
-      right.edit.from - left.edit.from ||
-      right.edit.to - left.edit.to ||
+      right.change.from - left.change.from ||
+      right.change.to - left.change.to ||
       right.index - left.index,
   );
   let current = text;
-  for (const { edit } of ordered) {
-    current = current.slice(0, edit.from) + edit.text + current.slice(edit.to);
+  for (const { change } of ordered) {
+    current = current.slice(0, change.from) +
+      change.text +
+      current.slice(change.to);
   }
   return current;
 }
 
 /** Operationally move real editor transactions around the citation metadata
- * rewrite. Only offsets change; voice, timestamp, transaction id, and intent
- * remain exact. */
-function rebaseCoinMintSourceKEdits(
+ * rewrite. Only offsets change; actor, timestamp, sequence, and intent remain
+ * exact. Selection evidence is retained when it translates unambiguously and
+ * otherwise omitted rather than fabricated. */
+function rebaseCoinMintSourceEditorTransactions(
   sourceText: string,
   steppedText: string,
   currentText: string,
   expectedRebasedText: string,
-  edits: readonly KEdit[],
-): KEdit[] {
-  if (!validateKEditTransition(sourceText, currentText, edits).valid) {
-    throw new Error("Mint source contains an invalid concurrent KEdit log");
+  transactions: readonly EditorTransaction[],
+): EditorTransaction[] {
+  if (!validateEditorTransactionTransition(
+    sourceText,
+    currentText,
+    transactions,
+  ).valid) {
+    throw new Error(
+      "Mint source contains an invalid concurrent EditorTransaction log",
+    );
   }
   const sourceChange = minimalTextChange(sourceText, steppedText);
-  if (!sourceChange) return [...edits];
+  if (!sourceChange) return [...transactions];
   const replacementDelta = sourceChange.insert.length -
     (sourceChange.to - sourceChange.from);
   let citationFrom = sourceChange.from;
   let citationTo = sourceChange.to;
   let original = sourceText;
   let rebased = steppedText;
-  const transformed: KEdit[] = [];
-  let cursor = 0;
-  while (cursor < edits.length) {
-    const tx = edits[cursor]!.tx;
-    const group: KEdit[] = [];
-    while (cursor < edits.length && edits[cursor]!.tx === tx) {
-      group.push(edits[cursor++]!);
-    }
+  const transformed: EditorTransaction[] = [];
+  const translateSelection = (
+    selection: EditorSelectionState | null,
+  ): EditorSelectionState | null => {
+    if (selection === null) return null;
+    const ranges = selection.ranges.map((range) => {
+      const translate = (position: number) => {
+        if (position <= citationFrom) return position;
+        if (position >= citationTo) return position + replacementDelta;
+        return null;
+      };
+      const anchor = translate(range.anchor);
+      const head = translate(range.head);
+      return anchor === null || head === null ? null : { anchor, head };
+    });
+    return ranges.some((range) => range === null)
+      ? null
+      : {
+          ranges: ranges as { anchor: number; head: number }[],
+          main: selection.main,
+        };
+  };
+  for (const transaction of transactions) {
     let shiftBeforeCitation = 0;
-    const transformedGroup = group.map((edit) => {
-      const before = edit.to <= citationFrom;
-      const after = edit.from >= citationTo;
+    const transformedChanges = transaction.changes.map((change) => {
+      const before = change.to <= citationFrom;
+      const after = change.from >= citationTo;
       if (!before && !after) {
         throw new Error("Mint source citation overlaps a concurrent editor transaction");
       }
       if (before) {
-        shiftBeforeCitation += edit.text.length - (edit.to - edit.from);
-        return { ...edit };
+        shiftBeforeCitation += change.text.length - (change.to - change.from);
+        return { ...change };
       }
       return {
-        ...edit,
-        from: edit.from + replacementDelta,
-        to: edit.to + replacementDelta,
+        ...change,
+        from: change.from + replacementDelta,
+        to: change.to + replacementDelta,
       };
     });
-    original = applyKEditGroup(original, group);
-    rebased = applyKEditGroup(rebased, transformedGroup);
+    const transformedTransaction: EditorTransaction = {
+      ...transaction,
+      changes: transformedChanges,
+      selectionBefore: transaction.changes.length === 0
+        ? translateSelection(transaction.selectionBefore)
+        : null,
+      selectionAfter: transaction.changes.length === 0
+        ? translateSelection(transaction.selectionAfter)
+        : null,
+    };
+    if (
+      transformedTransaction.changes.length === 0 &&
+      (
+        transformedTransaction.selectionBefore === null ||
+        transformedTransaction.selectionAfter === null
+      )
+    ) {
+      continue;
+    }
+    original = applyEditorTransactionText(original, transaction);
+    rebased = applyEditorTransactionText(rebased, transformedTransaction);
     citationFrom += shiftBeforeCitation;
     citationTo += shiftBeforeCitation;
-    transformed.push(...transformedGroup);
+    transformed.push(transformedTransaction);
   }
   if (
     original !== currentText ||
     rebased !== expectedRebasedText ||
-    !validateKEditTransition(steppedText, rebased, transformed).valid
+    !validateEditorTransactionTransition(steppedText, rebased, transformed).valid
   ) {
-    throw new Error("Mint source concurrent KEdits could not be rebased truthfully");
+    throw new Error(
+      "Mint source concurrent EditorTransactions could not be rebased truthfully",
+    );
   }
   return transformed;
 }
 
 /** Advance a delayed source-citation Step without overwriting edits made while
  * its relay barrier was in flight. The citation replacement is translated
- * from the captured source, and real concurrent KEdits retain their authorship
- * and transaction metadata on top of the Step that actually landed. */
+ * from the captured source, and real concurrent EditorTransactions retain
+ * their authorship and transaction metadata on top of the Step that landed. */
 export function rebaseFinalizedCoinMintSourceFile(
   record: PendingCoinMint,
   current: FileState,
@@ -304,7 +355,7 @@ export function rebaseFinalizedCoinMintSourceFile(
   steppedText: string,
   steppedNodeId: string,
   signerPubkey: string,
-  concurrentKEdits: readonly KEdit[] = [],
+  concurrentEditorTransactions: readonly EditorTransaction[] = [],
 ): FileState {
   const currentText = flattenRuns(current.runs);
   if (finalizedCoinMintSourceText(record, sourceText) !== steppedText) {
@@ -312,21 +363,27 @@ export function rebaseFinalizedCoinMintSourceFile(
   }
   const rebasedText = rebasedFinalizedCoinMintSourceText(record, sourceText, currentText);
   const runs = reconcileRunsText(current.runs, rebasedText, signerPubkey);
-  const pending = concurrentKEdits.length > 0
-    ? rebaseCoinMintSourceKEdits(
+  const pending = concurrentEditorTransactions.length > 0
+    ? rebaseCoinMintSourceEditorTransactions(
         sourceText,
         steppedText,
         currentText,
         rebasedText,
-        concurrentKEdits,
+        concurrentEditorTransactions,
       )
-    : synthesizeKEditTransition(steppedText, rebasedText, signerPubkey);
-  const { kedits: _priorKedits, ...rest } = current;
+    : synthesizeEditorTransactionTransition(
+        steppedText,
+        rebasedText,
+        signerPubkey,
+      );
+  const { editorTransactions: _priorTransactions, ...rest } = current;
   return {
     ...rest,
     runs,
     nodeId: steppedNodeId,
-    ...(pending.length > 0 ? { kedits: keditLogFromArray(pending) } : {}),
+    ...(pending.length > 0
+      ? { editorTransactions: editorTransactionLogFromArray(pending) }
+      : {}),
   };
 }
 
