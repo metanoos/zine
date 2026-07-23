@@ -83,6 +83,50 @@ test("source updater preserves every dirty checkout", () => {
   }
 });
 
+test("source updater preserves ignored files that an update starts tracking", () => {
+  const { root, author, install } = fixture();
+  try {
+    writeFileSync(join(install, ".git", "info", "exclude"), ".env\n");
+    writeFileSync(join(install, ".env"), "LOCAL_SECRET\n");
+
+    writeFileSync(join(author, ".env"), "UPSTREAM_VALUE\n");
+    git(author, "add", ".env");
+    git(author, "commit", "-m", "track environment template");
+    git(author, "push", "origin", "main");
+
+    const before = git(install, "rev-parse", "HEAD");
+    const result = updateSourceCheckout({ repoRoot: install, logger: quietLogger([]) });
+
+    assert.equal(result.status, "local-collision");
+    assert.equal(git(install, "rev-parse", "HEAD"), before);
+    assert.equal(readFileSync(join(install, ".env"), "utf8"), "LOCAL_SECRET\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("source updater preserves a clean branch that diverged from upstream", () => {
+  const { root, author, install } = fixture();
+  try {
+    pushVersion(author, "remote");
+    git(install, "config", "user.name", "Zine test");
+    git(install, "config", "user.email", "zine-test@example.invalid");
+    writeFileSync(join(install, "version.txt"), "local\n");
+    git(install, "add", "version.txt");
+    git(install, "commit", "-m", "local version");
+
+    const before = git(install, "rev-parse", "HEAD");
+    const result = updateSourceCheckout({ repoRoot: install, logger: quietLogger([]) });
+
+    assert.equal(result.status, "diverged");
+    assert.equal(git(install, "rev-parse", "HEAD"), before);
+    assert.equal(readFileSync(join(install, "version.txt"), "utf8"), "local\n");
+    assert.equal(git(install, "status", "--porcelain"), "");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("source updater can be disabled for pinned or offline launches", () => {
   const { root, install } = fixture();
   try {
@@ -105,6 +149,9 @@ test("npm start owns source updates while npm run dev stays pinned", () => {
 
   assert.equal(packageJson.scripts.start, "node scripts/dev.mjs start");
   assert.equal(packageJson.scripts.dev, "node scripts/dev.mjs dev");
-  assert.match(launcher, /const sourceUpdate = mode === "start"/);
+  assert.match(
+    launcher,
+    /mode === "start" && !sourceUpdateRestarted[\s\S]*?updateSourceCheckout/,
+  );
   assert.match(launcher, /const tauriMode = mode === "start" \? "dev" : mode/);
 });

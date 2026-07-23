@@ -6,7 +6,7 @@ import type { EditorView } from "@codemirror/view";
 import {
   bracketExtensions,
   bracketRangeAt,
-  doubleBackspaceUnwrapCommand,
+  doubleBackspaceReopenCommand,
   findAddedInlineCitations,
   findInProgressBracket,
   findMintSelectionTarget,
@@ -193,7 +193,7 @@ test("double Backspace reopens a resolved bracket while preserving its opener", 
       state = state.update(spec).state;
     },
   } as unknown as EditorView;
-  const command = doubleBackspaceUnwrapCommand(() => time);
+  const command = doubleBackspaceReopenCommand(() => time);
 
   assert.equal(command(view), true);
   assert.equal(state.doc.toString(), "before [[ kept | node-1 ]] after");
@@ -225,7 +225,7 @@ test("double Backspace from after a pending chip reopens it for editing", () => 
       state = state.update(spec).state;
     },
   } as unknown as EditorView;
-  const command = doubleBackspaceUnwrapCommand(() => time);
+  const command = doubleBackspaceReopenCommand(() => time);
 
   assert.equal(command(view), true);
   assert.deepEqual(

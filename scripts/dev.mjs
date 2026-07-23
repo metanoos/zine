@@ -185,10 +185,11 @@ if (mode !== "start" && mode !== "dev" && mode !== "build") {
   process.exit(1);
 }
 
-const sourceUpdate = mode === "start"
+const sourceUpdateRestarted = process.env.ZINE_SOURCE_UPDATE_RESTARTED === "1";
+const sourceUpdate = mode === "start" && !sourceUpdateRestarted
   ? updateSourceCheckout({ disabled: process.argv.includes("--no-update") })
   : { status: "current" };
-if (sourceUpdate.status === "updated" && process.env.ZINE_SOURCE_UPDATE_RESTARTED !== "1") {
+if (sourceUpdate.status === "updated") {
   // Reload the launcher after a fast-forward so changes to this script and its
   // imported bootstrap helpers take effect immediately, not one launch later.
   console.log("→ restarting with the updated source…");

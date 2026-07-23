@@ -11297,7 +11297,12 @@ function App() {
           </ViewErrorBoundary>
         ) : activeView === "globe" ? (
           <ViewErrorBoundary view="globe">
-            <GlobeView query={socialQuery} />
+            <>
+              {stackOpenError ? (
+                <p className="sampler-status error" role="alert">{stackOpenError}</p>
+              ) : null}
+              <GlobeView query={socialQuery} />
+            </>
           </ViewErrorBoundary>
         ) : activeView === "listings" ? (
           <ViewErrorBoundary view="listings">

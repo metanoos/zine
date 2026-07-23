@@ -7,6 +7,7 @@
 // the version already on disk.
 
 import { spawnSync } from "node:child_process";
+import { lstatSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,6 +34,34 @@ function succeeded(result) {
 
 function shortRevision(revision) {
   return revision.slice(0, 8);
+}
+
+function pathExists(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    // If metadata cannot be inspected, treat the path as occupied. Updating is
+    // optional; preserving an unreadable local path is not.
+    return true;
+  }
+}
+
+function incomingPathCollisions(repoRoot) {
+  // Git is willing to replace ignored files when an incoming revision starts
+  // tracking the same path. Limit the scan to paths that are absent from HEAD
+  // and newly present upstream; `--no-renames` also exposes rename destinations
+  // as additions.
+  const addedResult = runGit(
+    ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", "HEAD", "@{upstream}"],
+    { repoRoot },
+  );
+  if (!succeeded(addedResult)) return null;
+  return addedResult.stdout
+    .split("\0")
+    .filter(Boolean)
+    .filter((path) => pathExists(join(repoRoot, path)));
 }
 
 function autoUpdateDisabled(env) {
@@ -152,6 +181,18 @@ export function updateSourceCheckout({
     return { status: "diverged", branch, upstream, before };
   }
 
+  const collisions = incomingPathCollisions(repoRoot);
+  if (collisions === null) {
+    logger.warn("! source update safety check failed; using the current checkout");
+    return { status: "failed", branch, upstream, before };
+  }
+  if (collisions.length > 0) {
+    logger.warn(
+      `! source update skipped (incoming files would replace local paths: ${collisions.join(", ")})`,
+    );
+    return { status: "local-collision", branch, upstream, before };
+  }
+
   const mergeResult = runGit(["merge", "--ff-only", "--quiet", "@{upstream}"], { repoRoot });
   if (!succeeded(mergeResult)) {
     logger.warn("! source fast-forward failed; using the current checkout");
@@ -166,7 +207,17 @@ export function updateSourceCheckout({
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const result = updateSourceCheckout();
-  if (["dirty", "diverged", "failed", "detached", "no-upstream", "not-checkout"].includes(result.status)) {
+  if (
+    [
+      "dirty",
+      "diverged",
+      "failed",
+      "detached",
+      "local-collision",
+      "no-upstream",
+      "not-checkout",
+    ].includes(result.status)
+  ) {
     process.exitCode = 1;
   }
 }

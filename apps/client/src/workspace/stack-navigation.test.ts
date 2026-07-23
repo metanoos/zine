@@ -39,4 +39,9 @@ test("Stacks and Spaces route folder cards through the Press navigation handler"
     app,
     /addEventListener\("zine:open-folder", onOpen\)[\s\S]*?removeEventListener\("zine:open-folder", onOpen\)/,
   );
+  assert.match(
+    app,
+    /activeView === "globe"[\s\S]*?stackOpenError[\s\S]*?<GlobeView/,
+    "Spaces must surface a failed folder-id lookup instead of ignoring the click",
+  );
 });
