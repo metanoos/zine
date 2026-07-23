@@ -244,7 +244,7 @@ test("Settle protected tokens cannot collide with literal target prose", () => {
   );
 });
 
-test("Extend stages deletion and accepted insertion together, never during preparation", () => {
+test("Append stages deletion and accepted insertion together, never during preparation", () => {
   const text = "Lead\n((continue briefly))";
   const result = compileTraceAuthoringOperation({
     operation: "extend",
@@ -308,7 +308,7 @@ test("Extend stages deletion and accepted insertion together, never during prepa
   );
 });
 
-test("Extend without an authorized directive keeps the legacy single insertion", () => {
+test("Append without an authorized directive keeps the legacy single insertion", () => {
   const text = "Lead";
   const result = compileTraceAuthoringOperation({
     operation: "extend",

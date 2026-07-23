@@ -48,23 +48,102 @@ missing destination folders and updates each ancestor manifest. Recursive
 fork-on-write through an already-foreign folder remains the separate deferred
 case documented below.
 
+## Collaboration core
+
+The first collaboration vertical slice is provider-neutral, durable, and
+folder-scoped. A Collaboration copies the same singular mount plus shield
+resolver used for MODEL context, then intersects that scope with default-deny
+participant capabilities. It is not limited to one simultaneous editing
+window: participants may disconnect, edit at different times, and catch up
+from retained signed operation history. Connected peers additionally exchange
+ephemeral live presence.
+
+The directory is a typed Yjs document keyed by the workspace entries' existing
+stable IDs; joining a Collaboration does not mint replacement file or folder
+identities. Every readable file has its own Y.Doc/Y.Text boundary. Participant
+identities sign edit batches and individual folder operations, while the
+operation's actor pubkey remains voice attribution. Joining requires an
+explicit `collaboration.join` grant. Initial directory/file snapshots are
+recipient-bound and signed by the owner; unknown or unreadable file documents
+are rejected at bootstrap and access time. Merged Yjs state is never used to
+infer actor boundaries: the signed accepted-operation log stays parallel to it.
+
+Remote cursors use ephemeral Awareness and Yjs-relative positions. Exact
+before/after selections remain in signed editor transactions. CodeMirror
+keeps a short same-file, same-actor run in an isolated local draft, then emits
+`file.edit.batch`: one merged Yjs update and one signature over its causal base
+snapshot plus the untouched ordered `editorTransactions` array. A receiver
+reconstructs that base and rejects an update whose materialized text differs
+from the signed transactions. The default flush window is 80 ms, bounded to 32
+transactions or roughly 32 KiB, with immediate flushes at undo/redo, blur,
+file/voice teardown, explicit Step preparation, and before an intervening
+remote edit is applied. A failed or revoked commit never mutates shared Yjs;
+the local draft becomes a private patch/fork. CodeMirror also uses incremental
+remote deltas and actor-scoped undo, so Undo never removes a peer's work.
+Concurrent same-name directory operations converge: the lowest stable ID keeps
+the requested name and other entries receive deterministic hash suffixes in
+the materialized workspace. A Step captures and acknowledges one exact
+accepted batch prefix, leaving edits that arrived during signing pending. The
+current in-memory peer link proves the transport boundary; production durable
+storage, peer discovery, encrypted per-file transport, invitation/access UI,
+and visible collaboration UI remain later slices. Overall panel layouts are
+not Collaboration state.
+
+## Stage core
+
+Stage is a separate optional document inside one Collaboration, not a mode for the
+whole workspace. Its shared state is a strict, versioned cluster of one or two
+stable-ID panels containing resource, mode, active panel, arrangement,
+selection, scroll/fold/preview anchors, and an optional Replay presentation.
+Signed participant commands enforce the Collaboration's view/start/control/end
+capabilities and readable mount boundary. The starter is the first Stage
+Controller; passing control requires recipient acceptance. A disconnected
+Controller freezes Stage during a short grace period, then leaves it vacant
+for owner recovery or ending.
+
+The workspace adapter keeps the rest of each layout private. Joining an active
+Stage follows automatically; direct navigation, scroll, selection, or typing
+inside a followed panel detaches locally first, while private-panel work does
+not. Rejoin applies the complete latest snapshot. Ending Stage leaves its final
+panels as ordinary private panels. In-place Replay suspension is an opaque
+participant-private sidecar, so unstepped text, scroll pixels, and undo state
+never enter shared Stage JSON. Production peer transport and visible Stage
+controls are still deferred.
+
+The first Replay-in-Stage presentation reducer is also implemented. It changes
+exactly one stable panel in place, preserves the panel's slot and arrangement,
+scopes playhead changes to that panel, and pauses/resets when its trace set
+changes. Return to Work accepts only restored view fields; the opaque editor
+suspension remains local. If a follower presses Play or scrubs, the same
+transition first detaches and mutates only that participant's private
+projection. The visible controls and concrete CodeMirror suspension/restore
+binding are still deferred.
+
+Two transport boundaries are intentionally not hidden by this core. Stage
+projection gating is not plaintext confidentiality: a provider must avoid
+delivering unreadable Stage commands, and production read privacy needs
+encryption. Controller disconnect/vacancy transitions also require one ordered
+provider-wide fence; independently inferred disconnects on an unordered mesh
+can diverge. A production peer provider must supply that sequencer/epoch before
+these transitions are wired to P2P.
+
 ## Trace-aware MODEL preparation
 
 Direct single-shot MODEL gestures freeze their target revision, mounted
 context, provider profile, voice, lens, and exact messages before approval.
 Prompt Inspector shows that prepared request and its trace-context boundary.
 
-Extend and Settle are the first operations using the shared
+Append (internal operation id `extend`) and Settle are the first operations using the shared
 `@zine/trace-context` syntax kernel. `[[…]]` remains exact quoted data.
 A complete `((…))` candidate becomes an instruction only when every byte was
 typed directly by the acting local author during the current mounted editor
 session and lies wholly inside the prepared operation range. Paste, drop,
 MODEL, undo/redo restoration, reload, mixed origin, wrong-author, malformed,
-and unknown bytes remain inert quoted data. Accepted Extend/Settle results
+and unknown bytes remain inert quoted data. Accepted Append/Settle results
 validate protected content and remove consumed directives as part of the same
 editor transaction.
 
-Desktop Extend adds a vault-scoped encrypted operation journal around that
+Desktop Append adds a vault-scoped encrypted operation journal around that
 prepared boundary. It durably records the exact approved request, selected
 context, provider profile, attempt, provisional result, local application
 intent, and exact crash-pad receipt. Recovery never redispatches a provider
@@ -114,7 +193,7 @@ cargo test
 ### Cross-model prompt evaluation
 
 The prompt eval compares role-name-only prompts, the built-in operation
-contracts, and contracts plus operation-scoped lenses for Extend, Settle,
+contracts, and contracts plus operation-scoped lenses for Append, Settle,
 Stir, Reply, and Receive. It requires at least two models and reads API keys
 from named environment variables rather than from the config file:
 

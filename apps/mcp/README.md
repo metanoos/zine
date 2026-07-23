@@ -55,8 +55,8 @@ trace-provenance layer:
 Step records the supplied state locally. Send steps the supplied present state
 only when it differs from the latest Step, then publishes the current node.
 Because a headless tool call is one discrete authoring action, each changed
-file Step records it as one atomic KEdit from the previous snapshot to the
-supplied text. Every file node therefore carries a replay-valid KEdit array;
+file Step records it as one atomic editor transaction from the previous snapshot to the
+supplied text. Every file node therefore carries a replay-valid editor transaction array;
 an unchanged metadata-only checkpoint carries `[]`.
 The sovereignty filter: not every Step is Sent, and callers do not need to Step
 immediately before Send. A Step first persists as an exact signed event in the
@@ -235,7 +235,7 @@ Paste that locator into **Desktop action palette → Open Trace**. The desktop
 verifies the exact signed file nucleus and renders any reachable history. Send
 publishes only the chosen file node, so earlier private Steps may correctly be
 absent; the nucleus remains self-sufficient and verifiable as `SNAPSHOT ONLY`
-until its process ancestry is available. Complete valid KEdit process is
+until its process ancestry is available. Complete valid editor transaction process is
 reported as `FULL TRACE`; broken signature, hash, or lineage is `INVALID`.
 
 ## Development

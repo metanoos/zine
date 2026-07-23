@@ -17,8 +17,6 @@
     "eval:prompts": "tsx scripts/prompt-eval.ts"
   },
   "dependencies": {
-    "@zine/protocol": "file:../../packages/protocol",
-    "@zine/trace-context": "file:../../packages/trace-context",
     "@codemirror/commands": "^6.10.4",
     "@codemirror/language": "^6.12.4",
     "@codemirror/state": "^6.7.1",
@@ -30,6 +28,8 @@
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-stronghold": "2.3.1",
     "@types/diff": "^7.0.2",
+    "@zine/protocol": "file:../../packages/protocol",
+    "@zine/trace-context": "file:../../packages/trace-context",
     "codemirror": "^6.0.2",
     "diff": "^9.0.0",
     "lucide-react": "^1.24.0",
@@ -37,7 +37,9 @@
     "marked": "^18.0.6",
     "nostr-tools": "^2.23.9",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.31"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

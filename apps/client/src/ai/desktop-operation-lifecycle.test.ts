@@ -518,7 +518,7 @@ test("creation and parsing reject rehashed manifests with reordered selected evi
   );
 });
 
-test("creation rejects mismatched context identity, non-Extend operations, split Unicode, and unbounded retention", async () => {
+test("creation rejects mismatched context identity, non-Append operations, split Unicode, and unbounded retention", async () => {
   const selected = await selection();
   const base = {
     operationId: "operation-invalid",
@@ -591,7 +591,7 @@ test("creation rejects mismatched context identity, non-Extend operations, split
   assert.throws(() => createDesktopOperationEnvelopeV1({
     ...base,
     prepared: { ...base.prepared, operation: "settle" },
-  }), /supports Extend only/);
+  }), /supports Append only/);
   assert.throws(() => createDesktopOperationEnvelopeV1({
     ...base,
     prepared: { ...base.prepared, version: 2 } as never,
@@ -659,7 +659,7 @@ test("creation rejects mismatched context identity, non-Extend operations, split
   }), /splits a Unicode scalar/);
 });
 
-test("real preparation and selector bind an Extend source selection separately from its apply point", async () => {
+test("real preparation and selector bind an Append source selection separately from its apply point", async () => {
   const body = "Opening paragraph. Selected 🧠 seed";
   const sourceFrom = body.indexOf("Selected");
   const sourceTo = body.length;

@@ -13,6 +13,8 @@ import { BUILTIN_AI_PALETTE_REGISTRY } from "../ai/palette-registry.js";
 const appSource = [
   readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("../app/AppOverlays.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("./FileEditor.tsx", import.meta.url), "utf8"),
 ].join("\n");
 const cssSource = readFileSync(new URL("../app/App.css", import.meta.url), "utf8");
 const voiceChipSource = readFileSync(new URL("../identity/VoiceChip.tsx", import.meta.url), "utf8");
@@ -438,12 +440,16 @@ test("the palette permits a deliberate Step when the focused trace is current", 
   assert.doesNotMatch(appSource, /No updates since the last Step/);
 });
 
-test("switching files collapses the previous editor range", () => {
+test("switching files restores the next file's captured selection", () => {
   const switchedBranch = appSource.match(
     /if \(switched\) \{([\s\S]*?)\n\s*return;\n\s*\}/,
   )?.[1] ?? "";
 
-  assert.match(switchedBranch, /selection:\s*EditorSelection\.cursor\(0\)/);
+  assert.match(switchedBranch, /selectionAfterEditorTransactions\(/);
+  assert.match(
+    switchedBranch,
+    /restoreFileUndoHistory\([\s\S]*?nextSelection,\s*\)\.update\(/,
+  );
 });
 
 test("only a completed Mint entry presents as an immutable Coin", () => {

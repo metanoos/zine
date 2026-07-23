@@ -253,7 +253,7 @@ export function createDesktopOperationEnvelopeV1(
   requireTimestamp(input.createdAtMs, "createdAtMs");
   if (input.prepared.version !== 1) fail("prepared operation version is unsupported");
   if (input.prepared.operation !== "extend") {
-    fail("the first durable desktop contract supports Extend only");
+    fail("the first durable desktop contract supports Append only");
   }
   requireHash(input.prepared.preparedRequestHash, "prepared preparedRequestHash");
   if (
@@ -492,7 +492,7 @@ export function validateDesktopOperationEnvelopeV1(value: unknown): asserts valu
   }
   const manifest = selected.manifest as unknown as Record<string, unknown>;
   const manifestOperation = requireRecord(manifest.operation, "selectedContext.manifest.operation");
-  if (manifestOperation.operation !== "extend") fail("selected context is not for Extend");
+  if (manifestOperation.operation !== "extend") fail("selected context is not for Append");
   const manifestTarget = requireRecord(manifestOperation.target, "selectedContext.manifest.operation.target");
   const manifestCurrentText = requireText(manifestTarget.currentText, "manifest target currentText");
   validatePreparedTraceAuthoringV1(
@@ -747,7 +747,7 @@ function validateSelectedContext(
     || target.contentHash !== prepared.targetRevision.contentHash
     || (target.chosenPath !== undefined && target.chosenPath !== prepared.targetRevision.path)
   ) {
-    fail("selected context is not bound to the exact prepared Extend target");
+    fail("selected context is not bound to the exact prepared Append target");
   }
   if (contentFingerprint(target.currentText) !== prepared.targetRevision.contentHash) {
     fail("selected current text does not match the prepared target content hash");
@@ -773,7 +773,7 @@ function validateSelectedOperationRange(
     currentText,
   );
   if (range.fromUtf16 !== expected.fromUtf16 || range.toUtf16 !== expected.toUtf16) {
-    fail("selected operation range does not match the prepared Extend source range");
+    fail("selected operation range does not match the prepared Append source range");
   }
 }
 
@@ -781,7 +781,7 @@ function requireExtendTraceAuthoring(
   value: PreparedOperation["traceAuthoring"],
 ): PreparedTraceAuthoringV1 {
   if (!value || value.operation !== "extend") {
-    fail("prepared Extend must carry its exact trace-authoring apply contract");
+    fail("prepared Append must carry its exact trace-authoring apply contract");
   }
   return value;
 }
@@ -812,7 +812,7 @@ function validatePreparedTraceAuthoringV1(
   if (
     operationRange.fromUtf16 !== expectedRange.fromUtf16
     || operationRange.toUtf16 !== expectedRange.toUtf16
-  ) fail("prepared trace authoring range does not match the exact Extend source range");
+  ) fail("prepared trace authoring range does not match the exact Append source range");
   if (
     requireText(authoring.operationText, "prepared.traceAuthoring.operationText")
     !== currentText.slice(operationRange.fromUtf16, operationRange.toUtf16)
@@ -821,7 +821,7 @@ function validatePreparedTraceAuthoringV1(
   requireText(authoring.quotedExcerptSection, "prepared.traceAuthoring.quotedExcerptSection");
   requireText(authoring.promptTargetText, "prepared.traceAuthoring.promptTargetText");
   if (!Array.isArray(authoring.protectedTokens) || authoring.protectedTokens.length !== 0) {
-    fail("prepared Extend trace authoring must not carry Settle protected tokens");
+    fail("prepared Append trace authoring must not carry Settle protected tokens");
   }
 
   const compiled = requireRecord(authoring.compiled, "prepared.traceAuthoring.compiled");
@@ -1171,9 +1171,9 @@ function requireExtendRange(inputs: Record<string, unknown>, currentText: string
   const from = inputs.rangeFrom;
   const to = inputs.rangeTo;
   requireRange(from, to, "prepared.operationInputs apply range");
-  if ((to as number) > currentText.length) fail("Extend apply range is outside the selected current text");
+  if ((to as number) > currentText.length) fail("Append apply range is outside the selected current text");
   if (!isUtf16Boundary(currentText, from as number) || !isUtf16Boundary(currentText, to as number)) {
-    fail("Extend apply range splits a Unicode scalar value");
+    fail("Append apply range splits a Unicode scalar value");
   }
 }
 
@@ -1193,13 +1193,13 @@ function validateExtendOperationInputs(value: unknown, currentText: string): voi
   if (hasSourceFrom) {
     requireRange(inputs.sourceFrom, inputs.sourceTo, "prepared.operationInputs source range");
     if ((inputs.sourceTo as number) > currentText.length) {
-      fail("Extend source range is outside the selected current text");
+      fail("Append source range is outside the selected current text");
     }
     if (
       !isUtf16Boundary(currentText, inputs.sourceFrom as number)
       || !isUtf16Boundary(currentText, inputs.sourceTo as number)
     ) {
-      fail("Extend source range splits a Unicode scalar value");
+      fail("Append source range splits a Unicode scalar value");
     }
   }
 }

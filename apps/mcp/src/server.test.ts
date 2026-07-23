@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { validateKEditTransition, type KEdit } from "@zine/protocol";
+import { validateEditorTransactionTransition, type EditorTransaction } from "@zine/protocol";
 import type { Event } from "nostr-tools";
 import { finalizeEvent, verifyEvent } from "nostr-tools/pure";
 
@@ -279,7 +279,7 @@ test("cold headless profile mints one Root and Steps exact events while the rela
     assert.equal((history.conformance as { status?: string }).status, "full");
     const historyRows = history.history as Array<{
       nodeId: string;
-      payload: { snapshot?: string; kedits?: KEdit[] };
+      payload: { snapshot?: string; editorTransactions?: EditorTransaction[] };
       event: Event;
     }>;
     assert.deepEqual(historyRows.map((row) => row.nodeId), nodeIds);
@@ -289,28 +289,38 @@ test("cold headless profile mints one Root and Steps exact events while the rela
       const row = historyRows[index]!;
       const expectedSnapshot = contents[index]!;
       assert.equal(row.payload.snapshot, expectedSnapshot);
-      assert.ok(Array.isArray(row.payload.kedits), `Step ${index} is missing kedits`);
+      assert.ok(Array.isArray(row.payload.editorTransactions), `Step ${index} is missing editorTransactions`);
       assert.equal(
-        validateKEditTransition(previousSnapshot, expectedSnapshot, row.payload.kedits!).valid,
+        validateEditorTransactionTransition(previousSnapshot, expectedSnapshot, row.payload.editorTransactions!).valid,
         true,
-        `Step ${index} KEdits do not replay its signed transition`,
+        `Step ${index} EditorTransactions do not replay its signed transition`,
       );
       assert.equal(verifyEvent(canonicalEvent(row.event)), true, `Step ${index} signature is invalid`);
       assert.equal(row.event.id, nodeIds[index]);
       assert.equal(row.event.pubkey, ownerPubkey);
       if (previousSnapshot === expectedSnapshot) {
-        assert.deepEqual(row.payload.kedits, [], "unchanged Step must carry kedits: []");
+        assert.deepEqual(row.payload.editorTransactions, [], "unchanged Step must carry editorTransactions: []");
       } else {
-        assert.equal(row.payload.kedits!.length, 1, "headless change must be one atomic KEdit");
-        const edit = row.payload.kedits![0]!;
-        assert.ok(Number.isSafeInteger(edit.tx) && edit.tx >= 0, "invalid transaction id");
-        assert.ok(Number.isSafeInteger(edit.t) && edit.t >= 0, "invalid transaction timestamp");
-        assert.equal(edit.voice, ownerPubkey, "KEdit voice must be the profile signer");
-        assert.match(edit.voice, /^[0-9a-f]{64}$/);
-        assert.ok(Number.isSafeInteger(edit.from) && edit.from >= 0, "invalid KEdit start");
-        assert.ok(Number.isSafeInteger(edit.to) && edit.to >= edit.from, "invalid KEdit end");
-        assert.ok(edit.op === "ins" || edit.op === "del" || edit.op === "repl");
-        assert.equal(typeof edit.text, "string");
+        assert.equal(row.payload.editorTransactions!.length, 1, "headless change must be one atomic EditorTransaction");
+        const transaction = row.payload.editorTransactions![0]!;
+        assert.ok(
+          Number.isSafeInteger(transaction.sequence) && transaction.sequence >= 0,
+          "invalid transaction sequence",
+        );
+        assert.ok(
+          Number.isSafeInteger(transaction.timestamp) && transaction.timestamp >= 0,
+          "invalid transaction timestamp",
+        );
+        assert.equal(transaction.actor, ownerPubkey, "transaction actor must be the profile signer");
+        assert.match(transaction.actor, /^[0-9a-f]{64}$/);
+        assert.equal(transaction.selectionBefore, null);
+        assert.equal(transaction.selectionAfter, null);
+        assert.equal(transaction.changes.length, 1);
+        const change = transaction.changes[0]!;
+        assert.ok(Number.isSafeInteger(change.from) && change.from >= 0, "invalid text-change start");
+        assert.ok(Number.isSafeInteger(change.to) && change.to >= change.from, "invalid text-change end");
+        assert.ok(change.op === "insert" || change.op === "delete" || change.op === "replace");
+        assert.equal(typeof change.text, "string");
       }
       rawEvents.push(canonicalEvent(row.event));
       previousSnapshot = expectedSnapshot;

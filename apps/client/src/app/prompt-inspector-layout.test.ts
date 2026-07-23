@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const css = readFileSync(new URL("./App.css", import.meta.url), "utf8");
+const inspector = readFileSync(
+  new URL("../ai/PromptInspectorModal.tsx", import.meta.url),
+  "utf8",
+);
 
 function rule(selector: string): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -38,4 +42,13 @@ test("trace context stays constrained and keyboard-scrollable inside the prompt 
   const traceView = rule(".trace-context-inspector-view");
   assert.match(traceView, /min-width:\s*0\s*;/);
   assert.match(traceView, /flex-direction:\s*column\s*;/);
+});
+
+test("prompt inspector mirrors the four Press action classes and their recipes", () => {
+  assert.match(inspector, /BUILTIN_AI_RECIPE_FAMILIES\.map\(\(family\) =>/);
+  assert.match(inspector, /aria-selected=\{family\.id === actionFamily\.id\}/);
+  assert.match(inspector, /<span>Recipe<\/span>/);
+  assert.match(inspector, /actionFamily\.recipes\.map\(\(recipe\) =>/);
+  assert.match(inspector, /Dispatch \$\{actionFamily\.label\}/);
+  assert.doesNotMatch(inspector, /OP_ORDER\.map/);
 });

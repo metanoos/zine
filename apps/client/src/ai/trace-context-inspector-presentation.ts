@@ -270,7 +270,7 @@ export const TRACE_CONTEXT_INSPECTOR_POLICY_LABELS: Readonly<
 export const TRACE_CONTEXT_INSPECTOR_OPERATION_LABELS: Readonly<
   Record<TraceContextInspectorOperationV1, string>
 > = Object.freeze({
-  extend: "Extend",
+  extend: "Append",
   settle: "Settle",
   stir: "Stir",
   reply: "Reply",

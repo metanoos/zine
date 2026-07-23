@@ -46,7 +46,7 @@ export function paletteStatusMessage(op?: string, message?: string): string | nu
     case "attest": return "attested";
     case "analyze": return "analyzed";
     case "reply": return "replied";
-    case "extend": return "extended";
+    case "extend": return "appended";
     case "stir": return "stirred";
     case "settle": return "settled";
     case "run": return "run complete";

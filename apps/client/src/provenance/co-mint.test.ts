@@ -20,6 +20,17 @@ interface MintFixture {
   secret: Uint8Array;
 }
 
+function genesisTransaction(text: string, actor: string) {
+  return {
+    sequence: 0,
+    timestamp: 1_000,
+    actor,
+    changes: [{ op: "insert" as const, from: 0, to: 0, text }],
+    selectionBefore: null,
+    selectionAfter: null,
+  };
+}
+
 function attestation(coin: Event, secret: Uint8Array): Event {
   return finalizeEvent({
     kind: 4294,
@@ -48,15 +59,7 @@ async function directMint(phrase: string): Promise<MintFixture> {
       contentHash: hash,
       operationId: "cd".repeat(32),
       deltas: [],
-      kedits: [{
-        op: "ins",
-        from: 0,
-        to: 0,
-        text: phrase,
-        voice,
-        t: 1_000,
-        tx: 0,
-      }],
+      editorTransactions: [genesisTransaction(phrase, voice)],
       coin: { version: 1, origin: { kind: "direct" } },
     }),
   }, secret);
@@ -75,7 +78,7 @@ async function sourceNode(snapshot: string): Promise<Event> {
       snapshot,
       contentHash: hash,
       operationId: "ef".repeat(32),
-      kedits: [{ op: "ins", from: 0, to: 0, text: snapshot, voice, t: 1_000, tx: 0 }],
+      editorTransactions: [genesisTransaction(snapshot, voice)],
     }),
   }, secret);
 }
@@ -106,7 +109,7 @@ async function extractedMint(
       contentHash: hash,
       operationId: "12".repeat(32),
       deltas: [],
-      kedits: [{ op: "ins", from: 0, to: 0, text: phrase, voice, t: 1_000, tx: 0 }],
+      editorTransactions: [genesisTransaction(phrase, voice)],
       coin: {
         version: 1,
         origin: {

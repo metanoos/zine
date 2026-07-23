@@ -28,7 +28,7 @@ const encoder = new TextEncoder();
 const CANCELLATION_YIELD_INTERVAL = 256;
 const CANCELLATION_CODE_UNIT_INTERVAL = 16 * 1_024;
 const VOICE_PUBKEY_PATTERN = /^[0-9a-f]{64}$/;
-const NON_PUBKEY_VOICE_PATTERN = /^kedit-voice-utf16-v1:(?:[0-9a-f]{4})*$/;
+const NON_PUBKEY_ACTOR_PATTERN = /^editor-transaction-actor-utf16-v1:(?:[0-9a-f]{4})*$/;
 
 const POLICIES: readonly TraceContextPolicyV1[] = ["text-only-v1", "selected-trace-v1"];
 
@@ -609,7 +609,10 @@ function normalizeOperation(
   if (keys) return malformed("$.operation", keys);
   if (value.version !== 1) return malformed("$.operation.version", "Operation version must be 1");
   if (value.operation !== "extend" && value.operation !== "settle") {
-    return malformed("$.operation.operation", "Operation must be extend or settle");
+    return malformed(
+      "$.operation.operation",
+      "Operation must be Append (internal id: extend) or Settle",
+    );
   }
   if (!isRecord(value.target)) return malformed("$.operation.target", "Target must be an object");
   const targetKeys = exactKeys(value.target, [
@@ -1073,8 +1076,14 @@ function normalizeProcessFact(
         if (!hasFirst && !timingOutsideSummaryDomain) {
           return malformed(path, "A non-empty Step summary requires first and last capture times");
         }
-        if (rangeCount < transactionCount) {
-          return malformed(`${path}.rangeCount`, "A non-empty Step must report at least one range per transaction");
+        if (
+          rangeCount === 0
+          && (insertedCodePointCount > 0 || deletedCodePointCount > 0)
+        ) {
+          return malformed(
+            `${path}.rangeCount`,
+            "A Step without text ranges cannot report inserted or deleted text",
+          );
         }
       }
       if (undoCount + redoCount > transactionCount) {
@@ -1149,15 +1158,15 @@ function normalizeProcessFact(
       if (value.intent !== undefined && value.intent !== "undo" && value.intent !== "redo") {
         return malformed(`${path}.intent`, "Transaction intent must be undo or redo");
       }
-      if (!isPositiveSafeInteger(value.changeCount)) {
-        return malformed(`${path}.changeCount`, "Transaction change count must be a positive safe integer");
+      if (!isNonNegativeSafeInteger(value.changeCount)) {
+        return malformed(`${path}.changeCount`, "Transaction change count must be a non-negative safe integer");
       }
       if (
         !Array.isArray(value.voiceIds)
         || value.voiceIds.length === 0
         || value.voiceIds.length > TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxFactVoiceIds
       ) {
-        return malformed(`${path}.voiceIds`, "Transaction voices must be a bounded non-empty array");
+        return malformed(`${path}.voiceIds`, "Transaction voices must be a non-empty bounded array");
       }
       const voices: string[] = [];
       for (let index = 0; index < value.voiceIds.length; index += 1) {
@@ -1167,7 +1176,7 @@ function normalizeProcessFact(
         if (!isTraceVoiceId(voiceId)) {
           return malformed(
             `${path}.voiceIds[${index}]`,
-            "Voice id must be a Nostr signer pubkey or canonical protocol-valid KEdit voice",
+            "Voice id must be a Nostr signer pubkey or canonical editor transaction actor id",
           );
         }
         voices.push(voiceId);
@@ -1175,7 +1184,13 @@ function normalizeProcessFact(
       if (new Set(voices).size !== voices.length) {
         return malformed(`${path}.voiceIds`, "Transaction voice ids must be unique");
       }
-      if (voices.length > value.changeCount) {
+      if (value.changeCount === 0 && voices.length !== 1) {
+        return malformed(
+          `${path}.voiceIds`,
+          "A zero-change selection transaction must preserve exactly one actor voice",
+        );
+      }
+      if (value.changeCount > 0 && voices.length > value.changeCount) {
         return malformed(`${path}.voiceIds`, "Transaction cannot report more unique voices than changes");
       }
       return {
@@ -1221,7 +1236,7 @@ function normalizeProcessFact(
       if (!isTraceVoiceId(value.voiceId as string)) {
         return malformed(
           `${path}.voiceId`,
-          "Voice id must be a Nostr signer pubkey or canonical protocol-valid KEdit voice",
+          "Voice id must be a Nostr signer pubkey or canonical editor transaction actor id",
         );
       }
       const emptyRange = range.value.fromUtf16 === range.value.toUtf16;
@@ -1874,11 +1889,13 @@ function renderProcessFact(fact: TraceProcessFactV1, source: SelectedEvidenceSou
   const node = source.kind === "trace" ? source.nodeId : "unknown";
   switch (fact.kind) {
     case "step-summary":
-      return `Step ${node} · ${fact.transactionCount} tx / ${fact.rangeCount} ranges · +${fact.insertedCodePointCount}/−${fact.deletedCodePointCount} · first ${fact.firstCapturedAtMs ?? "none"} · last ${fact.lastCapturedAtMs ?? "none"} · span ${fact.spanMs}ms · longest gap ${fact.longestGapMs}ms${fact.timingStatus ? " · timing outside summary domain" : ""} · undo ${fact.undoCount} · redo ${fact.redoCount}`;
+      return `Step ${node} · ${fact.transactionCount} transactions / ${fact.rangeCount} ranges · +${fact.insertedCodePointCount}/−${fact.deletedCodePointCount} · first ${fact.firstCapturedAtMs ?? "none"} · last ${fact.lastCapturedAtMs ?? "none"} · span ${fact.spanMs}ms · longest gap ${fact.longestGapMs}ms${fact.timingStatus ? " · timing outside summary domain" : ""} · undo ${fact.undoCount} · redo ${fact.redoCount}`;
     case "transaction":
-      return `tx ${fact.transactionIndex} @ ${fact.capturedAtMs} · ${fact.intent ? `${fact.intent} · ` : ""}${fact.changeCount} changes · voices ${fact.voiceIds.join(",")}`;
+      return fact.changeCount === 0
+        ? `transaction ${fact.transactionIndex} @ ${fact.capturedAtMs} · ${fact.intent ? `${fact.intent} · ` : ""}selection only · actor ${fact.voiceIds[0]}`
+        : `transaction ${fact.transactionIndex} @ ${fact.capturedAtMs} · ${fact.intent ? `${fact.intent} · ` : ""}${fact.changeCount} changes · voices ${fact.voiceIds.join(",")}`;
     case "change":
-      return `change tx ${fact.transactionIndex} · ${fact.operation} · range [${fact.range.fromUtf16},${fact.range.toUtf16}) · +${fact.insertedCodePointCount}/−${fact.deletedCodePointCount} · voice ${fact.voiceId}`;
+      return `change in transaction ${fact.transactionIndex} · ${fact.operation} · range [${fact.range.fromUtf16},${fact.range.toUtf16}) · +${fact.insertedCodePointCount}/−${fact.deletedCodePointCount} · voice ${fact.voiceId}`;
   }
 }
 
@@ -2010,7 +2027,7 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 }
 
 function isTraceVoiceId(value: string): boolean {
-  return VOICE_PUBKEY_PATTERN.test(value) || NON_PUBKEY_VOICE_PATTERN.test(value);
+  return VOICE_PUBKEY_PATTERN.test(value) || NON_PUBKEY_ACTOR_PATTERN.test(value);
 }
 
 function uniqueSortedStrings<T extends string>(values: readonly T[]): readonly T[] {

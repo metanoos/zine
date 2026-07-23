@@ -15,6 +15,7 @@ export type OpLensId =
   | "default"
   | "voice-mirror"
   | "bold-continuation"
+  | "outside-perspective"
   | "conservative-line-editor"
   | "developmental-editor"
   | "skeptical-reader"
@@ -51,6 +52,13 @@ export const OP_LENSES: Record<OpKind, readonly OpLens[]> = {
       description: "Advance the piece decisively while remaining faithful to its established premises.",
       instruction:
         "Advance the piece rather than circling its last claim. Introduce one consequential next move that follows from the seed's premises, while preserving its voice, tense, register, and factual commitments.",
+    },
+    {
+      id: "outside-perspective",
+      label: "Outside perspective",
+      description: "Respond to the source from a distinct, external point of view.",
+      instruction:
+        "Respond to the seed from a distinct outside perspective rather than continuing in its voice. Engage its central idea directly, add a useful interpretation, question, or counterpoint, and write only the response that should be appended after the seed. Do not summarize the source mechanically or explain this instruction.",
     },
   ],
   settle: [

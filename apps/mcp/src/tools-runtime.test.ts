@@ -129,6 +129,10 @@ test("registered local tools require a Root and return structured JSON", async (
     sent: false,
     pendingLocalEvents: 0,
   });
+  assert.equal(writes[0]?.length, 12);
+  assert.equal(writes[0]?.[7], null, "headless Step must request EditorTransaction synthesis");
+  assert.equal(writes[0]?.[8], true, "headless Step must remain local-only");
+  assert.equal(writes[0]?.[9], true, "headless Step must force an explicit checkpoint");
   const result = await handlers.get("zine_delete")?.({
     relativePath: "drafts",
     isFolder: true,

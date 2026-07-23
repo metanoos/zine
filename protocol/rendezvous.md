@@ -719,7 +719,7 @@ readers ignore uppercase `Q` tags.
   Defer the exact wire shape until the one-way path is exercised.
 - **Calendar self-hosting spec.** The super-peer-as-calendar role
   (`transport.md` §2) needs a concrete spec: digest aggregation batch size,
-  Bitcoin tx cadence, proof-serving endpoint, proof upgrade sweep. Modest
+  Bitcoin transaction cadence, proof-serving endpoint, proof upgrade sweep. Modest
   service, not yet specified.
 - **Attest's own stamp.** Whether Attest keeps its own anteriority stamp
   (§3.4, for proving *when endorsed* as distinct from *when content existed*)

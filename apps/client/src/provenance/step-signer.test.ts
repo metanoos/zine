@@ -3,6 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const appSource = [
+  readFileSync(new URL("./useProvenance.ts", import.meta.url), "utf8"),
   readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
 ].join("\n");
@@ -33,7 +34,7 @@ test("in-place Settle and Stir retain the AUTHOR ownership context for later Ste
     );
     assert.match(
       source,
-      /beginOp\(idx, secretKeyForVoice\(authorPubkey\) \?\? undefined,/,
+      /secretKeyForVoice\(authorPubkey\) \?\? undefined/,
       name,
     );
     assert.doesNotMatch(
@@ -44,7 +45,7 @@ test("in-place Settle and Stir retain the AUTHOR ownership context for later Ste
   }
 });
 
-test("durable Extend attributes local MODEL text without signing or stepping it", () => {
+test("durable Append attributes local MODEL text without signing or stepping it", () => {
   const extend = functionSource("extendLLM", "function settleDeDupeLLM");
   const apply = functionSource("applyDesktopArtifact", "function editFile");
 

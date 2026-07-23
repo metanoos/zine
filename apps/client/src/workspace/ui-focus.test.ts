@@ -3,12 +3,29 @@ import test from "node:test";
 
 import {
   focusDirectoryPath,
+  focusMatchesTrace,
   focusReplayTarget,
   locateFocus,
   rebaseUiFocus,
   refreshFocusNode,
   sameUiFocus,
 } from "./ui-focus.js";
+
+test("a borrowed tab locus does not make a different semantic trace active", () => {
+  const file = { kind: "file" as const, path: "draft.md", nodeId: "file-head" };
+  const folder = locateFocus(
+    { kind: "folder", path: "essays", nodeId: "folder-head" },
+    0,
+    "draft.md",
+  );
+
+  assert.equal(focusMatchesTrace(folder, file), false);
+  assert.equal(
+    focusMatchesTrace(folder, { kind: "folder", path: "essays", nodeId: "older-head" }),
+    true,
+    "advancing node ids do not change the selected semantic identity",
+  );
+});
 
 test("focus records one semantic trace and exact duplicate-tab locus", () => {
   const focus = locateFocus(

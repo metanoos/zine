@@ -22,7 +22,7 @@ import {
   type PlayFrame,
   type ReplayTimelineStep,
 } from "./replay-timeline.js";
-import { reconstructRunsFromChain, type KEdit } from "../provenance/provenance.js";
+import { reconstructRunsFromChain } from "../provenance/provenance.js";
 import { flattenRuns, type Run } from "../workspace/workspace-core.js";
 
 const VOICE = "author";
@@ -75,22 +75,58 @@ test("recursive Replay rejects alias fan-out beyond its occurrence and depth bud
   );
 });
 
-function insert(from: number, text: string, at: number): KEdit {
+interface TestEdit {
+  op: "ins" | "del" | "repl";
+  from: number;
+  to: number;
+  text: string;
+  voice: string;
+  t: number;
+  tx: number;
+  intent?: "undo" | "redo";
+}
+
+function insert(from: number, text: string, at: number): TestEdit {
   return { op: "ins", from, to: from, text, voice: VOICE, t: at, tx: at };
 }
 
-function replace(from: number, to: number, text: string, at: number, tx = at): KEdit {
+function replace(from: number, to: number, text: string, at: number, tx = at): TestEdit {
   return { op: "repl", from, to, text, voice: VOICE, t: at, tx };
 }
 
-function event(id: string, path: string, snapshot: string, kedits: KEdit[]): Event {
+function editorTransactions(edits: TestEdit[]) {
+  const grouped = new Map<number, TestEdit[]>();
+  for (const edit of edits) {
+    const group = grouped.get(edit.tx);
+    if (group) group.push(edit);
+    else grouped.set(edit.tx, [edit]);
+  }
+  return [...grouped.entries()].map(([sequence, group]) => ({
+    sequence,
+    timestamp: group[0]!.t,
+    actor: group[0]!.voice,
+    changes: group.map((edit) => ({
+      op: edit.op === "ins" ? "insert" as const
+        : edit.op === "del" ? "delete" as const
+        : "replace" as const,
+      from: edit.from,
+      to: edit.to,
+      text: edit.text,
+    })),
+    selectionBefore: null,
+    selectionAfter: null,
+    ...(group[0]?.intent ? { intent: group[0].intent } : {}),
+  }));
+}
+
+function event(id: string, path: string, snapshot: string, edits: TestEdit[]): Event {
   return {
     id,
     pubkey: VOICE,
     created_at: 0,
     kind: 4290,
     tags: [["z", "file"], ["F", path]],
-    content: JSON.stringify({ snapshot, kedits }),
+    content: JSON.stringify({ snapshot, editorTransactions: editorTransactions(edits) }),
     sig: "",
   };
 }
@@ -288,7 +324,7 @@ test("replay frames expose the exact action's inserted and deleted character del
 
 test("replay actions recover the exact text removed by a deletion", () => {
   const first = event("first", "notes.md", "a", [insert(0, "a", 1_000)]);
-  const deletion: KEdit = {
+  const deletion: TestEdit = {
     op: "del",
     from: 0,
     to: 1,
@@ -369,9 +405,9 @@ test("snapshot playback preserves the Step's reconstructed voice runs", () => {
   assert.deepEqual(savedFrame?.runs, mixedRuns);
 });
 
-test("replay preserves the authors-map voice when kedits are synthesized as the signer", () => {
+test("replay preserves the authors-map voice when transactions use the signer", () => {
   // Mirrors the onboarding starter prose shape: the body Step is AUTHOR-signed
-  // and carries a spare-voice `authors` map, but its synthesized KEdit carries
+  // and carries a spare-voice `authors` map, but its synthesized transaction carries
   // the signer's voice. Without the per-Step attribution guard, both the
   // animation frames AND the settled boundary collapse to the signer and the
   // spare-voice color flashes during Play.
@@ -380,7 +416,9 @@ test("replay preserves the authors-map voice when kedits are synthesized as the 
   const node = event("seed-body", "hello-world.md", "hello", []);
   node.content = JSON.stringify({
     snapshot: "hello",
-    kedits: [{ op: "ins", from: 0, to: 0, text: "hello", voice: author, t: 500, tx: 0 }],
+    editorTransactions: editorTransactions([
+      { op: "ins", from: 0, to: 0, text: "hello", voice: author, t: 500, tx: 0 },
+    ]),
     authors: [{ v: seed, len: 5 }],
   });
   const seedRuns = reconstructRunsFromChain([node]);
@@ -411,7 +449,7 @@ test("replay preserves the authors-map voice when kedits are synthesized as the 
   }
 });
 
-test("replay preserves attributed voices across multiple KEdit transactions", () => {
+test("replay preserves attributed voices across multiple editor transactions", () => {
   const attributedVoice = "seed-voice";
   const node = event(
     "seed-body-multi-transaction",
@@ -421,7 +459,10 @@ test("replay preserves attributed voices across multiple KEdit transactions", ()
   );
   node.content = JSON.stringify({
     snapshot: "hello world",
-    kedits: [insert(0, "hello", 500), insert(5, " world", 700)],
+    editorTransactions: editorTransactions([
+      insert(0, "hello", 500),
+      insert(5, " world", 700),
+    ]),
     authors: [{ v: attributedVoice, len: 11 }],
   });
   const attributedRuns = reconstructRunsFromChain([node]);
@@ -449,11 +490,17 @@ test("replay preserves attributed voices across multiple KEdit transactions", ()
   assert.deepEqual(timeline.at(-1)?.runs, attributedRuns);
 });
 
-test("replay discards KEdits without a valid transaction id", () => {
-  const node = event("invalid-kedit", "draft.md", "signed snapshot", []);
+test("replay discards EditorTransactions without a valid sequence", () => {
+  const node = event("invalid-transaction", "draft.md", "signed snapshot", []);
   node.content = JSON.stringify({
     snapshot: "signed snapshot",
-    kedits: [{ op: "ins", from: 0, to: 0, text: "wrong", voice: VOICE, t: 500 }],
+    editorTransactions: [{
+      timestamp: 500,
+      actor: VOICE,
+      changes: [{ op: "insert", from: 0, to: 0, text: "wrong" }],
+      selectionBefore: null,
+      selectionAfter: null,
+    }],
   });
   const timeline = buildReplayTimeline(
     [step(node, "draft.md", 1_000, "signed snapshot")],
@@ -468,9 +515,9 @@ test("replay discards KEdits without a valid transaction id", () => {
   assert.equal(timeline.at(-1)?.action?.type, "snapshot");
 });
 
-test("replay discards valid KEdits that do not reproduce the signed snapshot", () => {
+test("replay discards valid EditorTransactions that do not reproduce the signed snapshot", () => {
   const node = event(
-    "mismatched-kedit",
+    "mismatched-editor-transaction",
     "draft.md",
     "authoritative",
     [insert(0, "advisory", 500)],
@@ -488,7 +535,7 @@ test("replay discards valid KEdits that do not reproduce the signed snapshot", (
   assert.equal(timeline.some((frame) => frame.at === 500), false);
 });
 
-test("replay does not animate a KEdit with a dishonest operation label", () => {
+test("replay does not animate an EditorTransaction with a dishonest operation label", () => {
   const node = event("wrong-op", "draft.md", "A", [{
     op: "repl",
     from: 0,

@@ -21,6 +21,15 @@ function meta(model: string): LlmStepMeta {
   };
 }
 
+const answerTransaction = {
+  sequence: 0,
+  timestamp: 1,
+  actor: "voice",
+  changes: [{ op: "insert" as const, from: 0, to: 0, text: "answer" }],
+  selectionBefore: null,
+  selectionAfter: null,
+};
+
 test("pending LLM metadata is isolated by destination path", () => {
   setPendingLlmMeta("a.md", meta("a"));
   setPendingLlmMeta("b.md", meta("b"));
@@ -48,15 +57,7 @@ test("pending metadata marks only its matching write as an LLM Step", () => {
     deltas: [],
     snapshot: "answer",
     contentHash: "hash",
-    kedits: [{
-      op: "ins",
-      from: 0,
-      to: 0,
-      text: "answer",
-      voice: "voice",
-      t: 1,
-      tx: 0,
-    }],
+    editorTransactions: [answerTransaction],
   };
   setPendingLlmMeta("a.md", meta("model-a"));
 
@@ -81,15 +82,7 @@ test("LLM writer preserves q edges and marks only structural-only targets", asyn
     deltas: [],
     snapshot: "answer",
     contentHash: "hash",
-    kedits: [{
-      op: "ins",
-      from: 0,
-      to: 0,
-      text: "answer",
-      voice: "voice",
-      t: 1,
-      tx: 0,
-    }],
+    editorTransactions: [answerTransaction],
     citations: [social, bothRoles],
     scopeCitations: [privateScope, bothRoles],
     injectRule: rule,

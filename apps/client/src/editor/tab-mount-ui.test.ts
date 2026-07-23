@@ -4,6 +4,7 @@ import test from "node:test";
 
 const source = [
   readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("../workspace/WorkspaceSidebar.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
 ].join("\n");
 
@@ -28,7 +29,8 @@ test("tree operation selection is independent while replay follows focus", () =>
   assert.match(source, /targets=\{replayTargets\}/);
   assert.match(source, /const target = focusReplayTarget\(uiFocusRef\.current\)/);
   assert.match(source, /const playbackScopes = target \? \[target\] : \[\]/);
-  assert.doesNotMatch(source, /playbackScopes = \[\.\.\.directorySelectionRef\.current\]/);
+  assert.match(source, /return await loadReplay\(sequence\)/);
+  assert.doesNotMatch(source, /scopes = \[\.\.\.directorySelectionRef\.current\]/);
 });
 
 test("folder tabs focus their underlying folder for playback", () => {

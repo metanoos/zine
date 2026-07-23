@@ -1,10 +1,10 @@
 /**
  * Prompt inspector — see exactly what a single-shot LLM op would send.
  *
- * Opens when the user clicks a single-shot MODEL action, selecting that action's
- * tab. The persistent `Inspect` control remains an optional entry point. Shows the full
- * `messages[]` layout a chosen op (Extend / Settle / Stir / Reply / Analyze)
- * would send against the op-target panel's focused file and current scope:
+ * Opens when the user inspects a MODEL recipe, selecting its action class and
+ * recipe. The four action classes mirror The Press: Append, Rewrite, Reply, and
+ * Quote Reply. Shows the full `messages[]` layout the chosen recipe would send
+ * against the op-target panel's focused file and current scope:
  *
  *   1. system — provider-card personality/instructions (if any)
  *   2. system — SYSTEM_PREAMBLE + op role + optional voice/lens layers
@@ -18,7 +18,7 @@
  * The modal is a pure presentation layer. App owns editor/parser coupling,
  * canonical gathering, preparation, invalidation, and execution.
  *
- * Cheap inputs are derived live (Extend seed, Settle/Stir loose prose). Relay-
+ * Cheap inputs are derived live (Append seed, Settle/Stir loose prose). Relay-
  * fetched inputs (Reply's stepped traces, Analyze's limelight log) are captured
  * by App when the modal opens. Fetch failures are shown as honest notes.
  *
@@ -29,13 +29,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import {
-  OP_ORDER,
-  OP_LABELS,
-  type OpKind,
-} from "./op-prompts.js";
-import { OP_LENSES, lensForOp, type OpLensId, type OpLensSelections } from "./op-lenses.js";
+import type { OpKind } from "./op-prompts.js";
+import { lensForOp, type OpLensId, type OpLensSelections } from "./op-lenses.js";
 import type { ProviderConfig } from "./models-store.js";
+import {
+  BUILTIN_AI_RECIPE_FAMILIES,
+  type AiPaletteRecipeDescription,
+} from "./palette-registry.js";
 import type { PreparedOperation } from "./prepared-operation.js";
 import { TraceContextInspectorView } from "./TraceContextInspectorView.js";
 import { adaptPreparedOperationForTraceContextInspector } from "./trace-context-inspector-adapter.js";
@@ -59,8 +59,9 @@ export interface PromptInspectorProps {
   voicePrompt: string;
   /** Resolved provider. Its system layer is applied through the live helper. */
   provider: ProviderConfig | null;
-  /** Browser-local lens choice for each operation. */
+  /** Browser-local recipe lens choice for each internal operation. */
   lensSelections: OpLensSelections;
+  /** Select one recipe from the four action classes. */
   onLensChange: (op: OpKind, lensId: OpLensId) => void;
   /** Exact session objects produced by App's canonical preparation path. */
   preparedOperations: Partial<Record<OpKind, PreparedOperation>>;
@@ -73,6 +74,8 @@ export interface PromptInspectorProps {
   /** Estimates total payload tokens from char count. Passed in so the modal
    *  uses the same ~4 chars/token heuristic as the action-palette indicator. */
   estimateTokens: (chars: number) => number;
+  /** Marks the inspected Append dispatch as the current onboarding action. */
+  dispatchOnboardingTarget?: boolean;
   onClose: () => void;
 }
 
@@ -103,6 +106,7 @@ export function PromptInspectorModal({
   onOperationChange,
   onDispatch,
   estimateTokens,
+  dispatchOnboardingTarget = false,
   onClose,
 }: PromptInspectorProps) {
   const [op, setOp] = useState<OpKind>(defaultOp);
@@ -119,6 +123,22 @@ export function PromptInspectorModal({
   }, [onClose]);
 
   const selectedLens = lensForOp(op, lensSelections[op]);
+  const actionFamily = BUILTIN_AI_RECIPE_FAMILIES.find((family) =>
+    family.recipes.some((recipe) =>
+      recipe.operation === op && recipe.lensId === selectedLens.id))
+    ?? BUILTIN_AI_RECIPE_FAMILIES.find((family) =>
+      family.recipes.some((recipe) => recipe.operation === op))
+    ?? BUILTIN_AI_RECIPE_FAMILIES[0];
+  const selectedRecipe = actionFamily.recipes.find((recipe) =>
+    recipe.operation === op && recipe.lensId === selectedLens.id)
+    ?? actionFamily.recipes[0];
+
+  function chooseRecipe(recipe: AiPaletteRecipeDescription): void {
+    if (recipe.operation !== op) onOperationChange(recipe.operation);
+    setOp(recipe.operation);
+    onLensChange(recipe.operation, recipe.lensId);
+  }
+
   const preparedOperation = preparedOperations[op] ?? null;
   const effectiveContextBlock = preparedOperation?.contextSnapshot.renderedBlock ?? contextBlock;
   const traceContextPresentation = useMemo(
@@ -177,40 +197,41 @@ export function PromptInspectorModal({
           <button type="button" className="attest-close" aria-label="Close" onClick={onClose}>×</button>
         </div>
         <p className="run-blurb">
-          What the selected op would send to the LLM against the focused file + current scope.
-          Switch tabs to see each op. The context block and voice prompt are shared.
+          What the selected action would send to the LLM against the focused file + current scope.
+          Switch actions or recipes; the context block and voice prompt are shared.
         </p>
 
         <div className="prompt-inspector-tabs" role="tablist">
-          {OP_ORDER.map((o) => (
+          {BUILTIN_AI_RECIPE_FAMILIES.map((family) => (
             <button
-              key={o}
+              key={family.id}
               type="button"
               role="tab"
-              aria-selected={o === op}
-              className={`prompt-inspector-tab${o === op ? " active" : ""}`}
-              onClick={() => {
-                setOp(o);
-                onOperationChange(o);
-              }}
+              aria-selected={family.id === actionFamily.id}
+              className={`prompt-inspector-tab${family.id === actionFamily.id ? " active" : ""}`}
+              onClick={() => chooseRecipe(family.recipes[0])}
             >
-              {OP_LABELS[o]}
+              {family.label}
             </button>
           ))}
         </div>
 
         <label className="prompt-inspector-lens">
-          <span>Editorial lens</span>
+          <span>Recipe</span>
           <select
-            value={selectedLens.id}
-            onChange={(event) => onLensChange(op, event.target.value as OpLensId)}
-            aria-label={`Editorial lens for ${OP_LABELS[op]}`}
+            value={selectedRecipe.id}
+            onChange={(event) => {
+              const recipe = actionFamily.recipes.find((candidate) =>
+                candidate.id === event.target.value);
+              if (recipe) chooseRecipe(recipe);
+            }}
+            aria-label={`Recipe for ${actionFamily.label}`}
           >
-            {OP_LENSES[op].map((lens) => (
-              <option key={lens.id} value={lens.id}>{lens.label}</option>
+            {actionFamily.recipes.map((recipe) => (
+              <option key={recipe.id} value={recipe.id}>{recipe.label}</option>
             ))}
           </select>
-          <small>{selectedLens.description}</small>
+          <small>{selectedRecipe.title}</small>
         </label>
 
         <div className="prompt-inspector-meta">
@@ -305,15 +326,15 @@ export function PromptInspectorModal({
         {preparedOperation ? (
           <button
             type="button"
-            className="run-start"
+            className={`run-start${dispatchOnboardingTarget && op === "extend" ? " prompt-inspector-dispatch-onboarding" : ""}`}
             onClick={() => onDispatch(preparedOperation)}
           >
-            {`Dispatch ${OP_LABELS[op]}`}
+            {`Dispatch ${actionFamily.label}`}
           </button>
         ) : null}
 
         <p className="run-hint">
-          Esc to close · click a tab to switch op · Dispatch sends this exact request
+          Esc to close · click a tab to switch action · Dispatch sends this exact request
         </p>
       </div>
     </div>,

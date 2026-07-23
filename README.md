@@ -38,19 +38,24 @@ account or hosted service.
 The daily loop Zine is building is:
 
 ```text
-current scoped content + selected trace evidence
-                  |
-                  v
-        inspect and correct context
-                  |
-                  v
-             ask the AI
-                  |
-                  v
-       accept, revise, or reject in-text
-                  |
-                  v
-          extend the signed trace
+              your text + the trace that shaped it
+                              |
+                              v
+             choose and inspect the context the AI receives
+                              |
+                              v
+                    request an AI contribution
+                              |
+                              v
+          accept the response into the text under the AI's voice
+                              |
+                              v
+             edit / answer / reject / revise in your voice
+                              |
+                              v
+                 Step the richer text + provenance trace
+                              |
+                              +----> begin again with more to work from
 ```
 
 At file scope, content is Markdown text; at folder scope, it is the
@@ -76,6 +81,18 @@ product — trace-aware assistance, replay, and portable proof — with no
 account, hosted service, or organization required. If adoption compounds, it
 should compound the way Git's did: writers first, organizations following the
 writers.
+
+Collaboration is designed as three composable layers. A **Collaboration** is a
+durable, folder-level shared space for membership, text and folder operations,
+voices, selections, and presence. It can last across days or months: people
+edit asynchronously, disconnect, and catch up later; connected participants
+add ephemeral live presence and cursors. Each participant's overall layout
+stays private. An optional **Stage** shares only a one- or two-panel cluster
+for coordinated attention; people can follow, detach, and rejoin without
+changing edit authority. **Replay** is a panel presentation: it can be private
+or occupy a staged panel without taking over the workspace. A Stage Controller
+controls a staged presentation; Replay does not introduce a second controller.
+Implementation order is Collaboration, then Stage, then Replay-in-Stage.
 
 Accountable teams are where paid demand is expected first. Organizations
 letting AI agents edit durable files — reports, research, policies, editorial
@@ -181,7 +198,10 @@ not claim an operated public network or meaningful co-Mint density. The
 |---|---|
 | Desktop press with a local relay sidecar | Implemented |
 | Headless MCP press with a distinct agent voice | Implemented |
-| Mandatory replay-valid KEdit process log on every file Step | Implemented for editor, AI, import/fork, and MCP write paths |
+| Mandatory replay-valid editor transaction process log on every file Step | Implemented for editor, AI, import/fork, and MCP write paths |
+| Folder-level Collaboration | Initial client core implemented: copied mount/shield scope, explicit join grants, owner-signed recipient bootstraps, read-scoped per-file Yjs docs, causally verified micro-batched edit operations with ordered transaction evidence, isolated unsigned drafts, deterministic directory collision materialization, voice attribution, scoped capabilities, ephemeral relative selections, private denied-work patches, reconnect history, and exact Step-prefix capture/acknowledgement APIs. Production Step wiring, join UI, durable provider storage, encrypted transport, and a peer provider remain deferred; layouts stay private |
+| Optional shared Stage | Initial client core implemented: strict versioned one/two-panel state, signed Controller commands chained to exact parent snapshots with deterministic fork resolution, mounted/readable capability checks, accepted handoff, disconnect grace/vacancy, owner recovery, and a private-layout follow/detach/rejoin adapter. Visible controls and a production peer provider remain deferred |
+| Replay presentation | Current private Replay plus the initial in-place Stage presentation core are implemented: one panel transitions Working ↔ Replay without changing its identity, slot, split, or siblings; trace-set changes pause/reset, and follower playback detaches into a private projection. Visible Stage controls and the CodeMirror suspension binding remain deferred |
 | Shared `FULL TRACE` / `SNAPSHOT ONLY` / `INVALID` reader verdict | Implemented in Replay, Analyze, handoff, Reify, and MCP inspection |
 | Step, Publish (wire name Send), Attest, Mint, Cite, fork, merge, and replay | Implemented and covered by tests; the core gestures also have a real-relay smoke |
 | Recursive folder checkpoint propagation | Implemented with verified checkpoint causes, distinct `advance` deltas, serialized folder appends, explicit folder/Root Step, durable operation ids, durable move/delete journals, and inspectable collapsed roll-ups in Replay |

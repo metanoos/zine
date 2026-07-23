@@ -16,10 +16,9 @@ import { validateSelectorManifestSemanticsV1 } from "./selector.js";
 const encoder = new TextEncoder();
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const VOICE_PUBKEY_PATTERN = /^[0-9a-f]{64}$/;
-// Canonical protocol-valid KEdit voice for legacy non-pubkey voices. Must stay
-// in lockstep with selector.ts NON_PUBKEY_VOICE_PATTERN / isTraceVoiceId and
-// process-projector.ts selectorVoiceId, which emit this form.
-const VOICE_KEDIT_PATTERN = /^kedit-voice-utf16-v1:(?:[0-9a-f]{4})*$/;
+// Canonical projection id for a protocol-valid non-pubkey transaction actor.
+// Must stay in lockstep with selector.ts and process-projector.ts.
+const EDITOR_TRANSACTION_ACTOR_PATTERN = /^editor-transaction-actor-utf16-v1:(?:[0-9a-f]{4})*$/;
 
 const POLICIES = new Set<TraceContextPolicyV1>(["text-only-v1", "selected-trace-v1"]);
 const KINDS = new Set<EvidenceCandidateKindV1>([
@@ -445,11 +444,15 @@ function validateProcessFact(value: unknown, path: string): TraceProcessFactV1 {
       const rangeCount = nonNegative(fact.rangeCount, `${path}.rangeCount`);
       const insertedCodePointCount = nonNegative(fact.insertedCodePointCount, `${path}.insertedCodePointCount`);
       const deletedCodePointCount = nonNegative(fact.deletedCodePointCount, `${path}.deletedCodePointCount`);
+      if (
+        rangeCount === 0
+        && (insertedCodePointCount > 0 || deletedCodePointCount > 0)
+      ) fail(`${path}.rangeCount`, "cannot be zero when text counts are non-zero");
       const spanMs = nonNegative(fact.spanMs, `${path}.spanMs`);
       const longestGapMs = nonNegative(fact.longestGapMs, `${path}.longestGapMs`);
       const undoCount = nonNegative(fact.undoCount, `${path}.undoCount`);
       const redoCount = nonNegative(fact.redoCount, `${path}.redoCount`);
-      // timingStatus is emitted by process-projector when KEdit capture times
+      // timingStatus is emitted by process-projector when EditorTransaction capture times
       // are non-finite or overflow Number.MAX_SAFE_INTEGER. When set it must be
       // the only timing signal: capture times absent and span/gap zeroed.
       const timingStatus = fact.timingStatus;
@@ -489,14 +492,20 @@ function validateProcessFact(value: unknown, path: string): TraceProcessFactV1 {
       if (fact.intent !== undefined && fact.intent !== "undo" && fact.intent !== "redo") {
         fail(`${path}.intent`, "must be undo or redo");
       }
-      const changeCount = positive(fact.changeCount, `${path}.changeCount`);
+      const changeCount = nonNegative(fact.changeCount, `${path}.changeCount`);
       if (
         !Array.isArray(fact.voiceIds)
         || fact.voiceIds.length === 0
         || fact.voiceIds.length > TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxFactVoiceIds
-      ) fail(`${path}.voiceIds`, "must be a bounded non-empty array");
+      ) fail(`${path}.voiceIds`, "must be a non-empty bounded array");
       const voiceIds = fact.voiceIds.map((voice, index) => voiceId(voice, `${path}.voiceIds[${index}]`));
       if (new Set(voiceIds).size !== voiceIds.length) fail(`${path}.voiceIds`, "must be unique");
+      if (changeCount === 0 && voiceIds.length !== 1) {
+        fail(`${path}.voiceIds`, "must preserve exactly one actor voice when changeCount is zero");
+      }
+      if (changeCount > 0 && voiceIds.length > changeCount) {
+        fail(`${path}.voiceIds`, "cannot contain more unique voices than changes");
+      }
       return { kind: "transaction", transactionIndex, capturedAtMs, ...(fact.intent ? { intent: fact.intent } : {}), changeCount, voiceIds };
     }
     case "change": {
@@ -601,8 +610,8 @@ function hash(value: unknown, path: string): string {
 
 function voiceId(value: unknown, path: string): string {
   const result = text(value, path);
-  if (!VOICE_PUBKEY_PATTERN.test(result) && !VOICE_KEDIT_PATTERN.test(result)) {
-    fail(path, "must be a lowercase Nostr pubkey or canonical protocol-valid KEdit voice");
+  if (!VOICE_PUBKEY_PATTERN.test(result) && !EDITOR_TRANSACTION_ACTOR_PATTERN.test(result)) {
+    fail(path, "must be a lowercase Nostr pubkey or canonical editor transaction actor id");
   }
   return result;
 }

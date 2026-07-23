@@ -1,4 +1,4 @@
-/** Compatibility surface for existing client imports. */
+/** Client-facing surface for the shared protocol process reader. */
 export {
   renderTraceProcessLog,
   renderTraceProcessSummary,

@@ -6,11 +6,20 @@
  * file includes only itself.
  */
 
+import {
+  applyMountScope,
+  containsMountedPath,
+  mountScopeFromParts,
+  mountScopeLabel,
+  mountScopeParts,
+  mountStateForPath,
+  pathInMountScope,
+  rebaseMountScopeAfterMove,
+  type MountRef,
+} from "../workspace/mount-scope.js";
+
 /** A file or folder coordinate used by tree selection and context mounting. */
-export interface TraceRef {
-  kind: "file" | "folder";
-  path: string;
-}
+export type TraceRef = MountRef;
 
 /** An explicit context mount that acts as a root for derived prompt scope. */
 export type ScopeRef = TraceRef;
@@ -38,11 +47,6 @@ export interface ContextMountResult {
   shielded: Set<string>;
 }
 
-function containsPath(ancestor: string, path: string): boolean {
-  if (ancestor === "") return true;
-  return path === ancestor || path.startsWith(ancestor + "/");
-}
-
 /**
  * Resolve the selection targeted by a drag or context-menu gesture. Gesturing
  * on a selected member keeps the group; gesturing on any other trace
@@ -64,7 +68,10 @@ export function topLevelSelectedPaths(selection: readonly TraceRef[]): string[] 
   const paths = [...new Set(selection.map((item) => item.path))];
   const actionable = paths.length > 1 ? paths.filter((path) => path !== "") : paths;
   return actionable.filter(
-    (path) => !actionable.some((other) => other !== path && containsPath(other, path)),
+    (path) =>
+      !actionable.some(
+        (other) => other !== path && containsMountedPath(other, path),
+      ),
   );
 }
 
@@ -81,7 +88,7 @@ export function rebaseTraceRefsAfterMove(
   destFolder: string,
 ): TraceRef[] {
   return refs.map((ref) => {
-    const source = movedRoots.find((root) => containsPath(root, ref.path));
+    const source = movedRoots.find((root) => containsMountedPath(root, ref.path));
     if (source === undefined) return ref;
     const slash = source.lastIndexOf("/");
     const sourceName = slash === -1 ? source : source.slice(slash + 1);
@@ -101,8 +108,13 @@ export function rebaseContextMountAfterMove(
   movedRoots: readonly string[],
   destFolder: string,
 ): ContextMounts {
-  if (mounts.length === 0) return [];
-  return [rebaseTraceRefsAfterMove(mounts, movedRoots, destFolder)[0]];
+  return mountScopeParts(
+    rebaseMountScopeAfterMove(
+      mountScopeFromParts(mounts, new Set()),
+      movedRoots,
+      destFolder,
+    ),
+  ).mounts;
 }
 
 /** Carry the one context mount across an in-place rename. `path` is the
@@ -143,13 +155,13 @@ export function rebaseShieldedPath(
   const next = new Set<string>();
   let inherited = false;
   for (const boundary of shielded) {
-    if (containsPath(source, boundary)) {
+    if (containsMountedPath(source, boundary)) {
       next.add(boundary === source
         ? destination
         : destination + boundary.slice(source.length));
     } else {
       next.add(boundary);
-      if (containsPath(boundary, source)) inherited = true;
+      if (containsMountedPath(boundary, source)) inherited = true;
     }
   }
   if (inherited) next.add(destination);
@@ -206,7 +218,7 @@ export function removeDeletedShieldedPaths(
   deletedRoots: readonly string[],
 ): Set<string> {
   return new Set([...shielded].filter((boundary) =>
-    !deletedRoots.some((root) => containsPath(root, boundary))
+    !deletedRoots.some((root) => containsMountedPath(root, boundary))
   ));
 }
 
@@ -217,10 +229,12 @@ export function pathInTraceScopes(
   path: string,
 ): boolean {
   for (const boundary of shielded) {
-    if (containsPath(boundary, path)) return false;
+    if (containsMountedPath(boundary, path)) return false;
   }
   return scopes.some((scope) =>
-    scope.kind === "file" ? path === scope.path : containsPath(scope.path, path),
+    scope.kind === "file"
+      ? path === scope.path
+      : containsMountedPath(scope.path, path),
   );
 }
 
@@ -236,7 +250,7 @@ export function pathInEffectiveScope(
   shielded: ReadonlySet<string>,
   path: string,
 ): boolean {
-  return pathInTraceScopes(mounts, shielded, path);
+  return pathInMountScope(mountScopeFromParts(mounts, shielded), path);
 }
 
 /**
@@ -249,17 +263,7 @@ export function contextMountState(
   shielded: ReadonlySet<string>,
   path: string,
 ): ContextMountState {
-  if (mounts[0]?.path === path && pathInEffectiveScope(mounts, shielded, path)) {
-    return "mounted";
-  }
-  if (pathInEffectiveScope(mounts, shielded, path)) return "included";
-  if (shielded.has(path)) {
-    for (const boundary of shielded) {
-      if (boundary !== path && containsPath(boundary, path)) return "unmounted";
-    }
-    return "shielded";
-  }
-  return "unmounted";
+  return mountStateForPath(mountScopeFromParts(mounts, shielded), path);
 }
 
 /**
@@ -276,32 +280,13 @@ export function applyContextMount(
   target: ScopeRef,
   mounted: boolean,
 ): ContextMountResult {
-  const nextShielded = new Set(shielded);
-
-  if (mounted) {
-    for (const boundary of nextShielded) {
-      if (
-        containsPath(boundary, target.path) ||
-        containsPath(target.path, boundary)
-      ) {
-        nextShielded.delete(boundary);
-      }
-    }
-    return { mounts: [target], shielded: nextShielded };
-  }
-
-  // One blue boundary owns the complete branch. Drop older nested boundaries
-  // before installing it so every descendant renders ordinary unmounted grey.
-  for (const boundary of nextShielded) {
-    if (containsPath(target.path, boundary)) nextShielded.delete(boundary);
-  }
-  if (current[0]?.path === target.path) {
-    return { mounts: [], shielded: nextShielded };
-  }
-  if (pathInEffectiveScope(current, nextShielded, target.path)) {
-    nextShielded.add(target.path);
-  }
-  return { mounts: current, shielded: nextShielded };
+  return mountScopeParts(
+    applyMountScope(
+      mountScopeFromParts(current, shielded),
+      target,
+      mounted,
+    ),
+  );
 }
 
 /** Stable identity used by effects that must react only to semantic changes. */
@@ -314,10 +299,7 @@ export function mountedScopeLabel(
   mounts: ContextMounts,
   rootLabel = "Root",
 ): string {
-  const mount = mounts[0];
-  if (!mount) return "Nothing mounted";
-  const label = mount.path === "" ? rootLabel : mount.path;
-  return mount.kind === "folder" ? `${label}/` : label;
+  return mountScopeLabel(mountScopeFromParts(mounts, new Set()), rootLabel);
 }
 
 function mergeScopes(left: readonly ScopeRef[], right: readonly ScopeRef[]): ScopeRef[] {

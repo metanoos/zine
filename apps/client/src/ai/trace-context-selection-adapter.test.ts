@@ -29,10 +29,10 @@ const PATH = "draft.md";
 
 interface FileNodeOptions {
   path?: string;
-  kedits?: unknown;
-  omitKedits?: boolean;
-  tx?: number;
-  at?: number;
+  editorTransactions?: unknown;
+  omitEditorTransactions?: boolean;
+  sequence?: number;
+  timestamp?: number;
 }
 
 interface ParityProtocolFixture {
@@ -97,18 +97,22 @@ async function fileNode(
   previous?: Event,
   options: FileNodeOptions = {},
 ): Promise<Event> {
-  const at = options.at ?? 1_700_000_000_000 + (previous ? 1 : 0);
-  const tx = options.tx ?? 17;
-  const defaultKedits = before === snapshot
+  const timestamp = options.timestamp ?? 1_700_000_000_000 + (previous ? 1 : 0);
+  const sequence = options.sequence ?? 17;
+  const defaultEditorTransactions = before === snapshot
     ? []
     : [{
-        op: before.length === 0 ? "ins" : snapshot.length === 0 ? "del" : "repl",
-        from: 0,
-        to: before.length,
-        text: snapshot,
-        voice: OWNER,
-        t: at,
-        tx,
+        sequence,
+        timestamp,
+        actor: OWNER,
+        changes: [{
+          op: before.length === 0 ? "insert" : snapshot.length === 0 ? "delete" : "replace",
+          from: 0,
+          to: before.length,
+          text: snapshot,
+        }],
+        selectionBefore: null,
+        selectionAfter: null,
       }];
   const template: EventTemplate = {
     kind: 4290,
@@ -124,15 +128,17 @@ async function fileNode(
       snapshot,
       contentHash: await sha256(snapshot),
       operationId: OPERATION_ID,
-      ...(options.omitKedits ? {} : { kedits: options.kedits ?? defaultKedits }),
+      ...(options.omitEditorTransactions
+        ? {}
+        : { editorTransactions: options.editorTransactions ?? defaultEditorTransactions }),
     }),
   };
   return finalizeEvent(template, SECRET);
 }
 
 async function fullChain(): Promise<readonly [Event, Event]> {
-  const genesis = await fileNode("", "Draft", undefined, { at: 1_000, tx: 17 });
-  const head = await fileNode("Draft", "Current 🧠 draft", genesis, { at: 2_000, tx: 41 });
+  const genesis = await fileNode("", "Draft", undefined, { timestamp: 1_000, sequence: 17 });
+  const head = await fileNode("Draft", "Current 🧠 draft", genesis, { timestamp: 2_000, sequence: 41 });
   return [genesis, head];
 }
 
@@ -314,8 +320,8 @@ test("ignores fabricated verdict authority and rejects unsigned head/text/hash/p
       chain[1]!.tags.find((tag) => tag[0] === "F")![1] = "forged.md";
     }],
     ["process", (chain) => {
-      const payload = JSON.parse(chain[1]!.content) as { kedits: unknown[] };
-      payload.kedits = [];
+      const payload = JSON.parse(chain[1]!.content) as { editorTransactions: unknown[] };
+      payload.editorTransactions = [];
       chain[1]!.content = JSON.stringify(payload);
     }],
   ];
@@ -384,7 +390,7 @@ test("captures the entire signed chain before the verifier can yield", async () 
     snapshot: "MUTATED AFTER CALL",
     contentHash: "0".repeat(64),
     operationId: OPERATION_ID,
-    kedits: [],
+    editorTransactions: [],
   });
   mutable[1]!.tags.find((tag) => tag[0] === "F")![1] = "mutated.md";
   source.policy = "text-only-v1";
@@ -439,7 +445,9 @@ test("preserves zero request remainder for the selector's typed budget failure",
 });
 
 test("maps snapshot-only process to a typed selected-trace failure and text-only projection", async () => {
-  const snapshot = await fileNode("", "Readable snapshot", undefined, { omitKedits: true });
+  const snapshot = await fileNode("", "Readable snapshot", undefined, {
+    omitEditorTransactions: true,
+  });
   const selectedInput = await adaptDesktopTraceContextSelectionV1(input([snapshot]));
   assert.equal(selectedInput.candidates[0]?.source.kind, "trace");
   if (selectedInput.candidates[0]?.source.kind === "trace") {
@@ -458,8 +466,11 @@ test("maps snapshot-only process to a typed selected-trace failure and text-only
 });
 
 test("carries an incomplete ancestor's global verdict through a complete head", async () => {
-  const genesis = await fileNode("", "Draft", undefined, { omitKedits: true, at: 1_000 });
-  const head = await fileNode("Draft", "Current draft", genesis, { at: 2_000 });
+  const genesis = await fileNode("", "Draft", undefined, {
+    omitEditorTransactions: true,
+    timestamp: 1_000,
+  });
+  const head = await fileNode("Draft", "Current draft", genesis, { timestamp: 2_000 });
   const adapted = await adaptDesktopTraceContextSelectionV1(input([genesis, head]));
   assert.equal(adapted.candidates.length, 1);
   const candidate = adapted.candidates[0]!;
@@ -512,14 +523,13 @@ test("maps invalid ancestry to invalid process without trusting an unsigned targ
 
 test("enumerates a verified no-op transaction without a zero-effect change fact", async () => {
   const noOp = await fileNode("", "", undefined, {
-    kedits: [{
-      op: "ins",
-      from: 0,
-      to: 0,
-      text: "",
-      voice: OWNER,
-      t: 9_000,
-      tx: 77,
+    editorTransactions: [{
+      sequence: 77,
+      timestamp: 9_000,
+      actor: OWNER,
+      changes: [{ op: "insert", from: 0, to: 0, text: "" }],
+      selectionBefore: null,
+      selectionAfter: null,
     }],
   });
   const supported = await adaptDesktopTraceContextSelectionV1(input([noOp]));
@@ -532,16 +542,67 @@ test("enumerates a verified no-op transaction without a zero-effect change fact"
   assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
 });
 
-test("projects every protocol-valid FULL KEdit domain value through the desktop boundary", async () => {
+test("preserves a verified selection-only transaction actor through the desktop boundary", async () => {
+  const genesis = await fileNode("", "Draft", undefined, { timestamp: 1_000, sequence: 17 });
+  const head = await fileNode("Draft", "Draft", genesis, {
+    editorTransactions: [{
+      sequence: 41,
+      timestamp: 2_000,
+      actor: OWNER,
+      changes: [],
+      selectionBefore: { ranges: [{ anchor: 0, head: 0 }], main: 0 },
+      selectionAfter: { ranges: [{ anchor: 1, head: 1 }], main: 0 },
+    }],
+  });
+  const adapted = await adaptDesktopTraceContextSelectionV1(input([genesis, head]));
+  const transactionFact = adapted.candidates.find((candidate) =>
+    candidate.kind === "process-fact"
+    && candidate.source.kind === "trace"
+    && candidate.source.nodeId === head.id
+    && candidate.fact.kind === "transaction");
+
+  assert.ok(
+    transactionFact
+    && transactionFact.kind === "process-fact"
+    && transactionFact.fact.kind === "transaction",
+  );
+  if (
+    !transactionFact
+    || transactionFact.kind !== "process-fact"
+    || transactionFact.fact.kind !== "transaction"
+  ) return;
+  assert.deepEqual(transactionFact.fact, {
+    kind: "transaction",
+    transactionIndex: 0,
+    capturedAtMs: 2_000,
+    changeCount: 0,
+    voiceIds: [OWNER],
+  });
+  const selected = await selectTraceContextV1(adapted);
+  assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
+  if (selected.ok) {
+    assert.match(selected.renderedContext, new RegExp(`selection only · actor ${OWNER}`));
+  }
+});
+
+test("projects every protocol-valid FULL EditorTransaction domain value through the desktop boundary", async () => {
   const node = await fileNode("", "AB", undefined, {
-    kedits: [
+    editorTransactions: [
       {
-        op: "ins", from: 0, to: 0, text: "A", voice: "legacy writer",
-        t: -Number.MAX_VALUE, tx: 0,
+        sequence: 0,
+        timestamp: -Number.MAX_VALUE,
+        actor: "historical writer",
+        changes: [{ op: "insert", from: 0, to: 0, text: "A" }],
+        selectionBefore: null,
+        selectionAfter: null,
       },
       {
-        op: "ins", from: 1, to: 1, text: "B", voice: "\ud800",
-        t: Number.MAX_VALUE, tx: Number.MAX_SAFE_INTEGER + 1,
+        sequence: Number.MAX_SAFE_INTEGER + 1,
+        timestamp: Number.MAX_VALUE,
+        actor: "\ud800",
+        changes: [{ op: "insert", from: 1, to: 1, text: "B" }],
+        selectionBefore: null,
+        selectionAfter: null,
       },
     ],
   });
@@ -646,8 +707,8 @@ test("executes every applicable exported adapter rejection descriptor", async ()
   const mutationRoot: Record<string, unknown> = {
     verdict: {
       steps: [
-        { process: { transactions: [{ at: 1_700_000_000_000 }] } },
-        { process: { transactions: [{ at: 1_700_000_000_001 }] } },
+        { process: { transactions: [{ timestamp: 1_700_000_000_000 }] } },
+        { process: { transactions: [{ timestamp: 1_700_000_000_001 }] } },
       ],
     },
     chain: fixture.chain,

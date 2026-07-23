@@ -22,7 +22,7 @@ demonstrated.
 
 Implementation references sit below those reader-facing documents. The
 [desktop operation lifecycle](DESKTOP_OPERATION_LIFECYCLE.md) defines the
-private Phase-2 Extend journal, recovery states, retry rules, application
+private Phase-2 Append journal (internal operation id `extend`), recovery states, retry rules, application
 receipt, and vault-bound cancellation behavior. It is not a wire specification
 or portable provenance format.
 

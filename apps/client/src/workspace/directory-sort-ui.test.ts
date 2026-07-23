@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 
 const appSource = [
   readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("./WorkspaceSidebar.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
 ].join("\n");
 const styles = readFileSync(new URL("../app/App.css", import.meta.url), "utf8");

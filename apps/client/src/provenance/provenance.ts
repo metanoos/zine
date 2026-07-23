@@ -9,16 +9,19 @@ import { Relay } from "nostr-tools/relay";
 import {
   createTraceOperationId,
   isTraceOperationId,
-  parseKEditsFromContent,
-  synthesizeKEditTransition,
+  parseEditorTransactionsFromContent,
+  synthesizeEditorTransactionTransition,
   traceOperationIdFromEvent,
-  validateKEditTransition,
+  validateEditorTransactionTransition,
   verifyFolderTraceChain,
+  type EditorTransaction,
   type FolderCheckpoint,
-  type KEdit,
 } from "@zine/protocol";
 
-export type { KEdit, KEditIntent } from "@zine/protocol";
+export type {
+  EditorTransaction,
+  EditorTransactionIntent,
+} from "@zine/protocol";
 
 import { isTauri, loadOrCreateVoice, resolveRelayUrl } from "../identity/identity.js";
 import {
@@ -422,8 +425,8 @@ export function attributeDeltas(
 export interface PublishEditInput {
   prevEventId: string | null;
   /** The exact signed snapshot of `prevEventId`, or the empty string for
-   * genesis. Required so the publisher can prove `kedits` reproduces this
-   * transition before signing it. */
+   * genesis. Required so the publisher can prove `editorTransactions`
+   * reproduce this transition before signing it. */
   previousSnapshot: string;
   /** Stable identity of the file trace being extended. Genesis callers may
    * omit it: the signed genesis event id becomes the identity. Existing-chain
@@ -530,13 +533,9 @@ export interface PublishEditInput {
    *  `snapshot`/`contentHash` are untouched — a tag never alters the body, the
    *  same stance `reply-to` already takes. Absent on every non-tagging write. */
   citationIds?: string[];
-  /** The complete editor-action log since the previous Step: one `KEdit` per discrete
-   *  editor transaction change (every backspace, highlight-delete, type-over,
-   *  undo, redo, IME commit, streamed LLM token). Non-editor transitions such
-   *  as an import or fork use one explicitly synthetic atomic transaction.
-   *  This field is REQUIRED on file nodes and MUST replay `previousSnapshot`
-   *  exactly to `snapshot`; `[]` is valid only when the body is unchanged. */
-  kedits: KEdit[];
+  /** Required selection-aware process log. Its replay from `previousSnapshot`
+   * must produce `snapshot` exactly before the node can be signed. */
+  editorTransactions: EditorTransaction[];
   /** `action: llm` only — the op-specific instruction/body supplied by the
    *  press, excluding reconstructable folder context. Required by §3.7. */
   prompt?: string;
@@ -1078,19 +1077,21 @@ async function stepSignedEventLocally(
 
 export async function publishEdit(input: PublishEditInput): Promise<Event> {
   assertPublicationFence(input.publicationFence);
-  if (!Array.isArray(input.kedits)) {
-    throw new Error("cannot publish a file Step without its required KEdit array");
+  if (!Array.isArray(input.editorTransactions)) {
+    throw new Error("cannot publish a file Step without its required EditorTransaction array");
   }
   if (input.prevEventId === null && input.previousSnapshot !== "") {
-    throw new Error("file-trace genesis KEdits must start from the empty snapshot");
+    throw new Error("file-trace genesis EditorTransactions must start from the empty snapshot");
   }
-  const keditValidation = validateKEditTransition(
+  const validation = validateEditorTransactionTransition(
     input.previousSnapshot,
     input.snapshot,
-    input.kedits,
+    input.editorTransactions,
   );
-  if (!keditValidation.valid) {
-    throw new Error(`cannot publish a file Step with invalid KEdits: ${keditValidation.reason}`);
+  if (!validation.valid) {
+    throw new Error(
+      `cannot publish a file Step whose EditorTransactions do not reproduce the signed snapshot: ${validation.reason}`,
+    );
   }
   // §3.7: consume path-keyed, single-use LLM metadata. The client's generic
   // write-back path defaults to action:edit; this exact-path entry marks the
@@ -1284,7 +1285,7 @@ export async function publishEdit(input: PublishEditInput): Promise<Event> {
       // Required process log for this exact file transition. Metadata-only and
       // forced checkpoints carry an explicit empty array; content-changing
       // transitions were replay-validated before signing above.
-      kedits: input.kedits,
+      editorTransactions: input.editorTransactions,
       ...(input.summary ? { summary: input.summary } : {}),
       // §3.7: action:llm nodes name their expansion rule + call configuration.
       // `injectRule` is the event id of the minted rule-manifest trace; `llm`
@@ -2033,8 +2034,8 @@ export async function publishCoin(input: {
   phrase: string;
   origin: CoinOrigin;
   signer?: Uint8Array;
-  /** Direct-composer edit history. Genesis still has no prev/delta history. */
-  kedits?: KEdit[];
+  /** Direct-composer transaction history. Genesis still has no prev/delta history. */
+  editorTransactions?: EditorTransaction[];
   /** The Coin Step is durably local until `completeCoinMint` publishes it. */
   localOnly?: boolean;
   /** Sign only. Used so the pending-Mint journal can commit before Step. */
@@ -2061,11 +2062,12 @@ export async function publishCoin(input: {
 
   const signer = input.signer ?? authoringVoice().secretKey;
   const contentHash = await sha256HexLocal(input.phrase);
-  const kedits = input.kedits ?? synthesizeKEditTransition(
-    "",
-    input.phrase,
-    getPublicKey(signer),
-  );
+  const editorTransactions = input.editorTransactions ??
+    synthesizeEditorTransactionTransition(
+      "",
+      input.phrase,
+      getPublicKey(signer),
+    );
   return publishEdit({
     prevEventId: null,
     previousSnapshot: "",
@@ -2082,7 +2084,7 @@ export async function publishCoin(input: {
     bodyHashTag: contentHash,
     coinOrigin: input.origin,
     authors: [{ voice: getPublicKey(signer), text: input.phrase }],
-    kedits,
+    editorTransactions,
     operationId: input.operationId,
   });
 }
@@ -2150,7 +2152,7 @@ export async function publishDirectCoin(input: {
   relativePath: string;
   phrase: string;
   signer?: Uint8Array;
-  kedits?: KEdit[];
+  editorTransactions?: EditorTransaction[];
   localOnly?: boolean;
   /** Sign only. Used so the pending-Mint journal can commit before Step. */
   prepareOnly?: boolean;
@@ -2248,7 +2250,11 @@ export async function getOrCreateRuleTrace(
     summary: `inject rule: ${manifest.algorithm}`,
     bodyHashTag: contentHash,
     signer,
-    kedits: synthesizeKEditTransition("", body, getPublicKey(signer)),
+    editorTransactions: synthesizeEditorTransactionTransition(
+      "",
+      body,
+      getPublicKey(signer),
+    ),
   });
   ruleTraceCache.set(cacheKey, event.id);
   return event.id;
@@ -5136,7 +5142,11 @@ export async function forkFile(
     summary: `forked from ${sourceNodeId.slice(0, 8)}`,
     signer,
     forkedFrom: sourceNodeId,
-    kedits: synthesizeKEditTransition("", snapshot, getPublicKey(signer)),
+    editorTransactions: synthesizeEditorTransactionTransition(
+      "",
+      snapshot,
+      getPublicKey(signer),
+    ),
     operationId: opts?.operationId,
   });
 }
@@ -5182,7 +5192,11 @@ export async function forkFileFromNode(
     signer,
     localOnly: opts?.localOnly,
     forkedFrom: sourceNodeId,
-    kedits: synthesizeKEditTransition("", snapshot, getPublicKey(signer)),
+    editorTransactions: synthesizeEditorTransactionTransition(
+      "",
+      snapshot,
+      getPublicKey(signer),
+    ),
     operationId: opts?.operationId,
     onSigned: opts?.onSigned,
   });
@@ -5300,7 +5314,11 @@ export async function mergeFile(input: {
     localOnly: input.localOnly,
     operationId: input.operationId,
     onSigned: input.onSigned,
-    kedits: synthesizeKEditTransition(prevSnapshot, snapshot, getPublicKey(signer)),
+    editorTransactions: synthesizeEditorTransactionTransition(
+      prevSnapshot,
+      snapshot,
+      getPublicKey(signer),
+    ),
   });
 }
 
@@ -6215,12 +6233,9 @@ export function reconstructFromChain(chain: Event[]): string {
   return content;
 }
 
-/** Read structurally valid KEdits from one node. This tolerant extractor
- * returns `[]` for an explicit empty log and for missing/malformed input; use
- * `traceProcessFromEvent` when conformance must distinguish those cases and
- * validate the full transition. */
-export function keditsFromEvent(event: Event): KEdit[] {
-  return parseKEditsFromContent(event.content);
+/** Read a structurally valid current-schema EditorTransaction array. */
+export function editorTransactionsFromEvent(event: Event): EditorTransaction[] {
+  return parseEditorTransactionsFromContent(event.content);
 }
 
 /** Reconstruct per-author runs by replaying the chain. Attribution is sourced

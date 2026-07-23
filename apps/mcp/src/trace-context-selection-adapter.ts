@@ -387,18 +387,17 @@ function fullProcessProjection(
       chainDistance: chain.length - stepIndex - 1,
       transactions: process.transactions.map((transaction) => ({
         version: 1 as const,
-        sourceTransactionId: transaction.tx,
-        capturedAtMs: transaction.at,
+        sourceTransactionId: transaction.sequence,
+        capturedAtMs: transaction.timestamp,
+        actor: transaction.actor,
         ...(transaction.intent ? { intent: transaction.intent } : {}),
         changes: transaction.changes.map((change) => ({
           version: 1 as const,
-          operation: change.op === "ins"
-            ? "insert" as const
-            : change.op === "del" ? "delete" as const : "replace" as const,
+          operation: change.op,
           range: { fromUtf16: change.from, toUtf16: change.to },
           insertedText: change.inserted,
           deletedText: change.deleted,
-          voiceId: change.voice,
+          voiceId: change.actor,
         })),
       })),
     };

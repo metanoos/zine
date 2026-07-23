@@ -6,9 +6,15 @@ const modalSource = readFileSync(new URL("./CoinModal.tsx", import.meta.url), "u
 const appSource = [
   readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("../app/AppOverlays.tsx", import.meta.url), "utf8"),
+  readFileSync(new URL("../workspace/WorkspaceSidebar.tsx", import.meta.url), "utf8"),
 ].join("\n");
 const cssSource = readFileSync(new URL("../app/App.css", import.meta.url), "utf8");
 const networkingSource = readFileSync(new URL("../networking/Networking.tsx", import.meta.url), "utf8");
+const mutationSource = readFileSync(
+  new URL("../workspace/useWorkspaceMutations.ts", import.meta.url),
+  "utf8",
+);
 
 test("Coin composing and inspection render as tab surfaces", () => {
   const coinView = modalSource.match(
@@ -237,7 +243,9 @@ test("Mint completes Step, Publish, and minter-Attest before success", () => {
     "unfinished Mint attempts must not report a successful attestation",
   );
   assert.ok(
-    mint.indexOf("await recoverPendingCoinMints(operationKey)") <
+    mint.indexOf(
+      "await recoverPendingCoinMints(operationKey, publicationController.signal)",
+    ) <
       mint.indexOf("currentNodeId !== source.sourceNodeId") &&
       mint.indexOf("currentNodeId !== source.sourceNodeId") <
       mint.indexOf("preparePendingCoinMint(operationKey"),
@@ -269,7 +277,7 @@ test("Mint completes Step, Publish, and minter-Attest before success", () => {
   );
   assert.match(
     appSource,
-    /const sourceStepKedits = finalizedCoinMintSourceStepKEdits\([\s\S]*?lease\.workspace\.writeFile\([\s\S]*?sourceStepKedits/,
+    /const sourceStepTransactions = finalizedCoinMintSourceStepEditorTransactions\([\s\S]*?lease\.workspace\.writeFile\([\s\S]*?sourceStepTransactions/,
     "source recovery must publish the exact pending editor log plus its citation transaction",
   );
   assert.match(appSource, /rebaseFinalizedCoinMintSourceFile\(/);
@@ -298,17 +306,17 @@ test("Mint completes Step, Publish, and minter-Attest before success", () => {
     "a failed foreground Mint must restart recovery after an initially empty startup",
   );
   assert.match(
-    appSource,
-    /function moveNodes[\s\S]*?blocksPendingMintSourceMutation\([\s\S]*?function stepFolderPath/,
+    mutationSource,
+    /function moveNodes[\s\S]*?blocksPendingMintSourceMutation\(/,
     "moving an unfinished extracted-Mint source must be blocked before optimistic state changes",
   );
   assert.match(
-    appSource,
+    mutationSource,
     /function deleteNodes[\s\S]*?blocksPendingMintSourceMutation\([\s\S]*?function hardDelete[\s\S]*?blocksPendingMintSourceMutation\(/,
     "both recycle-bin and permanent deletes must retain unfinished Mint sources",
   );
   assert.match(
-    appSource,
+    mutationSource,
     /function renameNode[\s\S]*?blocksPendingMintSourceMutation\(/,
     "renaming an unfinished extracted-Mint source must fail before rebasing UI paths",
   );
@@ -390,8 +398,14 @@ test("Coin surfaces use the green Coin color token in both themes", () => {
   );
 });
 
-test("the direct Coin draft survives tab switches and retains KEdits", () => {
-  assert.match(appSource, /interface DirectCoinDraft[\s\S]*?kedits: KEdit\[\][\s\S]*?nextTx: number/);
-  assert.match(appSource, /function editDirectCoinDraft\(phrase: string\)[\s\S]*?diffToDeltas\(draft\.phrase, phrase\)/);
+test("the direct Coin draft survives tab switches and retains EditorTransactions", () => {
+  assert.match(
+    appSource,
+    /interface DirectCoinDraft[\s\S]*?editorTransactions: EditorTransaction\[\][\s\S]*?nextSequence: number/,
+  );
+  assert.match(
+    appSource,
+    /function editDirectCoinDraft\(phrase: string\)[\s\S]*?synthesizeEditorTransactionTransition\(\s*draft\.phrase,\s*phrase,/,
+  );
   assert.doesNotMatch(appSource, /directCoinComposerOpen|DirectCoinComposerModal/);
 });

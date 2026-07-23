@@ -1,11 +1,18 @@
 import type { LocalFile } from "./local-store.js";
 import {
   flattenRuns,
-  keditLogFromArray,
-  recoverStepKEdits,
+  editorTransactionLogFromArray,
+  recoverStepEditorTransactions,
   type FileState,
   type Run,
 } from "./workspace-core.js";
+
+export interface CrashPadRestoreOptions {
+  /** Exact snapshot carried by the signed head selected for this file. The
+   * local primary record may already contain a failed/staged write, so its body
+   * is not always the EditorTransaction journal's real pre-state. */
+  steppedSnapshot?: string;
+}
 
 /** Reconstruct an editor FileState by overlaying one crash-pad buffer on the
  * stepped workspace snapshot. */
@@ -14,6 +21,7 @@ export function restoreCrashPadFile(
   file: LocalFile,
   fallbackVoice: string,
   recoveryVoice: string,
+  options: CrashPadRestoreOptions = {},
 ): FileState {
   const runs: Run[] =
     file.runs && file.runs.length > 0 && flattenRuns(file.runs) === file.content
@@ -21,17 +29,17 @@ export function restoreCrashPadFile(
       : file.content.length === 0
         ? []
         : [{ voice: file.voicePubkey ?? fallbackVoice, text: file.content }];
-  const recoveredKEdits = recoverStepKEdits(
-    existing ? flattenRuns(existing.runs) : "",
+  const recoveredEditorTransactions = recoverStepEditorTransactions(
+    options.steppedSnapshot ?? (existing ? flattenRuns(existing.runs) : ""),
     file.content,
-    file.kedits,
+    file.editorTransactions,
     // An unusable or missing crash journal is a machine reconciliation, not a
-    // fresh AUTHOR or MODEL transaction. Its atomic recovery KEdit therefore
+    // fresh AUTHOR or MODEL transaction. Its atomic recovery EditorTransaction therefore
     // uses the dedicated per-machine reconciler identity; run attribution is
     // preserved separately and must never be guessed from the first run.
     recoveryVoice,
     file.updatedAt,
-  ).kedits;
+  ).editorTransactions;
   return {
     kind: existing?.kind,
     runs,
@@ -45,7 +53,7 @@ export function restoreCrashPadFile(
     updatedAt: file.updatedAt,
     tags: file.tags ?? existing?.tags ?? [],
     citationIds: file.citationIds ?? existing?.citationIds,
-    ...(recoveredKEdits.length > 0 ? { kedits: keditLogFromArray(recoveredKEdits) } : {}),
+    ...(recoveredEditorTransactions.length > 0 ? { editorTransactions: editorTransactionLogFromArray(recoveredEditorTransactions) } : {}),
     ...(existing?.eventMeta ? { eventMeta: existing.eventMeta } : {}),
   };
 }

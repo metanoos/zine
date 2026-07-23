@@ -1,4 +1,5 @@
 import type { OpKind as PreparedOperationId } from "./op-prompts.js";
+import type { OpLensId } from "./op-lenses.js";
 
 /**
  * Declarative descriptions for AI participants rendered in the action palette.
@@ -41,6 +42,21 @@ export type AiPaletteRowDescription = Readonly<{
 
 export type AiPaletteRegistry = readonly AiPaletteRowDescription[];
 
+export type AiPaletteRecipeDescription = Readonly<{
+  id: string;
+  operation: PreparedOperationId;
+  lensId: OpLensId;
+  label: string;
+  title: string;
+}>;
+
+export type AiPaletteRecipeFamilyDescription = Readonly<{
+  id: "append" | "rewrite" | "reply" | "quote-reply";
+  label: "Append" | "Rewrite" | "Reply" | "Quote Reply";
+  title: string;
+  recipes: readonly AiPaletteRecipeDescription[];
+}>;
+
 export class AiPaletteRegistryError extends Error {
   constructor(message: string) {
     super(message);
@@ -66,7 +82,7 @@ const BUILTIN_ACTIONS = [
   {
     id: "extend",
     kind: "operation",
-    label: "Extend",
+    label: "Append",
     title: "Append an AI continuation to this file",
     className: "op-extend",
   },
@@ -295,6 +311,106 @@ const BUILTIN_REGISTRY_SOURCE = deepFreeze([
     actions: BUILTIN_ACTIONS,
   },
 ]);
+
+/**
+ * The Press presents prepared operations as recipes filed under four writing
+ * gestures. A recipe is presentation-only: it selects one existing bounded
+ * operation and one existing editorial lens. It cannot carry prompt text,
+ * callbacks, provider authority, or application behavior.
+ */
+export const BUILTIN_AI_RECIPE_FAMILIES = deepFreeze([
+  {
+    id: "append",
+    label: "Append",
+    title: "Continue from the selected passage or document ending",
+    recipes: [
+      {
+        id: "append-continue",
+        operation: "extend",
+        lensId: "voice-mirror",
+        label: "Continue, extending in a similar fashion to the above",
+        title: "Continue in the source's existing voice and structure",
+      },
+      {
+        id: "append-outside-perspective",
+        operation: "extend",
+        lensId: "outside-perspective",
+        label: "Respond, giving an outside perspective on the above",
+        title: "Append a response from a distinct outside perspective",
+      },
+    ],
+  },
+  {
+    id: "rewrite",
+    label: "Rewrite",
+    title: "Stir up or settle the selected prose",
+    recipes: [
+      {
+        id: "rewrite-stir",
+        operation: "stir",
+        lensId: "default",
+        label: "Stir — heat it up, adding innovation, insight, challenge, intrigue, magic, whatnot, opposites, who knows, type energy",
+        title: "Heat up the draft with invention, insight, challenge, and surprise",
+      },
+      {
+        id: "rewrite-settle",
+        operation: "settle",
+        lensId: "default",
+        label: "Settle — to consolidate and condense, to sift the word-vomit for gold dust; to cut the fluff and isolate key points and good lines",
+        title: "Consolidate the draft, cut fluff, and preserve its strongest points and lines",
+      },
+    ],
+  },
+  {
+    id: "reply",
+    label: "Reply",
+    title: "Create a new response document beside the source",
+    recipes: [
+      {
+        id: "reply-open",
+        operation: "reply",
+        lensId: "default",
+        label: "Open response",
+        title: "Write a direct response with sparing trace citations",
+      },
+      {
+        id: "reply-skeptical",
+        operation: "reply",
+        lensId: "skeptical-reader",
+        label: "Skeptical response",
+        title: "Test the source's strongest assumptions fairly",
+      },
+    ],
+  },
+  {
+    id: "quote-reply",
+    label: "Quote Reply",
+    title: "Respond through close textual or process evidence",
+    recipes: [
+      {
+        id: "quote-reply-close-reading",
+        operation: "reply",
+        lensId: "psychoanalytic-reading",
+        label: "Close reading",
+        title: "Interpret textual tensions while grounding each claim in evidence",
+      },
+      {
+        id: "quote-reply-process",
+        operation: "analyze",
+        lensId: "default",
+        label: "Process reading",
+        title: "Answer the recorded writing process with a cited analysis",
+      },
+      {
+        id: "quote-reply-forensic",
+        operation: "analyze",
+        lensId: "forensic-process-analyst",
+        label: "Forensic process reading",
+        title: "Favor auditable event-to-claim reasoning and restrained inference",
+      },
+    ],
+  },
+] as const satisfies readonly AiPaletteRecipeFamilyDescription[]);
 
 /** The only registry exposed today. Multi-row/custom persistence is deferred. */
 export const BUILTIN_AI_PALETTE_REGISTRY = validateAiPaletteRegistry(

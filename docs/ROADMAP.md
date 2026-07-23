@@ -43,9 +43,29 @@ Already built:
 - desktop and MCP presses;
 - signed file and folder trace chains;
 - Step, Publish (wire name Send), Attest, Mint, Cite, fork, merge, and replay;
-- mandatory replay-valid KEdit process logs and shared `FULL TRACE` /
+- mandatory replay-valid editor transaction process logs and shared `FULL TRACE` /
   `SNAPSHOT ONLY` / `INVALID` reader verdicts;
 - distinct human, model, and agent voice keys with per-delta attribution;
+- an initial durable folder Collaboration core with shared mount/shield
+  resolution, explicit join grants, owner-signed recipient bootstraps,
+  read-scoped per-file Yjs documents, causally verified micro-batched edit
+  operations retaining ordered editor transactions, isolated unsigned drafts,
+  deterministic same-name materialization, delegated voice attribution, typed
+  stable-ID folder actions, scoped capabilities, ephemeral live presence,
+  private denied-work patches, retained reconnect history, and exact
+  Step-prefix capture/acknowledgement APIs; production Step wiring, durable
+  provider storage, join UI, encrypted transport, and a peer provider remain
+  deferred;
+- an initial Stage core with strict versioned one/two-panel snapshots, signed
+  Controller commands chained to exact parent snapshots with deterministic
+  fork resolution, mounted/readable capability enforcement, accepted handoff,
+  disconnect grace and vacancy, owner recovery, plus a private-layout
+  follow/detach/rejoin adapter with opaque local Replay suspensions; visible
+  controls and production peer transport remain deferred;
+- an initial in-place Replay presentation reducer that preserves stable panel
+  identity/arrangement, scopes playback to one panel, resets changed trace sets,
+  and detaches follower playback into a private projection; visible controls
+  and the concrete CodeMirror suspension binding remain deferred;
 - local and hosted relay implementations, with a remaining hosted ACL gap;
 - raw-file Reify with an optional signed-event bundle and report;
 - passphrase-gated desktop vault sessions with independent Roots, encrypted

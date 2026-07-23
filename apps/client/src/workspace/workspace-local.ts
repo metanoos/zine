@@ -58,11 +58,10 @@ import {
   stepFolderManifest,
   traceSignedEventBytes,
   upsertManifestEntry,
-  type KEdit,
   type ManifestFileEntry,
   type PublicationFence,
 } from "../provenance/provenance.js";
-import { createTraceOperationId } from "@zine/protocol";
+import { createTraceOperationId, type EditorTransaction } from "@zine/protocol";
 import { findAddedInlineCitations, findResolvedBrackets } from "../provenance/brackets.js";
 import { decidePullMerge } from "./three-way-merge.js";
 import { authorVoice, secretKeyForVoice } from "../identity/keys-store.js";
@@ -77,8 +76,8 @@ import type {
 import {
   ensureMdExt,
   flattenRuns,
-  resolveStepKEdits,
-  synthesizeKEditTransition,
+  resolveStepEditorTransactions,
+  synthesizeEditorTransactionTransition,
 } from "./workspace-core.js";
 import {
   clearFolderStepOperation,
@@ -130,7 +129,7 @@ function deleteLocalFileDurably(folderId: string, relativePath: string): void {
 
 function deleteLocalFilesDurably(folderId: string, relativePaths: readonly string[]): void {
   if (!deleteLocalFiles(folderId, relativePaths)) {
-    throw new Error(`cannot persist ${relativePaths.length} reconciled local deletions`);
+    throw new Error(`cannot persist ${relativePaths.length} local deletions`);
   }
 }
 
@@ -1138,7 +1137,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         citationIds: file.citationIds,
         pendingLocalOnly: file.pendingLocalOnly,
         pendingForce: file.pendingForce,
-        pendingKedits: file.pendingKedits,
+        pendingEditorTransactions: file.pendingEditorTransactions,
         pendingEmptyGenesis: file.pendingEmptyGenesis,
         pendingOperationId: operationId,
       });
@@ -1259,7 +1258,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
             operationId,
             onSigned: persistDelete,
             signer,
-            kedits: synthesizeKEditTransition(
+            editorTransactions: synthesizeEditorTransactionTransition(
               priorParsed.snapshot,
               "",
               getPublicKey(signer),
@@ -1329,7 +1328,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         citationIds: file.citationIds,
         pendingLocalOnly: file.pendingLocalOnly,
         pendingForce: file.pendingForce,
-        pendingKedits: file.pendingKedits,
+        pendingEditorTransactions: file.pendingEditorTransactions,
         pendingEmptyGenesis: file.pendingEmptyGenesis,
         pendingOperationId: operationId,
         pendingSignedEvent: event,
@@ -1359,7 +1358,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           action: "import",
           ...(file.pendingLocalOnly ? { localOnly: true } : {}),
           signer: genesisSigner,
-          kedits: [],
+          editorTransactions: [],
           operationId,
           onSigned: persistPendingFileNode,
         });
@@ -1377,7 +1376,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           citationIds: file.citationIds,
           pendingLocalOnly: file.pendingLocalOnly,
           pendingForce: file.pendingForce,
-          pendingKedits: file.pendingKedits,
+          pendingEditorTransactions: file.pendingEditorTransactions,
           pendingEmptyGenesis: true,
           pendingOperationId: operationId,
         });
@@ -1660,7 +1659,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
           citationIds: file.citationIds,
           pendingLocalOnly: file.pendingLocalOnly,
           pendingForce: file.pendingForce,
-          pendingKedits: file.pendingKedits,
+          pendingEditorTransactions: file.pendingEditorTransactions,
           pendingEmptyGenesis: file.pendingEmptyGenesis,
           pendingOperationId: operationId,
         });
@@ -1709,10 +1708,10 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     }
 
     const deltas = diffToDeltas(prevContent, content);
-    const stepKEdits = resolveStepKEdits(
+    const stepProcess = resolveStepEditorTransactions(
       prevContent,
       content,
-      file.pendingKedits,
+      file.pendingEditorTransactions ?? undefined,
       signerPubkey,
       file.updatedAt,
     );
@@ -1746,7 +1745,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       inlineCitations: findAddedInlineCitations(prevContent, content),
       ...(file.pendingReplyingTo ? { replyingTo: file.pendingReplyingTo } : {}),
       ...(citationIds.length > 0 ? { citationIds } : {}),
-      kedits: stepKEdits.kedits,
+      editorTransactions: stepProcess.editorTransactions,
       ...(file.pendingLocalOnly ? { localOnly: true } : {}),
       signer,
       operationId,
@@ -1757,9 +1756,9 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
     // Reflect the stepped node id back into local state so the next push's
     // prevId is correct. Preserve voicePubkey so re-pushes stay correctly signed,
     // and runs so the local record keeps the per-char attribution it just stepped
-    // (avoids a needless reload-from-chain on next open). `pendingReplyingTo`,
-    // `pendingKedits`, `pendingLocalOnly`, and `pendingForce` are deliberately
-    // NOT carried: all four are one-shot, consumed by this push.
+      // (avoids a needless reload-from-chain on next open). `pendingReplyingTo`,
+      // `pendingEditorTransactions`, `pendingLocalOnly`, and `pendingForce` are
+      // deliberately NOT carried: all four are one-shot, consumed by this push.
     // `citationIds` IS carried — tags are persistent across steps.
     finalizeFileNode(event);
     return event.id;
@@ -1912,7 +1911,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         operationId,
         onSigned: persistDelete,
         signer,
-        kedits: synthesizeKEditTransition(
+        editorTransactions: synthesizeEditorTransactionTransition(
           priorParsed.snapshot,
           "",
           getPublicKey(signer),
@@ -2561,7 +2560,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
         runs: draft.runs,
         voicePubkey: draft.voicePubkey,
         citationIds: draft.citationIds,
-        pendingKedits: draft.kedits,
+        pendingEditorTransactions: draft.editorTransactions ?? null,
         pendingLocalOnly: true,
         pendingOperationId: operationId,
       });
@@ -2742,7 +2741,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       runs?: Run[],
       replyingTo?: string,
       citationIds?: string[],
-      kedits?: KEdit[],
+      editorTransactions?: EditorTransaction[] | null,
       localOnly?: boolean,
       force?: boolean,
       requestedOperationId?: string,
@@ -2777,7 +2776,7 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
                 voicePubkey,
                 pendingReplyingTo: replyingTo,
                 citationIds: citationIds,
-                pendingKedits: kedits,
+                pendingEditorTransactions: editorTransactions ?? null,
                 pendingLocalOnly: localOnly || undefined,
                 pendingForce: force || undefined,
                 pendingEmptyGenesis: existing?.pendingEmptyGenesis,
@@ -3065,6 +3064,33 @@ export function createLocalWorkspace(options: LocalWorkspaceOptions = {}): Works
       });
     },
 
+    async deleteLocalPath(relativePath: string, isFolder: boolean): Promise<void> {
+      if (!isOblivionPath(relativePath)) {
+        throw new Error("local-only deletion is reserved for Oblivion");
+      }
+      const id = requireId();
+      const operationId = createTraceOperationId();
+      await runWorkspaceRootMutation(id, operationId, async () => {
+        const local = loadLocalFolder(id);
+        const affected = (isFolder
+          ? Object.keys(local?.files ?? {}).filter(
+              (path) => path === relativePath || path.startsWith(`${relativePath}/`),
+            )
+          : [relativePath])
+          .sort((left, right) => right.split("/").length - left.split("/").length);
+        for (const path of affected) {
+          const timerKey = pushTimerKey(id, path);
+          const timer = pushTimers.get(timerKey);
+          if (timer) {
+            clearTimeout(timer);
+            pushTimers.delete(timerKey);
+          }
+        }
+        deleteLocalFilesDurably(id, affected);
+        deletePadPath(id, relativePath, isFolder);
+      });
+    },
+
     async movePath(src, destFolder, isFolder, _tagsByPath = {}): Promise<void> {
       const id = requireId();
       const operationId = createTraceOperationId();
@@ -3283,7 +3309,7 @@ export function crashPadDraftForPull(
   return !existing ||
       existing.kind !== "file" ||
       pad.content !== existing.content ||
-      (pad.kedits?.length ?? 0) > 0
+      (pad.editorTransactions?.length ?? 0) > 0
     ? pad
     : undefined;
 }
@@ -3395,8 +3421,8 @@ export function localFolderReplacementIsSafe(
     file.pendingReplyingTo ||
     file.pendingLocalOnly ||
     file.pendingForce ||
-    file.pendingKedits ||
-    file.kedits,
+    file.pendingEditorTransactions !== undefined ||
+    file.editorTransactions,
   )) return false;
   const sameBufferedVersion = (primary: LocalFile | undefined, buffered: LocalFile) =>
     !!primary &&
@@ -3407,7 +3433,8 @@ export function localFolderReplacementIsSafe(
     JSON.stringify(primary.tags) === JSON.stringify(buffered.tags) &&
     JSON.stringify(primary.runs ?? []) === JSON.stringify(buffered.runs ?? []) &&
     JSON.stringify(primary.citationIds ?? []) === JSON.stringify(buffered.citationIds ?? []) &&
-    JSON.stringify(primary.kedits ?? []) === JSON.stringify(buffered.kedits ?? []);
+    JSON.stringify(primary.editorTransactions ?? []) ===
+      JSON.stringify(buffered.editorTransactions ?? []);
   if (Object.entries(pad ?? {}).some(([path, buffered]) =>
     (path === storagePath || path.startsWith(`${storagePath}/`)) &&
     !sameBufferedVersion(local.files[path], buffered)

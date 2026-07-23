@@ -27,7 +27,7 @@ async function fileNode(
   previous?: Event,
   options: {
     secret?: Uint8Array;
-    kedits?: unknown;
+    editorTransactions?: unknown;
     contentHash?: string;
     deltas?: unknown;
     prevTarget?: string;
@@ -36,16 +36,20 @@ async function fileNode(
   const voice = getPublicKey(options.secret ?? SECRET);
   const hasPrevious = previous !== undefined || options.prevTarget !== undefined;
   const previousId = options.prevTarget ?? previous?.id;
-  const kedits = options.kedits ?? (before === snapshot
+  const editorTransactions = options.editorTransactions ?? (before === snapshot
     ? []
     : [{
-        op: before.length === 0 ? "ins" : snapshot.length === 0 ? "del" : "repl",
-        from: 0,
-        to: before.length,
-        text: snapshot,
-        voice,
-        t: 1_700_000_000_000 + (hasPrevious ? 1 : 0),
-        tx: 0,
+        sequence: 0,
+        timestamp: 1_700_000_000_000 + (hasPrevious ? 1 : 0),
+        actor: voice,
+        changes: [{
+          op: before.length === 0 ? "insert" : snapshot.length === 0 ? "delete" : "replace",
+          from: 0,
+          to: before.length,
+          text: snapshot,
+        }],
+        selectionBefore: null,
+        selectionAfter: null,
       }]);
   const template: EventTemplate = {
     kind: 4290,
@@ -62,7 +66,7 @@ async function fileNode(
       contentHash: options.contentHash ?? await sha256Hex(snapshot),
       operationId: "ab".repeat(32),
       ...(options.deltas !== undefined ? { deltas: options.deltas } : {}),
-      ...(options.kedits === null ? {} : { kedits }),
+      ...(options.editorTransactions === null ? {} : { editorTransactions }),
     }),
   };
   return finalizeEvent(template, options.secret ?? SECRET);
@@ -76,23 +80,22 @@ test("shared verifier distinguishes Full Trace from readable snapshot-only proce
   assert.deepEqual(full.steps.map((step) => step.status), ["full", "full"]);
   assert.equal(traceConformanceLabel(full.status), "FULL TRACE");
 
-  const missingProcess = await fileNode("", "readable", undefined, { kedits: null });
+  const missingProcess = await fileNode("", "readable", undefined, { editorTransactions: null });
   const snapshotOnly = await verifyFileTraceChain([missingProcess]);
   assert.equal(snapshotOnly.status, "snapshot-only");
   assert.equal(snapshotOnly.issues[0]?.kind, "process");
   assert.equal(traceConformanceLabel(snapshotOnly.status), "SNAPSHOT ONLY");
 });
 
-test("a mismatched KEdit log downgrades process without invalidating signed text", async () => {
+test("a mismatched EditorTransaction log downgrades process without invalidating signed text", async () => {
   const event = await fileNode("", "signed snapshot", undefined, {
-    kedits: [{
-      op: "ins",
-      from: 0,
-      to: 0,
-      text: "different",
-      voice: OWNER,
-      t: 1,
-      tx: 0,
+    editorTransactions: [{
+      sequence: 0,
+      timestamp: 1,
+      actor: OWNER,
+      changes: [{ op: "insert", from: 0, to: 0, text: "different" }],
+      selectionBefore: null,
+      selectionAfter: null,
     }],
   });
   const verdict = await verifyFileTraceChain([event]);
@@ -165,7 +168,7 @@ test("signed deltas must reproduce the snapshot before a node is Full Trace", as
 test("combined reader verdict keeps integrity precedence", async () => {
   const full = await verifyFileTraceChain([await fileNode("", "full")]);
   const snapshotOnly = await verifyFileTraceChain([
-    await fileNode("", "snapshot", undefined, { kedits: null }),
+    await fileNode("", "snapshot", undefined, { editorTransactions: null }),
   ]);
   const invalid = await verifyFileTraceChain([
     { ...(await fileNode("", "invalid")), sig: "0".repeat(128) },

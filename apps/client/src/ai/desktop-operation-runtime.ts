@@ -250,7 +250,7 @@ export function desktopOperationRetryAttemptIdV1(
 }
 
 /**
- * Freeze one approved exact-context Extend request into the private envelope.
+ * Freeze one approved exact-context Append request into the private envelope.
  * Approval itself remains owned by `PreparedOperationApproval`; this boundary
  * verifies that no request/provider/selector bytes were substituted afterward.
  */
@@ -277,9 +277,9 @@ function bindApprovedDesktopExtendPreparationV1(
   "prepared" | "provider" | "selectedContext" | "maxOutputTokens"
 > {
   const { prepared, provider } = input;
-  if (prepared.operation !== "extend") fail("durable Phase 2 execution supports Extend only");
+  if (prepared.operation !== "extend") fail("durable Phase 2 execution supports Append only");
   const selected = prepared.traceContextSelection;
-  if (!selected) fail("approved Extend request has no exact trace-context selection");
+  if (!selected) fail("approved Append request has no exact trace-context selection");
   if (provider.id !== prepared.providerId) fail("provider id changed after request approval");
   if (providerProfileFingerprint(provider) !== prepared.providerFingerprint) {
     fail("provider configuration changed after request approval");

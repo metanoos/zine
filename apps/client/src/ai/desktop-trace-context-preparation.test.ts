@@ -13,6 +13,7 @@ import {
 import { ModelOperationController } from "./model-operation-controller.js";
 import type { ProviderConfig } from "./models-store.js";
 import {
+  PreparedOperationError,
   prepareOperation,
   prepareOperationWithSelectedTraceContext,
   type PrepareOperationInput,
@@ -39,7 +40,7 @@ async function sha256(text: string): Promise<string> {
   return Buffer.from(digest).toString("hex");
 }
 
-async function fileNode(text: string, omitKedits = false) {
+async function fileNode(text: string, omitEditorTransactions = false) {
   const template: EventTemplate = {
     kind: 4290,
     created_at: 1_700_000_000,
@@ -53,15 +54,14 @@ async function fileNode(text: string, omitKedits = false) {
       snapshot: text,
       contentHash: await sha256(text),
       operationId: OPERATION_ID,
-      ...(omitKedits ? {} : {
-        kedits: [{
-          op: "ins",
-          from: 0,
-          to: 0,
-          text,
-          voice: OWNER,
-          t: 1_700_000_000_000,
-          tx: 1,
+      ...(omitEditorTransactions ? {} : {
+        editorTransactions: [{
+          sequence: 1,
+          timestamp: 1_700_000_000_000,
+          actor: OWNER,
+          changes: [{ op: "insert", from: 0, to: 0, text }],
+          selectionBefore: null,
+          selectionAfter: null,
         }],
       }),
     }),
@@ -69,20 +69,25 @@ async function fileNode(text: string, omitKedits = false) {
   return finalizeEvent(template, SECRET);
 }
 
-function snapshotFor(node: Awaited<ReturnType<typeof fileNode>>, body: string, headId = node.id) {
+function snapshotFor(
+  node: Awaited<ReturnType<typeof fileNode>>,
+  body: string,
+  headId = node.id,
+  targetPath = "draft.md",
+) {
   return createContextSnapshot({
     target: {
       kind: "file",
       folderId: "folder-1",
-      path: "draft.md",
+      path: targetPath,
       traceId: node.id,
       headId,
       body,
     },
-    mount: { kind: "file", path: "draft.md" },
+    mount: { kind: "file", path: targetPath },
     shields: [],
     inputs: [{
-      path: "draft.md",
+      path: targetPath,
       traceId: node.id,
       headId,
       body,
@@ -92,8 +97,8 @@ function snapshotFor(node: Awaited<ReturnType<typeof fileNode>>, body: string, h
     }],
     renderedBlock: renderContextBlock({
       folderLabel: "folder-1",
-      entries: [{ relativePath: "draft.md", content: body }],
-      activePath: "draft.md",
+      entries: [{ relativePath: targetPath, content: body }],
+      activePath: targetPath,
       deltaLog: [],
     }),
     createdAt: 1,
@@ -104,6 +109,7 @@ function preparationInput(
   node: Awaited<ReturnType<typeof fileNode>>,
   body: string,
   headId = node.id,
+  targetPath = "draft.md",
 ): PrepareOperationInput {
   return {
     operation: "extend",
@@ -115,7 +121,7 @@ function preparationInput(
       sourceFrom: 0,
       sourceTo: body.length,
     },
-    contextSnapshot: snapshotFor(node, body, headId),
+    contextSnapshot: snapshotFor(node, body, headId, targetPath),
     provider,
     modelVoicePubkey: "a".repeat(64),
     lensId: "default",
@@ -172,6 +178,37 @@ test("binds Unicode selected-context bytes and all package-local identities to m
   });
   assert.equal(inspector.metadata.budget.usedContextBytes, selection.manifest.budget.usedRenderedBytes);
   assert.equal(inspector.selectedEvidence.length, selection.manifest.selected.length);
+});
+
+test("accepts a nested workspace target whose signed structural name is its final segment", async () => {
+  const body = "Nested lesson draft";
+  const node = await fileNode(body);
+
+  const prepared = await prepareDesktopTraceContextOperationV1(
+    preparationInput(node, body, node.id, "AI-interview-briefcase-v3/draft.md"),
+    boundary(node),
+  );
+
+  assert.equal(prepared.targetRevision.path, "AI-interview-briefcase-v3/draft.md");
+  assert.equal(
+    prepared.traceContextSelection?.manifest.operation.target.chosenPath,
+    "draft.md",
+  );
+});
+
+test("dirty Append reports its Step prerequisite before signed-range validation", async () => {
+  const signedBody = "Signed draft";
+  const liveBody = `${signedBody} with unstepped text`;
+  const node = await fileNode(signedBody);
+  const input = preparationInput(node, liveBody);
+  input.dirtyTarget = true;
+
+  await assert.rejects(
+    prepareDesktopTraceContextOperationV1(input, boundary(node)),
+    (error: unknown) =>
+      error instanceof PreparedOperationError
+      && /draft\.md has unstepped changes; click Step before running an AI action/.test(error.message),
+  );
 });
 
 test("text-only remains trace-free even though the signed target is verified", async () => {
@@ -455,7 +492,7 @@ test("controller invalidation aborts selector preparation after context gatherin
   assert.ok(verifierCalls > 0);
 });
 
-// Regression for the Extend autofire path (palette click fires Extend directly,
+// Regression for the Append autofire path (palette click fires Append directly,
 // without first opening the Inspector to produce a pre-approved request). The
 // autofire branch calls controller.prepare({ operation: "extend", traceContext })
 // and then hands the result to the durable desktop runtime, which requires
@@ -504,7 +541,7 @@ test("controller prepare for extend with trace context populates traceContextSel
     traceContext: boundary(node),
   });
 
-  // The durable runtime's guard (extendLLM) rejects a prepared Extend request
+  // The durable runtime's guard (extendLLM) rejects a prepared Append request
   // whose traceContextSelection is missing. Autofire must satisfy it.
   assert.ok(prepared.traceContextSelection, "autofire prepare must bind selected trace context");
   assert.equal(prepared.operation, "extend");

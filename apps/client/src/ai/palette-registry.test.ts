@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { OP_ORDER, type OpKind } from "./op-prompts.js";
 import {
+  BUILTIN_AI_RECIPE_FAMILIES,
   BUILTIN_AI_PALETTE_REGISTRY,
   resolveAiPaletteRegistry,
   validateAiPaletteRegistry,
@@ -14,6 +15,10 @@ const appSource = [
   readFileSync(new URL("../app/AppShell.tsx", import.meta.url), "utf8"),
   readFileSync(new URL("../app/App.tsx", import.meta.url), "utf8"),
 ].join("\n");
+const inspectorSource = readFileSync(
+  new URL("./PromptInspectorModal.tsx", import.meta.url),
+  "utf8",
+);
 
 function mutableBuiltinCopy(): Array<Record<string, unknown>> {
   return JSON.parse(JSON.stringify(BUILTIN_AI_PALETTE_REGISTRY)) as Array<Record<string, unknown>>;
@@ -64,7 +69,7 @@ test("the five prepared operations and Run preserve today's row order and labels
     [
       ["analyze", "Analyze"],
       ["reply", "Reply"],
-      ["extend", "Extend"],
+      ["extend", "Append"],
       ["stir", "Stir"],
       ["settle", "Settle"],
       ["run", "Run"],
@@ -73,6 +78,66 @@ test("the five prepared operations and Run preserve today's row order and labels
   assert.deepEqual(
     actions.filter((action) => action.kind === "operation").map((action) => action.id),
     ["analyze", "reply", "extend", "stir", "settle"],
+  );
+});
+
+test("The Press files prepared operations under four immutable recipe families", () => {
+  assert.deepEqual(
+    BUILTIN_AI_RECIPE_FAMILIES.map(({ id, label }) => [id, label]),
+    [
+      ["append", "Append"],
+      ["rewrite", "Rewrite"],
+      ["reply", "Reply"],
+      ["quote-reply", "Quote Reply"],
+    ],
+  );
+  assert.ok(BUILTIN_AI_RECIPE_FAMILIES.every((family) => family.recipes.length >= 2));
+  assert.deepEqual(
+    [...new Set(BUILTIN_AI_RECIPE_FAMILIES.flatMap((family) =>
+      family.recipes.map((recipe) => recipe.operation)))].sort(),
+    [...OP_ORDER].sort(),
+  );
+  assert.ok(Object.isFrozen(BUILTIN_AI_RECIPE_FAMILIES));
+  assert.ok(BUILTIN_AI_RECIPE_FAMILIES.every(Object.isFrozen));
+  assert.ok(BUILTIN_AI_RECIPE_FAMILIES.every((family) =>
+    Object.isFrozen(family.recipes) && family.recipes.every(Object.isFrozen)));
+});
+
+test("Append offers the two default continuation and outside-perspective recipes in order", () => {
+  const append = BUILTIN_AI_RECIPE_FAMILIES.find((family) => family.id === "append");
+  assert.deepEqual(
+    append?.recipes.map(({ operation, lensId, label }) => ({ operation, lensId, label })),
+    [
+      {
+        operation: "extend",
+        lensId: "voice-mirror",
+        label: "Continue, extending in a similar fashion to the above",
+      },
+      {
+        operation: "extend",
+        lensId: "outside-perspective",
+        label: "Respond, giving an outside perspective on the above",
+      },
+    ],
+  );
+});
+
+test("Rewrite offers the two default Stir and Settle recipes in order", () => {
+  const rewrite = BUILTIN_AI_RECIPE_FAMILIES.find((family) => family.id === "rewrite");
+  assert.deepEqual(
+    rewrite?.recipes.map(({ operation, lensId, label }) => ({ operation, lensId, label })),
+    [
+      {
+        operation: "stir",
+        lensId: "default",
+        label: "Stir — heat it up, adding innovation, insight, challenge, intrigue, magic, whatnot, opposites, who knows, type energy",
+      },
+      {
+        operation: "settle",
+        lensId: "default",
+        label: "Settle — to consolidate and condense, to sift the word-vomit for gold dust; to cut the fluff and isolate key points and good lines",
+      },
+    ],
   );
 });
 
@@ -157,9 +222,11 @@ test("custom input fails closed to the built-in registry", () => {
   assert.strictEqual(resolveAiPaletteRegistry(), BUILTIN_AI_PALETTE_REGISTRY);
 });
 
-test("App consumes the registry instead of maintaining a second AI action list", () => {
+test("the shell and Inspector consume the closed registries without duplicating action literals", () => {
   assert.match(appSource, /const AI_PALETTE_ROW = resolveAiPaletteRegistry\(\)\[0\]/);
-  assert.match(appSource, /AI_PALETTE_ROW\.actions\.map\(\(action\) =>/);
+  assert.match(appSource, /AI_PALETTE_ROW\.actions/);
+  assert.match(inspectorSource, /BUILTIN_AI_RECIPE_FAMILIES\.map\(\(family\) =>/);
+  assert.match(inspectorSource, /actionFamily\.recipes\.map\(\(recipe\) =>/);
   assert.doesNotMatch(appSource, /const VOICE_OPS|MODEL_ALIASES|MODEL_LABEL_KEY/);
   assert.doesNotMatch(appSource, /\{ op: "analyze", label: "Analyze"/);
 });

@@ -11,34 +11,33 @@ const base = {
   deltas: [],
   snapshot: "changed",
   contentHash: "hash",
-} satisfies Omit<PublishEditInput, "kedits">;
+} satisfies Omit<PublishEditInput, "editorTransactions">;
 
-test("publisher rejects a file Step that omits its KEdit array", async () => {
+test("publisher rejects a file Step that omits its EditorTransaction array", async () => {
   await assert.rejects(
     publishEdit(base as unknown as PublishEditInput),
-    /required KEdit array/,
+    /required EditorTransaction array/,
   );
 });
 
-test("publisher rejects an empty KEdit array for changed content", async () => {
+test("publisher rejects an empty EditorTransaction array for changed content", async () => {
   await assert.rejects(
-    publishEdit({ ...base, kedits: [] }),
+    publishEdit({ ...base, editorTransactions: [] }),
     /do not reproduce the signed snapshot/,
   );
 });
 
-test("publisher rejects KEdits whose replay differs from the signed snapshot", async () => {
+test("publisher rejects editor transactions whose replay differs from the signed snapshot", async () => {
   await assert.rejects(
     publishEdit({
       ...base,
-      kedits: [{
-        op: "ins",
-        from: 0,
-        to: 0,
-        text: "other",
-        voice: "voice",
-        t: 1,
-        tx: 0,
+      editorTransactions: [{
+        sequence: 0,
+        timestamp: 1,
+        actor: "voice",
+        changes: [{ op: "insert", from: 0, to: 0, text: "other" }],
+        selectionBefore: null,
+        selectionAfter: null,
       }],
     }),
     /do not reproduce the signed snapshot/,
@@ -50,8 +49,8 @@ test("publisher rejects a genesis transition that claims a non-empty pre-state",
     publishEdit({
       ...base,
       previousSnapshot: "not genesis",
-      kedits: [],
+      editorTransactions: [],
     }),
-    /genesis KEdits must start from the empty snapshot/,
+    /genesis EditorTransactions must start from the empty snapshot/,
   );
 });

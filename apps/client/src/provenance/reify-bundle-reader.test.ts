@@ -18,7 +18,7 @@ interface NodeOptions {
   kind?: number;
   discriminator?: string | null;
   contentHash?: string;
-  kedits?: unknown;
+  editorTransactions?: unknown;
   prevTarget?: string;
   createdAt?: number;
 }
@@ -56,16 +56,20 @@ async function fileNode(
     ["action", hasPrevious ? "edit" : "import"],
     ...(hasPrevious ? [["e", previousId, "", "prev"]] : []),
   ];
-  const defaultKEdits = before === snapshot
+  const defaultEditorTransactions = before === snapshot
     ? []
     : [{
-        op: before.length === 0 ? "ins" : snapshot.length === 0 ? "del" : "repl",
-        from: 0,
-        to: before.length,
-        text: snapshot,
-        voice,
-        t: (options.createdAt ?? 1_700_000_000) * 1_000,
-        tx: 0,
+        sequence: 0,
+        timestamp: (options.createdAt ?? 1_700_000_000) * 1_000,
+        actor: voice,
+        changes: [{
+          op: before.length === 0 ? "insert" : snapshot.length === 0 ? "delete" : "replace",
+          from: 0,
+          to: before.length,
+          text: snapshot,
+        }],
+        selectionBefore: null,
+        selectionAfter: null,
       }];
   const template: EventTemplate = {
     kind: options.kind ?? 4290,
@@ -75,7 +79,7 @@ async function fileNode(
       snapshot,
       contentHash: options.contentHash ?? await sha256Hex(snapshot),
       operationId: TEST_OPERATION_ID,
-      ...(options.kedits === null ? {} : { kedits: options.kedits ?? defaultKEdits }),
+      ...(options.editorTransactions === null ? {} : { editorTransactions: options.editorTransactions ?? defaultEditorTransactions }),
     }),
   };
   return finalizeEvent(template, secret);
@@ -441,7 +445,7 @@ test("independently detects tampered event signatures, ids, and content", async 
   }
 });
 
-test("uses shared conformance for kind, discriminator, lineage, owner, hash, and KEdit failures", async () => {
+test("uses shared conformance for kind, discriminator, lineage, owner, hash, and EditorTransaction failures", async () => {
   const genesis = await fileNode("", "draft");
   const wrongKind = await fileNode("", "body", undefined, { kind: 1 });
   const wrongDiscriminator = await fileNode("", "body", undefined, { discriminator: "folder" });
@@ -449,14 +453,13 @@ test("uses shared conformance for kind, discriminator, lineage, owner, hash, and
   const foreign = await fileNode("draft", "foreign", genesis, { secret: OTHER_SECRET });
   const wrongHash = await fileNode("", "body", undefined, { contentHash: "0".repeat(64) });
   const badReplay = await fileNode("", "body", undefined, {
-    kedits: [{
-      op: "ins",
-      from: 0,
-      to: 0,
-      text: "different",
-      voice: getPublicKey(SECRET),
-      t: 1,
-      tx: 0,
+    editorTransactions: [{
+      sequence: 0,
+      timestamp: 1,
+      actor: getPublicKey(SECRET),
+      changes: [{ op: "insert", from: 0, to: 0, text: "different" }],
+      selectionBefore: null,
+      selectionAfter: null,
     }],
   });
   const fixtures: {
@@ -471,7 +474,7 @@ test("uses shared conformance for kind, discriminator, lineage, owner, hash, and
     { name: "broken prev", chain: [genesis, brokenPrev], files: { "broken.md": "final" }, code: "broken-prev", status: "invalid" },
     { name: "owner change", chain: [genesis, foreign], files: { "owner.md": "foreign" }, code: "owner-changed", status: "invalid" },
     { name: "snapshot hash", chain: [wrongHash], files: { "hash.md": "body" }, code: "snapshot-hash-mismatch", status: "invalid" },
-    { name: "KEdit replay", chain: [badReplay], files: { "replay.md": "body" }, code: "nonconforming-kedits", status: "snapshot-only" },
+    { name: "EditorTransaction replay", chain: [badReplay], files: { "replay.md": "body" }, code: "nonconforming-editor-transactions", status: "snapshot-only" },
   ];
 
   for (const fixture of fixtures) {

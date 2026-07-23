@@ -27,6 +27,29 @@ const ROOT_ID = "e".repeat(64);
 const PATH = "draft.md";
 const CURRENT_TEXT = "Draft revised";
 
+function transaction(
+  from: number,
+  to: number,
+  text: string,
+  actor: string,
+  timestamp: number,
+  sequence: number,
+): Record<string, unknown> {
+  return {
+    sequence,
+    timestamp,
+    actor,
+    changes: [{
+      op: from === to ? "insert" : text === "" ? "delete" : "replace",
+      from,
+      to,
+      text,
+    }],
+    selectionBefore: null,
+    selectionAfter: null,
+  };
+}
+
 interface CorpusFixture {
   name: string;
   chain: ProtocolEvent[];
@@ -99,7 +122,7 @@ const ADAPTER_CASES = [
   },
 ] as const;
 
-test("internally verifies one immutable chain and derives exact Extend/Settle selector inputs", async (t) => {
+test("internally verifies one immutable chain and derives exact Append/Settle selector inputs", async (t) => {
   const fixture = await fullFixture();
   for (const adapterCase of ADAPTER_CASES) {
     await t.test(adapterCase.name, async () => {
@@ -418,17 +441,67 @@ test("deterministic enumeration keeps no-op summaries and transactions but omits
   assert.equal(headFacts.some((fact) => fact.kind === "change"), false);
 });
 
-test("projects every protocol-valid FULL KEdit domain value through the MCP boundary", async () => {
+test("preserves a verified selection-only transaction actor through the MCP boundary", async () => {
+  const draftHash = await sha256("Draft");
+  const chain = [
+    event(GENESIS_ID, [], "Draft", draftHash, [
+      transaction(0, 0, "Draft", VOICE_ID, 100, 0),
+    ], "1".repeat(64)),
+    event(HEAD_ID, [["e", GENESIS_ID, "", "prev"]], "Draft", draftHash, [{
+      sequence: 1,
+      timestamp: 200,
+      actor: VOICE_ID,
+      changes: [],
+      selectionBefore: { ranges: [{ anchor: 0, head: 0 }], main: 0 },
+      selectionAfter: { ranges: [{ anchor: 1, head: 1 }], main: 0 },
+    }], "2".repeat(64)),
+  ];
+  const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1({
+    version: 1,
+    policy: "selected-trace-v1",
+    operation: ADAPTER_CASES[0].operation,
+    chain,
+    verifyEvent: exactVectorVerifier(chain),
+  });
+  const transactionFact = adapted.candidates.find((candidate) =>
+    candidate.kind === "process-fact"
+    && candidate.source.kind === "trace"
+    && candidate.source.nodeId === HEAD_ID
+    && candidate.fact.kind === "transaction");
+
+  assert.ok(
+    transactionFact
+    && transactionFact.kind === "process-fact"
+    && transactionFact.fact.kind === "transaction",
+  );
+  if (
+    !transactionFact
+    || transactionFact.kind !== "process-fact"
+    || transactionFact.fact.kind !== "transaction"
+  ) return;
+  assert.deepEqual(transactionFact.fact, {
+    kind: "transaction",
+    transactionIndex: 0,
+    capturedAtMs: 200,
+    changeCount: 0,
+    voiceIds: [VOICE_ID],
+  });
+  const selected = await selectTraceContextV1(adapted);
+  assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
+  if (selected.ok) {
+    assert.match(selected.renderedContext, new RegExp(`selection only · actor ${VOICE_ID}`));
+  }
+});
+
+test("projects every protocol-valid FULL EditorTransaction domain value through the MCP boundary", async () => {
   const snapshot = "AB";
   const contentHash = await sha256(snapshot);
   const chain = [event(HEAD_ID, [], snapshot, contentHash, [
     {
-      op: "ins", from: 0, to: 0, text: "A", voice: "legacy writer",
-      t: -Number.MAX_VALUE, tx: 0,
+      ...transaction(0, 0, "A", "historical writer", -Number.MAX_VALUE, 0),
     },
     {
-      op: "ins", from: 1, to: 1, text: "B", voice: "\ud800",
-      t: Number.MAX_VALUE, tx: Number.MAX_SAFE_INTEGER + 1,
+      ...transaction(1, 1, "B", "\ud800", Number.MAX_VALUE, Number.MAX_SAFE_INTEGER + 1),
     },
   ], "5".repeat(64))];
   const adapted = await adaptVerifiedMcpFileForTraceContextSelectionV1({
@@ -512,15 +585,15 @@ async function fullFixture(): Promise<Fixture> {
   const draftHash = await sha256("Draft");
   const currentHash = await sha256(CURRENT_TEXT);
   const chain: ProtocolEvent[] = [
-    event(GENESIS_ID, [], "Draft", draftHash, [{
-      op: "ins", from: 0, to: 0, text: "Draft", voice: VOICE_ID, t: 100, tx: 0,
-    }], "1".repeat(64)),
-    event(CHANGE_ID, [["e", GENESIS_ID, "", "prev"]], CURRENT_TEXT, currentHash, [{
-      op: "ins", from: 5, to: 5, text: " revised", voice: VOICE_ID, t: 200, tx: 0,
-    }], "2".repeat(64)),
-    event(HEAD_ID, [["e", CHANGE_ID, "", "prev"]], CURRENT_TEXT, currentHash, [{
-      op: "ins", from: 0, to: 0, text: "", voice: VOICE_ID, t: 300, tx: 0,
-    }], "3".repeat(64)),
+    event(GENESIS_ID, [], "Draft", draftHash, [
+      transaction(0, 0, "Draft", VOICE_ID, 100, 0),
+    ], "1".repeat(64)),
+    event(CHANGE_ID, [["e", GENESIS_ID, "", "prev"]], CURRENT_TEXT, currentHash, [
+      transaction(5, 5, " revised", VOICE_ID, 200, 0),
+    ], "2".repeat(64)),
+    event(HEAD_ID, [["e", CHANGE_ID, "", "prev"]], CURRENT_TEXT, currentHash, [
+      transaction(0, 0, "", VOICE_ID, 300, 0),
+    ], "3".repeat(64)),
   ];
   return {
     currentHash,
@@ -554,7 +627,7 @@ function event(
   previousTags: string[][],
   snapshot: string,
   contentHash: string,
-  kedits: readonly Record<string, unknown>[] | undefined,
+  editorTransactions: readonly Record<string, unknown>[] | undefined,
   operationId: string,
 ): ProtocolEvent {
   return {
@@ -567,7 +640,7 @@ function event(
       snapshot,
       contentHash,
       operationId,
-      ...(kedits === undefined ? {} : { kedits }),
+      ...(editorTransactions === undefined ? {} : { editorTransactions }),
     }),
     sig: `signature:${id}`,
   };

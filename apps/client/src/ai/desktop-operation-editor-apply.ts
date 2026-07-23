@@ -12,7 +12,7 @@ export interface PreparedDesktopExtendApplyV1 {
   resultingContentHash: string;
 }
 
-/** Pure editor mutation plan for one already-persisted Extend accept intent. */
+/** Pure editor mutation plan for one already-persisted Append accept intent. */
 export function prepareDesktopExtendApplyV1(
   targetText: string,
   intent: AcceptedArtifactIntentV1,
@@ -20,7 +20,7 @@ export function prepareDesktopExtendApplyV1(
   authoring: PreparedTraceAuthoringV1,
 ): PreparedDesktopExtendApplyV1 {
   if (contentFingerprint(targetText) !== intent.targetRevision.contentHash) {
-    throw new Error("Desktop Extend target content no longer matches its accepted intent");
+    throw new Error("Desktop Append target content no longer matches its accepted intent");
   }
   const { fromUtf16, toUtf16 } = intent.applyRange;
   if (
@@ -30,7 +30,7 @@ export function prepareDesktopExtendApplyV1(
     || toUtf16 !== fromUtf16
     || toUtf16 > targetText.length
   ) {
-    throw new Error("Desktop Extend accepted intent has an invalid insertion range");
+    throw new Error("Desktop Append accepted intent has an invalid insertion range");
   }
   const changes = buildAcceptedExtendChanges(authoring, targetText, fromUtf16, responseText);
   let resultingText = targetText;

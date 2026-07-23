@@ -24,7 +24,7 @@ import { vaultStorage as localStorage } from "../storage/vault-storage.js";
 
 import type { Event } from "nostr-tools";
 import { verifyEvent } from "nostr-tools/pure";
-import type { KEdit } from "../provenance/provenance.js";
+import type { EditorTransaction } from "@zine/protocol";
 import { operationIdFromNode } from "../provenance/provenance.js";
 import { contentFingerprint } from "../ai/context-snapshot.js";
 import { hashCanonicalV1 } from "../ai/desktop-operation-envelope.js";
@@ -109,15 +109,14 @@ export interface LocalFile {
    *  cleared) by `pushToRelay`. Absent → the content-hash no-op branch
    *  collapses a redundant trailing debounce, as before. */
   pendingForce?: boolean;
-  /** One-shot keystroke log drained from the editor at step time, staged for
-   *  the next debounced relay push. Consumed (and cleared) by `pushToRelay`.
-   *  Absent on nodes stepped with an empty buffer (e.g. a forced no-op Step). */
-  pendingKedits?: KEdit[];
-  /** The in-flight keystroke log mirrored to the crash pad (desktop) so an
-   *  unstepped buffer survives a reload. Distinct from `pendingKedits`: this is
-   *  the live editor buffer for crash recovery, not the one-shot push stage.
-   *  Absent on the primary store and on stepped/clean files. */
-  kedits?: KEdit[];
+  /** One-shot transaction log drained from the editor at Step time. `null`
+   *  requests a synthesized
+   *  atomic EditorTransaction after recovery has resolved the exact pre-state;
+   *  an array carries an exact editor capture, including an empty no-op Step. */
+  pendingEditorTransactions?: EditorTransaction[] | null;
+  /** The in-flight selection-aware transaction log mirrored to the crash pad
+   *  so an unstepped buffer survives a reload. */
+  editorTransactions?: EditorTransaction[];
   /** Vault-local idempotency receipt for an accepted desktop MODEL result.
    *  This lives only in the encrypted crash pad. It binds the runtime's
    *  durable apply intent to the exact buffer write so recovery can observe
@@ -130,7 +129,7 @@ export interface DesktopOperationCrashPadReceiptV1 {
   intentId: string;
   resultingContentHash: string;
   resultingRunsSha256: string;
-  resultingKEditsSha256: string;
+  resultingEditorTransactionsSha256: string;
   modelVoicePubkey: string;
 }
 
@@ -429,8 +428,8 @@ function isDesktopOperationCrashPadReceiptV1(
     && /^[0-9a-f]{64}$/.test(receipt.resultingContentHash)
     && typeof receipt.resultingRunsSha256 === "string"
     && /^[0-9a-f]{64}$/.test(receipt.resultingRunsSha256)
-    && typeof receipt.resultingKEditsSha256 === "string"
-    && /^[0-9a-f]{64}$/.test(receipt.resultingKEditsSha256)
+    && typeof receipt.resultingEditorTransactionsSha256 === "string"
+    && /^[0-9a-f]{64}$/.test(receipt.resultingEditorTransactionsSha256)
     && typeof receipt.modelVoicePubkey === "string"
     && /^[0-9a-f]{64}$/.test(receipt.modelVoicePubkey);
 }
@@ -439,7 +438,7 @@ export function createDesktopOperationCrashPadReceiptV1(input: {
   intentId: string;
   content: string;
   runs: readonly Run[];
-  kedits: readonly KEdit[];
+  editorTransactions: readonly EditorTransaction[];
   modelVoicePubkey: string;
 }): DesktopOperationCrashPadReceiptV1 {
   if (!input.intentId || !/^[0-9a-f]{64}$/.test(input.modelVoicePubkey)) {
@@ -448,12 +447,18 @@ export function createDesktopOperationCrashPadReceiptV1(input: {
   if (input.runs.map((run) => run.text).join("") !== input.content) {
     throw new Error("Desktop operation crash-pad runs do not match their content");
   }
+  if (!Array.isArray(input.editorTransactions)) {
+    throw new Error("Desktop operation crash-pad receipt requires EditorTransactions");
+  }
   return Object.freeze({
     version: 1,
     intentId: input.intentId,
     resultingContentHash: contentFingerprint(input.content),
     resultingRunsSha256: hashCanonicalV1("zine.desktop-operation.pad-runs.v1", input.runs),
-    resultingKEditsSha256: hashCanonicalV1("zine.desktop-operation.pad-kedits.v1", input.kedits),
+    resultingEditorTransactionsSha256: hashCanonicalV1(
+      "zine.desktop-operation.pad-editor-transactions.v1",
+      input.editorTransactions,
+    ),
     modelVoicePubkey: input.modelVoicePubkey,
   });
 }
@@ -464,7 +469,7 @@ export function isExactDesktopOperationCrashPadReceipt(file: LocalFile): boolean
     !receipt
     || !isDesktopOperationCrashPadReceiptV1(receipt)
     || !Array.isArray(file.runs)
-    || !Array.isArray(file.kedits)
+    || !Array.isArray(file.editorTransactions)
     || file.voicePubkey !== receipt.modelVoicePubkey
     || file.runs.map((run) => run.text).join("") !== file.content
   ) return false;
@@ -472,8 +477,11 @@ export function isExactDesktopOperationCrashPadReceipt(file: LocalFile): boolean
     return receipt.resultingContentHash === contentFingerprint(file.content)
       && receipt.resultingRunsSha256
         === hashCanonicalV1("zine.desktop-operation.pad-runs.v1", file.runs)
-      && receipt.resultingKEditsSha256
-        === hashCanonicalV1("zine.desktop-operation.pad-kedits.v1", file.kedits);
+      && receipt.resultingEditorTransactionsSha256
+        === hashCanonicalV1(
+          "zine.desktop-operation.pad-editor-transactions.v1",
+          file.editorTransactions,
+        );
   } catch {
     return false;
   }
@@ -515,7 +523,7 @@ export function saveLocalFile(
     citationIds?: string[];
     pendingLocalOnly?: boolean;
     pendingForce?: boolean;
-    pendingKedits?: KEdit[];
+    pendingEditorTransactions?: EditorTransaction[] | null;
     pendingEmptyGenesis?: boolean;
     pendingOperationId?: string;
     pendingSignedEvent?: Event;
@@ -547,7 +555,9 @@ export function saveLocalFile(
     // record). Cleared by pushToRelay after the step lands.
     ...(data.pendingLocalOnly ? { pendingLocalOnly: data.pendingLocalOnly } : {}),
     ...(data.pendingForce ? { pendingForce: data.pendingForce } : {}),
-    ...(data.pendingKedits ? { pendingKedits: data.pendingKedits } : {}),
+    ...(data.pendingEditorTransactions !== undefined
+      ? { pendingEditorTransactions: data.pendingEditorTransactions }
+      : {}),
     ...(data.pendingEmptyGenesis ? { pendingEmptyGenesis: true } : {}),
     ...(data.pendingOperationId ? { pendingOperationId: data.pendingOperationId } : {}),
     ...(data.pendingSignedEvent ? { pendingSignedEvent: data.pendingSignedEvent } : {}),
@@ -858,7 +868,7 @@ export function mirrorPad(
     runs?: Run[];
     voicePubkey?: string;
     citationIds?: string[];
-    kedits?: KEdit[];
+    editorTransactions?: EditorTransaction[];
     desktopOperationReceipt?: DesktopOperationCrashPadReceiptV1;
   },
 ): boolean {
@@ -876,7 +886,9 @@ export function mirrorPad(
       ...(data.runs ? { runs: data.runs } : {}),
       ...(data.voicePubkey ? { voicePubkey: data.voicePubkey } : {}),
       ...(data.citationIds && data.citationIds.length > 0 ? { citationIds: data.citationIds } : {}),
-      ...(data.kedits ? { kedits: data.kedits } : {}),
+      ...(data.editorTransactions
+        ? { editorTransactions: data.editorTransactions }
+        : {}),
     };
     const desktopOperationReceipt = data.desktopOperationReceipt
       ?? pad[relativePath]?.desktopOperationReceipt;

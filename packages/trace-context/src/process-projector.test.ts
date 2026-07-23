@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   projectTraceProcessCandidatesV1,
   projectTraceProcessCandidatesV1Async,
+  selectTraceContextV1,
+  validateSelectedTraceContextManifestV1,
   type TraceContextProcessProjectionInputV1,
 } from "./index.js";
 
@@ -27,6 +29,7 @@ test("projector owns press-neutral identity, enumeration, ordinals, and exact ra
           version: 1,
           sourceTransactionId: 42,
           capturedAtMs: 200,
+          actor: VOICE_B,
           changes: [{
             version: 1,
             operation: "insert",
@@ -45,6 +48,7 @@ test("projector owns press-neutral identity, enumeration, ordinals, and exact ra
           version: 1,
           sourceTransactionId: 7,
           capturedAtMs: 300,
+          actor: VOICE_A,
           intent: "undo",
           changes: [{
             version: 1,
@@ -71,7 +75,7 @@ test("projector owns press-neutral identity, enumeration, ordinals, and exact ra
   assert.deepEqual(
     candidates.map((candidate) => candidate.source.transactionIndex),
     [0, 0, 0, 0, 0, 0],
-    "signed source tx ids 7/42 must not leak into process-array ordinals",
+    "signed source transaction ids 7/42 must not leak into process-array ordinals",
   );
   assert.deepEqual(candidates[2]?.fact, {
     kind: "change",
@@ -111,6 +115,7 @@ test("native-neutral no-op process views retain summary/transaction and omit zer
         version: 1,
         sourceTransactionId: 9,
         capturedAtMs: 400,
+        actor: VOICE_A,
         changes: [{
           version: 1,
           operation: "insert",
@@ -148,6 +153,75 @@ test("native-neutral no-op process views retain summary/transaction and omit zer
   ]);
 });
 
+test("selection-only transactions survive projection, selection, and manifest validation", async () => {
+  const candidates = projectTraceProcessCandidatesV1({
+    version: 1,
+    traceId: TRACE_ID,
+    headId: HEAD_ID,
+    steps: [{
+      version: 1,
+      nodeId: HEAD_ID,
+      chainDistance: 0,
+      transactions: [{
+        version: 1,
+        sourceTransactionId: 10,
+        capturedAtMs: 500,
+        actor: VOICE_A,
+        changes: [],
+      }],
+    }],
+  });
+
+  assert.deepEqual(candidates.map((candidate) => candidate.fact), [
+    {
+      kind: "step-summary",
+      transactionCount: 1,
+      rangeCount: 0,
+      insertedCodePointCount: 0,
+      deletedCodePointCount: 0,
+      firstCapturedAtMs: 500,
+      lastCapturedAtMs: 500,
+      spanMs: 0,
+      longestGapMs: 0,
+      undoCount: 0,
+      redoCount: 0,
+    },
+    {
+      kind: "transaction",
+      transactionIndex: 0,
+      capturedAtMs: 500,
+      changeCount: 0,
+      voiceIds: [VOICE_A],
+    },
+  ]);
+
+  const selected = await selectTraceContextV1({
+    version: 1,
+    policy: "selected-trace-v1",
+    operation: {
+      version: 1,
+      operation: "extend",
+      target: {
+        traceId: TRACE_ID,
+        headId: HEAD_ID,
+        contentHash: "selection-only-content",
+        currentText: "draft",
+        chosenPath: "draft.md",
+      },
+      maxContextBytes: 16_384,
+      preparedRequestMaxBytes: 32_768,
+      reservedPromptBytes: 512,
+    },
+    candidates,
+  });
+  assert.equal(selected.ok, true, selected.ok ? undefined : selected.error.message);
+  if (!selected.ok) return;
+  assert.doesNotThrow(() => validateSelectedTraceContextManifestV1(selected.manifest));
+  assert.match(selected.renderedContext, new RegExp(
+    `transaction 0 @ 500 · selection only · actor ${VOICE_A}`,
+  ));
+});
+
 test("projector rejects ambiguous chain and ordinal projections", () => {
   const baseline: TraceContextProcessProjectionInputV1 = {
     version: 1,
@@ -173,17 +247,33 @@ test("projector rejects ambiguous chain and ordinal projections", () => {
       steps: [{
         ...baseline.steps[0]!,
         transactions: [
-          { version: 1, sourceTransactionId: 7, capturedAtMs: 1, changes: [noOp()] },
-          { version: 1, sourceTransactionId: 7, capturedAtMs: 2, changes: [noOp()] },
+          { version: 1, sourceTransactionId: 7, capturedAtMs: 1, actor: VOICE_A, changes: [noOp()] },
+          { version: 1, sourceTransactionId: 7, capturedAtMs: 2, actor: VOICE_A, changes: [noOp()] },
         ],
       }],
     }),
     /source transaction ids must be strictly increasing/,
   );
+  assert.throws(
+    () => projectTraceProcessCandidatesV1({
+      ...baseline,
+      steps: [{
+        ...baseline.steps[0]!,
+        transactions: [{
+          version: 1,
+          sourceTransactionId: 8,
+          capturedAtMs: 3,
+          actor: VOICE_A,
+          changes: [{ ...noOp(), voiceId: VOICE_B }],
+        }],
+      }],
+    }),
+    /change voice must match its actor/,
+  );
 });
 
-test("projector closes the complete protocol KEdit domain without inventing signer authority", () => {
-  const legacyVoice = "legacy writer";
+test("projector closes the complete protocol EditorTransaction domain without inventing signer authority", () => {
+  const nonPubkeyActor = "non-pubkey actor";
   const surrogateVoice = "\ud800";
   const candidates = projectTraceProcessCandidatesV1({
     version: 1,
@@ -198,19 +288,21 @@ test("projector closes the complete protocol KEdit domain without inventing sign
           version: 1,
           sourceTransactionId: 0,
           capturedAtMs: -Number.MAX_VALUE,
+          actor: nonPubkeyActor,
           changes: [{
             version: 1,
             operation: "insert",
             range: { fromUtf16: 0, toUtf16: 0 },
             insertedText: "A",
             deletedText: "",
-            voiceId: legacyVoice,
+            voiceId: nonPubkeyActor,
           }],
         },
         {
           version: 1,
           sourceTransactionId: Number.MAX_SAFE_INTEGER + 1,
           capturedAtMs: Number.MAX_VALUE,
+          actor: surrogateVoice,
           changes: [{
             version: 1,
             operation: "insert",
@@ -240,8 +332,8 @@ test("projector closes the complete protocol KEdit domain without inventing sign
     candidates.flatMap((candidate) =>
       candidate.fact.kind === "change" ? [candidate.fact.voiceId] : []),
     [
-      "kedit-voice-utf16-v1:006c006500670061006300790020007700720069007400650072",
-      "kedit-voice-utf16-v1:d800",
+      "editor-transaction-actor-utf16-v1:006e006f006e002d007000750062006b006500790020006100630074006f0072",
+      "editor-transaction-actor-utf16-v1:d800",
     ],
   );
 });
@@ -259,6 +351,7 @@ test("async projector enforces selector bounds and cancellation before returning
         version: 1,
         sourceTransactionId: 0,
         capturedAtMs: 1,
+        actor: VOICE_A,
         changes: [noOp()],
       }],
     }],

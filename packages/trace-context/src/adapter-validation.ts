@@ -39,7 +39,7 @@ export function validateTraceContextAdapterMetadataV1(
   const operation = requireRecord(record.operation, "operation");
   if (operation.version !== 1) fail("operation version must be 1");
   if (operation.operation !== "extend" && operation.operation !== "settle") {
-    fail("operation must be Extend or Settle");
+    fail("operation must be Append (internal id: extend) or Settle");
   }
   const range = operation.range === undefined
     ? undefined
@@ -105,35 +105,39 @@ export function validateTraceContextAdapterProcessBoundsV1(
     fail("file chain exceeds the bounded Step ceiling");
   }
   let candidates = eventContents.length;
-  let editSlots = 0;
+  let activitySlots = 0;
   if (maxCandidates !== undefined && candidates > maxCandidates) {
     fail("projected candidate count exceeds the selector ceiling");
   }
   for (const content of eventContents) {
-    let parsed: { kedits?: unknown };
+    let parsed: { editorTransactions?: unknown };
     try {
-      parsed = JSON.parse(content) as { kedits?: unknown };
+      parsed = JSON.parse(content) as { editorTransactions?: unknown };
     } catch {
       continue;
     }
-    if (!Array.isArray(parsed.kedits)) continue;
-    let previousTransaction: unknown = Symbol("none");
-    for (const value of parsed.kedits) {
-      editSlots += 1;
-      if (editSlots > TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidateSlots) {
-        fail("file chain exceeds the bounded KEdit scan ceiling");
+    if (!Array.isArray(parsed.editorTransactions)) continue;
+    for (const value of parsed.editorTransactions) {
+      activitySlots += 1;
+      if (activitySlots > TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidateSlots) {
+        fail("file chain exceeds the bounded editor transaction scan ceiling");
       }
-      if (maxCandidates === undefined || value === null || typeof value !== "object") continue;
-      const edit = value as Record<string, unknown>;
-      if (edit.tx !== previousTransaction) {
-        candidates += 1;
-        previousTransaction = edit.tx;
+      if (value === null || typeof value !== "object") continue;
+      const transaction = value as Record<string, unknown>;
+      const changes = Array.isArray(transaction.changes) ? transaction.changes : [];
+      activitySlots += changes.length;
+      if (activitySlots > TRACE_CONTEXT_SELECTION_HARD_LIMITS_V1.maxCandidateSlots) {
+        fail("file chain exceeds the bounded editor activity scan ceiling");
       }
-      if (
-        typeof edit.text === "string"
-        && (edit.text.length > 0 || edit.from !== edit.to)
-      ) {
-        candidates += 1;
+      if (maxCandidates === undefined) continue;
+      candidates += 1;
+      for (const value of changes) {
+        if (value === null || typeof value !== "object") continue;
+        const change = value as Record<string, unknown>;
+        if (
+          typeof change.text === "string"
+          && (change.text.length > 0 || change.from !== change.to)
+        ) candidates += 1;
       }
       if (candidates > maxCandidates) {
         fail("projected candidate count exceeds the selector ceiling");

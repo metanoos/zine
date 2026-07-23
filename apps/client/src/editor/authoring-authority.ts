@@ -7,7 +7,7 @@ import type { AuthoritySpanV1 } from "@zine/trace-context";
  * Reload, tab repopulation, move, import, and any unannotated dispatch reset or
  * create ineligible bytes. A Step does not serialize or rekey this state; the
  * map survives only while the same mounted editor state survives. It is not
- * KEdit provenance, is not written into Runs, and makes no durable persistence
+ * EditorTransaction provenance, is not written into Runs, and makes no durable persistence
  * or consumption claim.
  */
 export const EDITOR_AUTHORITY_VERSION = 1;

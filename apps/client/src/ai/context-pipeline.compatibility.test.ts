@@ -58,7 +58,7 @@ Final.
 [#1] edit    2026-01-02 03:04        notes/draft.md   (+5/−5)   «replace the draft»   [one revision]   [FULL TRACE]
       − (deleted) "draft"
       + (inserted) "final"
-      ↳ trace 2 tx / 2 ranges · +10/−5 · span 1m · longest gap 1m · undo 1
+      ↳ trace 2 transactions / 2 ranges · +10/−5 · span 1m · longest gap 1m · undo 1
 
 === END CONTEXT ===`;
 
@@ -231,28 +231,34 @@ test("complete process history retains exact deltas, conformance, and mechanical
       status: "complete",
       transactions: [
         {
-          tx: 1,
-          at: 1_000,
+          sequence: 1,
+          timestamp: 1_000,
+          actor: "a".repeat(64),
+          selectionBefore: null,
+          selectionAfter: null,
           changes: [{
-            op: "ins",
+            op: "insert",
             from: 0,
             to: 0,
             inserted: "draft",
             deleted: "",
-            voice: "a".repeat(64),
+            actor: "a".repeat(64),
           }],
         },
         {
-          tx: 2,
-          at: 61_000,
+          sequence: 2,
+          timestamp: 61_000,
+          actor: "a".repeat(64),
+          selectionBefore: null,
+          selectionAfter: null,
           intent: "undo",
           changes: [{
-            op: "repl",
+            op: "replace",
             from: 0,
             to: 5,
             inserted: "final",
             deleted: "draft",
-            voice: "a".repeat(64),
+            actor: "a".repeat(64),
           }],
         },
       ],
@@ -270,7 +276,7 @@ test("complete process history retains exact deltas, conformance, and mechanical
 
   assert.equal(fixture.renderedBlock, COMPLETE_TRACE_BLOCK);
   assert.equal(fixture.snapshot.inputs[0].deltaLog[0].process?.status, "complete");
-  assert.match(fixture.prepared.messages.at(-1)?.content ?? "", /trace 2 tx \/ 2 ranges/);
+  assert.match(fixture.prepared.messages.at(-1)?.content ?? "", /trace 2 transactions \/ 2 ranges/);
 });
 
 test("Unicode is preserved while the snapshot records UTF-8 byte contributions", () => {
@@ -324,7 +330,7 @@ test("sibling budget includes an exact boundary and then omits in path order", (
   assert.equal(prefixOnly, PREFIX_OMISSION_BLOCK);
 });
 
-test("Extend preserves the exact provider, operation, and context-plus-seed layers", () => {
+test("Append preserves the exact provider, operation, and context-plus-seed layers", () => {
   const seed = "A selected ending.";
   const fixture = prepareFixture({
     entries: [{ relativePath: "draft.md", content: "Existing body." }],
@@ -354,7 +360,7 @@ test("Extend preserves the exact provider, operation, and context-plus-seed laye
     fixture.prepared.messages.map((message) => contentFingerprint(message.content)),
     [
       "a7ac870883c7252d1a11ee02253f7b4943d084532fa1b5a81a6fcf6cd83dc80c",
-      "ec8a00a32ce4f6bc184e582c3d5fd7da12e382c4f02d2c9fff8126c18f90273d",
+      "d1d0c3ddf96ccbed464ba26fe07866cbd5b7043c8f620b219381299d6f69ef1c",
       "55e7dd0279978cb020b8f0feaad10b9e45ad123547c65aeea979adf4e28825d1",
     ],
   );

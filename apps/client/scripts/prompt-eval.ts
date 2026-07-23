@@ -175,12 +175,12 @@ const CASES: PromptCase[] = [
     inputs: {
       traceLog: [
         "--- trace process log: 3 transactions across 2 Full Trace Steps; 0 missing; 0 snapshot-only; 0 invalid artifacts ---",
-        "[#1.1] 2026-07-15T09:00:00.000Z · draft.md · node eval-node-001 · tx 0 · voice eval-author",
+        "[#1.1] 2026-07-15T09:00:00.000Z · draft.md · node eval-node-001 · transaction 0 · actor eval-author",
         "      + 0:0 \"A complete first draft arrived in one span.\"",
-        "[#2.1] 2026-07-15T09:04:00.000Z · Δ4m · draft.md · node eval-node-002 · tx 1 · voice eval-author",
+        "[#2.1] 2026-07-15T09:04:00.000Z · Δ4m · draft.md · node eval-node-002 · transaction 1 · actor eval-author",
         "      − 0:18 \"A complete first \"",
         "      + 0:18 \"A qualified \"",
-        "[#3.1] 2026-07-15T09:08:00.000Z · Δ4m · notes.md · node eval-node-003 · tx 0 · voice eval-author",
+        "[#3.1] 2026-07-15T09:08:00.000Z · Δ4m · notes.md · node eval-node-003 · transaction 0 · actor eval-author",
         "      + 0:0 \"counterexample\"",
       ].join("\n"),
       limelightLog: "PANEL 1 2026-07-15 09:00 mounted draft.md\nPANEL 2 2026-07-15 09:07 mounted notes.md",
@@ -205,7 +205,7 @@ const CASES: PromptCase[] = [
 ];
 
 const ROLE_ONLY_SYSTEM: Record<OpKind, string> = {
-  extend: "You are Extend, a continuer. Continue the supplied writing.",
+  extend: "You are Append, a continuer. Continue the supplied writing.",
   settle: "You are Settle, a copyeditor. Condense the supplied prose.",
   stir: "You are Stir, a developmental editor. Rewrite the supplied prose.",
   reply: "You are Reply, a skeptical critic. Reply to the source document.",

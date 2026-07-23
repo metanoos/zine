@@ -56,16 +56,20 @@ async function fileNode(
       snapshot,
       contentHash: contentHash ?? await sha256Hex(snapshot),
       operationId: TEST_OPERATION_ID,
-      kedits: previousSnapshot === snapshot
+      editorTransactions: previousSnapshot === snapshot
         ? []
         : [{
-            op: previousSnapshot.length === 0 ? "ins" : snapshot.length === 0 ? "del" : "repl",
-            from: 0,
-            to: previousSnapshot.length,
-            text: snapshot,
-            voice,
-            t: createdAt * 1000,
-            tx: 0,
+            sequence: 0,
+            timestamp: createdAt * 1000,
+            actor: voice,
+            changes: [{
+              op: previousSnapshot.length === 0 ? "insert" : snapshot.length === 0 ? "delete" : "replace",
+              from: 0,
+              to: previousSnapshot.length,
+              text: snapshot,
+            }],
+            selectionBefore: null,
+            selectionAfter: null,
           }],
     }),
   };

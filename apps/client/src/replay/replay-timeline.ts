@@ -1,17 +1,18 @@
 import type { Event } from "nostr-tools";
 
-import { groupKEditsByTransaction } from "../provenance/kedit-capture.js";
 import {
   isFocusSelection,
   eventMeta,
-  keditsFromEvent,
+  type EventMeta,
   type FocusSelection,
-  type KEdit,
 } from "../provenance/provenance.js";
 import { pathInTraceScopes, type TraceRef } from "../ai/scope-model.js";
-import { traceProcessFromEvent } from "../provenance/trace-process.js";
 import {
-  applyKEditTransaction,
+  traceProcessFromEvent,
+  type TraceProcessTransaction,
+} from "../provenance/trace-process.js";
+import {
+  applyEditorTransaction,
   flattenRuns,
   type FileState,
   type Run,
@@ -38,6 +39,16 @@ export interface ReplayTimelineStep {
    * identities are aliases, not duplicate Steps, so they share one visible
    * checkpoint while replay applies every occurrence. */
   occurrenceProjections?: ReplayTimelineStep[];
+}
+
+/** Materialized file checkpoint shared with the extracted replay controller. */
+export interface ReplayStep extends ReplayTimelineStep {
+  meta: EventMeta;
+  contentUpToHere: string;
+  runsUpToHere: Run[];
+  changeRange: { from: number; to: number } | null;
+  membership?: { type: "add" | "remove" | "rename" | "advance"; path: string };
+  folder?: ReplayFolderState;
 }
 
 /** Merge independent trace chains without allowing wall-clock rollback to
@@ -311,12 +322,12 @@ export interface PlayFrame {
   eventId?: string;
   runs: Run[];
   at: number;
-  /** This action is also the durable checkpoint for `stepIndex`. KEdit frames
+  /** This action is also the durable checkpoint for `stepIndex`. Transaction frames
    * before it remain ordinary editor actions; the checkpoint frame lets the
    * transport announce the Step exactly when playback reaches it. */
   reachesStep?: boolean;
   /** Exact text mutation carried by this recorded editor transaction. This is
-   * reconstructed from the KEdit plus its pre-action document, so deletions
+   * reconstructed from the EditorTransaction plus its pre-action document, so deletions
    * retain the removed text even though the wire entry stores only offsets. */
   action?: ReplayEditorAction;
   /** Character footprint of this replay action. Fine-grained frames describe
@@ -430,8 +441,8 @@ function charCount(text: string): number {
   return [...text].length;
 }
 
-/** Revoice a kedit-derived run list to match the authoritative per-Step
- *  attribution. KEdits are synthesized from the signer's voice, so an
+/** Revoice a transaction-derived run list to match the authoritative per-Step
+ *  attribution. Synthetic transitions use the signer's voice, so an
  *  AUTHOR-signed-but-spare-voice-attributed Step (the onboarding starter
  *  prose) would otherwise flash the signer's color mid-animation before
  *  settling back to the correct voice at the Step boundary.
@@ -441,7 +452,7 @@ function charCount(text: string): number {
  *  that region. We do this by walking both runs character-by-character and
  *  adopting the authoritative voice at every position the frame shares with
  *  the final text; inserted text that isn't in the final snapshot yet (a
- *  later-deleted region) keeps its kedit voice. Returns the original runs
+ *  later-deleted region) keeps its transaction voice. Returns the original runs
  *  unchanged when texts don't share a prefix the helper can align. */
 function revoiceRunsToFinal(runs: Run[], finalRuns: Run[]): Run[] {
   const frameText = flattenRuns(runs);
@@ -449,14 +460,14 @@ function revoiceRunsToFinal(runs: Run[], finalRuns: Run[]): Run[] {
   if (frameText.length === 0 || finalRuns.length === 0) return runs;
   // Common, fast path: the whole frame is a prefix of the final text (the
   // onboarding insert, or any append-only edit). Adopt final voices verbatim
-  // for the prefix and keep any trailing frame-only tail voiced by the kedit.
+  // for the prefix and keep any trailing frame-only tail on its transaction voice.
   const prefixLen = commonPrefixLen(frameText, finalText);
   if (prefixLen === frameText.length) {
     return sliceRuns(finalRuns, 0, prefixLen);
   }
   if (prefixLen === 0) return runs;
-  // Mixed case (kedit deleted/rewrote region): adopt final voices for the
-  // shared prefix and leave the divergent suffix on its kedit voices. This
+  // Mixed case (a transaction deleted/rewrote a region): adopt final voices for
+  // the shared prefix and leave the divergent suffix on its transaction voices.
   // keeps the visible region correct without guessing mid-document.
   return [
     ...sliceRuns(finalRuns, 0, prefixLen),
@@ -494,18 +505,15 @@ function sliceRuns(runs: Run[], start: number, end: number): Run[] {
   return out;
 }
 
-/** Describe a transaction against the pre-transaction document. KEdit offsets
- * share that coordinate space, including multi-range edits. */
-function keditAction(
-  before: string,
-  edits: readonly KEdit[],
+/** Describe one validated EditorTransaction for Replay. */
+function editorTransactionAction(
+  transaction: TraceProcessTransaction,
 ): ReplayEditorAction {
-  const changes = edits.map((edit) => {
-    const from = Math.max(0, Math.min(edit.from, before.length));
-    const to = Math.max(from, Math.min(edit.to, before.length));
-    return { inserted: edit.text, deleted: before.slice(from, to) };
-  });
-  const intent = edits.find((edit) => edit.intent)?.intent;
+  const changes = transaction.changes.map((change) => ({
+    inserted: change.inserted,
+    deleted: change.deleted,
+  }));
+  const intent = transaction.intent;
   const hasInserted = changes.some((change) => change.inserted.length > 0);
   const hasDeleted = changes.some((change) => change.deleted.length > 0);
   const type = intent ?? (hasInserted && hasDeleted
@@ -1319,12 +1327,11 @@ export function buildReplayTimeline(
       } catch {
         parsed = {};
       }
-      const kedits = keditsFromEvent(event);
       const process = traceProcessFromEvent(event, flattenRuns(runs));
       let stepDelta: ReplayActionDelta | undefined;
-      if (process.status === "complete" && kedits.length > 0) {
+      if (process.status === "complete" && process.transactions.length > 0) {
         // Final per-Step attribution (reads the node's `authors` map). Used to
-        // revoice the kedit-synthesized animation frames so an
+        // revoice transaction-derived animation frames so an
         // AUTHOR-signed-but-spare-voice-attributed Step doesn't flash the
         // signer's color mid-Play. Falls back to no revoicing when the map is
         // absent or its text disagrees with the snapshot (parseAuthors's
@@ -1334,9 +1341,9 @@ export function buildReplayTimeline(
         let replayRuns = runs;
         let replayDelta: ReplayActionDelta | undefined;
         const replayFrames: PlayFrame[] = [];
-        for (const transaction of groupKEditsByTransaction(kedits)) {
-          const before = flattenRuns(replayRuns);
-          const action = keditAction(before, transaction);
+        for (const transaction of process.transactions) {
+          if (transaction.changes.length === 0) continue;
+          const action = editorTransactionAction(transaction);
           const delta = actionDelta(action);
           if (delta) {
             replayDelta = {
@@ -1344,10 +1351,23 @@ export function buildReplayTimeline(
               deleted: (replayDelta?.deleted ?? 0) + delta.deleted,
             };
           }
-          replayRuns = applyKEditTransaction(replayRuns, transaction);
-          const recordedAt = transaction.find((edit) => Number.isFinite(edit.t))?.t;
+          replayRuns = applyEditorTransaction(replayRuns, {
+            sequence: transaction.sequence,
+            timestamp: transaction.timestamp,
+            actor: transaction.changes[0]?.actor ?? event.pubkey,
+            changes: transaction.changes.map((change) => ({
+              op: change.op,
+              from: change.from,
+              to: change.to,
+              text: change.inserted,
+            })),
+            selectionBefore: transaction.selectionBefore,
+            selectionAfter: transaction.selectionAfter,
+            ...(transaction.intent ? { intent: transaction.intent } : {}),
+          });
+          const recordedAt = transaction.timestamp;
           // Revoice only against a final attribution that reproduces the
-          // Step's snapshot; otherwise the kedit voice is the honest best
+          // Step's snapshot; otherwise the transaction voice is the honest best
           // effort (and the settled frame below also keeps it).
           const voiced =
             finalText.length > 0 && finalText === parsed.snapshot
@@ -1398,13 +1418,13 @@ export function buildReplayTimeline(
       }
       // At the Step's settled boundary, prefer the per-Step `authors`
       // attribution (read by reconstructRunsUpTo, surfaced as
-      // step.runsUpToHere) over the kedit-derived runs. KEdits are synthesized
+      // step.runsUpToHere) over the transaction-derived runs. Synthetic transitions
       // from the signer's voice, so they cannot carry a non-signer attribution:
       // the onboarding starter prose, for example, is AUTHOR-signed but
       // spare-voice-attributed, and would otherwise re-color to the user's
       // voice during replay. Match on text so a stale/mismatched map degrades
-      // to the kedit runs instead of corrupting the frame. Intermediate
-      // animation frames keep their best-effort kedit attribution.
+      // to the transaction runs instead of corrupting the frame. Intermediate
+      // animation frames keep their best-effort transaction attribution.
       const stepRuns =
         step && flattenRuns(step.runsUpToHere) === flattenRuns(runs)
           ? step.runsUpToHere

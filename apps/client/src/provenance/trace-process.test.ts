@@ -8,38 +8,42 @@ import {
   summarizeTraceProcess,
   traceProcessFromEvent,
 } from "./trace-process.js";
-import type { KEdit } from "./provenance.js";
+import type { EditorTransaction } from "./provenance.js";
 
 const voice = "a".repeat(64);
 
-function event(snapshot: string, kedits?: KEdit[]): Event {
+function event(snapshot: string, editorTransactions?: EditorTransaction[]): Event {
   return {
     id: "b".repeat(64),
     pubkey: voice,
     created_at: 2,
     kind: 4290,
     tags: [["action", "edit"]],
-    content: JSON.stringify({ snapshot, ...(kedits ? { kedits } : {}) }),
+    content: JSON.stringify({ snapshot, ...(editorTransactions ? { editorTransactions } : {}) }),
     sig: "c".repeat(128),
   };
 }
 
 function edit(
-  tx: number,
+  sequence: number,
   from: number,
   to: number,
   text: string,
   t: number,
   intent?: "undo" | "redo",
-): KEdit {
+): EditorTransaction {
   return {
-    op: from === to ? "ins" : text === "" ? "del" : "repl",
-    from,
-    to,
-    text,
-    voice,
-    t,
-    tx,
+    sequence,
+    timestamp: t,
+    actor: voice,
+    changes: [{
+      op: from === to ? "insert" : text === "" ? "delete" : "replace",
+      from,
+      to,
+      text,
+    }],
+    selectionBefore: null,
+    selectionAfter: null,
     ...(intent ? { intent } : {}),
   };
 }
@@ -52,13 +56,14 @@ test("recovers intermediate text that the signed snapshot no longer contains", (
   assert.equal(process.status, "complete");
   assert.equal(process.transactions[1].changes[0].deleted, "draft");
   assert.equal(process.transactions[1].changes[0].inserted, "final");
-  assert.match(renderTraceProcessSummary(process), /2 tx \/ 2 ranges · \+10\/−5/);
+  assert.match(renderTraceProcessSummary(process), /2 transactions \/ 2 ranges · \+10\/−5/);
 });
 
 test("applies multi-range transactions atomically against one pre-state", () => {
+  const first = edit(7, 0, 1, "A", 1_000);
+  const second = edit(7, 3, 4, "D", 1_000);
   const process = traceProcessFromEvent(event("AbcD", [
-    edit(7, 0, 1, "A", 1_000),
-    edit(7, 3, 4, "D", 1_000),
+    { ...first, changes: [...first.changes, ...second.changes] },
   ]), "abcd");
   assert.equal(process.status, "complete");
   assert.deepEqual(
@@ -93,14 +98,14 @@ test("summaries remain mechanical and preserve undo, redo, span, and gaps", () =
   ]), "");
   const summary = summarizeTraceProcess(process);
   assert.deepEqual(
-    { tx: summary.transactions, ranges: summary.ranges, undo: summary.undo, redo: summary.redo },
-    { tx: 4, ranges: 4, undo: 1, redo: 1 },
+    { transactions: summary.transactions, ranges: summary.ranges, undo: summary.undo, redo: summary.redo },
+    { transactions: 4, ranges: 4, undo: 1, redo: 1 },
   );
   assert.equal(summary.spanMs, 12_000);
   assert.equal(summary.longestGapMs, 10_000);
 });
 
-test("exact Analyze log carries stable evidence anchors, node ids, voices, and deleted text", () => {
+test("exact Analyze log carries stable evidence anchors, node ids, actors, and deleted text", () => {
   const process = traceProcessFromEvent(event("final", [
     edit(0, 0, 0, "draft", 1_000),
     edit(1, 0, 5, "final", 3_000),
@@ -114,9 +119,34 @@ test("exact Analyze log carries stable evidence anchors, node ids, voices, and d
   }]);
   assert.match(log, /\[#4\.2\]/);
   assert.match(log, /node node-4/);
-  assert.match(log, new RegExp(`voice ${voice}`));
+  assert.match(log, new RegExp(`actor ${voice}`));
   assert.match(log, /− 0:5 "draft"/);
   assert.match(log, /\+ 0:5 "final"/);
+});
+
+test("selection-only transactions retain their actor in the derived process and Analyze log", () => {
+  const selectionOnly: EditorTransaction = {
+    sequence: 0,
+    timestamp: 1_000,
+    actor: voice,
+    changes: [],
+    selectionBefore: { ranges: [{ anchor: 0, head: 0 }], main: 0 },
+    selectionAfter: { ranges: [{ anchor: 1, head: 1 }], main: 0 },
+  };
+  const process = traceProcessFromEvent(event("draft", [
+    edit(0, 0, 0, "draft", 500),
+    { ...selectionOnly, sequence: 1 },
+  ]), "");
+
+  assert.equal(process.status, "complete");
+  assert.equal(process.transactions[1]?.actor, voice);
+  assert.match(renderTraceProcessLog([{
+    seq: 5,
+    nodeId: "node-5",
+    steppedAt: 2_000,
+    relativePath: "selection.md",
+    process,
+  }]), new RegExp(`transaction 1 · actor ${voice}`));
 });
 
 test("Analyze interleaves transactions from different Steps by captured editor time", () => {
@@ -130,7 +160,7 @@ test("Analyze interleaves transactions from different Steps by captured editor t
   assert.match(log, /\[#1\.1\].*Δ2s/);
 });
 
-test("a file Step without KEdits is nonconforming", () => {
+test("a file Step without editor transactions is nonconforming", () => {
   const process = traceProcessFromEvent(event("imported"), "");
   assert.equal(process.status, "invalid");
   const log = renderTraceProcessLog([{
@@ -142,10 +172,10 @@ test("a file Step without KEdits is nonconforming", () => {
   }]);
   assert.match(log, /0 missing; 1 snapshot-only/);
   assert.match(log, /SNAPSHOT ONLY/);
-  assert.match(log, /missing its required KEdit log/);
+  assert.match(log, /missing its required EditorTransaction log/);
 });
 
-test("an explicit empty KEdit log is complete only for an unchanged Step", () => {
+test("an explicit empty EditorTransaction log is complete only for an unchanged Step", () => {
   assert.equal(traceProcessFromEvent(event("same", []), "same").status, "complete");
   assert.equal(traceProcessFromEvent(event("changed", []), "before").status, "invalid");
 });

@@ -33,15 +33,18 @@ function fullTraceRows(): readonly DeltaLogEntry[] {
       process: {
         status: "complete",
         transactions: [{
-          tx: 3,
-          at: 900,
+          sequence: 3,
+          timestamp: 900,
+          actor: "a".repeat(64),
+          selectionBefore: null,
+          selectionAfter: null,
           changes: [{
-            op: "repl",
+            op: "replace",
             from: 0,
             to: 5,
             inserted: "clear",
             deleted: "rough",
-            voice: "a".repeat(64),
+            actor: "a".repeat(64),
           }],
         }],
       },
@@ -173,7 +176,7 @@ test("adapts only frozen bounded-context, authoring, and trace-row facts", () =>
 
   assert.equal(presentation.selectedEvidence.length, 2);
   assert.match(presentation.selectedEvidence[0]?.displayClaim ?? "", /FULL TRACE/);
-  assert.match(presentation.selectedEvidence[0]?.displayClaim ?? "", /trace 1 tx \/ 1 ranges/);
+  assert.match(presentation.selectedEvidence[0]?.displayClaim ?? "", /trace 1 transactions \/ 1 ranges/);
   assert.match(presentation.selectedEvidence[1]?.displayClaim ?? "", /SNAPSHOT ONLY/);
   assert.match(presentation.selectedEvidence[1]?.displayClaim ?? "", /snapshot only/);
   assert.equal(presentation.selectedEvidence[0]?.byteCostLabel, "source record bytes");

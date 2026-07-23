@@ -73,7 +73,7 @@ export interface PrepareModelOperationInput {
   modelVoicePubkey: string;
   lensId: OpLensId;
   signal?: AbortSignal;
-  /** Optional exact signed-chain selector boundary for Extend/Settle dogfood. */
+  /** Optional exact signed-chain selector boundary for Append/Settle dogfood. */
   traceContext?: DesktopTraceContextPreparationBoundaryV1;
 }
 

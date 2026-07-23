@@ -241,18 +241,17 @@ async function projectVerifiedProcessCandidates(
         chainDistance: steps.length - step.stepIndex - 1,
         transactions: step.process.transactions.map((transaction) => ({
           version: 1,
-          sourceTransactionId: transaction.tx,
-          capturedAtMs: transaction.at,
+          sourceTransactionId: transaction.sequence,
+          capturedAtMs: transaction.timestamp,
+          actor: transaction.actor,
           ...(transaction.intent ? { intent: transaction.intent } : {}),
           changes: transaction.changes.map((change) => ({
             version: 1,
-            operation: change.op === "ins"
-              ? "insert"
-              : change.op === "del" ? "delete" : "replace",
+            operation: change.op,
             range: { fromUtf16: change.from, toUtf16: change.to },
             insertedText: change.inserted,
             deletedText: change.deleted,
-            voiceId: change.voice,
+            voiceId: change.actor,
           })),
         })),
       };

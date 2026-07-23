@@ -13,7 +13,7 @@ import {
   temporalTraceEventPath,
   temporalTraceEventPaths,
 } from "./context-gather.js";
-import type { KEdit } from "../provenance/provenance.js";
+import type { EditorTransaction } from "../provenance/provenance.js";
 import type { FileState, FolderRef } from "../workspace/workspace-core.js";
 
 function file(text: string): FileState {
@@ -94,14 +94,13 @@ async function tracedEvent(path: string): Promise<Event> {
   const contentHash = Buffer.from(
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(snapshot)),
   ).toString("hex");
-  const kedit: KEdit = {
-    op: "ins",
-    from: 0,
-    to: 0,
-    text: snapshot,
-    voice: "a".repeat(64),
-    t: 900,
-    tx: 0,
+  const editorTransaction: EditorTransaction = {
+    sequence: 0,
+    timestamp: 900,
+    actor: "a".repeat(64),
+    changes: [{ op: "insert", from: 0, to: 0, text: snapshot }],
+    selectionBefore: null,
+    selectionAfter: null,
   };
   return finalizeEvent({
     kind: 4290,
@@ -113,7 +112,7 @@ async function tracedEvent(path: string): Promise<Event> {
       contentHash,
       operationId: TEST_OPERATION_ID,
       deltas: [],
-      kedits: [kedit],
+      editorTransactions: [editorTransaction],
     }),
   }, Uint8Array.from([...new Uint8Array(31), 1]));
 }
@@ -792,14 +791,18 @@ test("context discovers a moved file's removed historical parent folder", async 
       contentHash: oldFileHash,
       operationId: "7".repeat(64),
       deltas: [],
-      kedits: [{
-        op: "ins",
-        from: 0,
-        to: 0,
-        text: oldBody,
-        voice: getPublicKey(fileSecret),
-        t: 1_200,
-        tx: 0,
+      editorTransactions: [{
+        sequence: 0,
+        timestamp: 1_200,
+        actor: getPublicKey(fileSecret),
+        changes: [{
+          op: "insert",
+          from: 0,
+          to: 0,
+          text: oldBody,
+        }],
+        selectionBefore: null,
+        selectionAfter: null,
       }],
     }),
   }, fileSecret);
@@ -874,14 +877,18 @@ test("context discovers a moved file's removed historical parent folder", async 
         newValue: newBody,
         timestamp: 3_000,
       }],
-      kedits: [{
-        op: "repl",
-        from: 0,
-        to: oldBody.length,
-        text: newBody,
-        voice: fileGenesis.pubkey,
-        t: 3_000,
-        tx: 0,
+      editorTransactions: [{
+        sequence: 0,
+        timestamp: 3_000,
+        actor: fileGenesis.pubkey,
+        changes: [{
+          op: "replace",
+          from: 0,
+          to: oldBody.length,
+          text: newBody,
+        }],
+        selectionBefore: null,
+        selectionAfter: null,
       }],
     }),
   }, fileSecret);
@@ -1223,7 +1230,10 @@ test("validated editor transactions enter the snapshot and every AI context as m
   assert.equal(entry.conformance, "full");
   assert.equal(entry.process?.transactions[0].changes[0].inserted, "body:draft.md");
   assert.match(snapshot.renderedBlock, /\[FULL TRACE\]/);
-  assert.match(snapshot.renderedBlock, /trace 1 tx \/ 1 ranges · \+13\/−0/);
+  assert.match(
+    snapshot.renderedBlock,
+    /trace 1 transactions \/ 1 ranges · \+13\/−0/,
+  );
 });
 
 test("invalid signed delta summaries are excluded from AI context evidence", async () => {
@@ -1254,15 +1264,19 @@ test("invalid signed delta summaries are excluded from AI context evidence", asy
         newValue: "forged summary",
         timestamp: 2_000,
       }],
-      kedits: [{
-        op: "repl",
-        from: 0,
-        to: `body:${path}`.length,
-        text: finalText,
-        voice: genesis.pubkey,
-        t: 2_000,
-        tx: 0,
-      } satisfies KEdit],
+      editorTransactions: [{
+        sequence: 0,
+        timestamp: 2_000,
+        actor: genesis.pubkey,
+        changes: [{
+          op: "replace",
+          from: 0,
+          to: `body:${path}`.length,
+          text: finalText,
+        }],
+        selectionBefore: null,
+        selectionAfter: null,
+      } satisfies EditorTransaction],
     }),
   }, Uint8Array.from([...new Uint8Array(31), 1]));
 
@@ -1321,15 +1335,19 @@ test("descendants of an invalid ancestor cannot contribute AI process evidence",
         newValue: finalText,
         timestamp: 2_000,
       }],
-      kedits: [{
-        op: "repl",
-        from: 0,
-        to: `body:${path}`.length,
-        text: finalText,
-        voice: signedGenesis.pubkey,
-        t: 2_000,
-        tx: 0,
-      } satisfies KEdit],
+      editorTransactions: [{
+        sequence: 0,
+        timestamp: 2_000,
+        actor: signedGenesis.pubkey,
+        changes: [{
+          op: "replace",
+          from: 0,
+          to: `body:${path}`.length,
+          text: finalText,
+        }],
+        selectionBefore: null,
+        selectionAfter: null,
+      } satisfies EditorTransaction],
     }),
   }, Uint8Array.from([...new Uint8Array(31), 1]));
 

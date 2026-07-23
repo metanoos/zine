@@ -157,7 +157,7 @@ test("crash pads atomically retain an accepted desktop operation receipt", () =>
     intentId: "artifact-intent-12345678",
     content: "draft\nMODEL",
     runs,
-    kedits: [],
+    editorTransactions: [],
     modelVoicePubkey: "ab".repeat(32),
   });
   assert.equal(mirrorPad("root", "draft.md", {
@@ -166,7 +166,7 @@ test("crash pads atomically retain an accepted desktop operation receipt", () =>
     nodeId: "head-2",
     traceId: "genesis-1",
     runs,
-    kedits: [],
+    editorTransactions: [],
     voicePubkey: "ab".repeat(32),
     desktopOperationReceipt: receipt,
   }), true);
@@ -184,13 +184,13 @@ test("crash pads atomically retain an accepted desktop operation receipt", () =>
   );
 });
 
-test("receipt-bearing pads fail closed when runs, KEdits, or model metadata are tampered", () => {
+test("receipt-bearing pads fail closed when runs, EditorTransactions, or model metadata are tampered", () => {
   values.clear();
   const receipt = createDesktopOperationCrashPadReceiptV1({
     intentId: "artifact-intent-12345678",
     content: "MODEL",
     runs: [{ voice: "cd".repeat(32), text: "MODEL" }],
-    kedits: [],
+    editorTransactions: [],
     modelVoicePubkey: "cd".repeat(32),
   });
   const base = {
@@ -200,13 +200,23 @@ test("receipt-bearing pads fail closed when runs, KEdits, or model metadata are 
     nodeId: "head-2",
     updatedAt: 1,
     runs: [{ voice: "cd".repeat(32), text: "MODEL" }],
-    kedits: [],
+    editorTransactions: [],
     voicePubkey: "cd".repeat(32),
     desktopOperationReceipt: receipt,
   };
   for (const tampered of [
     { ...base, runs: [{ voice: "author", text: "MODEL" }] },
-    { ...base, kedits: [{ op: "ins", from: 0, to: 0, text: "MODEL", voice: "author", t: 1, tx: 1 }] },
+    {
+      ...base,
+      editorTransactions: [{
+        sequence: 1,
+        timestamp: 1,
+        actor: "author",
+        changes: [{ op: "insert", from: 0, to: 0, text: "MODEL" }],
+        selectionBefore: null,
+        selectionAfter: null,
+      }],
+    },
     { ...base, voicePubkey: "ef".repeat(32) },
     { ...base, runs: undefined },
   ]) {
@@ -225,13 +235,13 @@ test("crash-pad receipt writes report persistence failure", () => {
       tags: [],
       nodeId: "head-2",
       runs,
-      kedits: [],
+      editorTransactions: [],
       voicePubkey: "cd".repeat(32),
       desktopOperationReceipt: createDesktopOperationCrashPadReceiptV1({
         intentId: "artifact-intent-12345678",
         content: "draft\nMODEL",
         runs,
-        kedits: [],
+        editorTransactions: [],
         modelVoicePubkey: "cd".repeat(32),
       }),
     }), false);
@@ -395,7 +405,7 @@ test("a pending file operation preserves the exact verified signed event", () =>
       ["f", "root"],
       ["operation", operationId],
     ],
-    content: JSON.stringify({ snapshot: "draft", kedits: [] }),
+    content: JSON.stringify({ snapshot: "draft", editorTransactions: [] }),
   }, new Uint8Array(32).fill(7));
   assert.equal(saveLocalFile("root", "draft.md", {
     content: "draft",
@@ -660,7 +670,11 @@ test("a dropped journal also clears a co-existing pendingSignedEvent bound to th
       ["F", "a.md"],
       ["f", "root"],
     ],
-    content: JSON.stringify({ snapshot: "a", kedits: [], operationId: droppedOperationId }),
+    content: JSON.stringify({
+      snapshot: "a",
+      editorTransactions: [],
+      operationId: droppedOperationId,
+    }),
   }, new Uint8Array(32).fill(7));
   const signedUnderUnrelated = finalizeEvent({
     kind: 4290,
@@ -670,7 +684,11 @@ test("a dropped journal also clears a co-existing pendingSignedEvent bound to th
       ["F", "b.md"],
       ["f", "root"],
     ],
-    content: JSON.stringify({ snapshot: "b", kedits: [], operationId: unrelatedOperationId }),
+    content: JSON.stringify({
+      snapshot: "b",
+      editorTransactions: [],
+      operationId: unrelatedOperationId,
+    }),
   }, new Uint8Array(32).fill(7));
   values.set("zine.folder.root", JSON.stringify({
     id: "root",

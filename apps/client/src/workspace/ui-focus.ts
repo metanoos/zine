@@ -73,6 +73,20 @@ export function focusDirectoryPath(focus: UiFocus | null): string | null {
   return focus?.path ?? null;
 }
 
+/** Whether a visible tab represents the same semantic subject as the focus.
+ * The tab locus alone is insufficient: selecting a directory row deliberately
+ * borrows the current live tab without turning that tab into the folder. */
+export function focusMatchesTrace(
+  focus: UiFocus | null,
+  trace: FocusRef | null,
+): boolean {
+  if (!focus || !trace || focus.kind !== trace.kind) return false;
+  if (focus.path !== undefined || trace.path !== undefined) {
+    return focus.path === trace.path;
+  }
+  return focus.nodeId !== undefined && focus.nodeId === trace.nodeId;
+}
+
 /** Replay follows exactly one focused subject, never a directory operation set. */
 export function focusReplayTarget(
   focus: UiFocus | null,

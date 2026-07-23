@@ -72,7 +72,14 @@ test("a newer crash-pad body is the local side of pull reconciliation", () => {
   const pad = {
     ...primary,
     content: "unstepped draft",
-    kedits: [{ op: "ins" as const, from: 7, to: 7, text: " draft", t: 2, tx: 1, voice: "a" }],
+    editorTransactions: [{
+      sequence: 0,
+      timestamp: 2,
+      actor: "a",
+      changes: [{ op: "insert" as const, from: 7, to: 7, text: " draft" }],
+      selectionBefore: null,
+      selectionAfter: null,
+    }],
     updatedAt: 2,
   };
   assert.equal(crashPadDraftForPull(primary, pad), pad);
@@ -1036,7 +1043,6 @@ test("an unarchived recovery throw blocks successor mutations until the stuck jo
   assert.equal(await successorAfterAbandon, "ok");
   assert.equal(runs.has("root"), false, "queue cleaned up");
 });
-
 
 
 

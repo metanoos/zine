@@ -32,175 +32,176 @@
 // so the storage interface doesn't take a runtime dep on nostr-tools.
 
 import {
-  synthesizeKEditTransition,
-  validateKEditTransition,
-  type KEdit,
+  synthesizeEditorTransactionTransition,
+  validateEditorTransactionTransition,
+  type EditorTransaction,
 } from "@zine/protocol";
 import type { PublicationFence, SampleEventMeta } from "../provenance/provenance.js";
 
-export { synthesizeKEditTransition, validateKEditTransition } from "@zine/protocol";
-export type { KEditTransitionValidation } from "@zine/protocol";
+export {
+  synthesizeEditorTransactionTransition,
+  validateEditorTransactionTransition,
+} from "@zine/protocol";
+export type { EditorTransactionTransitionValidation } from "@zine/protocol";
 
-export interface StepKEditResolution {
-  kedits: KEdit[];
-  source: "captured" | "snapshot";
-  rejectedReason?: string;
-}
-
-/** Resolve the process record staged for an ordinary Step.
- *
- * Missing capture means the caller performed a discrete non-editor transition,
- * so one atomic snapshot KEdit is honest. Present editor capture is a stronger
- * claim: if it cannot replay, publication must fail rather than silently
- * signing a synthetic FULL TRACE for a journaling defect.
- */
-export function resolveStepKEdits(
-  before: string,
-  after: string,
-  captured: readonly KEdit[] | undefined,
-  voice: string,
-  t = Date.now(),
-): StepKEditResolution {
-  if (captured !== undefined) {
-    const validation = validateKEditTransition(before, after, captured);
-    if (validation.valid) {
-      return { kedits: [...captured], source: "captured" };
-    }
-    throw new Error(
-      `invalid captured KEdit log${validation.reason ? `: ${validation.reason}` : ""}`,
-    );
-  }
-  return {
-    kedits: synthesizeKEditTransition(before, after, voice, t),
-    source: "snapshot",
-  };
-}
-
-/** Repair only an explicitly recovered crash-pad journal.
- *
- * A legacy pad may contain a valid recent suffix whose older prefix was never
- * journaled. At this named recovery boundary, collapse the observed before /
- * after state to one atomic transition. Normal Step publication never calls
- * this helper and remains fail-closed above.
- */
-export function recoverStepKEdits(
-  before: string,
-  after: string,
-  captured: readonly KEdit[] | undefined,
-  voice: string,
-  t = Date.now(),
-): StepKEditResolution {
-  try {
-    return resolveStepKEdits(before, after, captured, voice, t);
-  } catch (error) {
-    return {
-      kedits: synthesizeKEditTransition(before, after, voice, t),
-      source: "snapshot",
-      rejectedReason: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
-/**
- * Append-efficient in-memory KEdit log.
- *
- * Each editor transaction contributes one immutable chunk and points at the
- * previous tail, so appending is O(1). The ordered array needed by the wire or
- * crash pad is materialized only at those boundaries. This avoids copying the
- * entire unstepped history on every keystroke.
- */
-export interface KEditLog {
+/** Append-efficient in-memory log for the current editor-transaction schema. */
+export interface EditorTransactionLog {
   readonly length: number;
-  readonly tail: KEditChunk | null;
+  readonly tail: EditorTransactionChunk | null;
 }
 
-interface KEditChunk {
-  readonly edits: readonly KEdit[];
-  readonly previous: KEditChunk | null;
+interface EditorTransactionChunk {
+  readonly transactions: readonly EditorTransaction[];
+  readonly previous: EditorTransactionChunk | null;
 }
 
-export const EMPTY_KEDIT_LOG: KEditLog = Object.freeze({ length: 0, tail: null });
+export const EMPTY_EDITOR_TRANSACTION_LOG: EditorTransactionLog = Object.freeze({
+  length: 0,
+  tail: null,
+});
 
-export function appendKEditLog(log: KEditLog, edits: readonly KEdit[]): KEditLog {
-  if (edits.length === 0) return log;
+export function appendEditorTransactionLog(
+  log: EditorTransactionLog,
+  transactions: readonly EditorTransaction[],
+): EditorTransactionLog {
+  if (transactions.length === 0) return log;
   return {
-    length: log.length + edits.length,
-    tail: { edits, previous: log.tail },
+    length: log.length + transactions.length,
+    tail: { transactions, previous: log.tail },
   };
 }
 
-export function keditLogFromArray(edits: readonly KEdit[]): KEditLog {
-  return edits.length === 0 ? EMPTY_KEDIT_LOG : appendKEditLog(EMPTY_KEDIT_LOG, edits);
+export function editorTransactionLogFromArray(
+  transactions: readonly EditorTransaction[],
+): EditorTransactionLog {
+  return transactions.length === 0
+    ? EMPTY_EDITOR_TRANSACTION_LOG
+    : appendEditorTransactionLog(EMPTY_EDITOR_TRANSACTION_LOG, transactions);
 }
 
-export function keditLogToArray(log: KEditLog | undefined): KEdit[] {
+export function editorTransactionLogToArray(
+  log: EditorTransactionLog | undefined,
+): EditorTransaction[] {
   if (!log || log.length === 0) return [];
-  const chunks: (readonly KEdit[])[] = [];
-  for (let chunk = log.tail; chunk; chunk = chunk.previous) chunks.push(chunk.edits);
+  const chunks: (readonly EditorTransaction[])[] = [];
+  for (let chunk = log.tail; chunk; chunk = chunk.previous) {
+    chunks.push(chunk.transactions);
+  }
   chunks.reverse();
-  const out: KEdit[] = [];
+  const out: EditorTransaction[] = [];
   for (const chunk of chunks) out.push(...chunk);
   return out;
 }
 
-/** The next node-local editor transaction id. A Step resets an empty log to
- *  zero; a crash-pad restore or an in-flight Step suffix continues after the
- *  newest captured transaction. */
-export function nextKEditTx(log: KEditLog): number {
-  const edits = log.tail?.edits;
-  const last = edits && edits.length > 0 ? edits[edits.length - 1] : undefined;
-  const tx = last?.tx;
-  return Number.isSafeInteger(tx) && tx !== undefined && tx >= 0 && tx < Number.MAX_SAFE_INTEGER
-    ? tx + 1
+export function nextEditorTransactionSequence(log: EditorTransactionLog): number {
+  const transactions = log.tail?.transactions;
+  const last = transactions?.[transactions.length - 1];
+  const sequence = last?.sequence;
+  return Number.isSafeInteger(sequence)
+    && sequence !== undefined
+    && sequence >= 0
+    && sequence < Number.MAX_SAFE_INTEGER
+    ? sequence + 1
     : 0;
 }
 
-/** Apply every range in one editor transaction atomically. KEdit offsets share
- *  the transaction's pre-change coordinate space, so descending splices keep
- *  lower offsets stable. Equal-offset edits run in reverse iteration order to
- *  preserve their original insertion order. */
-export function applyKEditTransaction(runs: Run[], edits: readonly KEdit[]): Run[] {
+export function applyEditorTransaction(
+  runs: Run[],
+  transaction: EditorTransaction,
+): Run[] {
   const baseLength = flattenRuns(runs).length;
-  const changes = edits.map((edit, index) => {
-    const from = Math.max(0, Math.min(edit.from, baseLength));
-    const to = Math.max(from, Math.min(edit.to, baseLength));
-    return { edit, index, from, to };
+  const changes = transaction.changes.map((change, index) => {
+    const from = Math.max(0, Math.min(change.from, baseLength));
+    const to = Math.max(from, Math.min(change.to, baseLength));
+    return { change, index, from, to };
   });
   changes.sort((a, b) => b.from - a.from || b.to - a.to || b.index - a.index);
 
   let next = runs;
-  for (const { edit, from, to } of changes) {
-    next = spliceRuns(next, from, to, edit.text, edit.voice);
+  for (const { change, from, to } of changes) {
+    next = spliceRuns(next, from, to, change.text, transaction.actor);
   }
   return next;
 }
 
-/**
- * Remove an already-stepped prefix while preserving edits appended during the
- * asynchronous Step. Prefix identity is structural: `appendKEditLog` keeps the
- * prior tail by reference, so we only drain when `stepped` is genuinely an
- * ancestor of `current`. An unrelated log is returned untouched rather than
- * risking lost edits.
- *
- * Work is proportional to the post-Step suffix, not the full historical log.
- */
-export function dropKEditLogPrefix(current: KEditLog, stepped: KEditLog): KEditLog {
+export function dropEditorTransactionLogPrefix(
+  current: EditorTransactionLog,
+  stepped: EditorTransactionLog,
+): EditorTransactionLog {
   if (stepped.length === 0) return current;
-  if (current.tail === stepped.tail) return EMPTY_KEDIT_LOG;
+  if (current.tail === stepped.tail) return EMPTY_EDITOR_TRANSACTION_LOG;
 
-  const suffixNewestFirst: (readonly KEdit[])[] = [];
+  const suffixNewestFirst: (readonly EditorTransaction[])[] = [];
   let cursor = current.tail;
   while (cursor && cursor !== stepped.tail) {
-    suffixNewestFirst.push(cursor.edits);
+    suffixNewestFirst.push(cursor.transactions);
     cursor = cursor.previous;
   }
   if (cursor !== stepped.tail) return current;
 
-  let suffix = EMPTY_KEDIT_LOG;
-  for (let i = suffixNewestFirst.length - 1; i >= 0; i--) {
-    suffix = appendKEditLog(suffix, suffixNewestFirst[i]);
+  let suffix = EMPTY_EDITOR_TRANSACTION_LOG;
+  for (let index = suffixNewestFirst.length - 1; index >= 0; index -= 1) {
+    suffix = appendEditorTransactionLog(suffix, suffixNewestFirst[index]);
   }
   return suffix;
+}
+
+export function resolveStepEditorTransactions(
+  before: string,
+  after: string,
+  captured: readonly EditorTransaction[] | undefined,
+  voice: string,
+  timestamp = Date.now(),
+): {
+  editorTransactions: EditorTransaction[];
+  source: "captured" | "snapshot";
+  rejectedReason?: string;
+} {
+  if (captured !== undefined) {
+    const validation = validateEditorTransactionTransition(before, after, captured);
+    if (!validation.valid) {
+      throw new Error(
+        `invalid captured EditorTransaction log${validation.reason ? `: ${validation.reason}` : ""}`,
+      );
+    }
+    return { editorTransactions: [...captured], source: "captured" };
+  }
+  return {
+    editorTransactions: synthesizeEditorTransactionTransition(
+      before,
+      after,
+      voice,
+      timestamp,
+    ),
+    source: "snapshot",
+  };
+}
+
+export function recoverStepEditorTransactions(
+  before: string,
+  after: string,
+  captured: readonly EditorTransaction[] | undefined,
+  voice: string,
+  timestamp = Date.now(),
+): {
+  editorTransactions: EditorTransaction[];
+  source: "captured" | "snapshot";
+  rejectedReason?: string;
+} {
+  try {
+    return resolveStepEditorTransactions(before, after, captured, voice, timestamp);
+  } catch (error) {
+    return {
+      editorTransactions: synthesizeEditorTransactionTransition(
+        before,
+        after,
+        voice,
+        timestamp,
+      ),
+      source: "snapshot",
+      rejectedReason: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export interface Run {
@@ -407,11 +408,11 @@ export interface FileState {
    *  on disk is clean text with no frontmatter). Drives the event-metadata
    *  strip in the editor pane. */
   eventMeta?: SampleEventMeta;
-  /** The in-flight keystroke log since the last step — drained from the
-   *  editor's `keditField` and threaded through `writeFile` on the next step.
+  /** The in-flight editor transaction log since the last Step, drained from
+   *  the editor and threaded through `writeFile`.
    *  Not part of long-term FileState identity: cleared after every step, and
    *  mirrored to the crash pad only so an unstepped buffer survives a reload. */
-  kedits?: KEditLog;
+  editorTransactions?: EditorTransactionLog;
 }
 
 export interface FileStepBaseline {
@@ -424,7 +425,7 @@ export interface FileStepBaseline {
  * Whether a file has working state waiting for Step.
  *
  * A newly created empty file has no prior Step baseline yet, but creation alone
- * is not an edit: it starts with no badge. Content, tag, citation, or KEdit
+ * is not an edit: it starts with no badge. Content, tag, citation, or transaction
  * activity makes a baseline-less file pending immediately. Once a baseline
  * exists, its stepped state is the comparison source.
  */
@@ -441,7 +442,7 @@ export function fileHasUnsteppedChanges(
       content.length > 0 ||
       tags.length > 0 ||
       citationIds.length > 0 ||
-      (file.kedits?.length ?? 0) > 0
+      (file.editorTransactions?.length ?? 0) > 0
     );
   }
   return (
@@ -449,7 +450,8 @@ export function fileHasUnsteppedChanges(
     baseline.tags.length !== tags.length ||
     baseline.tags.some((tag, index) => tag !== tags[index]) ||
     baseline.citationIds.length !== citationIds.length ||
-    baseline.citationIds.some((nodeId, index) => nodeId !== citationIds[index])
+    baseline.citationIds.some((nodeId, index) => nodeId !== citationIds[index]) ||
+    (file.editorTransactions?.length ?? 0) > 0
   );
 }
 
@@ -561,11 +563,11 @@ export interface Workspace {
     runs?: Run[],
     replyingTo?: string,
     citationIds?: string[],
-    /** The transaction log drained from the editor's `keditField` at Step
+    /** The transaction log drained from the editor at Step
      *  time. When omitted by a non-editor caller, the backend records the
-     *  content transition as one atomic KEdit. Every published file node still
-     *  receives a replay-valid `kedits` array. */
-    kedits?: KEdit[],
+     *  content transition as one atomic EditorTransaction. Every published
+     *  file node receives a replay-valid `editorTransactions` array. */
+    editorTransactions?: EditorTransaction[] | null,
     /** When true, step to the home relay only — don't fan out to external
      *  write relays. This is the Step gesture (protocol §8): a local
      *  checkpoint that doesn't leave the machine. Default false (fan out
@@ -629,6 +631,10 @@ export interface Workspace {
   /** Delete a file or folder. For folders, every tracked descendant is
    *  tombstoned in the manifest. */
   deletePath(relativePath: string, isFolder: boolean): Promise<void>;
+
+  /** Permanently remove only the retained local copy. This never publishes a
+   * trace tombstone or a relay revocation request. */
+  deleteLocalPath(relativePath: string, isFolder: boolean): Promise<void>;
 
   /** Move `src` into `destFolder` ("" = root), keeping the basename.
    *  `isFolder` selects the folder-member reparent path (spec §3.3: a folder

@@ -601,7 +601,7 @@ function extendApplyRange(
 ): { fromUtf16: number; toUtf16: number } {
   const { rangeFrom, rangeTo } = envelope.prepared.operationInputs;
   if (!Number.isSafeInteger(rangeFrom) || !Number.isSafeInteger(rangeTo)) {
-    fail("prepared Extend request has no exact apply range");
+    fail("prepared Append request has no exact apply range");
   }
   return { fromUtf16: rangeFrom!, toUtf16: rangeTo! };
 }
