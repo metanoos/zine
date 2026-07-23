@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Apple, Download as DownloadIcon, Monitor, Package } from "lucide-react";
+import { Apple, Download as DownloadIcon, Monitor, Package, Terminal } from "lucide-react";
 import { isTauri } from "../identity/identity.js";
 
 /**
@@ -107,11 +107,35 @@ export function DownloadView() {
         provenance live on your machine. Point it at additional relays to publish out.
       </p>
 
+      <div className="download-grid">
+        <div className="settings-card download-card recommended">
+          <div className="download-card-head">
+            <Terminal size={22} strokeWidth={1.75} />
+            <span className="download-card-title">Run from source</span>
+            <span className="download-card-badge">Default</span>
+          </div>
+          <p className="download-hint">
+            <code>git clone https://github.com/metanoos/zine.git</code>
+            <br />
+            <code>cd zine</code>
+            <br />
+            <code>npm start</code>
+          </p>
+          <p className="download-hint">
+            Clean checkouts update from their tracked Git branch the next time Zine starts. Local
+            changes are never overwritten. Run <code>npm run update</code> to update without opening
+            the app; <code>npm run dev</code> runs the exact checkout without updating.
+          </p>
+        </div>
+      </div>
+
+      <p className="download-status">Optional prebuilt installers</p>
+
       {!loaded ? (
-        <p className="download-status">Checking for builds…</p>
+        <p className="download-status">Checking for prebuilt installers…</p>
       ) : error ? (
         <div className="download-empty">
-          <p className="download-status">No builds published yet.</p>
+          <p className="download-status">Prebuilt installers unavailable.</p>
           <p className="download-hint">
             Builds aren't generated in the container — they're produced per-platform and dropped into
             the server's <code>downloads/</code> directory. See{" "}
@@ -120,7 +144,7 @@ export function DownloadView() {
         </div>
       ) : entries.length === 0 ? (
         <div className="download-empty">
-          <p className="download-status">No builds published yet.</p>
+          <p className="download-status">No prebuilt installers published yet.</p>
           <p className="download-hint">
             Drop a <code>.dmg</code>, <code>.msi</code>, or <code>.AppImage</code> into the
             container's <code>downloads/</code> dir and reload.

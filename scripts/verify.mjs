@@ -28,6 +28,7 @@ const checks = [
     args: [
       "--test",
       join(repoRoot, "scripts", "dependency-state.test.mjs"),
+      join(repoRoot, "scripts", "source-update.test.mjs"),
       join(repoRoot, "scripts", "check-go-coverage.test.mjs"),
       join(repoRoot, "scripts", "test-rust.test.mjs"),
     ],

@@ -1,13 +1,16 @@
-// The one-command dev entry point: `npm run dev` from the repo root.
+// Source-install and development entry point from the repo root.
 //
-// Goal: fresh clone → running app, no `cd`-ing, no manual relay build, no
-// guessing what the prerequisites are. This script orchestrates the pieces so
-// the developer never has to know the monorepo layout:
+// `npm start` is the user-facing source installation: it safely updates a clean
+// tracking branch before launch. `npm run dev` is the developer entry point: it
+// runs the exact checkout without fetching or changing source. Both orchestrate
+// the monorepo so nobody has to build the relay or install client dependencies
+// by hand:
 //
-//   1. Check prerequisites (Go, Node, Rust required; Tor optional; warn only)
-//   2. Build the relay if missing/stale (reuses build-relay.mjs's logic)
-//   3. Synchronize client deps when package manifests change
-//   4. Hand off to `tauri dev`, inheriting stdio so logs/clicks flow through
+//   1. For `npm start` only, fast-forward a clean tracking branch
+//   2. Check prerequisites (Go, Node, Rust required; Tor optional; warn only)
+//   3. Build the relay if missing/stale (reuses build-relay.mjs's logic)
+//   4. Synchronize client deps when package manifests change
+//   5. Hand off to `tauri dev`, inheriting stdio so logs/clicks flow through
 //
 // What this deliberately does NOT do: install system packages for you. Homebrew
 // / apt / rustup / Xcode CLT installs are too presumptuous to automate — if a
@@ -18,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { buildRelay } from "./build-relay.mjs";
 import { dependenciesCurrent, markDependenciesCurrent } from "./dependency-state.mjs";
+import { updateSourceCheckout } from "./source-update.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const clientDir = join(repoRoot, "apps", "client");
@@ -157,27 +161,46 @@ function ensureClientDeps() {
 // --- launch ------------------------------------------------------------
 
 /// Hand off to `tauri dev`/`tauri build`. Passes through any extra argv after
-/// `--` so `npm run dev -- --release` etc. still works. Inherits stdio so the
-/// app's logs and the relay sidecar's output stream live.
+/// `--` so `npm start -- --release` / `npm run dev -- --release` still work.
+/// `start` uses Tauri's source runner after updating; it is not a separate
+/// Tauri mode. Inherits stdio so the app and relay sidecar logs remain live.
 function launch(mode) {
-  const extra = process.argv.slice(2).filter((a) => a !== "--" && a !== mode);
-  const args = ["run", "tauri", mode, ...extra];
-  console.log(`\n→ tauri ${mode} (cwd apps/client)\n`);
+  const tauriMode = mode === "start" ? "dev" : mode;
+  const extra = process.argv
+    .slice(2)
+    .filter((a) => a !== "--" && a !== mode && a !== "--no-update");
+  const args = ["run", "tauri", tauriMode, ...extra];
+  console.log(`\n→ tauri ${tauriMode} (cwd apps/client)\n`);
   const child = spawn("npm", args, { cwd: clientDir, stdio: "inherit", shell: IS_WIN });
   child.on("exit", (code) => process.exit(code ?? 0));
 }
 
 // --- main --------------------------------------------------------------
 
-// First positional arg is the mode ("dev" | "build"). Set by the root
+// First positional arg is the mode ("start" | "dev" | "build"). Set by the root
 // package.json scripts; defaults to "dev" when invoked directly.
 const [mode = "dev"] = process.argv.slice(2).filter((a) => !a.startsWith("-"));
-if (mode !== "dev" && mode !== "build") {
-  console.error(`unknown mode "${mode}" (expected "dev" or "build")`);
+if (mode !== "start" && mode !== "dev" && mode !== "build") {
+  console.error(`unknown mode "${mode}" (expected "start", "dev", or "build")`);
   process.exit(1);
 }
 
-checkPrereqs();
-buildRelay();
-ensureClientDeps();
-launch(mode);
+const sourceUpdateRestarted = process.env.ZINE_SOURCE_UPDATE_RESTARTED === "1";
+const sourceUpdate = mode === "start" && !sourceUpdateRestarted
+  ? updateSourceCheckout({ disabled: process.argv.includes("--no-update") })
+  : { status: "current" };
+if (sourceUpdate.status === "updated") {
+  // Reload the launcher after a fast-forward so changes to this script and its
+  // imported bootstrap helpers take effect immediately, not one launch later.
+  console.log("→ restarting with the updated source…");
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
+    stdio: "inherit",
+    env: { ...process.env, ZINE_SOURCE_UPDATE_RESTARTED: "1" },
+  });
+  child.on("exit", (code) => process.exit(code ?? 0));
+} else {
+  checkPrereqs();
+  buildRelay();
+  ensureClientDeps();
+  launch(mode);
+}

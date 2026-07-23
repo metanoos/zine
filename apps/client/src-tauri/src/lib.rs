@@ -908,17 +908,18 @@ fn spawn_relay(app: tauri::AppHandle) -> Result<String, String> {
     let addr: SocketAddr = "127.0.0.1:4869"
         .parse::<SocketAddr>()
         .map_err(|e: std::net::AddrParseError| e.to_string())?;
+    let runtime = active_vault_runtime()?;
+    let database = runtime.directory.join(VAULT_RELAY_FILENAME);
 
     // A process we do not own could be serving another vault's database. Never
     // silently attach to it: the fixed loopback port is part of the active
-    // vault boundary.
+    // vault boundary. Desktop-owned relays exit when their private parent pipe
+    // closes; any remaining listener is ambiguous and must fail closed.
     if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
         return Err("relay port 4869 is already in use by another process".into());
     }
 
     let bin = resolve_relay_binary(&app)?;
-    let runtime = active_vault_runtime()?;
-    let database = runtime.directory.join(VAULT_RELAY_FILENAME);
     let mut ready_nonce = [0u8; 32];
     getrandom::fill(&mut ready_nonce)
         .map_err(|error| format!("generate relay readiness nonce: {error}"))?;
@@ -953,6 +954,11 @@ fn spawn_relay(app: tauri::AppHandle) -> Result<String, String> {
         .arg(&ready_path)
         .arg("--ready-token")
         .arg(&ready_token)
+        // Keep a private write end open for the lifetime of the desktop
+        // process. The relay watches the read end and closes its listener on
+        // EOF, so even a crash or forced parent termination cannot orphan it.
+        .arg("--exit-on-stdin-close")
+        .stdin(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to spawn relay binary at {}: {}", bin, e))?;
     *RELAY_CHILD
@@ -2930,6 +2936,95 @@ mod tests {
             assert!(!RELAY_SPAWNED.load(Ordering::SeqCst));
             assert!(RELAY_CHILD.lock().expect("relay process lock").is_none());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relay_process_exits_and_releases_its_port_when_parent_pipe_closes() {
+        use std::net::TcpListener;
+
+        let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join("zine-relay");
+        assert!(
+            binary.is_file(),
+            "Rust verification must build the relay resource before cargo test"
+        );
+
+        let reserved = TcpListener::bind("127.0.0.1:0").expect("reserve relay test port");
+        let addr = reserved.local_addr().expect("read relay test address");
+        drop(reserved);
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "zine-parent-pipe-relay-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create relay test directory");
+        let ready_path = dir.join("ready");
+        let ready_token = format!("test-{nonce}");
+
+        let mut child = Command::new(binary)
+            .arg("--host")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(addr.port().to_string())
+            .arg("--db")
+            .arg(dir.join(VAULT_RELAY_FILENAME))
+            .arg("--ready-file")
+            .arg(&ready_path)
+            .arg("--ready-token")
+            .arg(&ready_token)
+            .arg("--exit-on-stdin-close")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn real relay with parent pipe");
+
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let ready = fs::read_to_string(&ready_path)
+                .map(|token| token == ready_token)
+                .unwrap_or(false);
+            if ready && TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+                break;
+            }
+            if let Some(status) = child.try_wait().expect("inspect starting relay") {
+                panic!("relay exited before readiness: {status}");
+            }
+            if Instant::now() > ready_deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("relay did not become ready");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        drop(child.stdin.take().expect("relay stdin pipe"));
+        let exit_deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("inspect relay after EOF") {
+                break status;
+            }
+            if Instant::now() > exit_deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("relay did not exit after parent pipe EOF");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        assert!(
+            status.success(),
+            "relay should exit cleanly after parent EOF"
+        );
+
+        let rebound = TcpListener::bind(addr).expect("relay should release its listener");
+        drop(rebound);
+        fs::remove_dir_all(dir).expect("remove relay test directory");
     }
 
     #[cfg(unix)]
