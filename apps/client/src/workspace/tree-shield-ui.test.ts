@@ -8,6 +8,7 @@ const source = [
 ].join("\n");
 const css = readFileSync(new URL("../app/App.css", import.meta.url), "utf8");
 const model = readFileSync(new URL("../ai/scope-model.ts", import.meta.url), "utf8");
+const mountModel = readFileSync(new URL("./mount-scope.ts", import.meta.url), "utf8");
 
 test("directory tree icons mount context without activating their rows", () => {
   assert.match(source, /className="tree-icon-slot tree-icon-btn"/);
@@ -54,9 +55,10 @@ test("fixed top-level directory regions have gapless dividers and ordinary row h
 
 test("folder context mounting replaces the active root or shields an included subtree", () => {
   assert.match(source, /contextMountState\(scopes, shielded, node\.path\)/);
-  assert.match(model, /return \{ mounts: \[target\], shielded: nextShielded \}/);
-  assert.match(model, /current\[0\]\?\.path === target\.path/);
-  assert.match(model, /nextShielded\.add\(target\.path\)/);
+  assert.match(model, /applyMountScope\(/);
+  assert.match(mountModel, /mount: target, shields: \[\.\.\.shields\]/);
+  assert.match(mountModel, /normalized\.mount\?\.path === target\.path/);
+  assert.match(mountModel, /shields\.add\(target\.path\)/);
 });
 
 test("context icons distinguish the exact mount from inherited inclusion", () => {
@@ -107,14 +109,14 @@ test("only the explicit shield boundary is red; its descendants are unmounted", 
     source,
     /fileMountState === "shielded" \? \([\s\S]*?<FileX size=\{13\} className=\{fileIconClass\}/,
   );
-  assert.match(model, /if \(shielded\.has\(path\)\)/);
+  assert.match(mountModel, /normalized\.shields\.includes\(path\)/);
   assert.match(
-    model,
-    /boundary !== path && containsPath\(boundary, path\)\) return "unmounted"/,
+    mountModel,
+    /boundary !== path && containsMountedPath\(boundary, path\)\) return "unmounted"/,
   );
   assert.match(
-    model,
-    /containsPath\(target\.path, boundary\)\) nextShielded\.delete\(boundary\)/,
+    mountModel,
+    /containsMountedPath\(target\.path, boundary\)\) shields\.delete\(boundary\)/,
   );
 });
 
